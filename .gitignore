@@ -1,0 +1,27 @@
+# forge — repo hygiene (the bundled CLI is zero-dependency: there is no
+# node_modules or build output to commit)
+node_modules/
+dist/
+build/
+coverage/
+
+# Python bytecode shipped inside some bundled skills (build artifacts from
+# the packaging machine — regenerated on demand, never committed)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# the upstream release archive — kept on disk, never committed
+# (its contents live in agentv19/)
+*.zip
+
+# local test scratch
+*.log
