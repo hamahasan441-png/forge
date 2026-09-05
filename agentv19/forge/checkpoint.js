@@ -49,10 +49,15 @@ function sha256Head(file) {
  *  undo restores the whole atomic operation. Returns id | null. */
 export function snapshotBefore(files, cwd, created = []) {
   try {
+    // v20.0.1: files too big to snapshot are RECORDED (instead of silently
+    // skipped) so `forge undo` can tell the user it could not protect them.
+    const tooLarge = []
     const want = [...new Set((files || []).map((f) => path.resolve(f)))].filter((f) => {
       try {
         const st = fs.statSync(f)
-        return st.isFile() && st.size <= MAX_SNAPSHOT_BYTES
+        if (!st.isFile()) return false
+        if (st.size > MAX_SNAPSHOT_BYTES) { tooLarge.push(f); return false }
+        return true
       } catch {
         return false // does not exist (creation) — handled via `created`
       }
@@ -60,7 +65,7 @@ export function snapshotBefore(files, cwd, created = []) {
     const creating = [...new Set((created || []).map((f) => path.resolve(f)))].filter((f) => {
       try { fs.accessSync(f); return false } catch { return true } // must NOT exist yet
     })
-    if (!want.length && !creating.length) return null
+    if (!want.length && !creating.length && !tooLarge.length) return null
     const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
     const dir = path.join(CHECKPOINTS_DIR, id)
     fs.mkdirSync(dir, { recursive: true })
@@ -72,6 +77,9 @@ export function snapshotBefore(files, cwd, created = []) {
     })
     creating.forEach((f) => {
       manifest.files.push({ path: f, backup: null, created: true })
+    })
+    tooLarge.forEach((f) => {
+      manifest.files.push({ path: f, backup: null, tooLarge: true })
     })
     fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 1))
     prune()
@@ -122,6 +130,10 @@ export function restoreLast(cwd) {
             notes.push(`kept created file ${path.basename(f.path)} (modified since — not deleting)`)
           }
         } // already gone: nothing to do
+        continue
+      }
+      if (f.tooLarge) {
+        notes.push(`NOT restored ${path.basename(f.path)} — it is larger than ${Math.round(MAX_SNAPSHOT_BYTES / 1024 / 1024)}MB and was never snapshotted`)
         continue
       }
       const src = path.join(CHECKPOINTS_DIR, c.id, f.backup)

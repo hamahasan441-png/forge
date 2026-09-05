@@ -234,6 +234,15 @@ sealCreated(id2, WORK)
 fs.writeFileSync(path.join(WORK, "cp-created2.txt"), "USER EDITED\n")
 const r2b = restoreLast(WORK)
 ok("user-modified created file kept on undo", fs.existsSync(path.join(WORK, "cp-created2.txt")) && fs.readFileSync(path.join(WORK, "cp-created2.txt"), "utf8") === "USER EDITED\n")
+// v20.0.1: a file too big to snapshot (>2MB) used to be skipped SILENTLY —
+// undo reported "restored N file(s)" with no hint that one was unprotected.
+const BIGF = path.join(WORK, "cp-too-big.txt")
+fs.writeFileSync(BIGF, "x".repeat((2 * 1024 * 1024) + 1024))
+const id3 = snapshotBefore([BIGF], WORK)
+ok("oversized file still gets a checkpoint", !!id3)
+const rBig = restoreLast(WORK)
+ok("undo says which file it could NOT protect", (rBig?.notes ?? []).some((n) => /cp-too-big\.txt/.test(n) && /never snapshotted/.test(n)))
+fs.rmSync(BIGF, { force: true })
 
 console.log("== memory: hierarchy + relevance + learning ==")
 appendMemory("global", "user prefers dark mode terminals", WORK)

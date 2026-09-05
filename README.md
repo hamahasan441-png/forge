@@ -29,7 +29,8 @@ forge doctor                              # verify environment + connectivity
 cd agentv19/tests
 node mock-llm.mjs &                       # local stand-in provider (127.0.0.1:8787)
 bash e2e-forge.sh                         # 236 checks
-node test-security.mjs                    # 151 hardening unit checks
+node test-security.mjs                    # 153 hardening unit checks
+node test-providers.mjs                   # 31 provider-wire robustness checks
 node test-diffpatch.mjs                   # 13 diff-engine checks
 bash cleanroom-v20.sh                     # 48 checks — installs into a temp npm prefix
 ```
@@ -44,5 +45,14 @@ Four defects that the v20 suite missed are fixed here (details in
    a proper message (and never throws: it fails closed).
 2. `glob_files` compiled `**/*.ts` so that it never matched files in the search
    root.
-3. `forge doctor` printed `✓ doctor done` even when every provider probe failed.
+3. `forge doctor` printed `✓ doctor done` even when every provider probe
+   failed — and called a provider that answered with an HTML page *working*.
 4. `execTool` threw a `TypeError` when a model sent malformed tool arguments.
+5. A provider answering HTTP 200 with HTML (wrong URL, proxy, captive portal)
+   surfaced as `SyntaxError: Unexpected token '<'`; an unreachable host as
+   `fetch failed`; a stream cut mid-answer as `terminated`.
+6. Files larger than 2 MB were silently skipped when checkpointing, so
+   `forge undo` claimed a clean restore it had not made — it now names the
+   file it could not protect.
+
+Details in `agentv19/forge/PLAN-v20.md`; every fix has a regression test.

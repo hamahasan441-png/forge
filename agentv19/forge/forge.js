@@ -301,6 +301,7 @@ async function main() {
       const r = restoreLast(process.cwd())
       if (r) {
         ok(`restored ${r.files} file(s) from checkpoint ${r.id}`)
+        for (const n of r.notes ?? []) console.log(dim(`  · ${n}`))
       } else {
         const n = listCheckpoints(process.cwd(), 99).length
         if (n) warn(`no restorable checkpoint (all ${n} consumed or from other directories)`)
@@ -435,7 +436,11 @@ async function main() {
         const key = positional[2]
         if (!key) { err("usage: forge config get <path.to.key>"); process.exit(1); return }
         const v = getPath(config, key)
-        console.log(/apikey|token/i.test(key) ? maskKey(v) : (v === undefined ? "(unset)" : String(v)))
+        // v20.0.1: objects/arrays printed as JSON, not "[object Object]";
+        // secret-ish keys stay masked either way.
+        if (/apikey|token/i.test(key)) { console.log(maskKey(v)); return }
+        if (v === undefined) { console.log("(unset)"); return }
+        console.log(typeof v === "object" && v !== null ? JSON.stringify(v, null, 2) : String(v))
         return
       }
       if (sub === "set") {

@@ -132,7 +132,7 @@ export function appendMemory(tier, text, cwd = process.cwd()) {
 }
 
 /** Structured failure learning: { problem, rootCause, fix } → project memory. */
-export function recordLearning({ problem, rootCause, fix }, cwd = process.cwd()) {
+export function recordLearning({ problem, rootCause, fix } = {}, cwd = process.cwd()) {
   const block = [
     `LEARNING: ${redact(String(problem ?? "").slice(0, 200))}`,
     `  root-cause: ${redact(String(rootCause ?? "").slice(0, 200))}`,

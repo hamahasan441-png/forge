@@ -140,7 +140,30 @@ function abortToError(e, guard, connectMs, nextMs, nextName, userAborted) {
       ? new ProviderError(`provider request exceeded ${nextMs / 1000}s (request guard)`, { retryable: true })
       : new ProviderError(`provider sent no data within ${nextMs / 1000}s (first-byte guard)`, { retryable: true })
   }
-  return e
+  // v20.0.1: a raw `TypeError: fetch failed` (offline, DNS, TLS, connection
+  // reset) is the single most common provider failure and it used to reach the
+  // user verbatim. Report it as what it is, with something to check.
+  const cause = e?.cause
+  const detail = [cause?.code, cause?.message].filter(Boolean).join(" — ") || reason || e?.name || "network error"
+  return new ProviderError(`could not reach the provider (${detail}) — check the base URL, your connection, DNS and TLS`, { retryable: true })
+}
+
+/** v20.0.1: an HTML page (wrong base URL, captive portal, proxy interstitial)
+ *  answers with HTTP 200 — build an honest, non-retryable error for it. */
+function nonJsonError(res, rawText, providerName) {
+  const ct = String(res?.headers?.get?.("content-type") ?? "").split(";")[0].trim() || "unknown content-type"
+  const sniff = String(rawText ?? "").replace(/\s+/g, " ").trim().slice(0, 100)
+  const where = providerName ? `providers.${providerName}.baseUrl` : "the provider baseUrl"
+  return new ProviderError(
+    `provider returned a non-JSON response (HTTP ${res?.status ?? "?"}, ${ct}): ${sniff || "(empty body)"} — check ${where}. A wrong URL, a proxy, or a captive portal looks exactly like this.`,
+    { status: res?.status ?? 0, retryable: false },
+  )
+}
+
+/** v20.0.1: a stream that dies mid-answer used to surface as "terminated". */
+function streamError(e) {
+  if (e instanceof ProviderError || e?.name === "AbortError") return e
+  return new ProviderError(`stream interrupted before the answer completed (${String(e?.message ?? e)}) — check your connection or the provider`, { retryable: true })
 }
 
 async function readErrorBody(res) {
@@ -336,6 +359,9 @@ async function* streamOpenAI(opts, base) {
       const calls = [...tcAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
       yield { type: "tool_calls", calls }
     }
+  } catch (e) {
+    // v20.0.1: a stream cut mid-answer surfaced as a bare "terminated"
+    throw streamError(e)
   } finally { guard.dispose() }
 }
 
@@ -395,6 +421,8 @@ async function* streamAnthropic(opts, base) {
       const calls = [...tcAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
       yield { type: "tool_calls", calls }
     }
+  } catch (e) {
+    throw streamError(e)
   } finally { guard.dispose() }
 }
 
@@ -511,14 +539,24 @@ export async function chatOnce(opts) {
   if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
   guard.gotHeaders()
 
-  let j
+  // v20.0.1: read the body as TEXT first. `res.json()` used to throw a bare
+  // SyntaxError on an HTML error page (proxy / captive portal / wrong base URL),
+  // which surfaced to the user as "Unexpected token '<'". Now the response is
+  // inspected and reported as an honest, actionable provider error.
+  let raw
   try {
-    j = await res.json()
+    raw = await res.text()
   } catch (e) {
     guard.dispose()
     throw abortToError(e, guard, connectMs, requestTimeoutMs, "request", signal?.aborted)
   }
   guard.dispose()
+  let j
+  try {
+    j = JSON.parse(raw)
+  } catch {
+    throw nonJsonError(res, raw, opts.providerName)
+  }
   if (isAnthropic) {
     let content = "", reasoning = ""
     const toolCalls = []
@@ -580,14 +618,35 @@ export async function probe({ protocol, baseUrl, apiKey, model, signal }) {
         signal: signal ?? AbortSignal.timeout(12000),
       })
     }
+    const raw = await res.text().catch(() => "")
     const ms = Date.now() - t0
     if (!res.ok) {
-      const detail = await readErrorBody(res)
-      return { ok: false, ms, status: res.status, error: detail.slice(0, 120) }
+      const detail = await readErrorBody(res).catch(() => "")
+      return { ok: false, ms, status: res.status, error: (detail || raw).slice(0, 120) }
     }
-    await res.arrayBuffer().catch(() => {})
+    // v20.0.1: an HTML page (wrong baseUrl / captive portal / proxy) answers
+    // HTTP 200 — doctor used to report that as a WORKING provider and stamped
+    // a "✓ tested" badge on it. Verify the body really is a provider response.
+    const body = String(raw ?? "").trim()
+    if (body.startsWith("data:")) return { ok: true, ms } // SSE provider
+    let parsed = null
+    try { parsed = JSON.parse(body) } catch {}
+    if (!parsed || typeof parsed !== "object") {
+      const sniff = body.replace(/\s+/g, " ").slice(0, 80)
+      return { ok: false, ms, status: res.status, error: `unexpected response (${sniff || "empty body"}) — check baseUrl, it did not answer like a chat-completions API` }
+    }
+    if (parsed.error) {
+      return { ok: false, ms, status: res.status, error: String(parsed.error?.message ?? parsed.error).slice(0, 120) }
+    }
     return { ok: true, ms }
   } catch (e) {
-    return { ok: false, ms: Date.now() - t0, error: String(e?.message ?? e).slice(0, 120) }
+    // v20.0.1: "fetch failed" / "The operation was aborted due to timeout" are
+    // not actionable — name the real cause.
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      return { ok: false, ms: Date.now() - t0, error: `no response within 12s — check the base URL and your connection` }
+    }
+    const cause = e?.cause
+    const detail = [cause?.code, cause?.message].filter(Boolean).join(" — ") || String(e?.message ?? e)
+    return { ok: false, ms: Date.now() - t0, error: detail.slice(0, 120) }
   }
 }

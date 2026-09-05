@@ -71,9 +71,10 @@ Additional bugs found during audit (not in the known list):
 |---|---|
 | syntax (node --check, all 19 modules) | PASS |
 | `tests/test-diffpatch.mjs` | 13/13 PASS |
-| `tests/test-security.mjs` (v20 unit) | 151/151 PASS (launcher-isolated FORGE_HOME) |
+| `tests/test-security.mjs` (v20 unit) | 153/153 PASS (launcher-isolated FORGE_HOME) |
 | `tests/e2e-forge.sh` | 236/236 PASS (incl. 31 new v20 checks + 15 v20.0.1 regression checks) |
 | `tests/cleanroom-v20.sh` | 48/48 PASS (isolated npm prefix, no prior forge) |
+| `tests/test-providers.mjs` (v20.0.1) | 31/31 PASS (hostile local HTTP server) |
 
 New E2E coverage: SSRF default-block + opt-in, write-escape block, sensitive
 read block, skill traversal block, bash outside-project block, failure learning
@@ -102,10 +103,25 @@ Two smaller robustness fixes in the same pass:
 - `netguard.assertFetchableUrl()` rejects a hostless URL (`file:///etc/passwd`)
   up front instead of handing `""` to `dns.lookup`.
 
-New regression coverage: 23 unit checks (`v20.0.1` block in
-`tests/test-security.inner.mjs`), 15 E2E checks (doctor honesty, terminal
-`mv`/`cp` into `/etc` and `/usr`, `**/*.md` glob via a new mock branch),
-3 clean-room checks.
+### Second pass — provider wire + state honesty
+
+Same method, extended to the provider boundary with a hostile local HTTP server
+(`tests/test-providers.mjs`) that replays the failures people actually hit:
+
+| # | Bug | Impact | Fix |
+|---|---|---|---|
+| 5 | a provider answering **HTTP 200 with HTML** (wrong base URL, proxy, captive portal) | `SyntaxError: Unexpected token '<'` … in the chat; retried 3× because a raw SyntaxError counts as "retryable" | body is read as text and reported as `provider returned a non-JSON response (HTTP 200, text/html): <sniff> — check providers.<name>.baseUrl` (non-retryable) |
+| 6 | **`forge doctor` called that same HTML page a WORKING provider** and stamped a `✓ tested` badge on it | AutoPick could then route to a dead endpoint | `probe()` verifies the 200 body is really a chat-completions response (JSON, SSE, or an `error` object) before reporting `ok` |
+| 7 | a stream cut mid-answer | the user saw the single word `terminated` | `ProviderError: stream interrupted before the answer completed (…)` — retryable |
+| 8 | unreachable host / connection reset | `✗ fetch failed` | `could not reach the provider (UND_ERR_SOCKET — other side closed) — check the base URL, your connection, DNS and TLS` |
+| 9 | a file **larger than 2 MB was silently skipped** when checkpointing | `forge undo` reported "restored N file(s)" while one modified file was never protected | the manifest records `tooLarge` entries and undo names the file it could not restore |
+| 10 | `forge config get <object>` | printed `[object Object]` | prints the JSON |
+
+New regression coverage: 25 unit checks (`v20.0.1` blocks in
+`tests/test-security.inner.mjs`), 31 provider checks
+(`tests/test-providers.mjs` — 19 of them fail against the unfixed build),
+15 E2E checks (doctor honesty, terminal `mv`/`cp` into `/etc` and `/usr`,
+`**/*.md` glob via a new mock branch), 3 clean-room checks.
 
 ## Known limitations (honest)
 
