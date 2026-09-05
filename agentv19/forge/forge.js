@@ -297,11 +297,24 @@ async function main() {
       console.log(bold(green("── result " + "─".repeat(50))))
       console.log(renderMarkdown(res.text))
       console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+      if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       return
     }
     case "undo": {
-      // v16: restore the newest checkpoint recorded for this directory
-      const { restoreLast, listCheckpoints } = await import("./checkpoint.js")
+      // v16: restore the newest checkpoint recorded for this directory.
+      // v20.2: --run restores the whole last agent run atomically.
+      const { restoreLast, restoreRun, listCheckpoints } = await import("./checkpoint.js")
+      if (flags.run !== undefined) {
+        const runId = typeof flags.run === "string" ? flags.run : null
+        const r = restoreRun(process.cwd(), runId)
+        if (r) {
+          ok(`restored ${r.files} file(s) across ${r.checkpoints} checkpoint(s) from run ${r.runId}`)
+          for (const n of r.notes ?? []) console.log(dim(`  · ${n}`))
+        } else {
+          warn(runId ? `no restorable checkpoints for run ${runId}` : "no restorable agent-run checkpoints for this directory")
+        }
+        return
+      }
       const r = restoreLast(process.cwd())
       if (r) {
         ok(`restored ${r.files} file(s) from checkpoint ${r.id}`)
@@ -609,6 +622,7 @@ async function main() {
         console.log(bold(green("── result " + "─".repeat(50))))
         console.log(renderMarkdown(res.text))
         console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
         return
       }
       err(`unknown: forge plan ${sub} — use list | show <n|slug> | apply <n|slug>`)
@@ -694,7 +708,7 @@ ${bold("usage")}
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 17 tools (bash, files, web, memory, sub-agents)
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
-  ${cyan("forge undo")}                   restore files changed by the last tool edit (auto-checkpoints)
+  ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
   ${cyan("forge config show|path|get|set|unset")}

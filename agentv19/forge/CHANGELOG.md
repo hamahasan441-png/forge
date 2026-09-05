@@ -34,6 +34,12 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Undo a whole agent run** (P3-4) — every checkpoint from one `forge agent`
+  run is now tagged with a run id, and `forge undo --run` rolls the entire run
+  back atomically (newest→oldest, so files return to their exact pre-run state
+  even when the run edited a file several times). Plain `forge undo` still walks
+  back one checkpoint at a time. The agent prints an undo-run hint when a run
+  changed files. New `tests/test-checkpoint.mjs` (12 checks).
 - **Plan persistence** (P1-9) — `forge agent --plan "task"` now saves the plan to
   `.forge/plans/<slug>.md` instead of printing and discarding it. New `forge plan`
   command: `list`, `show <n|slug>`, and `apply <n|slug>` (runs the agent on the

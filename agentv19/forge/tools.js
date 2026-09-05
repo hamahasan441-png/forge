@@ -307,6 +307,7 @@ export function makeToolContext(opts = {}) {
     maxParallelDelegates = 2,
     signal = null,
     subAgent = false,
+    runId = null,
   } = opts
   const ctx = {
     cwd: path.resolve(cwd || process.cwd()),
@@ -314,7 +315,7 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     allowOutsideProject, allowSudo, assumeYes, fetchPrivateUrls,
-    delegateTimeoutSec, signal, subAgent,
+    delegateTimeoutSec, signal, subAgent, runId,
     _delegateActive: 0,
     _delegateMax: Math.max(1, Math.min(4, maxParallelDelegates)),
   }
@@ -570,7 +571,7 @@ function write_file(ctx, args) {
   const existed = fs.existsSync(p)
   // v20: one checkpoint covers the whole mutation — existing files get
   // backups, newly created files get tracked for undo-removal
-  const id = snapshotBefore([p], ctx.cwd, existed ? [] : [p])
+  const id = snapshotBefore([p], ctx.cwd, existed ? [] : [p], ctx.runId)
   fs.mkdirSync(path.dirname(p), { recursive: true })
   fs.writeFileSync(p, args.content ?? "")
   if (id) sealCreated(id, ctx.cwd)
@@ -589,7 +590,7 @@ function edit_file(ctx, args) {
   if (!args.replace_all && src.indexOf(oldS) !== src.lastIndexOf(oldS)) {
     return "ERROR: old string appears multiple times — add more surrounding context to make it unique, or set replace_all=true"
   }
-  snapshotBefore([p], ctx.cwd) // v16: auto-checkpoint
+  snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
   const out = args.replace_all ? src.split(oldS).join(newS) : src.replace(oldS, newS)
   fs.writeFileSync(p, out)
   return `OK edited ${p}`
@@ -936,7 +937,7 @@ function multi_edit(ctx, args) {
     if (e.replace_all) { applied += out.split(e.old).length - 1; out = out.split(e.old).join(e.new ?? "") }
     else { out = out.replace(e.old, e.new ?? ""); applied++ }
   }
-  snapshotBefore([p], ctx.cwd) // v16: auto-checkpoint
+  snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
   fs.writeFileSync(p, out)
   return `OK multi_edit ${p}: ${applied} replacement(s), ${edits.length} edit(s), atomic`
 }

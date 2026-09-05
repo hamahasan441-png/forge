@@ -195,6 +195,10 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   const maxToolCalls = Math.min(500, Math.max(10, config.agent?.maxToolCalls ?? 80)) // v20: hard stop for runaway tool loops
   const skillsDir = resolveSkillsDir(config.skills?.dir) // bundled skills work in agent mode too
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
+  // v20.2 (P3-4): tag every checkpoint from this run with one runId so the whole
+  // run can be rolled back atomically (`forge undo --run`). Sub-agents are
+  // read-only and never write, so they get no runId.
+  const runId = readonly ? null : "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
   const tools = makeToolContext({
     cwd: process.cwd(),
     root: process.cwd(),
@@ -204,6 +208,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     searchUrl: config.tools?.searchUrl || "",
     memoryPath,
     todoPath: path.join(DEFAULT_DIR, "todo.json"),
+    runId,
     readOnly: readonly,
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
@@ -362,7 +367,8 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   if (steps >= maxSteps && !finalText) {
     finalText = "(reached max steps without a final answer — raise agent.maxSteps in config)"
   }
-  return { text: finalText, steps, toolLog, planOnly }
+  const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
+  return { text: finalText, steps, toolLog, planOnly, runId, wrote }
 }
 
 /** Aggressive in-place shrink used only for overflow recovery: stub ALL tool
