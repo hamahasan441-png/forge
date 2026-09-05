@@ -34,6 +34,10 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Session hygiene** (P1-6) — the session store grew without bound. It's now
+  auto-capped at the newest 300 (pruned when a new conversation starts), and
+  `forge sessions --search "text"` finds a past conversation by title, summary or
+  message content, with a snippet. New `tests/test-sessions.mjs`.
 - **Relevance-ranked context (BM25)** (P3-2) — new zero-dep `retrieval.js`
   ranks the repo map and long-term memory by BM25 relevance to the current task
   instead of by symbol count / raw token overlap. BM25 down-weights common terms

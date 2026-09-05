@@ -53,10 +53,66 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
     fs.chmodSync(file, 0o600)
     fs.writeFileSync(path.join(SESSIONS_DIR, "last.json"), JSON.stringify({ id: sid, file }), { mode: 0o600 })
     fs.chmodSync(path.join(SESSIONS_DIR, "last.json"), 0o600)
+    // v20.2 (P1-6): cap the store when a NEW conversation is created (not on
+    // every auto-save of an existing one, which reuses its id)
+    if (!id) pruneSessions()
     return file
   } catch {
     return null
   }
+}
+
+// v20.2 (P1-6): the session store grew without bound. Keep the newest N.
+export const MAX_SESSIONS = 300
+
+/** Delete all but the newest `max` sessions. Returns count removed. Best-effort. */
+export function pruneSessions(max = MAX_SESSIONS) {
+  try {
+    const files = sessionFiles() // newest-first
+    if (files.length <= max) return 0
+    let removed = 0
+    for (const f of files.slice(max)) {
+      try { fs.rmSync(f, { force: true }); removed++ } catch {}
+    }
+    return removed
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Search sessions by substring (case-insensitive) across title, summary and
+ * message text. Returns list-shaped entries (newest-first) with a matching
+ * `snippet`. Bounded: scans at most `scan` files, returns at most `max`.
+ */
+export function searchSessions(query, { max = 20, scan = 600 } = {}) {
+  const q = String(query ?? "").trim().toLowerCase()
+  if (!q) return []
+  const out = []
+  for (const file of sessionFiles().slice(0, scan)) {
+    if (out.length >= max) break
+    let j
+    try { j = JSON.parse(fs.readFileSync(file, "utf8")) } catch { continue }
+    const hay = []
+    if (j.title) hay.push(String(j.title))
+    if (j.summary) hay.push(String(j.summary))
+    for (const m of j.messages ?? []) if (typeof m.content === "string") hay.push(m.content)
+    const joined = hay.join("\n")
+    const at = joined.toLowerCase().indexOf(q)
+    if (at === -1) continue
+    const snippet = joined.slice(Math.max(0, at - 30), at + q.length + 40).replace(/\s+/g, " ").trim()
+    out.push({
+      file,
+      id: j.id ?? path.basename(file, ".json"),
+      ts: j.updatedAt ?? j.ts ?? 0,
+      provider: j.provider,
+      model: j.model,
+      turns: Math.floor((j.messages?.length ?? 0) / 2),
+      title: j.title ?? null,
+      snippet,
+    })
+  }
+  return out
 }
 
 export function lastSessionFile() {

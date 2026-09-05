@@ -38,7 +38,7 @@ import { runChat } from "./chat.js"
 import { runAgent, agentEventPrinter } from "./agent.js"
 import { selfTestTools, toolCount } from "./tools.js"
 import { resolveSkillsDir, indexSkills, loadSkill } from "./skills.js"
-import { lastSessionFile, listSessions, findSession } from "./sessions.js"
+import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
@@ -560,6 +560,23 @@ async function main() {
       return
     }
     case "sessions": {
+      // v20.2 (P1-6): --search "text" finds sessions by title/summary/content
+      const query = typeof flags.search === "string" ? flags.search
+        : (flags.search === true ? positional.slice(1).join(" ") : "")
+      if (flags.search !== undefined) {
+        if (!query) { err('usage: forge sessions --search "text"'); process.exit(1); return }
+        const hits = searchSessions(query)
+        if (!hits.length) { warn(`no sessions match "${query}"`); return }
+        console.log(bold(`sessions matching "${query}" (${hits.length})`))
+        hits.forEach((s, i) => {
+          const age = Math.round((Date.now() - (s.ts || Date.now())) / 60000)
+          const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`
+          console.log(`  ${bold(String(i + 1).padStart(2))}. ${dim(s.id)}  ${cyan((s.provider || "?") + "/" + (s.model || "?"))}  ${dim(`${s.turns} turns • ${ageStr}`)}${s.title ? dim("  " + s.title.slice(0, 40)) : ""}`)
+          if (s.snippet) console.log(dim(`      …${s.snippet}…`))
+        })
+        console.log(dim("  resume a match: forge resume <id>"))
+        return
+      }
       const listed = listSessions(15)
       if (!listed.length) { warn("no saved sessions yet — they are auto-saved as you chat"); return }
       console.log(bold(`sessions (${listed.length} newest) — ~/.forge/sessions/`))
@@ -569,7 +586,7 @@ async function main() {
         const title = s.title ? dim(`  ${s.title.slice(0, 44)}`) : ""
         console.log(`  ${bold(String(i + 1).padStart(2))}. ${dim(s.id ?? s.file)}  ${cyan((s.provider || "?") + "/" + (s.model || "?"))}  ${dim(`${s.turns} turns • ${ageStr}`)}${title}`)
       })
-      console.log(dim("  resume: forge resume <n|id>  •  in chat: /resume <n>  •  last: forge chat --continue"))
+      console.log(dim("  resume: forge resume <n|id>  •  search: forge sessions --search \"text\"  •  last: forge chat --continue"))
       return
     }
     case "skills": {
@@ -729,7 +746,7 @@ ${bold("usage")}
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
   ${cyan("forge config show|path|get|set|unset")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
-  ${cyan("forge sessions")}               list saved conversations
+  ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
