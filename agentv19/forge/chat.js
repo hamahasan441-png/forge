@@ -27,7 +27,8 @@ import readline from "node:readline"
 import { execFile } from "node:child_process"
 import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError } from "./providers.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
-import { makeToolContext, toolCount, WRITE_TOOLS } from "./tools.js"
+import { makeToolContext, toolCount, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { loadToolPlugins } from "./plugins.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
@@ -37,8 +38,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { classifyTaskComplexity } from "./agent.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
-
-const VERSION = "20.0.0"
+import { VERSION } from "./version.js"
 
 const HELP = `
 ${bold("chat")}
@@ -63,7 +63,7 @@ ${bold("commands")}
   /compact              force context compaction (older turns → summary)
   /usage                session token totals + est. cost
   /tokens               context gauge — % of the model window used (auto-compact at ~55%)
-  /retry                regenerate the last answer
+  /retry                regenerate the last answer (also after Ctrl-C interrupts one)
   /undo                 drop the last exchange + restore its file checkpoint
   /export [file]        save the conversation as markdown
   /sessions             list saved conversations
@@ -209,6 +209,20 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
   return lines.join("\n")
 }
 
+/**
+ * v20.2 never-lose-work: decide what a Ctrl-C'd turn leaves in the session.
+ * If any text was streamed, keep it as a marked assistant message (so /retry can
+ * regenerate); otherwise roll back to the pre-turn snapshot so no orphaned
+ * user/tool messages linger. Pure — unit-tested independently of the chat loop.
+ */
+export function interruptedTurnResult(messages, preTurnSnapshot, partial) {
+  const p = String(partial ?? "").trim()
+  if (p) {
+    return { messages: [...messages, { role: "assistant", content: p + "\n\n_[interrupted — /retry to regenerate]_" }], kept: true }
+  }
+  return { messages: preTurnSnapshot, kept: false }
+}
+
 /** Cap conversation history (keep most recent turns) to protect context.
  *  Always trims to a safe boundary: history must start with a user message,
  *  never with a tool result or an assistant tool_calls turn (provider 400s). */
@@ -253,7 +267,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const resolvedSkillsDir = resolveSkillsDir(config.skills?.dir)
   const res = resourceProfile()
   const assumeYes = config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
+  // v20.2 P3-5: user tool plugins from ~/.forge/tools (empty by default)
+  let plugins = []
+  if (config.tools?.plugins !== false) {
+    try {
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      plugins = loaded.tools
+      for (const e of loaded.errors) warn(`tool plugin skipped: ${e}`)
+    } catch { /* best-effort */ }
+  }
   const tools = makeToolContext({
+    plugins,
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? 45,
@@ -501,15 +525,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     }
   })
 
-  /** One streaming round: returns {text, toolCalls}. Prints text as it arrives. */
-  async function streamRound(wire, signal, deepEffort) {
+  /** One streaming round: returns {text, toolCalls}. Prints text as it arrives.
+   *  onText (optional) receives each delta so the caller can preserve partial
+   *  output if the stream is interrupted (Ctrl-C) — v20.2 "never lose work". */
+  async function streamRound(wire, signal, deepEffort, onText) {
     let text = ""
     let toolCalls = []
     for await (const ev of streamChatResilient(
       { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? tools.defs : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
       { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: ({ attempt, attempts, error }) => console.log(yellow(`  ↻ ${error} — retry ${attempt}/${attempts}…`)) }
     )) {
-      if (ev.type === "text") { process.stdout.write(ev.text); text += ev.text }
+      if (ev.type === "text") { process.stdout.write(ev.text); text += ev.text; onText?.(ev.text) }
       else if (ev.type === "reasoning") {
         if (config.chat?.showReasoning !== false) process.stdout.write(dim(ev.text.slice(0, 1600)))
       } else if (ev.type === "tool_calls") toolCalls = ev.calls
@@ -582,6 +608,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   async function turn(userText) {
+    // v20.2 never-lose-work: snapshot the history before this turn mutates it,
+    // so an interrupt with no output rolls back cleanly (rather than a fragile
+    // pop that can orphan tool messages).
+    const preTurnSnapshot = messages.slice()
+    let streamedPartial = "" // visible text streamed so far this turn
     await maybeCompact().catch(() => {}) // v16: auto-compaction check
     // v19 terminal mode: notes from shell commands the user ran since the last
     // message ride along, so the model KNOWS what happened in the terminal.
@@ -610,7 +641,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         let out
         try {
           out = config.chat?.stream !== false
-            ? await streamRound(wire, signal, eff.deep)
+            ? await streamRound(wire, signal, eff.deep, (t) => { streamedPartial += t })
             : await plainRound(wire, eff.deep)
         } catch (e) {
           if (e instanceof ProviderError && e.contextOverflow && overflowTries < 2) {
@@ -635,7 +666,20 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       process.stdout.write("\n")
     } catch (e) {
       process.stdout.write("\n")
-      if (e?.name === "AbortError") { err("aborted"); messages.pop(); return }
+      if (e?.name === "AbortError") {
+        // v20.2: an interrupted answer is no longer thrown away. If any text was
+        // streamed, keep it in the session (marked, and /retry regenerates);
+        // if nothing was produced, roll the turn back cleanly.
+        const r = interruptedTurnResult(messages, preTurnSnapshot, streamedPartial)
+        messages = r.messages
+        if (r.kept) {
+          warn("interrupted — partial answer kept in the session (/retry to regenerate)")
+          persist()
+        } else {
+          err("aborted")
+        }
+        return
+      }
       if (e instanceof ProviderError && e.contextOverflow) {
         err(`context still too large after compression — start a new conversation (/new) or switch to a bigger-window model`)
         messages.pop()

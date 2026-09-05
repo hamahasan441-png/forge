@@ -41,6 +41,51 @@ export function envKeyFor(name) {
   return process.env[c.envKey] || null
 }
 
+/**
+ * Build a runnable provider object from config + catalog for a given name,
+ * WITHOUT any CLI flags (used for failover, where the target is not the one the
+ * user named on the command line). Returns null when the provider is not usable
+ * (no base URL, or a key is required but missing). Mirrors resolveProvider() in
+ * forge.js minus the flag overrides.
+ */
+export function buildProvider(config, name) {
+  if (!name) return null
+  const cat = getCatalog(name)
+  const conf = config?.providers?.[name] || null
+  if (!cat && !conf) return null
+  const c = conf || {}
+  const protocol = cat?.protocol ?? c.protocol ?? "openai"
+  const baseUrl = c.baseUrl || cat?.baseUrl || ""
+  const apiKey = c.apiKey || envKeyFor(name) || ""
+  const model = c.model || cat?.models?.[0] || ""
+  if (!baseUrl) return null
+  if (!apiKey && name !== "ollama") return null
+  return {
+    name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model,
+    contextWindow: c.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "",
+  }
+}
+
+/**
+ * Ordered list of usable fallback providers (excluding `activeName`), for
+ * automatic failover. Health-tested providers come first, then the rest in
+ * config order. Every entry is a runnable provider object from buildProvider().
+ */
+export function fallbackChain(config, activeName, { health = {} } = {}) {
+  const names = Object.keys(config?.providers || {}).filter((n) => n && n !== activeName)
+  const built = []
+  const seen = new Set()
+  for (const n of names) {
+    if (seen.has(n)) continue
+    const p = buildProvider(config, n)
+    if (p) { built.push(p); seen.add(n) }
+  }
+  // stable partition: tested-ok providers first
+  const tested = built.filter((p) => health[p.name]?.ok)
+  const rest = built.filter((p) => !health[p.name]?.ok)
+  return [...tested, ...rest]
+}
+
 export class ProviderError extends Error {
   constructor(message, { status, retryable, contextOverflow, retryAfterMs } = {}) {
     super(message)

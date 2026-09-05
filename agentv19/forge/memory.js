@@ -19,6 +19,7 @@ import os from "node:os"
 import crypto from "node:crypto"
 import { DEFAULT_DIR } from "./config.js"
 import { redact } from "./secrets.js"
+import { rankDocs } from "./retrieval.js"
 
 export const GLOBAL_MEMORY_PATH = path.join(DEFAULT_DIR, "memory.md")
 export const PROJECTS_DIR = path.join(DEFAULT_DIR, "projects")
@@ -46,47 +47,26 @@ function readLines(p) {
   }
 }
 
-const STOP = new Set("a an the is are was were be been to of in on for with and or not it this that i you my your we they do does did how what why when where which who if then as at by from".split(" "))
-
-function words(s) {
-  return String(s ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9_./-]+/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP.has(w))
-}
-
-/** Score one memory line against a query (token overlap, cheap and effective). */
-function score(line, queryTokens) {
-  const lt = new Set(words(line))
-  if (!lt.size) return 0
-  let hits = 0
-  for (const q of queryTokens) {
-    if (lt.has(q)) hits += 2
-    else for (const l of lt) {
-      if (l.length > 4 && q.length > 4 && (l.startsWith(q) || q.startsWith(l))) { hits += 1; break }
-    }
-  }
-  return hits
-}
+// v20.2 (P3-2): relevance scoring moved to retrieval.js (BM25). The old
+// token-overlap helpers (words/score) were retired with that switch.
 
 /**
  * Relevant memory for a query from both tiers.
  * Returns a compact string ready for a system prompt ("" when nothing matches).
  */
 export function relevantMemory(query, { cwd = process.cwd(), limit = 10 } = {}) {
-  const q = words(query)
-  if (!q.length) return ""
+  if (!String(query ?? "").trim()) return ""
   const global = readLines(GLOBAL_MEMORY_PATH).slice(0, 400)
   const project = readLines(projectMemoryPath(cwd)).slice(0, 400)
   const pool = [
     ...global.map((l) => ({ l, tier: "global" })),
     ...project.map((l) => ({ l, tier: "project" })),
   ]
-  const scored = pool
-    .map((e) => ({ ...e, s: score(e.l, q) }))
-    .filter((e) => e.s > 0)
-    .sort((a, b) => b.s - a.s)
+  if (!pool.length) return ""
+  // v20.2 (P3-2): BM25 relevance instead of raw token overlap
+  const scored = rankDocs(query, pool.map((e, i) => ({ i, text: e.l })))
+    .filter((r) => r.score > 0)
+    .map((r) => pool[r.i])
   const seen = new Set()
   const picked = []
   for (const e of scored) {
@@ -117,15 +97,111 @@ export function memoryStats(cwd = process.cwd()) {
 
 // --- writing ----------------------------------------------------------------
 
-/** Append one note to a tier ("global" | "project"). Redacted, atomic-ish. */
+// v20.2 memory hygiene: an append-only file grows without bound. Every
+// autonomous run appends notes, and relevantMemory() reads up to 400 lines per
+// tier and scores them — so unbounded growth means slower reads and, worse,
+// near-duplicate notes crowding out real signal in the injected context. We now
+// (1) skip an append whose bullet text already exists verbatim, and (2) trim the
+// file to MEMORY_MAX_ENTRIES entries (oldest first) after writing. Both are
+// best-effort; a failure here can never break the CLI.
+export const MEMORY_MAX_ENTRIES = 500
+
+function memoryFileFor(tier, cwd) {
+  return tier === "project" ? projectMemoryPath(cwd) : GLOBAL_MEMORY_PATH
+}
+
+/** Path for a tier ("global" | "project"). */
+export function memoryPathFor(tier, cwd = process.cwd()) {
+  return memoryFileFor(tier, cwd)
+}
+
+/**
+ * Parse a memory file into entries. A bullet line ("- note") is one entry; a
+ * "LEARNING:" line plus its following "root-cause:"/"fix:" lines is one entry
+ * (kept together so list/forget never split a learning block). Returns
+ * [{ text, lines }] preserving order.
+ */
+export function memoryEntries(tier, cwd = process.cwd()) {
+  let raw = ""
+  try { raw = fs.readFileSync(memoryFileFor(tier, cwd), "utf8") } catch { return [] }
+  const src = raw.split("\n")
+  const entries = []
+  for (let i = 0; i < src.length; i++) {
+    const line = src[i]
+    if (!line.trim()) continue
+    if (/^\s*LEARNING:/i.test(line)) {
+      const block = [line]
+      while (i + 1 < src.length && /^\s*(root-cause|fix):/i.test(src[i + 1])) block.push(src[++i])
+      entries.push({ text: block.join("\n"), lines: block })
+    } else {
+      entries.push({ text: line.replace(/^[-•*]\s+/, "").trim(), lines: [line] })
+    }
+  }
+  return entries
+}
+
+function writeEntries(tier, entries, cwd) {
+  const file = memoryFileFor(tier, cwd)
+  const body = entries.map((e) => e.lines.join("\n")).join("\n")
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, body ? body + "\n" : "")
+  return file
+}
+
+/** Append one note to a tier ("global" | "project"). Redacted, deduped, capped. */
 export function appendMemory(tier, text, cwd = process.cwd()) {
-  const file = tier === "project" ? projectMemoryPath(cwd) : GLOBAL_MEMORY_PATH
+  const file = memoryFileFor(tier, cwd)
   const line = redact(String(text ?? "").trim()).slice(0, 400)
   if (!line) return { ok: false, error: "empty text" }
   try {
+    // dedup: an identical bullet already present is a no-op (best-effort)
+    const existing = memoryEntries(tier, cwd)
+    if (existing.some((e) => e.text === line)) return { ok: true, file, deduped: true }
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.appendFileSync(file, `- ${line}\n`)
+    pruneMemory(tier, cwd)
     return { ok: true, file }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Trim a tier to the newest MEMORY_MAX_ENTRIES entries. Returns count removed. */
+export function pruneMemory(tier, cwd = process.cwd(), max = MEMORY_MAX_ENTRIES) {
+  try {
+    const entries = memoryEntries(tier, cwd)
+    if (entries.length <= max) return { ok: true, removed: 0 }
+    const kept = entries.slice(entries.length - max)
+    writeEntries(tier, kept, cwd)
+    return { ok: true, removed: entries.length - kept.length }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Remove entry N (1-based, as shown by `memory list`) from a tier. */
+export function forgetMemory(tier, n, cwd = process.cwd()) {
+  try {
+    const entries = memoryEntries(tier, cwd)
+    const idx = Number(n) - 1
+    if (!Number.isInteger(idx) || idx < 0 || idx >= entries.length) {
+      return { ok: false, error: `no entry ${n} (${entries.length} in ${tier} memory)` }
+    }
+    const [removed] = entries.splice(idx, 1)
+    writeEntries(tier, entries, cwd)
+    return { ok: true, removed: removed.text }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Clear a whole tier. Returns count removed. */
+export function clearMemory(tier, cwd = process.cwd()) {
+  try {
+    const n = memoryEntries(tier, cwd).length
+    const file = memoryFileFor(tier, cwd)
+    try { fs.rmSync(file, { force: true }) } catch {}
+    return { ok: true, removed: n, file }
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }
   }
@@ -162,13 +238,13 @@ export function relevantLearnings(query, { cwd = process.cwd(), limit = 3 } = {}
     learnings.push(block.join("\n"))
   }
   if (!learnings.length) return ""
-  const q = words(query)
-  const scored = learnings
-    .map((l) => ({ l, s: score(l, q) }))
-    .filter((e) => e.s > 1)
-    .sort((a, b) => b.s - a.s)
+  if (!String(query ?? "").trim()) return ""
+  // v20.2 (P3-2): BM25 relevance
+  const scored = rankDocs(query, learnings.map((l, i) => ({ i, text: l })))
+    .filter((r) => r.score > 0)
     .slice(0, limit)
-  return scored.length ? "LEARNED FIXES (relevant past failures):\n" + scored.map((e) => e.l).join("\n") : ""
+    .map((r) => learnings[r.i])
+  return scored.length ? "LEARNED FIXES (relevant past failures):\n" + scored.join("\n") : ""
 }
 
 // keep os import meaningful (homedir fallback if DEFAULT_DIR unset)

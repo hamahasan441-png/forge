@@ -9,7 +9,11 @@
   "engines": {
     "node": ">=18"
   },
+  "scripts": {
+    "test": "node ../tests/run-all.mjs"
+  },
   "files": [
+    "version.js",
     "forge.js",
     "chat.js",
     "agent.js",
@@ -29,7 +33,11 @@
     "secrets.js",
     "memory.js",
     "profile.js",
+    "plans.js",
+    "repomap.js",
+    "plugins.js",
     "README.md",
+    "CHANGELOG.md",
     "install.sh",
     "skills/"
   ],

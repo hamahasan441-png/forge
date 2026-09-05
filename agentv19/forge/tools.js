@@ -307,19 +307,34 @@ export function makeToolContext(opts = {}) {
     maxParallelDelegates = 2,
     signal = null,
     subAgent = false,
+    runId = null,
+    plugins = [], // v20.2 P3-5: user tool plugins (from loadToolPlugins().tools)
   } = opts
+  // register plugins: write-class ones join WRITE_TOOLS so they are serialized
+  // and blocked in read-only sub-agents, exactly like built-in write tools.
+  const pluginMap = new Map()
+  for (const pl of plugins) {
+    if (!pl || !pl.name) continue
+    pluginMap.set(pl.name, pl)
+    if (!pl.readOnly) WRITE_TOOLS.add(pl.name)
+  }
   const ctx = {
     cwd: path.resolve(cwd || process.cwd()),
     root: path.resolve(root || cwd || process.cwd()),
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     allowOutsideProject, allowSudo, assumeYes, fetchPrivateUrls,
-    delegateTimeoutSec, signal, subAgent,
+    delegateTimeoutSec, signal, subAgent, runId,
+    _plugins: pluginMap,
     _delegateActive: 0,
     _delegateMax: Math.max(1, Math.min(4, maxParallelDelegates)),
   }
-  return { defs: readOnly ? TOOL_DEFS.filter((t) => !WRITE_TOOLS.has(t.function.name)) : TOOL_DEFS, exec: (name, args) => execTool(ctx, name, args || {}) }
+  const allDefs = plugins.length ? [...TOOL_DEFS, ...plugins.map((p) => p.def)] : TOOL_DEFS
+  return { defs: readOnly ? allDefs.filter((t) => !WRITE_TOOLS.has(t.function.name)) : allDefs, exec: (name, args) => execTool(ctx, name, args || {}) }
 }
+
+/** Built-in tool names — used to reject plugins that shadow a built-in. */
+export const BUILTIN_TOOL_NAMES = new Set(TOOL_DEFS.map((t) => t.function.name))
 
 export function toolCount() {
   return TOOL_DEFS.length
@@ -570,7 +585,7 @@ function write_file(ctx, args) {
   const existed = fs.existsSync(p)
   // v20: one checkpoint covers the whole mutation — existing files get
   // backups, newly created files get tracked for undo-removal
-  const id = snapshotBefore([p], ctx.cwd, existed ? [] : [p])
+  const id = snapshotBefore([p], ctx.cwd, existed ? [] : [p], ctx.runId)
   fs.mkdirSync(path.dirname(p), { recursive: true })
   fs.writeFileSync(p, args.content ?? "")
   if (id) sealCreated(id, ctx.cwd)
@@ -589,10 +604,53 @@ function edit_file(ctx, args) {
   if (!args.replace_all && src.indexOf(oldS) !== src.lastIndexOf(oldS)) {
     return "ERROR: old string appears multiple times — add more surrounding context to make it unique, or set replace_all=true"
   }
-  snapshotBefore([p], ctx.cwd) // v16: auto-checkpoint
+  snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
   const out = args.replace_all ? src.split(oldS).join(newS) : src.replace(oldS, newS)
   fs.writeFileSync(p, out)
   return `OK edited ${p}`
+}
+
+// --- shared walk policy (v20.2 P1-2) ---------------------------------------
+// One SKIP set for list_dir / grep_files / glob_files (they used to diverge:
+// grep_files was missing .turbo/.cache). These are always-noise directories —
+// dependency trees, VCS metadata, build/venv output — that only waste the
+// agent's context and slow the walk.
+const DEFAULT_SKIP = new Set([
+  "node_modules", ".git", ".hg", ".svn", ".next", ".nuxt", ".svelte-kit",
+  "dist", "build", "coverage", "__pycache__", ".turbo", ".cache",
+  ".venv", "venv", ".mypy_cache", ".pytest_cache", ".gradle",
+])
+
+/**
+ * Best-effort .gitignore directory awareness: read the walk root's .gitignore
+ * and return the set of plain directory names it ignores, so the file tools
+ * stop indexing a repo's own generated/ignored folders. Deliberately
+ * conservative — only bare names (no slashes, no glob metacharacters, not
+ * negated) are honored, and only directories are ever skipped, so a gitignored
+ * FILE the user asks about is still readable. Cached per root. Never throws.
+ */
+const _gitignoreCache = new Map()
+function gitignoreSkip(root) {
+  if (_gitignoreCache.has(root)) return _gitignoreCache.get(root)
+  const out = new Set()
+  try {
+    const raw = fs.readFileSync(path.join(root, ".gitignore"), "utf8")
+    for (let line of raw.split("\n")) {
+      line = line.trim()
+      if (!line || line.startsWith("#") || line.startsWith("!")) continue
+      const name = line.replace(/^\/+/, "").replace(/\/+$/, "")
+      if (!name || name.includes("/") || /[*?\[\]]/.test(name)) continue
+      out.add(name)
+    }
+  } catch { /* no .gitignore — fine */ }
+  _gitignoreCache.set(root, out)
+  return out
+}
+
+/** Merged skip predicate for a walk rooted at `root`. */
+function skipSetFor(root) {
+  const gi = gitignoreSkip(root)
+  return gi.size ? new Set([...DEFAULT_SKIP, ...gi]) : DEFAULT_SKIP
 }
 
 function list_dir(ctx, args) {
@@ -600,7 +658,7 @@ function list_dir(ctx, args) {
   if (!sp.ok) return sp.error
   const root = sp.abs
   if (!fs.existsSync(root)) return `ERROR: not found: ${root}`
-  const SKIP = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", "__pycache__", ".turbo", ".cache"])
+  const SKIP = skipSetFor(root)
   const lines = []
   const walk = (dir, depth, prefix) => {
     if (depth > 2 || lines.length > 300) return
@@ -641,7 +699,7 @@ function grep_files(ctx, args) {
   }
   const glob = args.glob ? new RegExp("^" + args.glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$") : null
   const max = Math.min(120, args.max || 60)
-  const SKIP = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", "__pycache__"])
+  const SKIP = skipSetFor(root)
   const results = []
   const walk = (dir, depth) => {
     if (results.length >= max || depth > 8) return
@@ -773,7 +831,7 @@ function glob_files(ctx, args) {
   let re
   try { re = globToRegex(String(args.pattern || "*")) } catch (e) { return `ERROR: bad pattern: ${e.message}` }
   const max = Math.min(200, args.max || 100)
-  const SKIP = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", "__pycache__", ".turbo", ".cache"])
+  const SKIP = skipSetFor(root)
   const hits = []
   const walk = (dir, depth) => {
     if (hits.length >= max || depth > 10) return
@@ -893,7 +951,7 @@ function multi_edit(ctx, args) {
     if (e.replace_all) { applied += out.split(e.old).length - 1; out = out.split(e.old).join(e.new ?? "") }
     else { out = out.replace(e.old, e.new ?? ""); applied++ }
   }
-  snapshotBefore([p], ctx.cwd) // v16: auto-checkpoint
+  snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
   fs.writeFileSync(p, out)
   return `OK multi_edit ${p}: ${applied} replacement(s), ${edits.length} edit(s), atomic`
 }
@@ -1218,9 +1276,21 @@ export async function execTool(ctx, name, args) {
     case "think": result = think(ctx, args); break
     case "memory": result = memory(ctx, args); break
     case "delegate": result = await delegate(ctx, args); break
-    default: return `ERROR: unknown tool "${name}"`
+    default: {
+      // v20.2 P3-5: user tool plugins
+      const pl = ctx._plugins?.get(name)
+      if (!pl) return `ERROR: unknown tool "${name}"`
+      try {
+        const r = await pl.run(args, { cwd: ctx.cwd, readOnly: ctx.readOnly })
+        result = typeof r === "string" ? r : JSON.stringify(r ?? null)
+        result = cap(result, ctx.maxToolOutput)
+      } catch (e) {
+        result = `ERROR: plugin ${name} failed: ${String(e?.message ?? e).slice(0, 200)}`
+      }
+    }
   }
-  if (typeof result === "string" && REDACTED_TOOLS.has(name)) return redact(result)
+  // all plugin output passes through secret redaction, like built-in tools
+  if (typeof result === "string" && (REDACTED_TOOLS.has(name) || ctx._plugins?.has(name))) return redact(result)
   return result
 }
 

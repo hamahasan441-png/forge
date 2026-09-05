@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast lane: the zero-network Node unit suites across supported Node versions.
+  node-suites:
+    name: node suites (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Run Node unit suites (offline)
+        working-directory: agentv19/forge
+        run: FORGE_FAST=1 node ../tests/run-all.mjs
+
+  # Full lane: node suites + e2e (mock provider) + clean-room npm install.
+  full-suite:
+    name: full suite (e2e + cleanroom)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run all suites
+        working-directory: agentv19/forge
+        run: node ../tests/run-all.mjs

@@ -57,7 +57,7 @@ function sha256Head(file) {
  *  track `created` (absolute paths, NOT existing yet — this mutation will
  *  create them) so undo can remove them. One manifest covers both — a single
  *  undo restores the whole atomic operation. Returns id | null. */
-export function snapshotBefore(files, cwd, created = []) {
+export function snapshotBefore(files, cwd, created = [], runId = null) {
   try {
     // v20.0.1: files too big to snapshot are RECORDED (instead of silently
     // skipped) so `forge undo` can tell the user it could not protect them.
@@ -79,7 +79,7 @@ export function snapshotBefore(files, cwd, created = []) {
     const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
     const dir = path.join(CHECKPOINTS_DIR, id)
     fs.mkdirSync(dir, { recursive: true })
-    const manifest = { id, ts: Date.now(), cwd: path.resolve(cwd || process.cwd()), files: [] }
+    const manifest = { id, ts: Date.now(), cwd: path.resolve(cwd || process.cwd()), ...(runId ? { runId } : {}), files: [] }
     want.forEach((f, i) => {
       // v20.1: gzip anything worth compressing. Text shrinks ~10x, which is
       // what pays for the higher per-file cap.
@@ -132,11 +132,9 @@ export function sealCreated(checkpointId, cwd) {
   void cwd
 }
 
-/** Restore the newest checkpoint for cwd. Consumes it. Returns {id, files, notes} | null. */
-export function restoreLast(cwd) {
-  const found = listCheckpoints(cwd, 1)
-  if (!found.length) return null
-  const c = found[0]
+/** Restore one checkpoint object (from listCheckpoints) and consume it.
+ *  Returns {id, files, notes} | null. Shared by restoreLast and restoreRun. */
+function restoreOne(c) {
   let restored = 0
   const notes = []
   try {
@@ -178,6 +176,36 @@ export function restoreLast(cwd) {
   return restored || notes.length ? { id: c.id, files: restored, notes } : null
 }
 
+/** Restore the newest checkpoint for cwd. Consumes it. Returns {id, files, notes} | null. */
+export function restoreLast(cwd) {
+  const found = listCheckpoints(cwd, 1)
+  if (!found.length) return null
+  return restoreOne(found[0])
+}
+
+/**
+ * v20.2 (P3-4): restore an ENTIRE agent run atomically. Every checkpoint tagged
+ * with the same runId is rolled back, newest→oldest, so files return to their
+ * pre-run state even if the run touched one file several times. With no runId,
+ * the most recent run for cwd is used. Returns
+ * {runId, checkpoints, files, notes} | null.
+ */
+export function restoreRun(cwd, runId = null) {
+  const all = listCheckpoints(cwd, 999)
+  const rid = runId || all.find((c) => c.runId)?.runId
+  if (!rid) return null
+  const group = all.filter((c) => c.runId === rid) // already newest-first
+  if (!group.length) return null
+  let files = 0
+  const notes = []
+  let checkpoints = 0
+  for (const c of group) {
+    const r = restoreOne(c)
+    if (r) { files += r.files; checkpoints++; for (const n of r.notes) notes.push(n) }
+  }
+  return checkpoints ? { runId: rid, checkpoints, files, notes } : null
+}
+
 /** Newest-first checkpoints for cwd (or all if cwd is null). */
 export function listCheckpoints(cwd, max = 10) {
   const out = []
@@ -192,7 +220,7 @@ export function listCheckpoints(cwd, max = 10) {
       try {
         const m = JSON.parse(fs.readFileSync(path.join(CHECKPOINTS_DIR, d, "manifest.json"), "utf8"))
         if (cwd && path.resolve(m.cwd) !== path.resolve(cwd)) continue
-        out.push({ id: m.id, ts: m.ts, cwd: m.cwd, files: m.files ?? [] })
+        out.push({ id: m.id, ts: m.ts, cwd: m.cwd, runId: m.runId ?? null, files: m.files ?? [] })
       } catch {}
     }
   } catch {}

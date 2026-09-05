@@ -17,13 +17,16 @@
  *   - adaptive effort: profile auto → deep thinking for complex tasks
  *   - Retry-After honored on transient provider errors
  */
-import { chatOnce, ProviderError } from "./providers.js"
-import { makeToolContext, WRITE_TOOLS } from "./tools.js"
+import { chatOnce, ProviderError, fallbackChain } from "./providers.js"
+import { readHealth, recordHealth } from "./health.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { loadToolPlugins } from "./plugins.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { DEFAULT_DIR } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
 import { relevantMemory, relevantLearnings } from "./memory.js"
 import { profileSummary, resourceProfile } from "./profile.js"
+import { buildRepoMap } from "./repomap.js"
 import path from "node:path"
 import fs from "node:fs"
 
@@ -69,7 +72,7 @@ const ROLE_DIRECTIVES = {
   coder: "You are an ANALYSIS sub-agent for implementation planning: identify exact files and edits needed, but do NOT write — the main agent applies the changes.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -97,9 +100,16 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
       "DEEP THINKING MODE: think like the big models — before EACH tool batch, reason about what to do and why; consider alternatives and failure modes; after edits, VERIFY with tests/builds before claiming success. Prefer correctness over speed.")
   }
   if (planOnly) lines.push("", "PLAN MODE: investigate and produce a numbered, step-by-step implementation plan (files to touch, edits to make, how to verify). Do NOT execute any changes — read-only tools only. End with 'END OF PLAN'.")
-  // v20 context engine: project profile + relevant memory + learned fixes
+  // v20 context engine: project profile + repo map + relevant memory + learned fixes
   const prof = profileSummary(cwd)
   if (prof) lines.push("", prof)
+  // v20.2 (P3-1): a compact symbol map so the agent locates code without ls/grep
+  if (repoMap) {
+    try {
+      const map = buildRepoMap(cwd, { query: task || "" }) // P3-2: rank by task relevance
+      if (map) lines.push("", map)
+    } catch { /* repo map is best-effort — never break the prompt */ }
+  }
   if (task) {
     const mem = relevantMemory(task, { cwd })
     if (mem) lines.push("", mem)
@@ -167,8 +177,17 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
 }
 
 export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role }) {
-  const p = provider
+  let p = provider
   const readonly = readOnly || planOnly // plan mode is always read-only
+  // v20.2 provider failover (opt-in): when the active provider keeps failing on
+  // transient/auth errors, fall through to the next configured+tested provider
+  // instead of killing the task. Default OFF — a switch is always announced.
+  const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
+  const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
+  let chainIdx = 0
+  const isFailworthy = (e) =>
+    e instanceof ProviderError && !e.contextOverflow &&
+    (e.retryable || e.status === 401 || e.status === 403 || e.status === 404)
   const res = resourceProfile()
   // v20 adaptive effort: deep may be resolved from the profile when unset
   let deepEffort = deep
@@ -185,7 +204,26 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   const maxToolCalls = Math.min(500, Math.max(10, config.agent?.maxToolCalls ?? 80)) // v20: hard stop for runaway tool loops
   const skillsDir = resolveSkillsDir(config.skills?.dir) // bundled skills work in agent mode too
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
+  // v20.2 (P3-4): tag every checkpoint from this run with one runId so the whole
+  // run can be rolled back atomically (`forge undo --run`). Sub-agents are
+  // read-only and never write, so they get no runId.
+  const runId = readonly ? null : "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
+  // Sub-agents inherit the same plugins the main run sees.
+  let plugins = []
+  if (config.tools?.plugins !== false) {
+    try {
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      plugins = loaded.tools
+      const isDelegatedSubAgent = readonly && !planOnly
+      if (!isDelegatedSubAgent) {
+        for (const p of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${p.name}${p.readOnly ? " (read-only)" : ""} — ${p.source}` })
+        for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}` })
+      }
+    } catch { /* plugins are best-effort */ }
+  }
   const tools = makeToolContext({
+    plugins,
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? 45,
@@ -194,6 +232,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     searchUrl: config.tools?.searchUrl || "",
     memoryPath,
     todoPath: path.join(DEFAULT_DIR, "todo.json"),
+    runId,
     readOnly: readonly,
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
@@ -216,7 +255,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   })
 
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : task },
   ]
 
@@ -224,6 +263,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   let finalText = ""
   let retryBudget = 3 // transient-error retries do NOT burn maxSteps
   let overflowBudget = 2 // v20: context-overflow compress+retry attempts
+  let switchedOk = false // recorded health-ok after a successful failover
   let toolCallCount = 0
   const toolLog = []
 
@@ -264,8 +304,24 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
         steps-- // retry does not consume a step
         continue
       }
+      // v20.2: retries on THIS provider are spent (or the error is a hard
+      // auth/not-found) — fall through to the next configured provider if one
+      // is available. Each provider in the chain is tried once.
+      if (isFailworthy(e) && chainIdx < chain.length) {
+        const next = chain[chainIdx++]
+        recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
+        onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message })
+        p = next
+        retryBudget = 3 // fresh budget for the new provider
+        steps-- // switching does not consume a step
+        continue
+      }
       throw e
     }
+
+    // a request that succeeded on a switched-to provider confirms it works —
+    // record it once so the health cache and future runs prefer it
+    if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
 
     if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning })
 
@@ -335,7 +391,8 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   if (steps >= maxSteps && !finalText) {
     finalText = "(reached max steps without a final answer — raise agent.maxSteps in config)"
   }
-  return { text: finalText, steps, toolLog, planOnly }
+  const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
+  return { text: finalText, steps, toolLog, planOnly, runId, wrote }
 }
 
 /** Aggressive in-place shrink used only for overflow recovery: stub ALL tool
@@ -379,6 +436,8 @@ export function agentEventPrinter() {
       if (t) console.log(dim(`  ☍ thinking: ${t}`))
     } else if (ev.type === "retry") {
       console.log(yellow(`  ↻ transient provider error (${ev.error}) — retrying… ${ev.left ?? ""}`))
+    } else if (ev.type === "failover") {
+      console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
     } else if (ev.type === "info") {
       console.log(dim(`  · ${ev.text}`))
     } else if (ev.type === "compacted") {

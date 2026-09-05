@@ -37,11 +37,14 @@ import { readHealth, recordHealth } from "./health.js"
 import { runChat } from "./chat.js"
 import { runAgent, agentEventPrinter } from "./agent.js"
 import { selfTestTools, toolCount } from "./tools.js"
-import { resolveSkillsDir, indexSkills, loadSkill } from "./skills.js"
-import { lastSessionFile, listSessions, findSession } from "./sessions.js"
+import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
+import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
-
-const VERSION = "20.0.0"
+import { VERSION } from "./version.js"
+import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
+import { savePlan, listPlans, readPlan } from "./plans.js"
+import { loadToolPlugins, PLUGINS_DIR } from "./plugins.js"
+import { BUILTIN_TOOL_NAMES } from "./tools.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -73,6 +76,11 @@ function parseArgs(argv) {
 
 const { positional, flags } = parseArgs(process.argv.slice(2))
 if (flags["no-color"] || !process.stdout.isTTY) process.env.NO_COLOR = "1"
+
+// v20.2 (P2-6): machine-readable output. `--json` on data commands prints one
+// JSON document and nothing else, so forge can be scripted.
+const JSON_OUT = flags.json === true || flags.json === "true"
+function emitJson(obj) { console.log(JSON.stringify(obj, null, 2)) }
 
 function resolveProvider(config) {
   const name = flags.provider || config.activeProvider || CATALOG.find((c) => c.name !== "custom" && (config.providers[c.name]?.apiKey || (c.envKey && process.env[c.envKey])))?.name || ""
@@ -277,6 +285,9 @@ async function main() {
         console.log(bold(cyan("── plan " + "─".repeat(54))))
         console.log(renderMarkdown(res.text))
         console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        // v20.2 P1-9: persist the plan so it can be reviewed and executed later
+        const saved = savePlan(task, res.text, process.cwd())
+        if (saved.ok) console.log(dim(`  saved → ${path.relative(process.cwd(), saved.file)}  (${cyan("forge plan apply " + saved.slug)} to execute later)`))
         if (!process.stdin.isTTY) {
           warn("plan mode: non-interactive — not executing (re-run without --plan to execute)")
           return
@@ -293,11 +304,25 @@ async function main() {
       console.log(bold(green("── result " + "─".repeat(50))))
       console.log(renderMarkdown(res.text))
       console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+      if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      debugRunSummary(res)
       return
     }
     case "undo": {
-      // v16: restore the newest checkpoint recorded for this directory
-      const { restoreLast, listCheckpoints } = await import("./checkpoint.js")
+      // v16: restore the newest checkpoint recorded for this directory.
+      // v20.2: --run restores the whole last agent run atomically.
+      const { restoreLast, restoreRun, listCheckpoints } = await import("./checkpoint.js")
+      if (flags.run !== undefined) {
+        const runId = typeof flags.run === "string" ? flags.run : null
+        const r = restoreRun(process.cwd(), runId)
+        if (r) {
+          ok(`restored ${r.files} file(s) across ${r.checkpoints} checkpoint(s) from run ${r.runId}`)
+          for (const n of r.notes ?? []) console.log(dim(`  · ${n}`))
+        } else {
+          warn(runId ? `no restorable checkpoints for run ${runId}` : "no restorable agent-run checkpoints for this directory")
+        }
+        return
+      }
       const r = restoreLast(process.cwd())
       if (r) {
         ok(`restored ${r.files} file(s) from checkpoint ${r.id}`)
@@ -484,7 +509,7 @@ async function main() {
       }
       if (!t.baseUrl) { err(`no baseUrl known for ${t.name} — set it: forge config set providers.${t.name}.baseUrl <url>`); process.exit(1); return }
       const activeModel = config.providers?.[t.name]?.model || t.cat?.models?.[0] || ""
-      info(`fetching models from ${t.name} (${t.baseUrl})…`)
+      if (!JSON_OUT) info(`fetching models from ${t.name} (${t.baseUrl})…`)
       const { models, live, warning, entries } = await listModels({ protocol: t.protocol, baseUrl: t.baseUrl, apiKey: t.apiKey, catalog: t.cat })
       if (live && entries?.length) writeModelCache(t.name, entries)
       const metaById = new Map((entries || []).map((e) => [e.id, e]))
@@ -498,6 +523,13 @@ async function main() {
         } else if (warning) {
           warn(`live list failed: ${warning} — built-in suggestions:`)
         }
+      }
+      if (JSON_OUT) {
+        const rows = listed
+          .filter((m) => flags.free !== true || metaById.get(m)?.free || m.endsWith(":free"))
+          .map((m) => { const e = metaById.get(m); return { id: m, free: !!(e?.free || m.endsWith(":free")), context: e?.context ?? null, active: m === activeModel } })
+        emitJson({ provider: t.name, live: !!live, count: rows.length, models: rows })
+        return
       }
       if (flags.free === true) {
         const shown = listed
@@ -541,7 +573,26 @@ async function main() {
       return
     }
     case "sessions": {
-      const listed = listSessions(15)
+      // v20.2 (P1-6): --search "text" finds sessions by title/summary/content
+      const query = typeof flags.search === "string" ? flags.search
+        : (flags.search === true ? positional.slice(1).join(" ") : "")
+      if (flags.search !== undefined) {
+        if (!query) { err('usage: forge sessions --search "text"'); process.exit(1); return }
+        const hits = searchSessions(query)
+        if (JSON_OUT) { emitJson({ query, count: hits.length, sessions: hits }); return }
+        if (!hits.length) { warn(`no sessions match "${query}"`); return }
+        console.log(bold(`sessions matching "${query}" (${hits.length})`))
+        hits.forEach((s, i) => {
+          const age = Math.round((Date.now() - (s.ts || Date.now())) / 60000)
+          const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`
+          console.log(`  ${bold(String(i + 1).padStart(2))}. ${dim(s.id)}  ${cyan((s.provider || "?") + "/" + (s.model || "?"))}  ${dim(`${s.turns} turns • ${ageStr}`)}${s.title ? dim("  " + s.title.slice(0, 40)) : ""}`)
+          if (s.snippet) console.log(dim(`      …${s.snippet}…`))
+        })
+        console.log(dim("  resume a match: forge resume <id>"))
+        return
+      }
+      const listed = listSessions(JSON_OUT ? 999 : 15)
+      if (JSON_OUT) { emitJson({ count: listed.length, sessions: listed }); return }
       if (!listed.length) { warn("no saved sessions yet — they are auto-saved as you chat"); return }
       console.log(bold(`sessions (${listed.length} newest) — ~/.forge/sessions/`))
       listed.forEach((s, i) => {
@@ -550,12 +601,28 @@ async function main() {
         const title = s.title ? dim(`  ${s.title.slice(0, 44)}`) : ""
         console.log(`  ${bold(String(i + 1).padStart(2))}. ${dim(s.id ?? s.file)}  ${cyan((s.provider || "?") + "/" + (s.model || "?"))}  ${dim(`${s.turns} turns • ${ageStr}`)}${title}`)
       })
-      console.log(dim("  resume: forge resume <n|id>  •  in chat: /resume <n>  •  last: forge chat --continue"))
+      console.log(dim("  resume: forge resume <n|id>  •  search: forge sessions --search \"text\"  •  last: forge chat --continue"))
       return
     }
     case "skills": {
       const dir = resolveSkillsDir(config.skills?.dir)
       if (!dir) { err("no skills directory found (looked in ./skills, repo root, cli/forge/skills, ~/.forge/skills)"); process.exit(1); return }
+      // v20.2 (P2-5): forge skills --check | forge skills check — validate all skills
+      if (flags.check !== undefined || positional[1] === "check") {
+        const rep = checkSkills(dir)
+        if (JSON_OUT) { emitJson({ dir, ...rep }); process.exit(rep.failed ? 1 : 0); return }
+        console.log(bold(`skill check (${rep.total}) — ${dir}`))
+        for (const s of rep.skills) {
+          if (s.ok) console.log(`  ${green("✓")} ${cyan(s.name.padEnd(30))} ${dim(s.sizeKB + " KB")}`)
+          else {
+            console.log(`  ${red("✗")} ${cyan(s.name.padEnd(30))} ${dim(s.sizeKB + " KB")}`)
+            for (const iss of s.issues) console.log(`      ${red("•")} ${iss}`)
+          }
+        }
+        if (rep.failed) { err(`${rep.failed} of ${rep.total} skill(s) have issues`); process.exit(1); return }
+        ok(`all ${rep.total} skills valid`)
+        return
+      }
       const sub = positional[1]
       if (sub && sub !== "list") {
         const md = loadSkill(dir, sub)
@@ -568,11 +635,140 @@ async function main() {
       for (const s of idx) console.log(`  ${cyan(s.name.padEnd(32))} ${dim(s.desc)}`)
       return
     }
+    case "plan": {
+      // forge plan [list] | show <n|slug> | apply <n|slug>
+      const sub = (positional[1] || "list").toLowerCase()
+      if (sub === "list") {
+        const plans = listPlans(process.cwd())
+        if (!plans.length) { warn('no saved plans yet — run: forge agent --plan "task"'); return }
+        console.log(bold(`plans (${plans.length}) — ${path.relative(process.cwd(), path.dirname(plans[0].file))}`))
+        plans.forEach((pl, i) => {
+          const age = Math.round((Date.now() - pl.mtime) / 60000)
+          const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`
+          console.log(`  ${bold(String(i + 1).padStart(2))}. ${cyan(pl.slug)}  ${dim(ageStr)}${pl.title ? "  " + dim(pl.title.slice(0, 50)) : ""}`)
+        })
+        console.log(dim("  show: forge plan show <n|slug>  •  execute: forge plan apply <n|slug>"))
+        return
+      }
+      if (sub === "show") {
+        const r = readPlan(positional[2], process.cwd())
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        console.log(renderMarkdown(r.text))
+        return
+      }
+      if (sub === "apply") {
+        const r = readPlan(positional[2], process.cwd())
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        const cfg = await onboardIfMissing(config)
+        const p = needProvider(cfg)
+        if (!p) return
+        if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
+        console.log(dim(`forge plan apply — ${bold(r.slug)} • provider: ${p.name}/${p.model}`))
+        console.log()
+        const t0 = Date.now()
+        const task = `Execute the following implementation plan step by step. Verify each step (run tests/builds) before moving on, and keep edits minimal.\n\n${r.text}`
+        const res = await runAgent({ config: cfg, provider: p, task, onEvent: agentEventPrinter(), deep: flags.deep === true ? true : undefined })
+        console.log()
+        console.log(bold(green("── result " + "─".repeat(50))))
+        console.log(renderMarkdown(res.text))
+        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      debugRunSummary(res)
+        return
+      }
+      err(`unknown: forge plan ${sub} — use list | show <n|slug> | apply <n|slug>`)
+      process.exit(1)
+      return
+    }
+    case "memory": {
+      // forge memory [list] | add <text> | forget <n> | clear | prune
+      //   --project = the current project's tier (default: global)
+      //   --all     = both tiers (list only)
+      const sub = (positional[1] || "list").toLowerCase()
+      const tier = flags.project ? "project" : "global"
+      const cwd = process.cwd()
+      const showTier = (t) => {
+        const entries = memoryEntries(t, cwd)
+        console.log(bold(`${t} memory`) + dim(`  (${entries.length}) — ${memoryPathFor(t, cwd)}`))
+        if (!entries.length) { console.log(dim("  (empty)")); return }
+        entries.forEach((e, i) => {
+          const text = e.text.replace(/\n\s*/g, " ⏎ ")
+          console.log(`  ${bold(String(i + 1).padStart(3))}. ${text.slice(0, 100)}${text.length > 100 ? dim("…") : ""}`)
+        })
+      }
+      if (sub === "list") {
+        if (JSON_OUT) {
+          const dump = (t) => memoryEntries(t, cwd).map((e) => e.text)
+          emitJson(flags.all ? { global: dump("global"), project: dump("project") } : { tier, entries: dump(tier) })
+          return
+        }
+        if (flags.all) { showTier("global"); console.log(); showTier("project") }
+        else showTier(tier)
+        console.log(dim("  add: forge memory add \"note\" [--project]  •  remove: forge memory forget <n>  •  clear: forge memory clear"))
+        return
+      }
+      if (sub === "add") {
+        const text = positional.slice(2).join(" ").trim() || (typeof flags.text === "string" ? flags.text : "")
+        if (!text) { err('nothing to add — forge memory add "your note" [--project]'); process.exit(1); return }
+        const r = appendMemory(tier, text, cwd)
+        if (!r.ok) { err(`could not save: ${r.error}`); process.exit(1); return }
+        ok(r.deduped ? `already in ${tier} memory (no duplicate added)` : `saved to ${tier} memory`)
+        return
+      }
+      if (sub === "forget") {
+        const r = forgetMemory(tier, positional[2], cwd)
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`forgot from ${tier} memory: ${String(r.removed).slice(0, 80)}`)
+        return
+      }
+      if (sub === "clear") {
+        const r = clearMemory(tier, cwd)
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`cleared ${tier} memory (${r.removed} entr${r.removed === 1 ? "y" : "ies"} removed)`)
+        return
+      }
+      if (sub === "prune") {
+        const r = pruneMemory(tier, cwd)
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(r.removed ? `pruned ${r.removed} oldest entr${r.removed === 1 ? "y" : "ies"} from ${tier} memory` : `${tier} memory already within limit`)
+        return
+      }
+      err(`unknown: forge memory ${sub} — use list | add | forget <n> | clear | prune`)
+      process.exit(1)
+      return
+    }
+    case "plugins": {
+      // list user tool plugins loaded from ~/.forge/tools
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      if (JSON_OUT) {
+        emitJson({ dir: PLUGINS_DIR, tools: loaded.tools.map((t) => ({ name: t.name, readOnly: t.readOnly, description: t.def.function.description, source: t.source })), errors: loaded.errors })
+        return
+      }
+      console.log(bold(`tool plugins — ${PLUGINS_DIR}`))
+      if (!loaded.tools.length && !loaded.errors.length) {
+        console.log(dim("  (none) — drop a *.mjs exporting { name, description, parameters, run } here to add a tool"))
+      }
+      for (const t of loaded.tools) {
+        console.log(`  ${green("✓")} ${cyan(t.name.padEnd(24))} ${t.readOnly ? dim("[read-only] ") : ""}${dim(t.def.function.description.slice(0, 60))}  ${dim("(" + t.source + ")")}`)
+      }
+      for (const e of loaded.errors) console.log(`  ${red("✗")} ${dim(e)}`)
+      if (loaded.tools.length) console.log(dim(`  ${loaded.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
       process.exit(1)
   }
+}
+
+// v20.2 (P2-6): FORGE_DEBUG=1 prints a compact per-run tool breakdown to stderr.
+function debugRunSummary(res) {
+  if (process.env.FORGE_DEBUG !== "1" || !res) return
+  const counts = {}
+  for (const t of res.toolLog ?? []) counts[t.name] = (counts[t.name] || 0) + 1
+  const breakdown = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join(" ")
+  console.error(dim(`  [debug] steps=${res.steps} toolCalls=${res.toolLog?.length ?? 0} runId=${res.runId ?? "-"} wrote=${!!res.wrote}${breakdown ? " • " + breakdown : ""}`))
 }
 
 function coerce(v) {
@@ -593,13 +789,17 @@ ${bold("usage")}
   ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 17 tools (bash, files, web, memory, sub-agents)
-  ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute
-  ${cyan("forge undo")}                   restore files changed by the last tool edit (auto-checkpoints)
+  ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
+  ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
+  ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
   ${cyan("forge config show|path|get|set|unset")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
-  ${cyan("forge sessions")}               list saved conversations
+  ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
+  ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
+  ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
+  ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
   ${cyan("forge models [provider] [--free]")}    list models — --free = OpenRouter free tier only
 
@@ -614,8 +814,13 @@ ${bold("safety (v20)")}
   shell commands risk-classified (catastrophic always blocked; risky ones ask y/N) • SSRF-guarded URL fetches
   tool results secret-redacted • sub-agents read-only, depth-capped, timed out
 
+${bold("resilience")}
+  ${cyan("forge config set failover true")}  agent falls through to the next configured provider on outages ${dim("(or FORGE_FAILOVER=1)")}
+  ${cyan("forge memory")}                  curate long-term memory: list | add | forget <n> | clear | prune
+
 ${bold("flags")}
   --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>
+  --json (machine-readable output: sessions/models/plugins/skills --check/memory list)  •  FORGE_DEBUG=1 (agent trace)
   --config <path>    --cwd <dir> (agent)  --plan (agent)  --continue  --resume <n|id>  -m "message"  --no-color
 
 ${bold("config file")}  ${USER_CONFIG_PATH}  (chmod 600, env vars as fallback)
