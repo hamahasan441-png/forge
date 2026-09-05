@@ -512,6 +512,21 @@ check "forbidden command blocked" "$out" "BLOCKED"
 out=$(printf 'Please write a haiku about pwd\nbye\n' | $F 2>&1)
 check "sentence stays chat" "$out" "Hello from mock!"
 
+# 70b. v20.0.1: sentences that merely START with a command name were EXECUTED
+#      in the shell ("find the bug in main.js" ran find, "node is great" ran
+#      node) and the model never saw them. They must stay chat messages…
+for s in "find the bug in main.js" "make it work" "cat is my favorite animal" "node is great" "python vs go" "date me" "env is not set"; do
+  out=$(printf '%s\nbye\n' "$s" | $F 2>&1)
+  if echo "$out" | grep -q "Hello from mock!"; then PASS=$((PASS+1)); echo "  ok  sentence stays chat: $s"
+  else FAIL=$((FAIL+1)); echo "  FAIL sentence swallowed by the shell: $s"; fi
+done
+# …while real commands must still auto-execute without the ! prefix
+for c in "pwd" "ls -la" "git status" "echo hello"; do
+  out=$(printf '%s\nbye\n' "$c" | $F 2>&1)
+  if echo "$out" | grep -qF "\$ $c"; then PASS=$((PASS+1)); echo "  ok  command still auto-detected: $c"
+  else FAIL=$((FAIL+1)); echo "  FAIL command no longer auto-detected: $c"; fi
+done
+
 # 71. terminal runs are SHARED WITH THE MODEL on the next message
 out=$(printf '!echo forge-v19-note\nTERMINAL_NOTE_CHECK\nbye\n' | $F 2>&1)
 check "terminal note reaches model" "$out" "TERMINAL NOTE SEEN"

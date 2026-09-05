@@ -62,7 +62,7 @@ forge v20.0.0 "PRODUCTION" — CLI-only build
   checkpoints + undo; PLAN MODE (--plan) read-only hard-block
 - doctor: env self-check (platform/RAM/git/dirs) + provider/context line +
   ✓ tested badge (--tools probes all 17 tools, offline tools SKIP cleanly)
-- E2E: 236/236 checks + 153/153 hardening unit checks + 31/31 provider-wire
-  robustness checks + 13/13 diffpatch engine tests + 48/48 clean-room install
+- E2E: 247/247 checks + 153/153 hardening unit checks + 31/31 provider-wire
+  robustness checks + 13/13 diffpatch engine tests + 50/50 clean-room install
   verification
 - change plans inside: forge/PLAN-v15.md … forge/PLAN-v20.md

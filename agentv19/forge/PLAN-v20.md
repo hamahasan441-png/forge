@@ -72,8 +72,8 @@ Additional bugs found during audit (not in the known list):
 | syntax (node --check, all 19 modules) | PASS |
 | `tests/test-diffpatch.mjs` | 13/13 PASS |
 | `tests/test-security.mjs` (v20 unit) | 153/153 PASS (launcher-isolated FORGE_HOME) |
-| `tests/e2e-forge.sh` | 236/236 PASS (incl. 31 new v20 checks + 15 v20.0.1 regression checks) |
-| `tests/cleanroom-v20.sh` | 48/48 PASS (isolated npm prefix, no prior forge) |
+| `tests/e2e-forge.sh` | 247/247 PASS (incl. 31 new v20 checks + 26 v20.0.1 regression checks) |
+| `tests/cleanroom-v20.sh` | 50/50 PASS (isolated npm prefix, no prior forge) |
 | `tests/test-providers.mjs` (v20.0.1) | 31/31 PASS (hostile local HTTP server) |
 
 New E2E coverage: SSRF default-block + opt-in, write-escape block, sensitive
@@ -116,12 +116,14 @@ Same method, extended to the provider boundary with a hostile local HTTP server
 | 8 | unreachable host / connection reset | `✗ fetch failed` | `could not reach the provider (UND_ERR_SOCKET — other side closed) — check the base URL, your connection, DNS and TLS` |
 | 9 | a file **larger than 2 MB was silently skipped** when checkpointing | `forge undo` reported "restored N file(s)" while one modified file was never protected | the manifest records `tooLarge` entries and undo names the file it could not restore |
 | 10 | `forge config get <object>` | printed `[object Object]` | prints the JSON |
+| 11 | **terminal auto-detect swallowed ordinary sentences** — the rule was "first word is a known command", so `find the bug in main.js` ran `find` (and printed `find: 'the': No such file or directory`), `make it work` ran `make`, `node is great` ran `node`, `cat is my favorite animal` ran `cat` | the model never saw the message at all; a chat-first CLI eating user sentences | `isShellLine()` now requires a command-like line: no flag / path / shell operator AND the arguments must not read like English (weighted function-word score). 90-case corpus: real commands still execute, sentences go to the model |
 
 New regression coverage: 25 unit checks (`v20.0.1` blocks in
 `tests/test-security.inner.mjs`), 31 provider checks
 (`tests/test-providers.mjs` — 19 of them fail against the unfixed build),
-15 E2E checks (doctor honesty, terminal `mv`/`cp` into `/etc` and `/usr`,
-`**/*.md` glob via a new mock branch), 3 clean-room checks.
+26 E2E checks (doctor honesty, terminal `mv`/`cp` into `/etc` and `/usr`,
+sentence-vs-command detection, `**/*.md` glob via a new mock branch),
+5 clean-room checks.
 
 ## Known limitations (honest)
 

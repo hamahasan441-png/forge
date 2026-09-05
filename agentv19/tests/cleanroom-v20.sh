@@ -108,6 +108,12 @@ out=$(printf '!rm cleanroom-target.txt\nbye\n' | forge 2>&1)
 check "piped risky rm needs consent" "$out" "BLOCKED (non-interactive)"
 out=$(printf '!echo note-for-the-model\nTERMINAL_NOTE_CHECK\nbye\n' | forge 2>&1)
 check "terminal note reaches model" "$out" "TERMINAL NOTE SEEN"
+# v20.0.1: a sentence starting with a command name must reach the MODEL, not
+# the shell ("make it work" used to run make)
+out=$(printf 'make it work\nbye\n' | forge 2>&1)
+check "sentence stays chat" "$out" "Hello from mock!"
+out=$(printf 'pwd\nbye\n' | forge 2>&1)
+check "bare command still executes" "$out" "\$ pwd"
 
 # 7. v19 deep think + v20 effort profile
 out=$(printf '/deep\n/exit\n' | forge chat 2>&1)

@@ -26,6 +26,8 @@ DAILY:
 IN CHAT (v20 terminal mode):
   type Linux commands and they EXECUTE in the same chat, in your folder:
     ls · pwd · cat file.md · git status · python x.py · npm test · mkdir build
+  plain sentences stay chat — "find the bug in main.js", "make it work" and
+    "node is great" go to the MODEL, never to the shell (v20.0.1)
   ! <command>    force-execute (always works)   cd / export persist per session
   every run is shared with the model (secret-redacted) — ask "what did that print?"
   risky commands ask y/N (FORGE_ASSUME_YES=1 for scripts); catastrophic ones are
@@ -70,7 +72,7 @@ reduced sub-agent concurrency automatically), no systemd/desktop assumptions.
 
 Self-test (optional, needs Node only):
   cd agentv19/tests && node mock-llm.mjs &   # then in another shell:
-  bash e2e-forge.sh                          # 236 checks against the local mock
+  bash e2e-forge.sh                          # 247 checks against the local mock
   node test-security.mjs                     # 153 hardening unit checks
   node test-providers.mjs                    # 31 provider-wire robustness checks
   node test-diffpatch.mjs                    # 13 diff-engine checks

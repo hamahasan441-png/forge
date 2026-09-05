@@ -28,11 +28,11 @@ forge doctor                              # verify environment + connectivity
 ```bash
 cd agentv19/tests
 node mock-llm.mjs &                       # local stand-in provider (127.0.0.1:8787)
-bash e2e-forge.sh                         # 236 checks
+bash e2e-forge.sh                         # 247 checks
 node test-security.mjs                    # 153 hardening unit checks
 node test-providers.mjs                   # 31 provider-wire robustness checks
 node test-diffpatch.mjs                   # 13 diff-engine checks
-bash cleanroom-v20.sh                     # 48 checks — installs into a temp npm prefix
+bash cleanroom-v20.sh                     # 50 checks — installs into a temp npm prefix
 ```
 
 ## v20.0.1 patch
@@ -54,5 +54,9 @@ Four defects that the v20 suite missed are fixed here (details in
 6. Files larger than 2 MB were silently skipped when checkpointing, so
    `forge undo` claimed a clean restore it had not made — it now names the
    file it could not protect.
+7. Terminal auto-detect swallowed ordinary sentences: `find the bug in
+   main.js` ran `find`, `node is great` ran `node`, `make it work` ran `make`
+   — and the model never saw the message. Sentences now go to the model;
+   real commands still execute.
 
 Details in `agentv19/forge/PLAN-v20.md`; every fix has a regression test.

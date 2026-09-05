@@ -89,15 +89,60 @@ export const SHELL_COMMANDS = new Set(("ls pwd cd cat less head tail echo printf
   "python python3 pip pip3 curl wget ssh scp rsync ping ifconfig ip netstat man info " +
   "apt apt-get brew docker kubectl helm terraform jq sqlite3 tree watch bc xargs tee screen tmux").split(" "))
 
-/** Decide whether a typed line is a shell command. `!` forces; otherwise
- *  the first token must be a known command AND the line must not read like a
- *  natural-language request ("find the bug in this code" stays a chat message). */
-function isShellLine(t) {
-  if (t.startsWith("!")) return true
-  if (t.endsWith("?")) return false
-  if (/^(please|can|could|would|should|what|whats|how|why|when|where|who|tell|explain|help|give|make me|write)\b/i.test(t)) return false
-  const first = (t.split(/\s+/)[0] || "").split("/").pop()
-  return SHELL_COMMANDS.has(first)
+// Words that read like a SENTENCE, not like arguments. Checked on everything
+// after the command name (the command itself is a legitimate word too —
+// "make build" is a command, "make it work" is not). Strong words are worth 2.
+const CHAT_STRONG = new Set(("is are was were am be been being it its i me my we our you your he she they them his her " +
+  "please thanks thank what whats why how when where who whom which do does did dont doesnt " +
+  "should could would shall may might must like likes want wants need needs think thinks seems mean means " +
+  "explain tell show finds find make makes made fix use using used vs").split(" "))
+const CHAT_WEAK = new Set(("a an the this that these those to of in on for with and or but not no out up down over under " +
+  "again very just also about into from by at as if then than so because there here all any some more").split(" "))
+// tokens that make a line unmistakably a command: flags, paths, shell operators
+const FLAG_RE = /^--?[A-Za-z0-9]/
+// path-ish = "~", a slash, or a dot-relative/dotfile token. A bare
+// "file.txt" is NOT enough on its own: sentences mention filenames too
+// ("find the bug in main.js"), and a real command like `cat file.txt`
+// scores 0 on the sentence test anyway, so it still runs.
+const PATHISH_RE = /^~|^\.{1,2}(?:\/|$)|\//
+
+/** Score how English-like the ARGUMENTS of a line are (0 = pure command). */
+function chatWordScore(tokens) {
+  let s = 0
+  for (const w of tokens.slice(1)) {
+    const lw = w.toLowerCase().replace(/[^a-z']/g, "")
+    if (!lw) continue
+    if (CHAT_STRONG.has(lw)) s += 2
+    else if (CHAT_WEAK.has(lw)) s += 1
+  }
+  return s
+}
+
+/**
+ * Decide whether a typed line is a shell command. `!` forces; otherwise the
+ * first token must be a known command AND the line must not read like a
+ * natural-language request.
+ *
+ * v20.0.1: "SHELL_COMMANDS.has(firstWord)" alone swallowed ordinary sentences —
+ * "find the bug in main.js", "make it work", "node is great" and "cat is my
+ * favorite animal" were all EXECUTED in the shell (and the model never saw
+ * them). A line is now only auto-executed when it has no flag/path/operator
+ * AND does not read like a sentence.
+ */
+export function isShellLine(t) {
+  const line = String(t ?? "").trim()
+  if (line.startsWith("!")) return true
+  if (line.endsWith("?")) return false
+  if (/^(please|can|could|would|should|what|whats|how|why|when|where|who|tell|explain|help|give|make me|write)\b/i.test(line)) return false
+  const tokens = line.split(/\s+/).filter(Boolean)
+  const first = (tokens[0] || "").split("/").pop()
+  if (!SHELL_COMMANDS.has(first)) return false
+  if (tokens.length < 2) return true // bare command: `ls`, `pwd`, `date`
+  // unmistakably a command: flags, paths/files, redirects, pipes, chains
+  if (tokens.slice(1).some((w) => FLAG_RE.test(w) || PATHISH_RE.test(w))) return true
+  if (/[|;&<>]/.test(line) || line.includes("$(") || line.includes("`")) return true
+  // otherwise it is a command only if it does NOT read like a sentence
+  return chatWordScore(tokens) < 2
 }
 
 /** v19 tiered context reduction, stage 1: replace BIG tool outputs outside the
