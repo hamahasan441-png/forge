@@ -200,7 +200,7 @@ undo restores a 10 MB file).
 
 | milestone | scope | exit criteria |
 |---|---|---|
-| **v20.1.0 — "safe by default"** | all of P0 | +~44 unit checks, +4 e2e; every interpreter-wrapper bypass blocked; no suite regression. **Status: in progress** (P0-1 + P0-2 done, +32 unit checks) |
+| **v20.1.0 — "safe by default"** | all of P0 | **DONE** — P0-1…P0-5 shipped in 4 commits (`16f94ff`, `0ee2151`, `d1d4b09`, + P0-5). +69 unit checks (222 total), 247/247 e2e, no suite regression |
 | **v20.2.0 — "no lost work"** | P1-1 … P1-10 | e2e < 2 min; `forge memory`, plan files, provider failover, Windows shell; +~60 checks |
 | **v20.3.0 — "engineering"** | P2-1 … P2-6 | CI green on Node 18/20/22 × ubuntu/macos; coverage report ≥ 60%; clean `npm publish --dry-run` |
 | **v21.0.0 — "capability"** | chosen P3 items, behind config flags | each item has its own acceptance test + a documented off switch |

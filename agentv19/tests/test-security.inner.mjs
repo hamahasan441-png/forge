@@ -14,7 +14,7 @@ import { classifyCommand, modelMayRun, userMayRun, splitSubcommands, tokenize } 
 import { execTool, safePath, validSkillName } from "../forge/tools.js"
 import { redact, redactSecrets } from "../forge/secrets.js"
 import { isPrivateAddress, assertFetchableUrl } from "../forge/netguard.js"
-import { snapshotBefore, sealCreated, restoreLast, listCheckpoints } from "../forge/checkpoint.js"
+import { snapshotBefore, sealCreated, restoreLast, listCheckpoints, CHECKPOINTS_DIR } from "../forge/checkpoint.js"
 import { appendMemory, recordLearning, relevantMemory, relevantLearnings, memoryStats, GLOBAL_MEMORY_PATH } from "../forge/memory.js"
 import { loadProfile, profileSummary, resourceProfile } from "../forge/profile.js"
 import { saveSession, loadSession, listSessions, findSession, lastSessionFile } from "../forge/sessions.js"
@@ -307,15 +307,53 @@ sealCreated(id2, WORK)
 fs.writeFileSync(path.join(WORK, "cp-created2.txt"), "USER EDITED\n")
 const r2b = restoreLast(WORK)
 ok("user-modified created file kept on undo", fs.existsSync(path.join(WORK, "cp-created2.txt")) && fs.readFileSync(path.join(WORK, "cp-created2.txt"), "utf8") === "USER EDITED\n")
-// v20.0.1: a file too big to snapshot (>2MB) used to be skipped SILENTLY —
-// undo reported "restored N file(s)" with no hint that one was unprotected.
+// v20.0.1: a file too big to snapshot used to be skipped SILENTLY — undo
+// reported "restored N file(s)" with no hint that one was unprotected.
+// v20.1 P0-5 raised the cap from 2 MB to 64 MB (backups are gzip'ed), so the
+// "unprotected" path now needs a genuinely huge file.
 const BIGF = path.join(WORK, "cp-too-big.txt")
-fs.writeFileSync(BIGF, "x".repeat((2 * 1024 * 1024) + 1024))
+fs.writeFileSync(BIGF, Buffer.alloc(65 * 1024 * 1024, 0x78))
 const id3 = snapshotBefore([BIGF], WORK)
 ok("oversized file still gets a checkpoint", !!id3)
 const rBig = restoreLast(WORK)
 ok("undo says which file it could NOT protect", (rBig?.notes ?? []).some((n) => /cp-too-big\.txt/.test(n) && /never snapshotted/.test(n)))
+ok("…and names the current 64 MB limit", (rBig?.notes ?? []).some((n) => /64MB/.test(n)))
 fs.rmSync(BIGF, { force: true })
+
+console.log("== v20.1 P0-5: multi-MB files are checkpointed (gzip) ==")
+// v20 refused anything over 2 MB, so `forge undo` could not restore the very
+// files most worth protecting (logs, datasets, generated bundles).
+const CPL = path.join(WORK, "cp-large.log")
+const cpText = Array.from({ length: 120000 }, (_, i) => `log line ${i} with repetitive padding text to compress`).join("\n")
+fs.writeFileSync(CPL, cpText)
+const idL = snapshotBefore([CPL], WORK)
+ok(`6 MB file is snapshotted (${(cpText.length / 1048576).toFixed(1)} MB; v20 refused at 2 MB)`, !!idL)
+const manL = JSON.parse(fs.readFileSync(path.join(CHECKPOINTS_DIR, idL, "manifest.json"), "utf8"))
+const entryL = (manL.files ?? []).find((f) => f.path === CPL)
+ok("backup is gzip'ed", !!entryL && String(entryL.backup).endsWith(".gz") && entryL.gz === true)
+const bakSize = fs.statSync(path.join(CHECKPOINTS_DIR, idL, entryL.backup)).size
+ok(`compressed backup is far smaller (${(bakSize / 1024).toFixed(0)} KB for ${(cpText.length / 1024).toFixed(0)} KB)`, bakSize < cpText.length / 5)
+fs.writeFileSync(CPL, "CLOBBERED\n")
+const rL = restoreLast(WORK)
+ok("undo restores the multi-MB file byte-for-byte", !!rL && fs.readFileSync(CPL, "utf8") === cpText)
+// small files keep the old instant, uncompressed path
+const CPS = path.join(WORK, "cp-small.txt")
+fs.writeFileSync(CPS, "small\n")
+const idS = snapshotBefore([CPS], WORK)
+const manS = JSON.parse(fs.readFileSync(path.join(CHECKPOINTS_DIR, idS, "manifest.json"), "utf8"))
+ok("small file is stored uncompressed", String((manS.files ?? [])[0]?.backup) === "0.bak")
+restoreLast(WORK)
+// a pre-v20.1 checkpoint (plain .bak, no gz flag) must still restore
+const legacyId = "2099-01-01T00-00-00-000Z-legacy"
+const legacyDir = path.join(CHECKPOINTS_DIR, legacyId)
+fs.mkdirSync(legacyDir, { recursive: true })
+const LGP = path.join(WORK, "cp-legacy.txt")
+fs.writeFileSync(LGP, "legacy content\n")
+fs.copyFileSync(LGP, path.join(legacyDir, "0.bak"))
+fs.writeFileSync(path.join(legacyDir, "manifest.json"), JSON.stringify({ id: legacyId, ts: Date.now(), cwd: WORK, files: [{ path: LGP, backup: "0.bak" }] }))
+fs.writeFileSync(LGP, "CLOBBERED\n")
+restoreLast(WORK)
+ok("pre-v20.1 checkpoint (plain .bak) still restores", fs.readFileSync(LGP, "utf8") === "legacy content\n")
 
 console.log("== memory: hierarchy + relevance + learning ==")
 appendMemory("global", "user prefers dark mode terminals", WORK)

@@ -49,6 +49,21 @@ v20 "PRODUCTION" hardening:
   (memory action=learn); project profile (langs/pm/test commands, cached);
   sessions store cwd/title/summary; delegate roles + timeout + concurrency cap;
   null-provider crash guards; Retry-After honored; /status, /profile, forge resume.
+v20.1 "safe by default" (PLAN-v21 P0 — in progress):
+  * P0-1 shellguard unwraps interpreter wrappers: `sh -c "rm -rf /"`,
+    `eval`, `timeout/env/nohup`, `python3 -c "os.system(…)"`, `node -e`,
+    `xargs rm`, and `$(…)` are classified by their PAYLOAD, not the wrapper
+    (they used to be "safe" = run with no confirmation at all)
+  * P0-2 `$VAR` / `${VAR}` targets are expanded before classification, so
+    `rm -rf $HOME` is blocked like `rm -rf ~` (it used to be a mere "confirm")
+  * P0-3 redaction closes four leaks: values under 8 chars (`password=hunter2`),
+    escaped JSON values, `Authorization: Bearer <opaque>`, and unprefixed
+    high-entropy keys — with a pinned "refuse to over-redact" corpus
+  * P0-4 read_file STREAMS a window instead of slurping the file: a 16 MB log
+    costs +0 MB RSS (was +30 MB) and a 2 GB log can no longer OOM the agent
+  * P0-5 checkpoints gzip their backups: the per-file cap moves 2 MB -> 64 MB,
+    so `forge undo` now protects the files it used to refuse
+    (6.4 MB log -> 306 KB backup), with a 512 MB total directory budget
 v19: AutoPick, terminal-in-chat with session shell state, deep think mode,
 tiered long-context reduction, lazy-loaded wizard.
 v18: choosing OpenRouter detects EVERY free model through the PUBLIC /models
@@ -73,7 +88,7 @@ reduced sub-agent concurrency automatically), no systemd/desktop assumptions.
 Self-test (optional, needs Node only):
   cd agentv19/tests && node mock-llm.mjs &   # then in another shell:
   bash e2e-forge.sh                          # 247 checks against the local mock
-  node test-security.mjs                     # 153 hardening unit checks
+  node test-security.mjs                     # 222 hardening unit checks
   node test-providers.mjs                    # 31 provider-wire robustness checks
   node test-diffpatch.mjs                    # 13 diff-engine checks
   bash cleanroom-v20.sh                      # true clean-room install verify

@@ -6,12 +6,19 @@
  *
  *   ~/.forge/checkpoints/<id>/manifest.json   { id, ts, cwd, files: [{ path, backup, sha? }] }
  *   ~/.forge/checkpoints/<id>/<n>.bak         original file contents
+ *   ~/.forge/checkpoints/<id>/<n>.bak.gz      …gzip'ed when larger than 256 KB (v20.1)
  *
  * v20: CREATED files are tracked too — a manifest entry with `backup: null`
  * and a sha256 of the created content. `forge undo` deletes a created file
  * only when its current content still hashes the same (never clobber edits
  * the user made afterwards). This makes apply_patch's create+modify fully
  * atomic to undo (v19 left created files behind).
+ *
+ * v20.1 (P0-5): the 2 MB per-file cap meant every large file was simply not
+ * protected — `forge undo` could only report "NOT restored … larger than 2MB".
+ * Backups are now gzip'ed (node:zlib, still zero dependencies), which raises
+ * the cap to 64 MB and shrinks the checkpoint directory by ~10x on text. A
+ * total-directory budget (512 MB) keeps 30 checkpoints from filling a disk.
  *
  * `forge undo` / chat `/undo` restores the newest checkpoint recorded for the
  * CURRENT working directory and consumes it — repeated undo walks back through
@@ -20,11 +27,14 @@
 import fs from "node:fs"
 import path from "node:path"
 import crypto from "node:crypto"
+import zlib from "node:zlib"
 import { DEFAULT_DIR } from "./config.js"
 
 export const CHECKPOINTS_DIR = path.join(DEFAULT_DIR, "checkpoints")
-const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024 // per file
+const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024 // per file — compressed on the way in
+const COMPRESS_OVER_BYTES = 256 * 1024 // small files stay plain: instant undo
 const MAX_CHECKPOINTS = 30
+const MAX_CHECKPOINT_DIR_BYTES = 512 * 1024 * 1024 // total budget for all of them
 
 function sha256Head(file) {
   try {
@@ -71,9 +81,22 @@ export function snapshotBefore(files, cwd, created = []) {
     fs.mkdirSync(dir, { recursive: true })
     const manifest = { id, ts: Date.now(), cwd: path.resolve(cwd || process.cwd()), files: [] }
     want.forEach((f, i) => {
-      const backup = String(i) + ".bak"
-      fs.copyFileSync(f, path.join(dir, backup))
-      manifest.files.push({ path: f, backup })
+      // v20.1: gzip anything worth compressing. Text shrinks ~10x, which is
+      // what pays for the higher per-file cap.
+      let backup = String(i) + ".bak"
+      let gz = false
+      let size = 0
+      try {
+        size = fs.statSync(f).size
+      } catch {}
+      if (size > COMPRESS_OVER_BYTES) {
+        backup += ".gz"
+        gz = true
+        fs.writeFileSync(path.join(dir, backup), zlib.gzipSync(fs.readFileSync(f), { level: 6 }))
+      } else {
+        fs.copyFileSync(f, path.join(dir, backup))
+      }
+      manifest.files.push({ path: f, backup, ...(gz ? { gz: true, size } : {}) })
     })
     creating.forEach((f) => {
       manifest.files.push({ path: f, backup: null, created: true })
@@ -139,7 +162,12 @@ export function restoreLast(cwd) {
       const src = path.join(CHECKPOINTS_DIR, c.id, f.backup)
       if (fs.existsSync(src)) {
         fs.mkdirSync(path.dirname(f.path), { recursive: true })
-        fs.copyFileSync(src, f.path)
+        // .bak.gz is v20.1+; a bare .bak is a pre-v20.1 checkpoint
+        if (f.gz || f.backup.endsWith(".gz")) {
+          fs.writeFileSync(f.path, zlib.gunzipSync(fs.readFileSync(src)))
+        } else {
+          fs.copyFileSync(src, f.path)
+        }
         restored++
       }
     }
@@ -171,13 +199,38 @@ export function listCheckpoints(cwd, max = 10) {
   return out
 }
 
+function dirBytes(dir) {
+  let total = 0
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name)
+      try {
+        if (e.isDirectory()) walk(full)
+        else total += fs.statSync(full).size
+      } catch {}
+    }
+  }
+  try {
+    walk(dir)
+  } catch {}
+  return total
+}
+
 function prune() {
   try {
     const dirs = fs
       .readdirSync(CHECKPOINTS_DIR)
       .filter((d) => !d.startsWith("."))
       .sort()
+    // v20.1: oldest-first by count…
     while (dirs.length > MAX_CHECKPOINTS) {
+      fs.rmSync(path.join(CHECKPOINTS_DIR, dirs.shift()), { recursive: true, force: true })
+    }
+    // …and then by total size, so 30 compressed multi-MB checkpoints cannot
+    // quietly eat half a disk.
+    let guard = 0
+    while (dirs.length > 1 && guard++ < MAX_CHECKPOINTS) {
+      if (dirBytes(CHECKPOINTS_DIR) <= MAX_CHECKPOINT_DIR_BYTES) break
       fs.rmSync(path.join(CHECKPOINTS_DIR, dirs.shift()), { recursive: true, force: true })
     }
   } catch {}

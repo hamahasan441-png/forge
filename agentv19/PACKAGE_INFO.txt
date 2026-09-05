@@ -38,6 +38,18 @@ forge v20.0.0 "PRODUCTION" — CLI-only build
   profile (languages, package manager, test/build/lint, git branch, frameworks)
   cached + signature-refreshed; effort profiles fast|balanced|deep|auto (auto
   classifies task complexity — complex/critical get deep thinking, announced)
+- v20.1 P0 HARDENING ("safe by default", see forge/PLAN-v21.md):
+  * shellguard unwraps interpreter wrappers and classifies the PAYLOAD
+    (sh -c / eval / env / timeout / nohup / xargs / python3 -c / node -e /
+    $(…) / backticks) — `bash -c "echo hi"` stays safe, `sh -c "rm -rf /"` blocks
+  * `$VAR` / `${VAR}` in command targets are expanded before classification
+  * redaction: 4-char threshold for high-risk names (password/token/secret/
+    api_key/…), escaped JSON values, Authorization: Bearer/Basic, unprefixed
+    high-entropy blobs; git SHAs, UUIDs, hashes, paths and URLs stay untouched
+  * read_file streams a bounded window (64 KB in flight, 4 MB kept, 8 K chars
+    per line, 64 MB scanned) instead of readFileSync+split of the whole file
+  * checkpoints gzip backups (node:zlib): per-file cap 2 MB -> 64 MB, plus a
+    512 MB budget for the whole checkpoint directory
 - v20 AGENTS: delegate sub-agents get ROLES (researcher/reviewer/tester/
   security/coder), delegateTimeoutSec, resource-aware concurrency cap
   (low-RAM/ARM64 → 1), depth capped at 2; plan-mode agents can delegate
@@ -62,7 +74,8 @@ forge v20.0.0 "PRODUCTION" — CLI-only build
   checkpoints + undo; PLAN MODE (--plan) read-only hard-block
 - doctor: env self-check (platform/RAM/git/dirs) + provider/context line +
   ✓ tested badge (--tools probes all 17 tools, offline tools SKIP cleanly)
-- E2E: 247/247 checks + 153/153 hardening unit checks + 31/31 provider-wire
+- E2E: 247/247 checks + 222/222 hardening unit checks + 31/31 provider-wire
   robustness checks + 13/13 diffpatch engine tests + 50/50 clean-room install
   verification
-- change plans inside: forge/PLAN-v15.md … forge/PLAN-v20.md
+- change plans inside: forge/PLAN-v15.md … forge/PLAN-v20.md,
+  plus forge/PLAN-v21.md (v20.1+ roadmap: P0/P1/P2/P3)
