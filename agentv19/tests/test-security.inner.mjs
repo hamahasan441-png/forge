@@ -180,6 +180,34 @@ ok("read_file result redacted", String(t1).includes("***") && !String(t1).includ
 const t2 = await execTool(ctx, "bash", { command: "echo bearer sk-abcdefghijklmnopqrstuvwx" })
 ok("bash result redacted", String(t2).includes("[redacted") === false || !String(t2).includes("sk-abcdefghijklmnopqrstuvwx"))
 
+console.log("== v20.1 P0-3: redaction gaps that used to leak ==")
+// short values (the old engine required >= 8 characters, so "password=hunter2"
+// — 7 characters — went to the model verbatim)
+const SHORT = ["password=hunter2", "password = short1", "PASSWD: abcd", "pwd=1234", "token=abcd", "secret: wxyz"]
+for (const s of SHORT) ok(`short value redacted: ${s}`, redact(s) !== s)
+ok("short value is masked, not echoed", !redact("password=hunter2").includes("hunter2"))
+// escaped JSON values were skipped entirely by the old JSON rule
+ok("escaped JSON value redacted", !redact('{"password": "hun\\"ter2"}').includes("hunter2"))
+// Authorization headers only counted when they looked like a JWT
+ok("Bearer token redacted", !redact("Authorization: Bearer abcdef1234567890abcdef").includes("abcdef1234567890abcdef"))
+ok("Basic credential redacted", !redact("Authorization: Basic dXNlcjpwYXNzd29yZA==").includes("dXNlcjpwYXNzd29yZA=="))
+// unprefixed high-entropy keys in a config dump were invisible to the engine
+ok("unprefixed high-entropy key redacted", !redact("api_key = a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6").includes("c3D4e5F6g7H8"))
+ok("spacing around the separator survives", redact("password = hunter2").startsWith("password = "))
+console.log("== v20.1 P0-3: the false positives we refuse to accept ==")
+const KEEP = [
+  "git SHA: 3f9a1c2e5b7d4086af1c9d2e3b4a5c6d7e8f9012",
+  "uuid: 123e4567-e89b-12d3-a456-426614174000",
+  "md5: d41d8cd98f00b204e9800998ecf8427e",
+  "path: /usr/local/bin/forge-agent-cli-20.1.0-linux-x64",
+  "https://example.com/a/very/long/url/that/keeps/going/for/ages/x",
+  "key = user_id",
+  "port=8080",
+  '{"name": "forge", "version": "20.0.0"}',
+  "The quick brown fox jumps over the lazy dog",
+]
+for (const s of KEEP) ok(`not over-redacted: ${s.slice(0, 46)}`, redact(s) === s)
+
 console.log("== netguard: SSRF address validation ==")
 eq("127.0.0.1 private", isPrivateAddress("127.0.0.1"), true)
 eq("10.x private", isPrivateAddress("10.1.2.3"), true)
