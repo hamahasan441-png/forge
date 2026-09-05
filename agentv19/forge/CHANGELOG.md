@@ -6,6 +6,10 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.2.0 "no lost work" (in progress)
 
 ### Added
+- **Continuous integration** (P2-1) — `.github/workflows/ci.yml` runs the Node
+  unit suites on Node 20 & 22 and the full suite (e2e + clean-room install) on
+  every push and pull request, so the tests actually run on GitHub. The repo had
+  no CI before.
 - **Single-command test runner** (`tests/run-all.mjs`, wired to `npm test`):
   runs all suites (security, providers, diffpatch, memory, e2e, cleanroom) as
   child processes and fails if any suite's exit code is non-zero. Env switches:
