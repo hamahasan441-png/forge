@@ -3,7 +3,20 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v20.2.0 "no lost work" (in progress)
+## [Unreleased] — v20.3.0 (in progress)
+
+### Added
+- **Provider failover in the interactive chat loop** (extends P1-3) — failover
+  previously covered only the autonomous agent. Now `forge chat` also falls
+  through to the next configured provider when the active one fails before any
+  output is shown (transient or auth errors), announcing the switch. Still
+  opt-in (`failover: true` / `FORGE_FAILOVER=1`); a mid-stream failure after text
+  has appeared is not switched (it would duplicate output). The failover-worthy
+  check is now shared (`isFailoverWorthy`) between the agent and chat loops.
+  `tests/test-failover.mjs` grows to 18 checks (classifier + a live runChat
+  recovery run).
+
+## [20.2.0] — "no lost work"
 
 ### Added
 - **Continuous integration** (P2-1) — `.github/workflows/ci.yml` runs the Node
