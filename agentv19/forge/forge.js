@@ -43,6 +43,8 @@ import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, rend
 import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
 import { savePlan, listPlans, readPlan } from "./plans.js"
+import { loadToolPlugins, PLUGINS_DIR } from "./plugins.js"
+import { BUILTIN_TOOL_NAMES } from "./tools.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -681,6 +683,20 @@ async function main() {
       process.exit(1)
       return
     }
+    case "plugins": {
+      // list user tool plugins loaded from ~/.forge/tools
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      console.log(bold(`tool plugins — ${PLUGINS_DIR}`))
+      if (!loaded.tools.length && !loaded.errors.length) {
+        console.log(dim("  (none) — drop a *.mjs exporting { name, description, parameters, run } here to add a tool"))
+      }
+      for (const t of loaded.tools) {
+        console.log(`  ${green("✓")} ${cyan(t.name.padEnd(24))} ${t.readOnly ? dim("[read-only] ") : ""}${dim(t.def.function.description.slice(0, 60))}  ${dim("(" + t.source + ")")}`)
+      }
+      for (const e of loaded.errors) console.log(`  ${red("✗")} ${dim(e)}`)
+      if (loaded.tools.length) console.log(dim(`  ${loaded.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -715,6 +731,7 @@ ${bold("usage")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
   ${cyan("forge sessions")}               list saved conversations
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
+  ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
   ${cyan("forge models [provider] [--free]")}    list models — --free = OpenRouter free tier only
 

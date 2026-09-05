@@ -27,7 +27,8 @@ import readline from "node:readline"
 import { execFile } from "node:child_process"
 import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError } from "./providers.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
-import { makeToolContext, toolCount, WRITE_TOOLS } from "./tools.js"
+import { makeToolContext, toolCount, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { loadToolPlugins } from "./plugins.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
@@ -266,7 +267,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const resolvedSkillsDir = resolveSkillsDir(config.skills?.dir)
   const res = resourceProfile()
   const assumeYes = config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
+  // v20.2 P3-5: user tool plugins from ~/.forge/tools (empty by default)
+  let plugins = []
+  if (config.tools?.plugins !== false) {
+    try {
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      plugins = loaded.tools
+      for (const e of loaded.errors) warn(`tool plugin skipped: ${e}`)
+    } catch { /* best-effort */ }
+  }
   const tools = makeToolContext({
+    plugins,
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? 45,

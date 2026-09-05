@@ -19,7 +19,8 @@
  */
 import { chatOnce, ProviderError, fallbackChain } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
-import { makeToolContext, WRITE_TOOLS } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { loadToolPlugins } from "./plugins.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { DEFAULT_DIR } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -207,7 +208,22 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   // run can be rolled back atomically (`forge undo --run`). Sub-agents are
   // read-only and never write, so they get no runId.
   const runId = readonly ? null : "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
+  // Sub-agents inherit the same plugins the main run sees.
+  let plugins = []
+  if (config.tools?.plugins !== false) {
+    try {
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      plugins = loaded.tools
+      const isDelegatedSubAgent = readonly && !planOnly
+      if (!isDelegatedSubAgent) {
+        for (const p of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${p.name}${p.readOnly ? " (read-only)" : ""} — ${p.source}` })
+        for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}` })
+      }
+    } catch { /* plugins are best-effort */ }
+  }
   const tools = makeToolContext({
+    plugins,
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? 45,

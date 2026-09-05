@@ -34,6 +34,14 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Tool plugin API** (P3-5) — drop a `*.mjs` in `~/.forge/tools/` exporting
+  `{ name, description, parameters, run }` and it becomes an agent tool alongside
+  the built-ins, behind the same choke point: output is secret-redacted, and a
+  write-class plugin (the default; set `readOnly: true` to opt out) is serialized
+  and blocked in read-only sub-agents. Bad plugins are skipped with a reason,
+  never crashing the agent; names can't shadow a built-in. New `forge plugins`
+  lists them; disable all with `tools.plugins: false`. Empty by default (no
+  behavior change). New `plugins.js` + `tests/test-plugins.mjs` (16 checks).
 - **Repo map / symbol index** (P3-1) — the agent's system prompt now includes a
   compact, bounded map of the project's source files and their top-level symbols
   (JS/TS, Python, Go, Rust), so it can locate code without spending tool calls on

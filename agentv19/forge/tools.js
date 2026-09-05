@@ -308,7 +308,16 @@ export function makeToolContext(opts = {}) {
     signal = null,
     subAgent = false,
     runId = null,
+    plugins = [], // v20.2 P3-5: user tool plugins (from loadToolPlugins().tools)
   } = opts
+  // register plugins: write-class ones join WRITE_TOOLS so they are serialized
+  // and blocked in read-only sub-agents, exactly like built-in write tools.
+  const pluginMap = new Map()
+  for (const pl of plugins) {
+    if (!pl || !pl.name) continue
+    pluginMap.set(pl.name, pl)
+    if (!pl.readOnly) WRITE_TOOLS.add(pl.name)
+  }
   const ctx = {
     cwd: path.resolve(cwd || process.cwd()),
     root: path.resolve(root || cwd || process.cwd()),
@@ -316,11 +325,16 @@ export function makeToolContext(opts = {}) {
     delegateRunner, readOnly,
     allowOutsideProject, allowSudo, assumeYes, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
+    _plugins: pluginMap,
     _delegateActive: 0,
     _delegateMax: Math.max(1, Math.min(4, maxParallelDelegates)),
   }
-  return { defs: readOnly ? TOOL_DEFS.filter((t) => !WRITE_TOOLS.has(t.function.name)) : TOOL_DEFS, exec: (name, args) => execTool(ctx, name, args || {}) }
+  const allDefs = plugins.length ? [...TOOL_DEFS, ...plugins.map((p) => p.def)] : TOOL_DEFS
+  return { defs: readOnly ? allDefs.filter((t) => !WRITE_TOOLS.has(t.function.name)) : allDefs, exec: (name, args) => execTool(ctx, name, args || {}) }
 }
+
+/** Built-in tool names — used to reject plugins that shadow a built-in. */
+export const BUILTIN_TOOL_NAMES = new Set(TOOL_DEFS.map((t) => t.function.name))
 
 export function toolCount() {
   return TOOL_DEFS.length
@@ -1262,9 +1276,21 @@ export async function execTool(ctx, name, args) {
     case "think": result = think(ctx, args); break
     case "memory": result = memory(ctx, args); break
     case "delegate": result = await delegate(ctx, args); break
-    default: return `ERROR: unknown tool "${name}"`
+    default: {
+      // v20.2 P3-5: user tool plugins
+      const pl = ctx._plugins?.get(name)
+      if (!pl) return `ERROR: unknown tool "${name}"`
+      try {
+        const r = await pl.run(args, { cwd: ctx.cwd, readOnly: ctx.readOnly })
+        result = typeof r === "string" ? r : JSON.stringify(r ?? null)
+        result = cap(result, ctx.maxToolOutput)
+      } catch (e) {
+        result = `ERROR: plugin ${name} failed: ${String(e?.message ?? e).slice(0, 200)}`
+      }
+    }
   }
-  if (typeof result === "string" && REDACTED_TOOLS.has(name)) return redact(result)
+  // all plugin output passes through secret redaction, like built-in tools
+  if (typeof result === "string" && (REDACTED_TOOLS.has(name) || ctx._plugins?.has(name))) return redact(result)
   return result
 }
 
