@@ -6,6 +6,16 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.3.0 (in progress)
 
 ### Fixed
+- **`install.sh` ran the global install twice on failure** (P1-10) — the failure
+  path re-ran `npm i -g .` in full just to grep its output for `EACCES`, doubling
+  an already-slow failure; and because the first attempt used `--silent`, the
+  diagnostics it needed had been thrown away. Worse, if that second run happened
+  to succeed it was still treated as a failure. The install is now attempted
+  once, its output captured and reused for diagnosis (and printed verbatim when
+  it fails). Adds `--prefix <dir>` / `FORGE_PREFIX` for a no-sudo user-owned
+  install, plus a writability and free-space pre-flight. (No network pre-flight:
+  forge has zero dependencies, so installing this local folder never hits the
+  registry.) New `tests/test-install.mjs` (8 checks, hermetic via a stub `npm`).
 - **Non-deterministic recency ordering in `listPlans()` and `sessionFiles()`** —
   both sorted by mtime alone, which is not a total order: two files written
   inside one filesystem timestamp tick tie, and the resulting order was whatever
