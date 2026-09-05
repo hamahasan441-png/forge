@@ -33,6 +33,7 @@
     "secrets.js",
     "memory.js",
     "profile.js",
+    "plans.js",
     "README.md",
     "CHANGELOG.md",
     "install.sh",

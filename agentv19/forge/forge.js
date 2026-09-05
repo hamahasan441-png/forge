@@ -42,6 +42,7 @@ import { lastSessionFile, listSessions, findSession } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
+import { savePlan, listPlans, readPlan } from "./plans.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -277,6 +278,9 @@ async function main() {
         console.log(bold(cyan("── plan " + "─".repeat(54))))
         console.log(renderMarkdown(res.text))
         console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        // v20.2 P1-9: persist the plan so it can be reviewed and executed later
+        const saved = savePlan(task, res.text, process.cwd())
+        if (saved.ok) console.log(dim(`  saved → ${path.relative(process.cwd(), saved.file)}  (${cyan("forge plan apply " + saved.slug)} to execute later)`))
         if (!process.stdin.isTTY) {
           warn("plan mode: non-interactive — not executing (re-run without --plan to execute)")
           return
@@ -568,6 +572,49 @@ async function main() {
       for (const s of idx) console.log(`  ${cyan(s.name.padEnd(32))} ${dim(s.desc)}`)
       return
     }
+    case "plan": {
+      // forge plan [list] | show <n|slug> | apply <n|slug>
+      const sub = (positional[1] || "list").toLowerCase()
+      if (sub === "list") {
+        const plans = listPlans(process.cwd())
+        if (!plans.length) { warn('no saved plans yet — run: forge agent --plan "task"'); return }
+        console.log(bold(`plans (${plans.length}) — ${path.relative(process.cwd(), path.dirname(plans[0].file))}`))
+        plans.forEach((pl, i) => {
+          const age = Math.round((Date.now() - pl.mtime) / 60000)
+          const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`
+          console.log(`  ${bold(String(i + 1).padStart(2))}. ${cyan(pl.slug)}  ${dim(ageStr)}${pl.title ? "  " + dim(pl.title.slice(0, 50)) : ""}`)
+        })
+        console.log(dim("  show: forge plan show <n|slug>  •  execute: forge plan apply <n|slug>"))
+        return
+      }
+      if (sub === "show") {
+        const r = readPlan(positional[2], process.cwd())
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        console.log(renderMarkdown(r.text))
+        return
+      }
+      if (sub === "apply") {
+        const r = readPlan(positional[2], process.cwd())
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        const cfg = await onboardIfMissing(config)
+        const p = needProvider(cfg)
+        if (!p) return
+        if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
+        console.log(dim(`forge plan apply — ${bold(r.slug)} • provider: ${p.name}/${p.model}`))
+        console.log()
+        const t0 = Date.now()
+        const task = `Execute the following implementation plan step by step. Verify each step (run tests/builds) before moving on, and keep edits minimal.\n\n${r.text}`
+        const res = await runAgent({ config: cfg, provider: p, task, onEvent: agentEventPrinter(), deep: flags.deep === true ? true : undefined })
+        console.log()
+        console.log(bold(green("── result " + "─".repeat(50))))
+        console.log(renderMarkdown(res.text))
+        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        return
+      }
+      err(`unknown: forge plan ${sub} — use list | show <n|slug> | apply <n|slug>`)
+      process.exit(1)
+      return
+    }
     case "memory": {
       // forge memory [list] | add <text> | forget <n> | clear | prune
       //   --project = the current project's tier (default: global)
@@ -645,7 +692,8 @@ ${bold("usage")}
   ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 17 tools (bash, files, web, memory, sub-agents)
-  ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute
+  ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
+  ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit (auto-checkpoints)
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)

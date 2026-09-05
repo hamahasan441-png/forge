@@ -34,6 +34,10 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Plan persistence** (P1-9) — `forge agent --plan "task"` now saves the plan to
+  `.forge/plans/<slug>.md` instead of printing and discarding it. New `forge plan`
+  command: `list`, `show <n|slug>`, and `apply <n|slug>` (runs the agent on the
+  saved plan) — the autonomous "plan, then execute" loop. New `tests/test-plans.mjs`.
 - **Smarter file-tool walks** (P1-2) — `list_dir`, `grep_files` and `glob_files`
   now share one skip policy (they had diverged — `grep_files` was missing
   `.turbo`/`.cache`), broadened to common noise dirs (`.venv`, `venv`,
