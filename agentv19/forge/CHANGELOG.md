@@ -27,6 +27,13 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   off, so existing single-provider behavior is unchanged. New
   `tests/test-failover.mjs` (8 checks).
 
+- **Never lose work on Ctrl-C** (P1-4) — interrupting a streaming answer used to
+  discard it. The partial text is now kept in the session (marked, and `/retry`
+  regenerates it); if nothing had streamed yet, the turn rolls back cleanly to a
+  pre-turn snapshot instead of a fragile `pop()` that could orphan tool
+  messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
+  unit coverage, via `interruptedTurnResult` and `isShellLine`).
+
 ### Changed
 - **Version is now a single source of truth.** `version.js` reads the version
   from `package.json`; `forge.js` and `chat.js` import it instead of each
