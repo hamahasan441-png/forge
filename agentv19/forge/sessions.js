@@ -146,7 +146,11 @@ function sessionFiles() {
         try { return { full, mt: fs.statSync(full).mtimeMs } } catch { return null }
       })
       .filter(Boolean)
-      .sort((a, b) => b.mt - a.mt)
+      // Newest first. mtime ties are possible on coarse-granularity filesystems,
+      // and pruneSessions() DELETES by this order — an undefined order could drop
+      // a newer session. Session ids are ISO-timestamp prefixed, so a descending
+      // filename tie-break is both deterministic and recency-correct.
+      .sort((a, b) => b.mt - a.mt || path.basename(b.full).localeCompare(path.basename(a.full)))
       .map((e) => e.full)
   } catch {
     return []

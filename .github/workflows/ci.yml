@@ -40,3 +40,18 @@ jobs:
       - name: Run all suites
         working-directory: agentv19/forge
         run: node ../tests/run-all.mjs
+
+  # Non-blocking: reports how many exported symbols are named by a test.
+  # Informational for now — it never fails the build.
+  coverage:
+    name: export coverage (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Export coverage report
+        working-directory: agentv19/forge
+        run: npm run coverage

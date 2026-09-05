@@ -17,7 +17,7 @@
  *   - adaptive effort: profile auto → deep thinking for complex tasks
  *   - Retry-After honored on transient provider errors
  */
-import { chatOnce, ProviderError, fallbackChain } from "./providers.js"
+import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -185,9 +185,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
   const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
   let chainIdx = 0
-  const isFailworthy = (e) =>
-    e instanceof ProviderError && !e.contextOverflow &&
-    (e.retryable || e.status === 401 || e.status === 403 || e.status === 404)
+  const isFailworthy = isFailoverWorthy
   const res = resourceProfile()
   // v20 adaptive effort: deep may be resolved from the profile when unset
   let deepEffort = deep

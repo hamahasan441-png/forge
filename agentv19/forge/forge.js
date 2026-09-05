@@ -815,7 +815,7 @@ ${bold("safety (v20)")}
   tool results secret-redacted • sub-agents read-only, depth-capped, timed out
 
 ${bold("resilience")}
-  ${cyan("forge config set failover true")}  agent falls through to the next configured provider on outages ${dim("(or FORGE_FAILOVER=1)")}
+  ${cyan("forge config set failover true")}  agent AND chat fall through to the next configured provider on outages ${dim("(or FORGE_FAILOVER=1)")}
   ${cyan("forge memory")}                  curate long-term memory: list | add | forget <n> | clear | prune
 
 ${bold("flags")}

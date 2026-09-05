@@ -3,7 +3,68 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v20.2.0 "no lost work" (in progress)
+## [Unreleased] — v20.3.0 (in progress)
+
+### Fixed
+- **The published package was missing `retrieval.js`** — it was added in the BM25
+  change but never added to `package.json` `files[]`, so the npm tarball omitted
+  it while `memory.js` and `repomap.js`, which import it, shipped fine. A real
+  `npm publish` would therefore have produced a CLI that dies on startup for
+  nearly every command. The clean-room suite could not catch it: it installs from
+  the *directory*, and npm treats that differently from the tarball a user
+  actually receives. Fixed, and guarded by `tests/test-package.mjs` (6 checks)
+  which asserts the real invariant — every relative import of a shipped module
+  must itself ship — plus files[]/disk agreement and the actual `npm pack`
+  listing. Verified by reintroducing the omission and watching all three checks
+  fail.
+- **`install.sh` ran the global install twice on failure** (P1-10) — the failure
+  path re-ran `npm i -g .` in full just to grep its output for `EACCES`, doubling
+  an already-slow failure; and because the first attempt used `--silent`, the
+  diagnostics it needed had been thrown away. Worse, if that second run happened
+  to succeed it was still treated as a failure. The install is now attempted
+  once, its output captured and reused for diagnosis (and printed verbatim when
+  it fails). Adds `--prefix <dir>` / `FORGE_PREFIX` for a no-sudo user-owned
+  install, plus a writability and free-space pre-flight. (No network pre-flight:
+  forge has zero dependencies, so installing this local folder never hits the
+  registry.) New `tests/test-install.mjs` (8 checks, hermetic via a stub `npm`).
+- **Non-deterministic recency ordering in `listPlans()` and `sessionFiles()`** —
+  both sorted by mtime alone, which is not a total order: two files written
+  inside one filesystem timestamp tick tie, and the resulting order was whatever
+  `readdir` happened to yield. This surfaced as a CI-only flake (the plans suite
+  failed on a runner whose mtime granularity is coarser than the dev machine's)
+  but the session case was worse: `pruneSessions()` **deletes** everything past
+  the cap in that order, so a tie could have dropped a newer session. Both now
+  tie-break deterministically (plans by slug; sessions by descending
+  ISO-timestamped filename, which is also recency-correct). The plans and
+  sessions suites assert recency with explicit mtimes instead of wall-clock gaps,
+  and pin the tie-break behavior.
+
+### Added
+- **Export coverage harness** (P2-2) — `npm run coverage` reports, per module,
+  how many exported symbols are named by at least one test, with a total. It is
+  deliberately crude (a name-appears-in-tests heuristic that over-counts trivial
+  constants and cannot see indirect e2e coverage) and says so in its own output —
+  but it makes "this module has no direct test at all" impossible to miss. Runs
+  in CI as a non-blocking, informational job. Measured **43% → 67.4%** over this
+  release.
+- **Direct tests for config.js, health.js and version.js** — three load-bearing
+  modules (every command reads config, failover reads/writes the health cache,
+  the version drives the banner and the manifest) that had 8%/0%/0% export
+  coverage and no direct tests. `tests/test-config.mjs` (32 checks) covers the
+  save/load round-trip and its 0600 permissions, key masking in `maskKey` and
+  `safeView`, dotted get/set/delete, recent-model capping, and health-cache
+  merge semantics plus corrupt-file resilience.
+- **Provider failover in the interactive chat loop** (extends P1-3) — failover
+  previously covered only the autonomous agent. Now `forge chat` also falls
+  through to the next configured provider when the active one fails before any
+  output is shown (transient or auth errors), announcing the switch. Still
+  opt-in (`failover: true` / `FORGE_FAILOVER=1`); a mid-stream failure after text
+  has appeared is not switched (it would duplicate output). The failover-worthy
+  check is now shared (`isFailoverWorthy`) between the agent and chat loops.
+  `tests/test-failover.mjs` grows to 18 checks (classifier + a live runChat
+  recovery run).
+
+## [20.2.0] — "no lost work"
 
 ### Added
 - **Continuous integration** (P2-1) — `.github/workflows/ci.yml` runs the Node

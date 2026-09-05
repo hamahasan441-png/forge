@@ -67,6 +67,17 @@ export function buildProvider(config, name) {
 }
 
 /**
+ * Whether a provider error should trigger failover to another provider:
+ * a transient error (429/408/5xx/network — but NOT a context-overflow, which is
+ * handled by compaction) or a hard auth/not-found (401/403/404). Shared by the
+ * agent loop and the interactive chat loop so both classify failures alike.
+ */
+export function isFailoverWorthy(e) {
+  return e instanceof ProviderError && !e.contextOverflow &&
+    (e.retryable || e.status === 401 || e.status === 403 || e.status === 404)
+}
+
+/**
  * Ordered list of usable fallback providers (excluding `activeName`), for
  * automatic failover. Health-tested providers come first, then the rest in
  * config order. Every entry is a runnable provider object from buildProvider().

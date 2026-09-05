@@ -13,8 +13,9 @@ import path from "node:path"
 
 process.env.FORGE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-fo-"))
 
-const { buildProvider, fallbackChain } = await import("../forge/providers.js")
+const { buildProvider, fallbackChain, isFailoverWorthy, ProviderError } = await import("../forge/providers.js")
 const { runAgent } = await import("../forge/agent.js")
+const { runChat } = await import("../forge/chat.js")
 
 let PASS = 0, FAIL = 0
 const ok = (name, cond) => { if (cond) { PASS++; console.log(`  ok   ${name}`) } else { FAIL++; console.log(`  FAIL ${name}`) } }
@@ -47,6 +48,15 @@ const cfg = (failover) => ({
   skills: { enabled: false },
 })
 
+console.log("== isFailoverWorthy ==")
+ok("429 (retryable) is failover-worthy", isFailoverWorthy(new ProviderError("rate", { status: 429 })))
+ok("503 (retryable) is failover-worthy", isFailoverWorthy(new ProviderError("down", { status: 503 })))
+ok("401 (auth) is failover-worthy", isFailoverWorthy(new ProviderError("bad key", { status: 401 })))
+ok("404 (not found) is failover-worthy", isFailoverWorthy(new ProviderError("no model", { status: 404 })))
+ok("400 (bad request) is NOT failover-worthy", !isFailoverWorthy(new ProviderError("bad req", { status: 400, retryable: false })))
+ok("context overflow is NOT failover-worthy", !isFailoverWorthy(new ProviderError("too big", { status: 400, contextOverflow: true })))
+ok("a plain Error is NOT failover-worthy", !isFailoverWorthy(new Error("boom")))
+
 console.log("== buildProvider ==")
 const bp = buildProvider(cfg(true), "good")
 ok("buildProvider returns runnable object", bp && bp.baseUrl === goodBase && bp.model === "good-model")
@@ -75,6 +85,40 @@ console.log("== runAgent failover OFF ==")
   try { await runAgent({ config: cfg(false), provider, task: "say hi", onEvent: () => {} }) }
   catch { threw = true }
   ok("without opt-in, a dead provider still fails the task", threw)
+}
+
+console.log("== runChat failover ON (interactive loop) ==")
+{
+  // capture stdout while runChat streams its one-shot answer
+  const chunks = []
+  const orig = process.stdout.write.bind(process.stdout)
+  process.stdout.write = (s, ...a) => { chunks.push(String(s)); return true }
+  try {
+    const cfgChat = { ...cfg(true), chat: { stream: false, tools: false }, skills: { enabled: false } }
+    const provider = buildProvider(cfgChat, "bad")
+    await runChat({ config: cfgChat, provider, oneShot: "say hi" })
+  } finally {
+    process.stdout.write = orig
+  }
+  const out = chunks.join("")
+  ok("chat recovers via failover and prints the good answer", /FAILOVER-ANSWER-OK/.test(out))
+  ok("chat announces the provider switch", /switching to good/.test(out))
+}
+
+console.log("== runChat failover OFF ==")
+{
+  const chunks = []
+  const orig = process.stdout.write.bind(process.stdout)
+  process.stdout.write = (s, ...a) => { chunks.push(String(s)); return true }
+  try {
+    const cfgChat = { ...cfg(false), chat: { stream: false, tools: false }, skills: { enabled: false } }
+    const provider = buildProvider(cfgChat, "bad")
+    await runChat({ config: cfgChat, provider, oneShot: "say hi" })
+  } finally {
+    process.stdout.write = orig
+  }
+  const out = chunks.join("")
+  ok("without opt-in, chat does not switch providers", !/switching to good/.test(out) && !/FAILOVER-ANSWER-OK/.test(out))
 }
 
 bad.close(); good.close()

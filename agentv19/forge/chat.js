@@ -25,7 +25,8 @@ import fs from "node:fs"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError } from "./providers.js"
+import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy } from "./providers.js"
+import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
 import { makeToolContext, toolCount, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -258,7 +259,13 @@ function slurpStdin(ms = 400) {
 const HISTORY_PATH = path.join(DEFAULT_DIR, "history")
 
 export async function runChat({ config, provider, oneShot, resumeFile, deep: deepFlag }) {
-  const p = provider
+  let p = provider
+  // v20.2: provider failover (opt-in) for the interactive loop — when the active
+  // provider fails before any output is shown, switch to the next configured
+  // provider instead of dropping the turn. Default OFF; each switch is announced.
+  const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
+  const foChain = failoverOn ? fallbackChain(config, p.name, { health: readHealth() }) : []
+  let foIdx = 0
   // v19 deep think: --deep flag or persisted chat.deep; v20 profile resolves
   // the default when nothing explicit is set (auto → per-task classification)
   let deep = !!(deepFlag || config.chat?.deep)
@@ -649,6 +656,16 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
             warn(`context too large for ${p.model} — compressing history and retrying (${overflowTries}/2)`)
             messages = hardShrink(messages)
             await maybeCompact(true).catch(() => {})
+            round--
+            continue
+          }
+          // v20.2 chat failover: only before any text was shown this turn (a
+          // mid-stream switch would duplicate output). Switch provider, retry.
+          if (failoverOn && !streamedPartial && isFailoverWorthy(e) && foIdx < foChain.length) {
+            const next = foChain[foIdx++]
+            recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
+            warn(`provider ${p.name} failed (${String(e.message).slice(0, 80)}) — switching to ${next.name}/${next.model}`)
+            p = next
             round--
             continue
           }

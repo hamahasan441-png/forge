@@ -38,6 +38,22 @@ ok("prune keeps the NEWEST ones", listSessions(999).some((s) => /session 7/.test
 ok("prune dropped the oldest", !listSessions(999).some((s) => /fix the OAuth/.test(s.title)))
 ok("prune under cap is a no-op", pruneSessions(999) === 0)
 
+console.log("== tied mtimes: pruning must stay deterministic ==")
+{
+  // sessionFiles() sorts newest-first and pruneSessions() DELETES everything past
+  // the cap using that order — so a tie must not make the victim arbitrary (it
+  // could otherwise drop a NEWER session). Force a tie and pin the behavior.
+  const dir = path.join(process.env.FORGE_HOME, "sessions")
+  const names = fs.readdirSync(dir).filter((f) => f.endsWith(".json") && f !== "last.json")
+  const tied = new Date(4_000_000)
+  for (const f of names) fs.utimesSync(path.join(dir, f), tied, tied)
+  const a = listSessions(999).map((x) => x.id)
+  const b = listSessions(999).map((x) => x.id)
+  ok("tied mtimes yield a deterministic listing", JSON.stringify(a) === JSON.stringify(b))
+  ok("tie-break is newest-id-first (ids are ISO-timestamp prefixed)",
+     JSON.stringify(a) === JSON.stringify([...a].sort().reverse()))
+}
+
 try { fs.rmSync(process.env.FORGE_HOME, { recursive: true, force: true }) } catch {}
 console.log(`\n== sessions suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

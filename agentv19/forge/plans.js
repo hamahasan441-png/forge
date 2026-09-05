@@ -62,7 +62,11 @@ export function listPlans(cwd = process.cwd()) {
     } catch {}
     out.push({ slug: n.replace(/\.md$/, ""), file, mtime, title })
   }
-  return out.sort((a, b) => b.mtime - a.mtime)
+  // Newest first. mtime alone is NOT a total order: two plans written within
+  // the same filesystem timestamp tick tie, and the resulting order would be
+  // whatever readdir happened to yield. Tie-break on slug so `plan list`,
+  // `plan show 1` and `plan apply` are deterministic on every filesystem.
+  return out.sort((a, b) => b.mtime - a.mtime || a.slug.localeCompare(b.slug))
 }
 
 /**
