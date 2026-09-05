@@ -37,7 +37,7 @@ import { readHealth, recordHealth } from "./health.js"
 import { runChat } from "./chat.js"
 import { runAgent, agentEventPrinter } from "./agent.js"
 import { selfTestTools, toolCount } from "./tools.js"
-import { resolveSkillsDir, indexSkills, loadSkill } from "./skills.js"
+import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
@@ -592,6 +592,21 @@ async function main() {
     case "skills": {
       const dir = resolveSkillsDir(config.skills?.dir)
       if (!dir) { err("no skills directory found (looked in ./skills, repo root, cli/forge/skills, ~/.forge/skills)"); process.exit(1); return }
+      // v20.2 (P2-5): forge skills --check | forge skills check — validate all skills
+      if (flags.check !== undefined || positional[1] === "check") {
+        const rep = checkSkills(dir)
+        console.log(bold(`skill check (${rep.total}) — ${dir}`))
+        for (const s of rep.skills) {
+          if (s.ok) console.log(`  ${green("✓")} ${cyan(s.name.padEnd(30))} ${dim(s.sizeKB + " KB")}`)
+          else {
+            console.log(`  ${red("✗")} ${cyan(s.name.padEnd(30))} ${dim(s.sizeKB + " KB")}`)
+            for (const iss of s.issues) console.log(`      ${red("•")} ${iss}`)
+          }
+        }
+        if (rep.failed) { err(`${rep.failed} of ${rep.total} skill(s) have issues`); process.exit(1); return }
+        ok(`all ${rep.total} skills valid`)
+        return
+      }
       const sub = positional[1]
       if (sub && sub !== "list") {
         const md = loadSkill(dir, sub)
@@ -747,6 +762,7 @@ ${bold("usage")}
   ${cyan("forge config show|path|get|set|unset")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
+  ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

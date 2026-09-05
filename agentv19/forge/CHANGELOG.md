@@ -34,6 +34,11 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Skill linting** (P2-5) — `forge skills --check` validates every installed
+  skill: safe directory name, a non-empty SKILL.md with a description, no broken
+  relative markdown links (documentation placeholders like `URL`/`path/to/…` are
+  ignored), and a size budget. Exits non-zero on any issue. All 69 bundled skills
+  pass. New `checkSkills()` + `tests/test-skills.mjs` (10 checks).
 - **Session hygiene** (P1-6) — the session store grew without bound. It's now
   auto-capped at the newest 300 (pruned when a new conversation starts), and
   `forge sessions --search "text"` finds a past conversation by title, summary or

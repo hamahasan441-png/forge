@@ -84,6 +84,86 @@ function computeIndex(dir) {
   return out
 }
 
+/**
+ * v20.2 (P2-5): validate the installed skills. For each skill directory:
+ *  - the directory name must be a safe skill name
+ *  - SKILL.md must be non-empty and have a description (H1 or first line)
+ *  - relative links in SKILL.md (markdown links + `scripts/…`/`references/…`
+ *    style paths) must resolve to a file that exists
+ *  - a very large SKILL.md is flagged (it is truncated at load time)
+ * Returns { skills: [{name, ok, issues, sizeKB}], ok, total, failed }.
+ * Read-only; never throws.
+ */
+export function checkSkills(dir, { maxSkillKB = 64 } = {}) {
+  const result = { skills: [], ok: true, total: 0, failed: 0 }
+  if (!dir) return result
+  let entries = []
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return result }
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!e.isDirectory()) continue
+    const skillFile = path.join(dir, e.name, "SKILL.md")
+    if (!fs.existsSync(skillFile)) continue // not a skill dir
+    result.total++
+    const issues = []
+    let sizeKB = 0
+    if (!validSkillName(e.name)) issues.push(`invalid skill directory name "${e.name}"`)
+    let md = null
+    try {
+      const buf = fs.readFileSync(skillFile)
+      sizeKB = Math.round((buf.length / 1024) * 10) / 10
+      md = buf.toString("utf8")
+    } catch (err) {
+      issues.push(`SKILL.md unreadable: ${err?.message ?? err}`)
+    }
+    if (md !== null) {
+      if (!md.trim()) {
+        issues.push("SKILL.md is empty")
+      } else {
+        const h1 = md.match(/^#\s+(.+)$/m)
+        const firstLine = md.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#") && !l.startsWith("---"))
+        if (!h1 && !firstLine) issues.push("no description (no H1 heading or intro line)")
+        if (sizeKB > maxSkillKB) issues.push(`SKILL.md is ${sizeKB} KB (> ${maxSkillKB} KB; loads are truncated at 24 KB)`)
+        for (const link of brokenSkillLinks(md, path.join(dir, e.name))) issues.push(`broken link: ${link}`)
+      }
+    }
+    if (issues.length) { result.ok = false; result.failed++ }
+    result.skills.push({ name: e.name, ok: issues.length === 0, issues, sizeKB })
+  }
+  return result
+}
+
+/**
+ * Relative links in a SKILL.md that do not resolve to an existing file.
+ * Only markdown links/images are checked, and obvious documentation
+ * placeholders (URL, path/to/…, ellipses, angle brackets) are ignored, so the
+ * report is genuine broken references rather than prose examples.
+ */
+function brokenSkillLinks(md, skillDir) {
+  const broken = []
+  const seen = new Set()
+  const isPlaceholder = (t) =>
+    t.includes("...") || t.includes("…") || /[<> ]/.test(t) ||
+    /path\/to/i.test(t) || /example\.(com|org)/i.test(t) ||
+    /^[A-Z]{2,}$/.test(t) || t.includes("YOUR_") || t.includes("{{")
+  const consider = (target) => {
+    if (!target) return
+    const t = target.trim().split("#")[0].split("?")[0].trim()
+    if (!t) return
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t) || t.startsWith("mailto:") || t.startsWith("#") || t.startsWith("/") || t.startsWith("~")) return
+    if (isPlaceholder(t)) return
+    if (!/\.[A-Za-z0-9]{1,8}$/.test(t) && !t.endsWith("/")) return // must look like a file or dir path
+    if (seen.has(t)) return
+    seen.add(t)
+    const abs = path.resolve(skillDir, t)
+    if (path.relative(skillDir, abs).startsWith("..")) return // escapes the skill dir — not our concern
+    try { if (!fs.existsSync(abs)) broken.push(t) } catch {}
+  }
+  const reMd = /!?\[[^\]]*\]\(([^)]+)\)/g // [text](target) and ![alt](target)
+  let m
+  while ((m = reMd.exec(md))) consider(m[1])
+  return broken
+}
+
 /** v20: skill names must be plain directory names — blocks `../` traversal
  *  and absolute-path injection before any filesystem access. */
 export function validSkillName(name) {
