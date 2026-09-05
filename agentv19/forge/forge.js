@@ -40,8 +40,8 @@ import { selfTestTools, toolCount } from "./tools.js"
 import { resolveSkillsDir, indexSkills, loadSkill } from "./skills.js"
 import { lastSessionFile, listSessions, findSession } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
-
-const VERSION = "20.0.0"
+import { VERSION } from "./version.js"
+import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -568,6 +568,58 @@ async function main() {
       for (const s of idx) console.log(`  ${cyan(s.name.padEnd(32))} ${dim(s.desc)}`)
       return
     }
+    case "memory": {
+      // forge memory [list] | add <text> | forget <n> | clear | prune
+      //   --project = the current project's tier (default: global)
+      //   --all     = both tiers (list only)
+      const sub = (positional[1] || "list").toLowerCase()
+      const tier = flags.project ? "project" : "global"
+      const cwd = process.cwd()
+      const showTier = (t) => {
+        const entries = memoryEntries(t, cwd)
+        console.log(bold(`${t} memory`) + dim(`  (${entries.length}) — ${memoryPathFor(t, cwd)}`))
+        if (!entries.length) { console.log(dim("  (empty)")); return }
+        entries.forEach((e, i) => {
+          const text = e.text.replace(/\n\s*/g, " ⏎ ")
+          console.log(`  ${bold(String(i + 1).padStart(3))}. ${text.slice(0, 100)}${text.length > 100 ? dim("…") : ""}`)
+        })
+      }
+      if (sub === "list") {
+        if (flags.all) { showTier("global"); console.log(); showTier("project") }
+        else showTier(tier)
+        console.log(dim("  add: forge memory add \"note\" [--project]  •  remove: forge memory forget <n>  •  clear: forge memory clear"))
+        return
+      }
+      if (sub === "add") {
+        const text = positional.slice(2).join(" ").trim() || (typeof flags.text === "string" ? flags.text : "")
+        if (!text) { err('nothing to add — forge memory add "your note" [--project]'); process.exit(1); return }
+        const r = appendMemory(tier, text, cwd)
+        if (!r.ok) { err(`could not save: ${r.error}`); process.exit(1); return }
+        ok(r.deduped ? `already in ${tier} memory (no duplicate added)` : `saved to ${tier} memory`)
+        return
+      }
+      if (sub === "forget") {
+        const r = forgetMemory(tier, positional[2], cwd)
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`forgot from ${tier} memory: ${String(r.removed).slice(0, 80)}`)
+        return
+      }
+      if (sub === "clear") {
+        const r = clearMemory(tier, cwd)
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`cleared ${tier} memory (${r.removed} entr${r.removed === 1 ? "y" : "ies"} removed)`)
+        return
+      }
+      if (sub === "prune") {
+        const r = pruneMemory(tier, cwd)
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(r.removed ? `pruned ${r.removed} oldest entr${r.removed === 1 ? "y" : "ies"} from ${tier} memory` : `${tier} memory already within limit`)
+        return
+      }
+      err(`unknown: forge memory ${sub} — use list | add | forget <n> | clear | prune`)
+      process.exit(1)
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -600,6 +652,7 @@ ${bold("usage")}
   ${cyan("forge config show|path|get|set|unset")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
   ${cyan("forge sessions")}               list saved conversations
+  ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
   ${cyan("forge models [provider] [--free]")}    list models — --free = OpenRouter free tier only
 

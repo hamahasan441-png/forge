@@ -117,15 +117,111 @@ export function memoryStats(cwd = process.cwd()) {
 
 // --- writing ----------------------------------------------------------------
 
-/** Append one note to a tier ("global" | "project"). Redacted, atomic-ish. */
+// v20.2 memory hygiene: an append-only file grows without bound. Every
+// autonomous run appends notes, and relevantMemory() reads up to 400 lines per
+// tier and scores them — so unbounded growth means slower reads and, worse,
+// near-duplicate notes crowding out real signal in the injected context. We now
+// (1) skip an append whose bullet text already exists verbatim, and (2) trim the
+// file to MEMORY_MAX_ENTRIES entries (oldest first) after writing. Both are
+// best-effort; a failure here can never break the CLI.
+export const MEMORY_MAX_ENTRIES = 500
+
+function memoryFileFor(tier, cwd) {
+  return tier === "project" ? projectMemoryPath(cwd) : GLOBAL_MEMORY_PATH
+}
+
+/** Path for a tier ("global" | "project"). */
+export function memoryPathFor(tier, cwd = process.cwd()) {
+  return memoryFileFor(tier, cwd)
+}
+
+/**
+ * Parse a memory file into entries. A bullet line ("- note") is one entry; a
+ * "LEARNING:" line plus its following "root-cause:"/"fix:" lines is one entry
+ * (kept together so list/forget never split a learning block). Returns
+ * [{ text, lines }] preserving order.
+ */
+export function memoryEntries(tier, cwd = process.cwd()) {
+  let raw = ""
+  try { raw = fs.readFileSync(memoryFileFor(tier, cwd), "utf8") } catch { return [] }
+  const src = raw.split("\n")
+  const entries = []
+  for (let i = 0; i < src.length; i++) {
+    const line = src[i]
+    if (!line.trim()) continue
+    if (/^\s*LEARNING:/i.test(line)) {
+      const block = [line]
+      while (i + 1 < src.length && /^\s*(root-cause|fix):/i.test(src[i + 1])) block.push(src[++i])
+      entries.push({ text: block.join("\n"), lines: block })
+    } else {
+      entries.push({ text: line.replace(/^[-•*]\s+/, "").trim(), lines: [line] })
+    }
+  }
+  return entries
+}
+
+function writeEntries(tier, entries, cwd) {
+  const file = memoryFileFor(tier, cwd)
+  const body = entries.map((e) => e.lines.join("\n")).join("\n")
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, body ? body + "\n" : "")
+  return file
+}
+
+/** Append one note to a tier ("global" | "project"). Redacted, deduped, capped. */
 export function appendMemory(tier, text, cwd = process.cwd()) {
-  const file = tier === "project" ? projectMemoryPath(cwd) : GLOBAL_MEMORY_PATH
+  const file = memoryFileFor(tier, cwd)
   const line = redact(String(text ?? "").trim()).slice(0, 400)
   if (!line) return { ok: false, error: "empty text" }
   try {
+    // dedup: an identical bullet already present is a no-op (best-effort)
+    const existing = memoryEntries(tier, cwd)
+    if (existing.some((e) => e.text === line)) return { ok: true, file, deduped: true }
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.appendFileSync(file, `- ${line}\n`)
+    pruneMemory(tier, cwd)
     return { ok: true, file }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Trim a tier to the newest MEMORY_MAX_ENTRIES entries. Returns count removed. */
+export function pruneMemory(tier, cwd = process.cwd(), max = MEMORY_MAX_ENTRIES) {
+  try {
+    const entries = memoryEntries(tier, cwd)
+    if (entries.length <= max) return { ok: true, removed: 0 }
+    const kept = entries.slice(entries.length - max)
+    writeEntries(tier, kept, cwd)
+    return { ok: true, removed: entries.length - kept.length }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Remove entry N (1-based, as shown by `memory list`) from a tier. */
+export function forgetMemory(tier, n, cwd = process.cwd()) {
+  try {
+    const entries = memoryEntries(tier, cwd)
+    const idx = Number(n) - 1
+    if (!Number.isInteger(idx) || idx < 0 || idx >= entries.length) {
+      return { ok: false, error: `no entry ${n} (${entries.length} in ${tier} memory)` }
+    }
+    const [removed] = entries.splice(idx, 1)
+    writeEntries(tier, entries, cwd)
+    return { ok: true, removed: removed.text }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Clear a whole tier. Returns count removed. */
+export function clearMemory(tier, cwd = process.cwd()) {
+  try {
+    const n = memoryEntries(tier, cwd).length
+    const file = memoryFileFor(tier, cwd)
+    try { fs.rmSync(file, { force: true }) } catch {}
+    return { ok: true, removed: n, file }
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }
   }

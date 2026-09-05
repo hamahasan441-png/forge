@@ -37,8 +37,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { classifyTaskComplexity } from "./agent.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
-
-const VERSION = "20.0.0"
+import { VERSION } from "./version.js"
 
 const HELP = `
 ${bold("chat")}
