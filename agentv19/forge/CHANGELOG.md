@@ -34,6 +34,11 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Structured diagnostics** (P2-6) — `--json` on the data commands (`sessions`
+  incl. `--search`, `models`, `plugins`, `skills --check`, `memory list`) prints
+  one JSON document and nothing else, so forge can be scripted. `FORGE_DEBUG=1`
+  prints a compact per-run tool breakdown (steps, tool-call counts, runId) to
+  stderr after an agent run. New `tests/test-json.mjs`.
 - **Skill linting** (P2-5) — `forge skills --check` validates every installed
   skill: safe directory name, a non-empty SKILL.md with a description, no broken
   relative markdown links (documentation placeholders like `URL`/`path/to/…` are

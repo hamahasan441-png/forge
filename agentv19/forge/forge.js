@@ -77,6 +77,11 @@ function parseArgs(argv) {
 const { positional, flags } = parseArgs(process.argv.slice(2))
 if (flags["no-color"] || !process.stdout.isTTY) process.env.NO_COLOR = "1"
 
+// v20.2 (P2-6): machine-readable output. `--json` on data commands prints one
+// JSON document and nothing else, so forge can be scripted.
+const JSON_OUT = flags.json === true || flags.json === "true"
+function emitJson(obj) { console.log(JSON.stringify(obj, null, 2)) }
+
 function resolveProvider(config) {
   const name = flags.provider || config.activeProvider || CATALOG.find((c) => c.name !== "custom" && (config.providers[c.name]?.apiKey || (c.envKey && process.env[c.envKey])))?.name || ""
   if (!name) return null
@@ -300,6 +305,7 @@ async function main() {
       console.log(renderMarkdown(res.text))
       console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
       if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      debugRunSummary(res)
       return
     }
     case "undo": {
@@ -503,7 +509,7 @@ async function main() {
       }
       if (!t.baseUrl) { err(`no baseUrl known for ${t.name} — set it: forge config set providers.${t.name}.baseUrl <url>`); process.exit(1); return }
       const activeModel = config.providers?.[t.name]?.model || t.cat?.models?.[0] || ""
-      info(`fetching models from ${t.name} (${t.baseUrl})…`)
+      if (!JSON_OUT) info(`fetching models from ${t.name} (${t.baseUrl})…`)
       const { models, live, warning, entries } = await listModels({ protocol: t.protocol, baseUrl: t.baseUrl, apiKey: t.apiKey, catalog: t.cat })
       if (live && entries?.length) writeModelCache(t.name, entries)
       const metaById = new Map((entries || []).map((e) => [e.id, e]))
@@ -517,6 +523,13 @@ async function main() {
         } else if (warning) {
           warn(`live list failed: ${warning} — built-in suggestions:`)
         }
+      }
+      if (JSON_OUT) {
+        const rows = listed
+          .filter((m) => flags.free !== true || metaById.get(m)?.free || m.endsWith(":free"))
+          .map((m) => { const e = metaById.get(m); return { id: m, free: !!(e?.free || m.endsWith(":free")), context: e?.context ?? null, active: m === activeModel } })
+        emitJson({ provider: t.name, live: !!live, count: rows.length, models: rows })
+        return
       }
       if (flags.free === true) {
         const shown = listed
@@ -566,6 +579,7 @@ async function main() {
       if (flags.search !== undefined) {
         if (!query) { err('usage: forge sessions --search "text"'); process.exit(1); return }
         const hits = searchSessions(query)
+        if (JSON_OUT) { emitJson({ query, count: hits.length, sessions: hits }); return }
         if (!hits.length) { warn(`no sessions match "${query}"`); return }
         console.log(bold(`sessions matching "${query}" (${hits.length})`))
         hits.forEach((s, i) => {
@@ -577,7 +591,8 @@ async function main() {
         console.log(dim("  resume a match: forge resume <id>"))
         return
       }
-      const listed = listSessions(15)
+      const listed = listSessions(JSON_OUT ? 999 : 15)
+      if (JSON_OUT) { emitJson({ count: listed.length, sessions: listed }); return }
       if (!listed.length) { warn("no saved sessions yet — they are auto-saved as you chat"); return }
       console.log(bold(`sessions (${listed.length} newest) — ~/.forge/sessions/`))
       listed.forEach((s, i) => {
@@ -595,6 +610,7 @@ async function main() {
       // v20.2 (P2-5): forge skills --check | forge skills check — validate all skills
       if (flags.check !== undefined || positional[1] === "check") {
         const rep = checkSkills(dir)
+        if (JSON_OUT) { emitJson({ dir, ...rep }); process.exit(rep.failed ? 1 : 0); return }
         console.log(bold(`skill check (${rep.total}) — ${dir}`))
         for (const s of rep.skills) {
           if (s.ok) console.log(`  ${green("✓")} ${cyan(s.name.padEnd(30))} ${dim(s.sizeKB + " KB")}`)
@@ -657,6 +673,7 @@ async function main() {
         console.log(renderMarkdown(res.text))
         console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      debugRunSummary(res)
         return
       }
       err(`unknown: forge plan ${sub} — use list | show <n|slug> | apply <n|slug>`)
@@ -680,6 +697,11 @@ async function main() {
         })
       }
       if (sub === "list") {
+        if (JSON_OUT) {
+          const dump = (t) => memoryEntries(t, cwd).map((e) => e.text)
+          emitJson(flags.all ? { global: dump("global"), project: dump("project") } : { tier, entries: dump(tier) })
+          return
+        }
         if (flags.all) { showTier("global"); console.log(); showTier("project") }
         else showTier(tier)
         console.log(dim("  add: forge memory add \"note\" [--project]  •  remove: forge memory forget <n>  •  clear: forge memory clear"))
@@ -718,6 +740,10 @@ async function main() {
     case "plugins": {
       // list user tool plugins loaded from ~/.forge/tools
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      if (JSON_OUT) {
+        emitJson({ dir: PLUGINS_DIR, tools: loaded.tools.map((t) => ({ name: t.name, readOnly: t.readOnly, description: t.def.function.description, source: t.source })), errors: loaded.errors })
+        return
+      }
       console.log(bold(`tool plugins — ${PLUGINS_DIR}`))
       if (!loaded.tools.length && !loaded.errors.length) {
         console.log(dim("  (none) — drop a *.mjs exporting { name, description, parameters, run } here to add a tool"))
@@ -734,6 +760,15 @@ async function main() {
       printHelp()
       process.exit(1)
   }
+}
+
+// v20.2 (P2-6): FORGE_DEBUG=1 prints a compact per-run tool breakdown to stderr.
+function debugRunSummary(res) {
+  if (process.env.FORGE_DEBUG !== "1" || !res) return
+  const counts = {}
+  for (const t of res.toolLog ?? []) counts[t.name] = (counts[t.name] || 0) + 1
+  const breakdown = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join(" ")
+  console.error(dim(`  [debug] steps=${res.steps} toolCalls=${res.toolLog?.length ?? 0} runId=${res.runId ?? "-"} wrote=${!!res.wrote}${breakdown ? " • " + breakdown : ""}`))
 }
 
 function coerce(v) {
@@ -785,6 +820,7 @@ ${bold("resilience")}
 
 ${bold("flags")}
   --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>
+  --json (machine-readable output: sessions/models/plugins/skills --check/memory list)  •  FORGE_DEBUG=1 (agent trace)
   --config <path>    --cwd <dir> (agent)  --plan (agent)  --continue  --resume <n|id>  -m "message"  --no-color
 
 ${bold("config file")}  ${USER_CONFIG_PATH}  (chmod 600, env vars as fallback)
