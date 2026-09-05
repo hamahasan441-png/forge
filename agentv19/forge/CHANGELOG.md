@@ -29,6 +29,20 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   and pin the tie-break behavior.
 
 ### Added
+- **Export coverage harness** (P2-2) — `npm run coverage` reports, per module,
+  how many exported symbols are named by at least one test, with a total. It is
+  deliberately crude (a name-appears-in-tests heuristic that over-counts trivial
+  constants and cannot see indirect e2e coverage) and says so in its own output —
+  but it makes "this module has no direct test at all" impossible to miss. Runs
+  in CI as a non-blocking, informational job. Measured **43% → 67.4%** over this
+  release.
+- **Direct tests for config.js, health.js and version.js** — three load-bearing
+  modules (every command reads config, failover reads/writes the health cache,
+  the version drives the banner and the manifest) that had 8%/0%/0% export
+  coverage and no direct tests. `tests/test-config.mjs` (32 checks) covers the
+  save/load round-trip and its 0600 permissions, key masking in `maskKey` and
+  `safeView`, dotted get/set/delete, recent-model capping, and health-cache
+  merge semantics plus corrupt-file resilience.
 - **Provider failover in the interactive chat loop** (extends P1-3) — failover
   previously covered only the autonomous agent. Now `forge chat` also falls
   through to the next configured provider when the active one fails before any

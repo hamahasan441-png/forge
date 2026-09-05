@@ -10,7 +10,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node ../tests/run-all.mjs"
+    "test": "node ../tests/run-all.mjs",
+    "coverage": "node ../tests/coverage-symbols.mjs"
   },
   "files": [
     "version.js",
