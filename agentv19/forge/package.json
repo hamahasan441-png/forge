@@ -1,0 +1,47 @@
+{
+  "name": "forge-agent-cli",
+  "version": "20.0.1",
+  "description": "forge — standalone terminal AI agent. Zero dependencies, pure Node, direct-to-provider. Terminal-in-chat with risk-classified shell execution, deep think + effort profiles, AutoPick start, streaming chat, coding agent with checkpoints/undo + plan mode + 17 hardened tools, hierarchical memory, sessions with resume, project profiles, SSRF-guarded fetches, secret redaction.",
+  "type": "module",
+  "bin": {
+    "forge": "./forge.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "forge.js",
+    "chat.js",
+    "agent.js",
+    "tools.js",
+    "providers.js",
+    "config.js",
+    "sessions.js",
+    "checkpoint.js",
+    "skills.js",
+    "diffpatch.js",
+    "ui.js",
+    "health.js",
+    "modelcache.js",
+    "onboard.js",
+    "shellguard.js",
+    "netguard.js",
+    "secrets.js",
+    "memory.js",
+    "profile.js",
+    "README.md",
+    "install.sh",
+    "skills/"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "terminal",
+    "coding-agent",
+    "streaming",
+    "arm64",
+    "termux"
+  ],
+  "license": "MIT"
+}

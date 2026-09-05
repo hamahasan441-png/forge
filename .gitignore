@@ -1,0 +1,9 @@
+# python bytecode shipped inside some skills' scripts
+__pycache__/
+*.pyc
+
+# local runtime state
+node_modules/
+.forge/
+*.log
+.DS_Store
