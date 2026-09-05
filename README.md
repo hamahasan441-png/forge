@@ -25,15 +25,21 @@ forge doctor                              # verify environment + connectivity
 
 ## Self-test (needs Node only, no network)
 
+One command runs every suite and exits non-zero if any of them fails:
+
 ```bash
-cd agentv19/tests
-node mock-llm.mjs &                       # local stand-in provider (127.0.0.1:8787)
-bash e2e-forge.sh                         # 247 checks
-node test-security.mjs                    # 153 hardening unit checks
-node test-providers.mjs                   # 31 provider-wire robustness checks
-node test-diffpatch.mjs                   # 13 diff-engine checks
-bash cleanroom-v20.sh                     # 50 checks — installs into a temp npm prefix
+cd agentv19/forge
+npm test                                  # all suites (~7 min — mostly the e2e)
+FORGE_FAST=1 npm test                     # Node suites only (~3 s inner loop)
+FORGE_SKIP_E2E=1 npm test                 # skip just the slow e2e
 ```
+
+`npm test` is the authoritative source for what passes — suite counts are
+deliberately **not** duplicated in this README, because they drift. The runner
+covers: security, providers, diffpatch, memory, failover, chat, walk, plans,
+checkpoint, repomap, plugins, retrieval, sessions, skills and json (Node
+suites), plus the e2e and clean-room install suites (bash; each starts and
+stops its own mock provider). CI runs the same command on every push.
 
 ## v20.0.1 patch
 
@@ -84,5 +90,22 @@ P0, "safe by default", is done:
    the per-file cap moves from 2 MB to 64 MB, so `forge undo` now protects
    the files it used to refuse (6.4 MB log → 306 KB backup).
 
-Suites: 222/222 hardening unit checks, 247/247 e2e, 31/31 provider-wire,
-13/13 diff-engine, 50/50 clean-room install.
+## v20.2 / v20.3 — resilience, context and extensibility
+
+Full detail in `agentv19/forge/CHANGELOG.md` (the single source of truth for
+changes). Highlights:
+
+- **Survives provider outages** — opt-in failover (`forge config set failover
+  true`) falls through to the next configured provider in both the autonomous
+  agent and the interactive chat, announcing every switch.
+- **Never loses work** — a Ctrl-C'd answer is kept in the session; `/retry`
+  regenerates it.
+- **Better context per token** — a bounded repo map (top-level symbols across
+  JS/TS, Python, Go, Rust) and BM25 relevance ranking order the map and memory
+  by the current task.
+- **Extensible** — drop a `*.mjs` in `~/.forge/tools/` and it becomes an agent
+  tool behind the same redaction/safety choke point (`forge plugins`).
+- **New commands** — `forge memory`, `forge plan list|show|apply`,
+  `forge plugins`, `forge skills --check`, `forge sessions --search`,
+  `forge undo --run`, and `--json` output on the data commands.
+- **CI** — GitHub Actions runs the suites on Node 20 and 22 on every push.

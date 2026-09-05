@@ -115,6 +115,7 @@ Edit it any time, or use commands: `forge config set providers.openai.apiKey sk-
 | `forge agent --deep "task"` | DEEP THINKING agent — structured reasoning, high reasoning effort, verify-first |
 | `forge agent --plan "task"` | plan first (read-only), confirm, then execute |
 | `forge undo` | restore files changed by the last tool edit (auto-checkpoints; v20 also removes files the edit CREATED) |
+| `forge undo --run` | roll back an ENTIRE agent run atomically — every checkpoint from that run, newest→oldest (v20.2) |
 | `forge agent "task" --cwd /path/to/project` | run agent in a project |
 | `forge config` | **interactive config menu**: add provider → model → key, switch, test |
 | `forge config set providers.openai.apiKey sk-...` | direct config editing (also: show/path/get/unset) |
@@ -125,6 +126,12 @@ Edit it any time, or use commands: `forge config set providers.openai.apiKey sk-
 | `forge models openrouter --free` | **OpenRouter free tier only** — live, or cached when offline |
 | `forge models` / `forge providers` | list models / providers |
 | `forge skills` / `forge skills pdf` | list skills / read one |
+| `forge skills --check` | validate every skill: name, description, broken relative links, size budget (v20.2) |
+| `forge memory list\|add\|forget <n>\|clear\|prune` | inspect and curate long-term memory (`--project` / `--all`) (v20.2) |
+| `forge plan list\|show\|apply <n\|slug>` | saved plans from `agent --plan` — review one, or execute it later (v20.2) |
+| `forge plugins` | list user tool plugins from `~/.forge/tools/*.mjs` (+ why any were skipped) (v20.2) |
+| `forge sessions --search "text"` | find a past conversation by title, summary or message content (v20.2) |
+| any data command `--json` | machine-readable output for scripting: sessions, models, plugins, skills --check, memory list (v20.2) |
 
 Inside chat: `/help` `/status` `/profile` `/tools` `/shell` `/deep` `/plan` `/compact` `/tokens` `/usage` `/retry` `/undo` `/export` `/sessions` `/resume` `/model` `/key` `/skills` `/agent` `/save` `/new` `/stream` `/config` — end a line with `\` for multiline input
 

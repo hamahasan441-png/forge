@@ -85,12 +85,10 @@ Requirements: Node.js >= 18 only. No bun, no build, no native modules.
 ARM64 / Termux / Kali NetHunter / proot: resource-aware (low-RAM devices get
 reduced sub-agent concurrency automatically), no systemd/desktop assumptions.
 
-Self-test (optional, needs Node only):
-  cd agentv19/tests && node mock-llm.mjs &   # then in another shell:
-  bash e2e-forge.sh                          # 247 checks against the local mock
-  node test-security.mjs                     # 222 hardening unit checks
-  node test-providers.mjs                    # 31 provider-wire robustness checks
-  node test-diffpatch.mjs                    # 13 diff-engine checks
-  bash cleanroom-v20.sh                      # true clean-room install verify
-                                             # (installs into a temp npm prefix;
-                                             # no prior global forge required)
+Self-test (optional, needs Node only — one command runs everything):
+  cd agentv19/forge && npm test              # every suite; non-zero on any failure
+  FORGE_FAST=1 npm test                      # Node suites only (fast inner loop)
+  FORGE_SKIP_E2E=1 npm test                  # skip just the slow e2e
+  Counts are not repeated here (they drift) — npm test prints the authoritative
+  per-suite results. The bash suites (e2e, clean-room install) each start and
+  stop their own mock provider, so nothing needs to be launched by hand.
