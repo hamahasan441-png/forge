@@ -6,6 +6,17 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.3.0 (in progress)
 
 ### Fixed
+- **The published package was missing `retrieval.js`** — it was added in the BM25
+  change but never added to `package.json` `files[]`, so the npm tarball omitted
+  it while `memory.js` and `repomap.js`, which import it, shipped fine. A real
+  `npm publish` would therefore have produced a CLI that dies on startup for
+  nearly every command. The clean-room suite could not catch it: it installs from
+  the *directory*, and npm treats that differently from the tarball a user
+  actually receives. Fixed, and guarded by `tests/test-package.mjs` (6 checks)
+  which asserts the real invariant — every relative import of a shipped module
+  must itself ship — plus files[]/disk agreement and the actual `npm pack`
+  listing. Verified by reintroducing the omission and watching all three checks
+  fail.
 - **`install.sh` ran the global install twice on failure** (P1-10) — the failure
   path re-ran `npm i -g .` in full just to grep its output for `EACCES`, doubling
   an already-slow failure; and because the first attempt used `--silent`, the
