@@ -18,6 +18,14 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   auto-prunes each tier to the newest `MEMORY_MAX_ENTRIES` (500). Previously the
   memory files were append-only and grew without bound, slowly crowding the
   relevance-scored context injected into every run.
+- **Provider failover** (P1-3, opt-in) — in the autonomous agent loop, when the
+  active provider keeps failing on transient (429/408/5xx/network) or hard
+  auth/not-found (401/403/404) errors and its retries are spent, forge falls
+  through to the next configured provider (health-tested ones first) instead of
+  killing the task. Every switch is announced and recorded in `health.json`.
+  Enable with `forge config set failover true` or `FORGE_FAILOVER=1`; default
+  off, so existing single-provider behavior is unchanged. New
+  `tests/test-failover.mjs` (8 checks).
 
 ### Changed
 - **Version is now a single source of truth.** `version.js` reads the version

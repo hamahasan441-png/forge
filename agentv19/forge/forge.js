@@ -667,6 +667,10 @@ ${bold("safety (v20)")}
   shell commands risk-classified (catastrophic always blocked; risky ones ask y/N) • SSRF-guarded URL fetches
   tool results secret-redacted • sub-agents read-only, depth-capped, timed out
 
+${bold("resilience")}
+  ${cyan("forge config set failover true")}  agent falls through to the next configured provider on outages ${dim("(or FORGE_FAILOVER=1)")}
+  ${cyan("forge memory")}                  curate long-term memory: list | add | forget <n> | clear | prune
+
 ${bold("flags")}
   --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>
   --config <path>    --cwd <dir> (agent)  --plan (agent)  --continue  --resume <n|id>  -m "message"  --no-color

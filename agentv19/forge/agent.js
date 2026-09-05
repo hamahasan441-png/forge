@@ -17,7 +17,8 @@
  *   - adaptive effort: profile auto → deep thinking for complex tasks
  *   - Retry-After honored on transient provider errors
  */
-import { chatOnce, ProviderError } from "./providers.js"
+import { chatOnce, ProviderError, fallbackChain } from "./providers.js"
+import { readHealth, recordHealth } from "./health.js"
 import { makeToolContext, WRITE_TOOLS } from "./tools.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { DEFAULT_DIR } from "./config.js"
@@ -167,8 +168,17 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
 }
 
 export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role }) {
-  const p = provider
+  let p = provider
   const readonly = readOnly || planOnly // plan mode is always read-only
+  // v20.2 provider failover (opt-in): when the active provider keeps failing on
+  // transient/auth errors, fall through to the next configured+tested provider
+  // instead of killing the task. Default OFF — a switch is always announced.
+  const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
+  const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
+  let chainIdx = 0
+  const isFailworthy = (e) =>
+    e instanceof ProviderError && !e.contextOverflow &&
+    (e.retryable || e.status === 401 || e.status === 403 || e.status === 404)
   const res = resourceProfile()
   // v20 adaptive effort: deep may be resolved from the profile when unset
   let deepEffort = deep
@@ -224,6 +234,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   let finalText = ""
   let retryBudget = 3 // transient-error retries do NOT burn maxSteps
   let overflowBudget = 2 // v20: context-overflow compress+retry attempts
+  let switchedOk = false // recorded health-ok after a successful failover
   let toolCallCount = 0
   const toolLog = []
 
@@ -264,8 +275,24 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
         steps-- // retry does not consume a step
         continue
       }
+      // v20.2: retries on THIS provider are spent (or the error is a hard
+      // auth/not-found) — fall through to the next configured provider if one
+      // is available. Each provider in the chain is tried once.
+      if (isFailworthy(e) && chainIdx < chain.length) {
+        const next = chain[chainIdx++]
+        recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
+        onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message })
+        p = next
+        retryBudget = 3 // fresh budget for the new provider
+        steps-- // switching does not consume a step
+        continue
+      }
       throw e
     }
+
+    // a request that succeeded on a switched-to provider confirms it works —
+    // record it once so the health cache and future runs prefer it
+    if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
 
     if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning })
 
@@ -379,6 +406,8 @@ export function agentEventPrinter() {
       if (t) console.log(dim(`  ☍ thinking: ${t}`))
     } else if (ev.type === "retry") {
       console.log(yellow(`  ↻ transient provider error (${ev.error}) — retrying… ${ev.left ?? ""}`))
+    } else if (ev.type === "failover") {
+      console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
     } else if (ev.type === "info") {
       console.log(dim(`  · ${ev.text}`))
     } else if (ev.type === "compacted") {
