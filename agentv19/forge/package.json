@@ -34,6 +34,7 @@
     "memory.js",
     "profile.js",
     "plans.js",
+    "repomap.js",
     "README.md",
     "CHANGELOG.md",
     "install.sh",

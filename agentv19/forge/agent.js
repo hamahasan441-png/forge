@@ -25,6 +25,7 @@ import { DEFAULT_DIR } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
 import { relevantMemory, relevantLearnings } from "./memory.js"
 import { profileSummary, resourceProfile } from "./profile.js"
+import { buildRepoMap } from "./repomap.js"
 import path from "node:path"
 import fs from "node:fs"
 
@@ -70,7 +71,7 @@ const ROLE_DIRECTIVES = {
   coder: "You are an ANALYSIS sub-agent for implementation planning: identify exact files and edits needed, but do NOT write — the main agent applies the changes.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -98,9 +99,16 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
       "DEEP THINKING MODE: think like the big models — before EACH tool batch, reason about what to do and why; consider alternatives and failure modes; after edits, VERIFY with tests/builds before claiming success. Prefer correctness over speed.")
   }
   if (planOnly) lines.push("", "PLAN MODE: investigate and produce a numbered, step-by-step implementation plan (files to touch, edits to make, how to verify). Do NOT execute any changes — read-only tools only. End with 'END OF PLAN'.")
-  // v20 context engine: project profile + relevant memory + learned fixes
+  // v20 context engine: project profile + repo map + relevant memory + learned fixes
   const prof = profileSummary(cwd)
   if (prof) lines.push("", prof)
+  // v20.2 (P3-1): a compact symbol map so the agent locates code without ls/grep
+  if (repoMap) {
+    try {
+      const map = buildRepoMap(cwd)
+      if (map) lines.push("", map)
+    } catch { /* repo map is best-effort — never break the prompt */ }
+  }
   if (task) {
     const mem = relevantMemory(task, { cwd })
     if (mem) lines.push("", mem)
@@ -231,7 +239,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   })
 
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : task },
   ]
 

@@ -34,6 +34,12 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Repo map / symbol index** (P3-1) — the agent's system prompt now includes a
+  compact, bounded map of the project's source files and their top-level symbols
+  (JS/TS, Python, Go, Rust), so it can locate code without spending tool calls on
+  `ls`/`grep`. Respects the shared skip set + root `.gitignore`; bounded in files
+  scanned, bytes/file, symbols/file and total size; built once per run; opt-out
+  via `context.repoMap: false`. New `repomap.js` + `tests/test-repomap.mjs` (19).
 - **Undo a whole agent run** (P3-4) — every checkpoint from one `forge agent`
   run is now tagged with a run id, and `forge undo --run` rolls the entire run
   back atomically (newest→oldest, so files return to their exact pre-run state
