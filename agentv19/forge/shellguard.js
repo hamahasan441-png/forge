@@ -96,10 +96,29 @@ export function tokenize(sub) {
 
 const PATH_RE = /^(?:[A-Za-z0-9._~-]*\/|\/|~\/|~$|\.{1,2}\/)/ // looks path-ish
 
+/** Expand $VAR / ${VAR} like a shell would (v20.1).
+ *  Returns { text, unknown } — `unknown` is true when a variable could not be
+ *  resolved, so callers can refuse to trust the resulting path. */
+function expandVars(tok, env) {
+  let t = String(tok ?? "")
+  if (!t.includes("$")) return { text: t, unknown: false }
+  const e = env || process.env
+  let unknown = false
+  t = t.replace(/\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g, (_m, braced, bare) => {
+    const name = braced || bare
+    const v = e?.[name]
+    if (v === undefined || v === "") { unknown = true; return "" }
+    return String(v)
+  })
+  return { text: t, unknown }
+}
+
 /** Normalize one token to an absolute path if it is path-like.
- *  Handles ~ expansion, ./ ../, globs-at-root detection, and strips quotes. */
-function toAbsPath(tok, cwd) {
+ *  Handles ~ expansion, $VAR expansion, ./ ../, globs-at-root detection,
+ *  and strips quotes. */
+function toAbsPath(tok, cwd, env) {
   let t = tok.replace(/^['"]|['"]$/g, "")
+  if (t.includes("$")) t = expandVars(t, env).text
   if (t.startsWith("~")) t = path.join(os.homedir(), t.slice(1))
   else if (PATH_RE.test(t)) t = path.resolve(cwd, t)
   else if (t.includes("/")) t = path.resolve(cwd, t)
@@ -155,7 +174,107 @@ const POWER_WORDS = new Set(["poweroff", "reboot", "halt", "shutdown", "suspend"
 /** git subcommands that are risky */
 const GIT_CONFIRM = new Set(["reset", "clean", "push", "checkout", "restore", "rebase", "filter-branch", "branch -D"])
 
-function classifySub(sub, ctx) {
+// ---------------------------------------------------------------------------
+// v20.1 P0-1 — wrapper unwrapping
+//
+// A command whose payload is ANOTHER command used to be judged by its wrapper
+// alone: `sh -c "rm -rf /"` saw only `sh`, which is in no rule table, so the
+// level stayed "safe" and the model ran it with no confirmation. These tables
+// name the programs that carry a command line as an argument.
+// ---------------------------------------------------------------------------
+
+/** `prog -c "<shell command>"` / `prog -e "<code>"` — argument is a payload. */
+const SHELL_WRAPPERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "busybox", "eval", "source", "."])
+/** Scripting runtimes: the payload is CODE, not shell — scan it for markers. */
+const CODE_WRAPPERS = new Set(["python", "python2", "python3", "py", "perl", "ruby", "node", "nodejs", "deno", "bun", "lua", "php", "Rscript", "groovy", "osascript"])
+/** Prefix programs: everything after their own flags is the real command. */
+const PREFIX_WRAPPERS = new Set(["env", "nohup", "nice", "timeout", "time", "command", "stdbuf", "setsid", "xargs", "script", "watch", "unbuffer", "parallel"])
+/** Flags that take a value, so unwrapping must skip the value too. */
+const VALUE_FLAGS = new Set(["-c", "-e", "--eval", "-p", "--print", "-n", "-I", "-i", "-u", "-d", "-s", "--command", "--separator", "--delimiter", "-R", "-L", "-P", "--max-procs", "-t", "--timeout", "-k", "--kill-after"])
+
+/** Things a script can do that a user (or the model) must not do silently. */
+const CODE_DANGER = [
+  [/\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*[fF]?[a-zA-Z]*\s+[/~]/, "deletes outside the working directory"],
+  [/mkfs(\.|\s|\()/, "formats a filesystem"],
+  [/\bdd\s+[^|&]*of=\/dev\/(sd|hd|nvme|mmcblk|vd|loop|md|dm-)/, "writes to a raw device"],
+  [/\b(shutdown|reboot|poweroff|halt|init\s+[06])\b/, "controls system power"],
+  [/:\s*\(\s*\)\s*\{/, "fork-bomb pattern"],
+  [/>\s*\/etc\/|>>\s*\/etc\//, "overwrites system configuration"],
+  [/\bos\.system\s*\(|\bsubprocess\b|child_process|execSync|spawnSync|Runtime\.getRuntime|\bexec\s*\(|shutil\.rmtree|\bsystem\s*\(/, "runs shell commands from a script"],
+]
+
+/**
+ * Return the level/reason contributed by a wrapped payload, or null when the
+ * program is not a wrapper (or there is nothing to unwrap).
+ */
+function unwrapWrapper(prog, rest, sub, ctx, depth) {
+  const p = String(prog ?? "").toLowerCase()
+  const env = ctx.env
+
+  // 1. `$( … )` and backticks — command substitution hides a whole command
+  const subs = []
+  for (const m of String(sub).matchAll(/\$\(([^)]*)\)/g)) if (m[1].trim()) subs.push(m[1])
+  for (const m of String(sub).matchAll(/`([^`]*)`/g)) if (m[1].trim()) subs.push(m[1])
+  let worst = null
+  for (const sc of subs) {
+    const r = classifyCommand(sc, { ...ctx, env }, depth + 1)
+    if (!worst || LEVEL_RANK[r.level] > LEVEL_RANK[worst.level]) {
+      worst = { level: r.level, reason: `command substitution runs "${sc.trim().slice(0, 40)}" (${r.reasons[0] ?? r.level})` }
+    }
+  }
+
+  // 2. shell wrappers: -c/--command carries a real shell command line
+  if (SHELL_WRAPPERS.has(p)) {
+    const idx = rest.findIndex((a) => a === "-c" || a === "--command" || a === "-e")
+    const payload = idx >= 0 ? rest.slice(idx + 1).join(" ") : rest.join(" ")
+    if (String(payload).trim()) {
+      const r = classifyCommand(payload, { ...ctx, env }, depth + 1)
+      const cand = { level: r.level, reason: `${prog} runs "${payload.trim().slice(0, 40)}" (${r.reasons[0] ?? r.level})` }
+      if (!worst || LEVEL_RANK[cand.level] > LEVEL_RANK[worst.level]) worst = cand
+    } else {
+      const cand = { level: "confirm", reason: `${prog} with no readable payload` }
+      if (!worst || LEVEL_RANK[cand.level] > LEVEL_RANK[worst.level]) worst = cand
+    }
+  }
+
+  // 3. scripting runtimes: the payload is code — scan it for destructive calls
+  if (CODE_WRAPPERS.has(p)) {
+    const code = rest.join(" ")
+    const hit = CODE_DANGER.find(([re]) => re.test(code))
+    const cand = hit
+      ? { level: "danger", reason: `${prog} script ${hit[1]}` }
+      : { level: "low", reason: null }
+    if (!worst || LEVEL_RANK[cand.level] > LEVEL_RANK[worst.level]) worst = cand
+  }
+
+  // 4. prefix wrappers: skip their own flags/values, classify what follows
+  if (PREFIX_WRAPPERS.has(p)) {
+    let k = 0
+    while (k < rest.length && (rest[k].startsWith("-") || /^\d+(\.\d+)?[smhd]?$/.test(rest[k]) || /^[A-Za-z_]\w*=/.test(rest[k]))) {
+      if (VALUE_FLAGS.has(rest[k])) k += 2
+      else k += 1
+    }
+    const inner = rest.slice(k).join(" ")
+    if (inner.trim()) {
+      const r = classifyCommand(inner, { ...ctx, env }, depth + 1)
+      const cand = { level: r.level, reason: `${prog} → ${r.reasons[0] ?? r.level}` }
+      if (!worst || LEVEL_RANK[cand.level] > LEVEL_RANK[worst.level]) worst = cand
+    } else {
+      const cand = { level: "confirm", reason: `${prog} with a payload we cannot see (arguments come from stdin)` }
+      if (!worst || LEVEL_RANK[cand.level] > LEVEL_RANK[worst.level]) worst = cand
+    }
+  }
+
+  // 5. placeholder targets (xargs -I{} rm -rf {}) — the real paths arrive later
+  if (/\b(rm|rmdir|shred|srm|find|chmod|chown|chgrp|mv|cp|tee|dd)\b/.test(p) === false && rest.some((a) => /\{\}|\$\{?[0-9@*]\}?|%s|%@/.test(a))) {
+    const cand = { level: "confirm", reason: "one or more targets are placeholders resolved at run time" }
+    if (!worst || LEVEL_RANK[cand.level] > LEVEL_RANK[worst.level]) worst = cand
+  }
+
+  return worst
+}
+
+function classifySub(sub, ctx, depth = 0) {
   const reasons = []
   let level = "safe"
   const bump = (lv, why) => {
@@ -172,11 +291,18 @@ function classifySub(sub, ctx) {
   const rest = toks.slice(i + 1)
   const fileArgs = rest.filter((a) => !a.startsWith("-")) // non-flag args (rough file operands)
 
+  // v20.1 P0-1: a wrapper must never HIDE its payload. `sh -c "rm -rf /"`,
+  // `python -c "os.system('rm -rf /')"`, `xargs rm -rf /` and `eval` used to
+  // classify as "safe" (only the wrapper was examined) and therefore ran
+  // unsupervised. Unwrap, classify the payload, take the WORST level.
+  const wrapped = depth < 3 ? unwrapWrapper(prog, rest, sub, ctx, depth) : null
+  if (wrapped) bump(wrapped.level, wrapped.reason)
+
   // collect redirect targets
   const redirects = []
   for (let j = 0; j < toks.length; j++) {
     if (toks[j] === ">" || toks[j] === ">>" || toks[j] === "<") {
-      const t = toks[j + 1] ? toAbsPath(toks[j + 1], ctx.cwd) : null
+      const t = toks[j + 1] ? toAbsPath(toks[j + 1], ctx.cwd, ctx.env) : null
       if (t) redirects.push({ op: toks[j], path: t })
     }
   }
@@ -184,7 +310,7 @@ function classifySub(sub, ctx) {
   // are file operands in context)
   const targets = []
   for (const t of fileArgs) {
-    const abs = toAbsPath(t, ctx.cwd) ?? path.resolve(ctx.cwd, t)
+    const abs = toAbsPath(t, ctx.cwd, ctx.env) ?? path.resolve(ctx.cwd, t)
     targets.push(abs)
   }
   for (const r of redirects) targets.push(r.path)
@@ -222,6 +348,11 @@ function classifySub(sub, ctx) {
         const why = pathReason(t, ctx.home)
         if (why) { bump("danger", `rm ${why}`); break }
       }
+    }
+    // v20.1: a placeholder target (`xargs -I{} rm -rf {}`) is filled in at run
+    // time — we cannot prove where it points, so it is never merely "confirm".
+    if (targets.some((t) => /\{\}|\$\{?[0-9@*]\}?|%s|%@/.test(path.basename(String(t))))) {
+      bump("danger", "rm targets are placeholders resolved at run time")
     }
     if (LEVEL_RANK[level] < 2) {
       if (!hasTargets) bump("danger", "rm without a file argument")
@@ -274,7 +405,7 @@ function classifySub(sub, ctx) {
   }
   if (prog === "sudo" || prog === "doas" || prog === "su") {
     // classify the inner command first, then apply sudo policy
-    const inner = classifySub(rest.join(" "), { ...ctx, allowSudo: true }) // inner program decides its own level
+    const inner = classifySub(rest.join(" "), { ...ctx, allowSudo: true }, depth + 1) // inner program decides its own level
     if (LEVEL_RANK[inner.level] >= 4) return { level: "block", reasons: [`sudo + ${inner.reasons[0] ?? "destructive command"}`], program: prog, targets }
     if (!ctx.allowSudo) bump("danger", "sudo runs commands with elevated privileges")
   }
@@ -382,12 +513,12 @@ function isForkBomb(raw) {
 
 /** Classify a full command line. Returns the WORST level found plus reasons.
  *  ctx: { cwd, root (project boundary — defaults to cwd), home, allowSudo } */
-export function classifyCommand(command, ctx = {}) {
+export function classifyCommand(command, ctx = {}, depth = 0) {
   // v20.0.1: the classifier is the safety choke point — it must NEVER throw.
   // Any unexpected parser error fails CLOSED (danger = ask the user / refuse
   // for the model) instead of bubbling a raw JS error into the chat.
   try {
-    return classifyCommandUnsafe(command, ctx)
+    return classifyCommandUnsafe(command, ctx, depth)
   } catch (e) {
     return {
       level: "danger",
@@ -397,7 +528,7 @@ export function classifyCommand(command, ctx = {}) {
   }
 }
 
-function classifyCommandUnsafe(command, ctx = {}) {
+function classifyCommandUnsafe(command, ctx = {}, depth = 0) {
   const raw = String(command ?? "")
   if (isForkBomb(raw)) return { level: "block", reasons: ["fork-bomb pattern (self-piping shell function)"], targets: [], programs: [] }
   const c = {
@@ -405,6 +536,7 @@ function classifyCommandUnsafe(command, ctx = {}) {
     root: path.resolve(ctx.root || ctx.cwd || process.cwd()),
     home: ctx.home || os.homedir(),
     allowSudo: ctx.allowSudo === true,
+    env: ctx.env || process.env, // v20.1: $VAR targets are expanded with this
   }
   const subs = splitSubcommands(String(command ?? ""))
   let worst = "safe"
@@ -412,7 +544,7 @@ function classifyCommandUnsafe(command, ctx = {}) {
   const targets = []
   const programs = []
   for (const sub of subs) {
-    const r = classifySub(sub, c)
+    const r = classifySub(sub, c, depth)
     programs.push(r.program)
     targets.push(...r.targets)
     if (LEVEL_RANK[r.level] > LEVEL_RANK[worst]) worst = r.level

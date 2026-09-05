@@ -329,6 +329,59 @@ ok("classifier fails CLOSED on internal error", clBoom.level === "danger" && /co
 ok("failed-closed command is refused for the model", modelMayRun(boom, { cwd: WORK, root: WORK }).ok === false)
 ok("failed-closed command needs user consent", userMayRun(boom, { cwd: WORK }, { interactive: false }).ok === false)
 
+console.log("== v20.1 P0-1: wrappers must not hide their payload ==")
+// Before v20.1 only the WRAPPER was classified, so every one of these was
+// "safe" — i.e. the model's bash tool ran them with no confirmation at all.
+const cw = (cmd, extra) => classifyCommand(cmd, { cwd: WORK, root: WORK, home: os.homedir(), env: { ...process.env, HOME: os.homedir(), TARGET: "" }, ...extra })
+const WRAP = [
+  ['sh -c "rm -rf /"', "block"],
+  ['bash -c "rm -rf /"', "block"],
+  ['zsh -c "mkfs.ext4 /dev/sda"', "block"],
+  ['eval "rm -rf /"', "block"],
+  ['python3 -c "import os; os.system(\'rm -rf /\')"', "danger"],
+  ['node -e "require(\'child_process\').execSync(\'rm -rf /\')"', "danger"],
+  ['timeout 10 rm -rf /', "block"],
+  ['env FOO=1 rm -rf /', "block"],
+  ['nohup rm -rf /', "block"],
+  ['xargs rm -rf /tmp/x', "danger"],
+  ['xargs -I{} rm -rf {}', "danger"],
+  ['echo hi $(rm -rf /)', "block"],
+  ["echo hi `rm -rf /`", "block"],
+  ['sudo sh -c "rm -rf /"', "block"],
+]
+for (const [cmd, want] of WRAP) {
+  const got = cw(cmd)
+  ok(`${cmd.slice(0, 42)} → ${want} (got ${got.level})`, got.level === want)
+}
+// …and the benign equivalents must stay runnable (no over-blocking)
+const WRAP_OK = [
+  ['bash -c "echo hi"', "safe"],
+  ['sh -c "ls -la"', "safe"],
+  ['python3 -c "print(1)"', "low"],
+  ['node -e "console.log(1)"', "low"],
+  ["env FOO=1 echo hi", "safe"],
+  ["timeout 5 ls", "safe"],
+  ["npm test", "safe"],
+  ["cat file.txt", "safe"],
+]
+for (const [cmd, want] of WRAP_OK) {
+  const got = cw(cmd)
+  ok(`benign: ${cmd.slice(0, 34)} stays ${want}`, got.level === want)
+}
+ok("model refused: sh -c root wipe", modelMayRun('sh -c "rm -rf /"', { cwd: WORK, root: WORK }).ok === false)
+ok("model refused: python os.system root wipe", modelMayRun('python3 -c "import os; os.system(\'rm -rf /\')"', { cwd: WORK, root: WORK }).ok === false)
+ok("model refused: xargs rm", modelMayRun("xargs rm -rf /tmp/x", { cwd: WORK, root: WORK }).ok === false)
+ok("model may still run python -c", modelMayRun('python3 -c "print(1)"', { cwd: WORK, root: WORK }).ok === true)
+ok("model may still run sh -c echo", modelMayRun('sh -c "echo hi"', { cwd: WORK, root: WORK }).ok === true)
+
+console.log("== v20.1 P0-2: $VAR targets are expanded before classification ==")
+const envCtx = { cwd: WORK, root: WORK, home: os.homedir(), env: { ...process.env, HOME: os.homedir(), PAYLOAD: "/tmp/payload" } }
+eq("rm -rf $HOME → block (was only confirm)", classifyCommand("rm -rf $HOME", envCtx).level, "block")
+eq("rm -rf ${HOME} → block", classifyCommand("rm -rf ${HOME}", envCtx).level, "block")
+eq("cp x $HOME → danger/outside project", ["danger", "block"].includes(classifyCommand("cp x $HOME", envCtx).level), true)
+ok("unknown variable never classifies as safe", ["confirm", "danger", "block"].includes(classifyCommand("rm -rf $WHO_KNOWS", envCtx).level))
+ok("expanded variable resolves the real path", (classifyCommand("rm -rf $PAYLOAD", envCtx).targets ?? []).some((t) => String(t).startsWith("/tmp")))
+
 console.log("== v20.0.1: malformed tool arguments never crash the agent ==")
 const ALL_TOOLS = ["bash", "read_file", "write_file", "edit_file", "multi_edit", "apply_patch", "glob_files", "grep_files", "list_dir", "fetch_url", "web_search", "todo", "think", "memory", "delegate", "load_skill", "git_status"]
 let argCrashes = []
