@@ -595,12 +595,55 @@ function edit_file(ctx, args) {
   return `OK edited ${p}`
 }
 
+// --- shared walk policy (v20.2 P1-2) ---------------------------------------
+// One SKIP set for list_dir / grep_files / glob_files (they used to diverge:
+// grep_files was missing .turbo/.cache). These are always-noise directories —
+// dependency trees, VCS metadata, build/venv output — that only waste the
+// agent's context and slow the walk.
+const DEFAULT_SKIP = new Set([
+  "node_modules", ".git", ".hg", ".svn", ".next", ".nuxt", ".svelte-kit",
+  "dist", "build", "coverage", "__pycache__", ".turbo", ".cache",
+  ".venv", "venv", ".mypy_cache", ".pytest_cache", ".gradle",
+])
+
+/**
+ * Best-effort .gitignore directory awareness: read the walk root's .gitignore
+ * and return the set of plain directory names it ignores, so the file tools
+ * stop indexing a repo's own generated/ignored folders. Deliberately
+ * conservative — only bare names (no slashes, no glob metacharacters, not
+ * negated) are honored, and only directories are ever skipped, so a gitignored
+ * FILE the user asks about is still readable. Cached per root. Never throws.
+ */
+const _gitignoreCache = new Map()
+function gitignoreSkip(root) {
+  if (_gitignoreCache.has(root)) return _gitignoreCache.get(root)
+  const out = new Set()
+  try {
+    const raw = fs.readFileSync(path.join(root, ".gitignore"), "utf8")
+    for (let line of raw.split("\n")) {
+      line = line.trim()
+      if (!line || line.startsWith("#") || line.startsWith("!")) continue
+      const name = line.replace(/^\/+/, "").replace(/\/+$/, "")
+      if (!name || name.includes("/") || /[*?\[\]]/.test(name)) continue
+      out.add(name)
+    }
+  } catch { /* no .gitignore — fine */ }
+  _gitignoreCache.set(root, out)
+  return out
+}
+
+/** Merged skip predicate for a walk rooted at `root`. */
+function skipSetFor(root) {
+  const gi = gitignoreSkip(root)
+  return gi.size ? new Set([...DEFAULT_SKIP, ...gi]) : DEFAULT_SKIP
+}
+
 function list_dir(ctx, args) {
   const sp = safePath(ctx, args.path || ".")
   if (!sp.ok) return sp.error
   const root = sp.abs
   if (!fs.existsSync(root)) return `ERROR: not found: ${root}`
-  const SKIP = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", "__pycache__", ".turbo", ".cache"])
+  const SKIP = skipSetFor(root)
   const lines = []
   const walk = (dir, depth, prefix) => {
     if (depth > 2 || lines.length > 300) return
@@ -641,7 +684,7 @@ function grep_files(ctx, args) {
   }
   const glob = args.glob ? new RegExp("^" + args.glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$") : null
   const max = Math.min(120, args.max || 60)
-  const SKIP = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", "__pycache__"])
+  const SKIP = skipSetFor(root)
   const results = []
   const walk = (dir, depth) => {
     if (results.length >= max || depth > 8) return
@@ -773,7 +816,7 @@ function glob_files(ctx, args) {
   let re
   try { re = globToRegex(String(args.pattern || "*")) } catch (e) { return `ERROR: bad pattern: ${e.message}` }
   const max = Math.min(200, args.max || 100)
-  const SKIP = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", "__pycache__", ".turbo", ".cache"])
+  const SKIP = skipSetFor(root)
   const hits = []
   const walk = (dir, depth) => {
     if (hits.length >= max || depth > 10) return

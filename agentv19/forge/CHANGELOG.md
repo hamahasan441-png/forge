@@ -34,6 +34,14 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Smarter file-tool walks** (P1-2) — `list_dir`, `grep_files` and `glob_files`
+  now share one skip policy (they had diverged — `grep_files` was missing
+  `.turbo`/`.cache`), broadened to common noise dirs (`.venv`, `venv`,
+  `.mypy_cache`, `.pytest_cache`, `.gradle`, `.svelte-kit`, …), and additionally
+  skip directories a project's root `.gitignore` ignores (bare-name entries;
+  files stay readable). Less wasted context on generated output. New
+  `tests/test-walk.mjs` (10 checks).
+
 ### Changed
 - **Version is now a single source of truth.** `version.js` reads the version
   from `package.json`; `forge.js` and `chat.js` import it instead of each
