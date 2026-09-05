@@ -106,7 +106,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   // v20.2 (P3-1): a compact symbol map so the agent locates code without ls/grep
   if (repoMap) {
     try {
-      const map = buildRepoMap(cwd)
+      const map = buildRepoMap(cwd, { query: task || "" }) // P3-2: rank by task relevance
       if (map) lines.push("", map)
     } catch { /* repo map is best-effort — never break the prompt */ }
   }

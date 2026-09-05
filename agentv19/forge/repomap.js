@@ -12,6 +12,7 @@
  */
 import fs from "node:fs"
 import path from "node:path"
+import { rankDocs } from "./retrieval.js"
 
 // self-contained skip set (mirrors tools.js DEFAULT_SKIP; kept local so this
 // module has no dependency on the tool layer)
@@ -102,11 +103,12 @@ export function buildRepoMap(root, {
   maxSymbols = 12,       // symbols shown per file
   maxBytesPerFile = 256 * 1024, // never read more than this from one file
   maxChars = 4000,       // total output cap
+  query = "",            // when set, rank files by BM25 relevance to it (P3-2)
 } = {}) {
   let base
   try { base = path.resolve(root || process.cwd()) } catch { return "" }
   const skip = new Set([...SKIP, ...gitignoreDirs(base)])
-  const found = [] // { rel, symbols }
+  let found = [] // { rel, symbols }
   let scanned = 0
   const walk = (dir, depth) => {
     if (scanned >= maxFiles || depth > 8) return
@@ -132,8 +134,17 @@ export function buildRepoMap(root, {
   }
   walk(base, 0)
   if (!found.length) return ""
-  // most informative files first (more exported symbols), then path order
-  found.sort((a, b) => b.symbols.length - a.symbols.length || a.rel.localeCompare(b.rel))
+  // ordering: when a task query is given, surface the files most relevant to it
+  // (BM25 over "path + symbols"); otherwise the most informative files first.
+  const q = String(query || "").trim()
+  if (q) {
+    const ranked = rankDocs(q, found.map((f, i) => ({ i, text: f.rel + " " + f.symbols.join(" ") })))
+    // keep ranked order; files with score 0 keep their original relative order at the end
+    const order = ranked.map((r) => r.i)
+    found = order.map((i) => found[i])
+  } else {
+    found.sort((a, b) => b.symbols.length - a.symbols.length || a.rel.localeCompare(b.rel))
+  }
   const lines = ["REPO MAP (top-level symbols — use this to locate code before ls/grep):"]
   let used = lines[0].length
   let shown = 0

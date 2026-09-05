@@ -34,6 +34,12 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   messages. New `tests/test-chat.mjs` (15 checks — also chat.js's first direct
   unit coverage, via `interruptedTurnResult` and `isShellLine`).
 
+- **Relevance-ranked context (BM25)** (P3-2) — new zero-dep `retrieval.js`
+  ranks the repo map and long-term memory by BM25 relevance to the current task
+  instead of by symbol count / raw token overlap. BM25 down-weights common terms
+  (IDF) and saturates term frequency, so the files and notes most relevant to the
+  task surface first within the same token budget. New `tests/test-retrieval.mjs`
+  (11 checks).
 - **Tool plugin API** (P3-5) — drop a `*.mjs` in `~/.forge/tools/` exporting
   `{ name, description, parameters, run }` and it becomes an agent tool alongside
   the built-ins, behind the same choke point: output is secret-redacted, and a
