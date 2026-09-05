@@ -5,6 +5,19 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 
 ## [Unreleased] — v20.3.0 (in progress)
 
+### Fixed
+- **Non-deterministic recency ordering in `listPlans()` and `sessionFiles()`** —
+  both sorted by mtime alone, which is not a total order: two files written
+  inside one filesystem timestamp tick tie, and the resulting order was whatever
+  `readdir` happened to yield. This surfaced as a CI-only flake (the plans suite
+  failed on a runner whose mtime granularity is coarser than the dev machine's)
+  but the session case was worse: `pruneSessions()` **deletes** everything past
+  the cap in that order, so a tie could have dropped a newer session. Both now
+  tie-break deterministically (plans by slug; sessions by descending
+  ISO-timestamped filename, which is also recency-correct). The plans and
+  sessions suites assert recency with explicit mtimes instead of wall-clock gaps,
+  and pin the tie-break behavior.
+
 ### Added
 - **Provider failover in the interactive chat loop** (extends P1-3) — failover
   previously covered only the autonomous agent. Now `forge chat` also falls
