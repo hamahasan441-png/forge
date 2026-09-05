@@ -208,6 +208,51 @@ const KEEP = [
 ]
 for (const s of KEEP) ok(`not over-redacted: ${s.slice(0, 46)}`, redact(s) === s)
 
+console.log("== v20.1 P0-4: read_file is bounded ==")
+// v20 called fs.readFileSync() and then split() the whole file, so a large log
+// allocated 3x its size in RSS before the 400-line window was applied.
+const BIGDIR = path.join(WORK, "bigfiles")
+fs.mkdirSync(BIGDIR, { recursive: true })
+const bigPath = path.join(BIGDIR, "huge.log")
+// ~20 MB / 300k lines
+{
+  const chunk = []
+  for (let i = 0; i < 300000; i++) chunk.push(`log line ${i} with enough padding text to be realistic`)
+  fs.writeFileSync(bigPath, chunk.join("\n") + "\n")
+  chunk.length = 0
+}
+const bigSize = fs.statSync(bigPath).size
+const bigCtx = { cwd: BIGDIR, root: BIGDIR }
+const rss0 = process.memoryUsage().rss
+const tBig0 = Date.now()
+const bigRead = String(await execTool(bigCtx, "read_file", { path: "huge.log" }))
+const bigMs = Date.now() - tBig0
+const rssGrowthMB = (process.memoryUsage().rss - rss0) / 1048576
+ok(`20 MB file: first window returned (${bigMs}ms, ${bigSize} bytes on disk)`, bigRead.startsWith("    1| log line 0 "))
+ok(`20 MB file: RSS grew ${rssGrowthMB.toFixed(0)} MB (< ${(bigSize / 1048576).toFixed(0)} MB file ⇒ not slurped)`, rssGrowthMB < bigSize / 1048576)
+ok("20 MB file: pagination hint present", String(await execTool(bigCtx, "read_file", { path: "huge.log", limit: 3 })).includes("more lines follow"))
+const bigTail = String(await execTool(bigCtx, "read_file", { path: "huge.log", offset: 299998, limit: 5 }))
+ok("20 MB file: deep offset works", bigTail.includes("299998| log line 299997") && bigTail.includes("299999| log line 299998"))
+ok("read_file: offset past EOF reports the line count", /past the end of the file \(300000 lines\)/.test(String(await execTool(bigCtx, "read_file", { path: "huge.log", offset: 999999 }))))
+// one 300 KB line (minified bundle) must be clipped, not dumped
+const longPath = path.join(BIGDIR, "onelong.js")
+fs.writeFileSync(longPath, "x".repeat(300000) + "\n")
+const longRead = String(await execTool(bigCtx, "read_file", { path: "onelong.js" }))
+ok("single 300k-char line is clipped", longRead.includes("[line truncated, 300000 chars]") && longRead.length < 12000)
+// streaming must be byte-identical to slurping on a unicode file
+const uniPath = path.join(BIGDIR, "uni.txt")
+const uniLines = []
+for (let i = 0; i < 5000; i++) uniLines.push(`líne ${i} — ünïcode ✓ 你 \t${".".repeat(i % 40)}`)
+fs.writeFileSync(uniPath, uniLines.join("\n") + "\n")
+const uniExpect = uniLines.slice(99, 109).map((l, i) => String(100 + i).padStart(5) + "| " + l).join("\n")
+const uniGot = String(await execTool(bigCtx, "read_file", { path: "uni.txt", offset: 100, limit: 10 }))
+ok("streamed window is byte-identical to readFileSync", uniGot.startsWith(uniExpect))
+ok("exact line total is still reported for ordinary files", uniGot.includes("total 5000"))
+// file without a trailing newline
+const noNlPath = path.join(BIGDIR, "nonewline.txt")
+fs.writeFileSync(noNlPath, "alpha\nbeta\ngamma")
+ok("last line without a newline is returned", String(await execTool(bigCtx, "read_file", { path: "nonewline.txt" })).includes("    3| gamma"))
+
 console.log("== netguard: SSRF address validation ==")
 eq("127.0.0.1 private", isPrivateAddress("127.0.0.1"), true)
 eq("10.x private", isPrivateAddress("10.1.2.3"), true)

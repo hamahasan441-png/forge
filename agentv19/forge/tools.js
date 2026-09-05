@@ -23,6 +23,7 @@
  *     structured failure learning
  */
 import { execFile } from "node:child_process"
+import { StringDecoder } from "node:string_decoder"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -354,6 +355,178 @@ async function runBash(ctx, command, timeoutSec) {
 // file tools — all paths through safePath()
 // ---------------------------------------------------------------------------
 
+// --- v20.1 P0-4: read_file is bounded --------------------------------------
+// v20 called fs.readFileSync() on whatever path it was handed and then split
+// the result, so `read_file {"path":"one-gigabyte.log"}` allocated the whole
+// file as one string plus one array element per line before the 400-line
+// window was even applied. Measured on a 16 MB log: +30 MB RSS. A 2 GB log
+// is an OOM kill of the agent process.
+// readLineRange() streams instead: READ_CHUNK bytes are in flight at a time,
+// only the requested window is kept, no single line is kept in full, and the
+// scan stops as soon as the window is full (or the budget is reached).
+const READ_CHUNK = 64 * 1024 // bytes per read
+const READ_SCAN_CAP = 64 * 1024 * 1024 // never scan more than 64 MB of one file
+const READ_MAX_BYTES = 4 * 1024 * 1024 // hard cap on the bytes one read keeps
+const READ_TOTAL_CAP = 4 * 1024 * 1024 // once the window is full, keep counting
+//   lines only while the file is this small — that keeps the exact "N more
+//   lines; total M" note for ordinary source files without ever scanning a
+//   huge one to the end
+const READ_MAX_LINE = 8000 // one minified line must not blow up the context
+
+/**
+ * Stream the requested [start, end) line window out of a file.
+ * Bounded in every direction: at most READ_CHUNK bytes in flight, at most
+ * READ_MAX_BYTES kept, at most READ_MAX_LINE chars of any single line kept,
+ * at most READ_SCAN_CAP bytes scanned.
+ * Returns { lines, total, truncated, scanned, completed } — `truncated` means
+ * the keep-budget ran out, `completed` means EOF was reached (as opposed to
+ * stopping because the requested window was full).
+ */
+function readLineRange(p, start, end) {
+  const lines = []
+  let total = 0 // lines seen
+  let scanned = 0 // bytes read
+  let kept = 0 // bytes kept for the caller
+  let pending = "" // head of the line we are inside of
+  let extra = 0 // bytes of the current line we counted but did not store
+  let pendingFull = false // current line exceeded READ_MAX_LINE
+  let countOnly = false // window is full; only the line count still matters
+  let endsWithNL = true // the last byte processed was a newline
+  let truncated = false
+  let completed = false
+  let fd
+  try {
+    fd = fs.openSync(p, "r")
+  } catch {
+    return { lines, total, truncated, scanned, completed }
+  }
+  const decoder = new StringDecoder("utf8")
+  const buf = Buffer.alloc(READ_CHUNK)
+  const countNL = (str) => {
+    let c = 0
+    for (let i = str.indexOf("\n"); i !== -1; i = str.indexOf("\n", i + 1)) c++
+    return c
+  }
+  // returns true when the keep-budget is exhausted (the caller must stop)
+  const emit = (text, realLen) => {
+    if (total < start || total >= end) return false
+    const shown = realLen > READ_MAX_LINE ? text.slice(0, READ_MAX_LINE) + ` …[line truncated, ${realLen} chars]` : text
+    if (kept + shown.length + 1 > READ_MAX_BYTES) return true
+    lines.push(shown)
+    kept += shown.length + 1
+    return false
+  }
+  try {
+    while (scanned < READ_SCAN_CAP) {
+      let n = 0
+      try {
+        n = fs.readSync(fd, buf, 0, buf.length, scanned)
+      } catch {
+        break
+      }
+      if (n <= 0) {
+        completed = true
+        break
+      }
+      scanned += n
+      const data = decoder.write(buf.subarray(0, n))
+      endsWithNL = data.charCodeAt(data.length - 1) === 10
+      // the window is already full: count the remaining lines, store nothing
+      if (countOnly) {
+        total += countNL(data)
+        if (scanned >= READ_TOTAL_CAP) break
+        continue
+      }
+      if (pendingFull) {
+        // inside a line longer than READ_MAX_LINE: count bytes, store nothing
+        const i = data.indexOf("\n")
+        if (i === -1) {
+          extra += data.length
+          continue
+        }
+        if (emit(pending, READ_MAX_LINE + extra + i)) {
+          truncated = true
+          break
+        }
+        total++
+        if (total >= end) {
+          total += countNL(data.slice(i + 1))
+          if (scanned >= READ_TOTAL_CAP) break
+          countOnly = true
+          continue
+        }
+        pending = ""
+        extra = 0
+        pendingFull = false
+        let rest = data.slice(i + 1)
+        let nl
+        while ((nl = rest.indexOf("\n")) !== -1) {
+          const line = rest.slice(0, nl)
+          rest = rest.slice(nl + 1)
+          if (emit(line, line.length)) {
+            truncated = true
+            break
+          }
+          total++
+          if (total >= end) break
+        }
+        if (truncated) break
+        if (total >= end) {
+          total += countNL(rest)
+          if (scanned >= READ_TOTAL_CAP) break
+          countOnly = true
+          continue
+        }
+        pending = rest
+        continue
+      }
+      let chunk = pending + data
+      let nl
+      while ((nl = chunk.indexOf("\n")) !== -1) {
+        const line = chunk.slice(0, nl)
+        chunk = chunk.slice(nl + 1)
+        if (emit(line, line.length)) {
+          truncated = true
+          break
+        }
+        total++
+        if (total >= end) break
+      }
+      if (truncated) break
+      if (total >= end) {
+        // from here on only the line count matters
+        total += countNL(chunk)
+        if (scanned >= READ_TOTAL_CAP) break
+        countOnly = true
+        pending = ""
+        continue
+      }
+      pending = chunk
+      if (pending.length > READ_MAX_LINE) {
+        extra = pending.length - READ_MAX_LINE
+        pending = pending.slice(0, READ_MAX_LINE)
+        pendingFull = true
+      }
+    }
+    if (!truncated) {
+      if (total < end) {
+        // the window never filled: what is left is the final line
+        if (pending.length || extra) {
+          if (emit(pending, pending.length + extra)) truncated = true
+          total++
+        }
+      } else if (completed && !endsWithNL) {
+        total++ // the file does not end with a newline
+      }
+    }
+  } finally {
+    try {
+      fs.closeSync(fd)
+    } catch {}
+  }
+  return { lines, total, truncated, scanned, completed }
+}
+
 function read_file(ctx, args) {
   const sp = safePath(ctx, args.path)
   if (!sp.ok) return sp.error
@@ -367,14 +540,26 @@ function read_file(ctx, args) {
   fs.readSync(fd, sniff, 0, sniff.length, 0)
   fs.closeSync(fd)
   if (sniff.includes(0)) return `ERROR: binary file (not readable as text): ${p}`
-  const raw = fs.readFileSync(p, "utf8")
-  const lines = raw.split("\n")
-  const offset = Math.max(1, args.offset || 1)
-  const limit = Math.min(2000, args.limit || 400)
-  const slice = lines.slice(offset - 1, offset - 1 + limit)
-  const numbered = slice.map((l, i) => String(offset + i).padStart(5) + "| " + l).join("\n")
+  // v20.1: stream the window out of the file instead of slurping it
+  const offset = Math.max(1, Math.floor(Number(args.offset) || 1))
+  const limit = Math.min(2000, Math.floor(Number(args.limit) || 400))
+  const { lines, total, truncated, scanned, completed } = readLineRange(p, offset - 1, offset - 1 + limit)
+  const eof = completed || scanned >= stat.size
+  const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`
+  if (!lines.length) {
+    if (offset > total && eof) return `ERROR: offset ${offset} is past the end of the file (${total} line${total === 1 ? "" : "s"})`
+    if (!eof) {
+      return `ERROR: file too large to page that far — read_file scans at most ${mb(READ_SCAN_CAP)} of ${mb(stat.size)}; ` +
+        `offset ${offset} starts beyond line ${total}. Use grep_files to locate the section first.`
+    }
+    return "(empty file)"
+  }
+  const numbered = lines.map((l, i) => String(offset + i).padStart(5) + "| " + l).join("\n")
   let note = ""
-  if (lines.length > offset - 1 + slice.length) note = `\n... (${lines.length - (offset - 1 + slice.length)} more lines; total ${lines.length})`
+  const shown = offset - 1 + lines.length
+  if (truncated) note = `\n... (read_file kept ${mb(READ_MAX_BYTES)} — use offset/limit to page through the rest)`
+  else if (eof && total > shown) note = `\n... (${total - shown} more lines; total ${total})`
+  else if (!eof) note = "\n... (more lines follow — use offset/limit to continue)"
   return cap(numbered + note, ctx.maxToolOutput)
 }
 
