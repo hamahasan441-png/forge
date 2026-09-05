@@ -1,0 +1,81 @@
+forge v20.0.0 "PRODUCTION" — CLI-only build
+- zero-dependency Node CLI (>=18), runs directly against providers (no localhost)
+- 18 providers with per-provider contextWindow + keyUrl docs: openai, anthropic,
+  zai, deepseek, groq, openrouter, gemini, mistral, xai, together, cerebras,
+  nvidia, siliconflow, qwen, github-models, huggingface, ollama, custom
+  — OpenAI AND Anthropic wire protocols
+- v20 HARDENING (defense in depth, all verified by tests):
+  * shellguard: structural command parsing (quote-aware split/tokenize) +
+    path-aware risk classification — block/danger/confirm/low/safe. Catastrophic
+    commands (rm -rf /, mkfs, dd to raw devices, fork bombs, shutdown, redirects
+    over /etc/passwd, find / -delete) ALWAYS refused; destructive-outside-project
+    refused for the model; risky commands ask y/N on a TTY (FORGE_ASSUME_YES=1
+    or tools.assumeYes when piped); sudo needs tools.allowSudo
+  * safePath: writes confined to the project dir (../, absolute, and SYMLINK
+    escapes caught via realpath of nearest existing ancestor); reads outside
+    allowed except sensitive files (.env, .ssh, keys, credentials, forge config)
+    checked on logical AND real path; ~ expanded like a shell
+  * SSRF (netguard): fetch_url resolves DNS and validates EVERY address —
+    loopback, 0/8, 10/8, CGNAT 100.64/10, 172.16/12, 192.168/16, link-local +
+    cloud metadata, IPv6 ::1/fc00::/7/fe80::/10/IPv4-mapped; DNS-rebinding safe
+    (all resolved records must pass); tools.fetchPrivateUrls /
+    FORGE_ALLOW_PRIVATE_URLS=1 opt-in for local stacks
+  * secrets: every tool RESULT, memory write, and terminal note is redacted
+    (sk-*, AKIA*, ghp_*, xox*, AIza*, JWTs, private keys, KEY=value shapes);
+    display stays raw for the user, the model + sessions never see raw secrets
+  * skills: name validation (plain dir names only) + realpath containment —
+    ../../ traversal impossible; skills-dir resolution order fixed
+- v20 STATE: sessions record cwd + title + rolling summary + usage; forge resume
+  <n|id> restores conversation AND working directory; checkpoints track CREATED
+  files (sha256-verified) so undo removes them — apply_patch create+modify is
+  atomically reversible; context-overflow recovery (400 too-large → shrink +
+  compact → bounded retry, session persisted before failure); null-provider
+  crash guards on chat/ask/agent
+- v20 INTELLIGENCE: hierarchical memory (global ~/.forge/memory.md + project
+  ~/.forge/projects/<hash>/memory.md) retrieved by RELEVANCE (scored against the
+  task, deduped, capped — never a full dump); structured failure learning
+  (memory action=learn → problem/root-cause/fix, retrieved by symptom); project
+  profile (languages, package manager, test/build/lint, git branch, frameworks)
+  cached + signature-refreshed; effort profiles fast|balanced|deep|auto (auto
+  classifies task complexity — complex/critical get deep thinking, announced)
+- v20.1 P0 HARDENING ("safe by default", see forge/PLAN-v21.md):
+  * shellguard unwraps interpreter wrappers and classifies the PAYLOAD
+    (sh -c / eval / env / timeout / nohup / xargs / python3 -c / node -e /
+    $(…) / backticks) — `bash -c "echo hi"` stays safe, `sh -c "rm -rf /"` blocks
+  * `$VAR` / `${VAR}` in command targets are expanded before classification
+  * redaction: 4-char threshold for high-risk names (password/token/secret/
+    api_key/…), escaped JSON values, Authorization: Bearer/Basic, unprefixed
+    high-entropy blobs; git SHAs, UUIDs, hashes, paths and URLs stay untouched
+  * read_file streams a bounded window (64 KB in flight, 4 MB kept, 8 K chars
+    per line, 64 MB scanned) instead of readFileSync+split of the whole file
+  * checkpoints gzip backups (node:zlib): per-file cap 2 MB -> 64 MB, plus a
+    512 MB budget for the whole checkpoint directory
+- v20 AGENTS: delegate sub-agents get ROLES (researcher/reviewer/tester/
+  security/coder), delegateTimeoutSec, resource-aware concurrency cap
+  (low-RAM/ARM64 → 1), depth capped at 2; plan-mode agents can delegate
+  read-only research (v19 misclassification fixed); agent.maxToolCalls runaway
+  guard; Retry-After honored on transient provider errors
+- v20 TERMINAL UX: persistent command history (~/.forge/history, arrow keys
+  across sessions), backslash multiline input, /status snapshot (provider,
+  context %, session, cwd, effort, memory, resources, safety flags), resize-aware
+  output, doctor now shows platform/arch/RAM/cores/terminal/git/project-profile
+  + writable sessions/state dirs
+- v20 INSTALL: package.json files whitelist (lean installs — no pyc/PLAN cruft);
+  clean-room test installs into an isolated temp npm prefix (no root, no prior
+  forge, PATH-isolated) — Termux/proot friendly
+- v19 carryover: AutoPick, terminal-in-chat (cd/export persist, model-visible
+  notes), deep think (--deep + provider reasoning params), tiered shrink-then-
+  summarize context reduction, lazy wizard import
+- 17 agent tools (auto-used in chat AND agent): bash (risk-classified),
+  read/write/edit, multi_edit (atomic), apply_patch (atomic unified diff,
+  created-file undo), glob_files, grep_files, list_dir, fetch_url (SSRF-guarded)
+  + web_search, todo, think, memory (hierarchical), delegate (roles),
+  load_skill (traversal-safe), git_status; parallel reads, serialized writes,
+  checkpoints + undo; PLAN MODE (--plan) read-only hard-block
+- doctor: env self-check (platform/RAM/git/dirs) + provider/context line +
+  ✓ tested badge (--tools probes all 17 tools, offline tools SKIP cleanly)
+- E2E: 247/247 checks + 222/222 hardening unit checks + 31/31 provider-wire
+  robustness checks + 13/13 diffpatch engine tests + 50/50 clean-room install
+  verification
+- change plans inside: forge/PLAN-v15.md … forge/PLAN-v20.md,
+  plus forge/PLAN-v21.md (v20.1+ roadmap: P0/P1/P2/P3)
