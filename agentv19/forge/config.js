@@ -25,7 +25,9 @@ export function defaultConfig() {
     skills: { enabled: true, dir: "" },
     agent: { maxSteps: 25, timeoutSec: 45, maxToolOutput: 12000, maxToolCalls: 80, delegateTimeoutSec: 180, maxParallelSubAgents: 2 },
     chat: { stream: true, system: "", showReasoning: true, maxHistoryMessages: 40, tools: true, compact: true, compactAtChars: 48000, profile: "auto", restoreCwd: true, historySize: 300 },
-    tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, fetchPrivateUrls: false },
+    // v20.5: `intelligence` is the master switch for the capability/router/
+    // verification layer; everything below it only matters while it is on.
+    tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, fetchPrivateUrls: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true },
     retry: { attempts: 3, backoffMs: 1500, connectMs: 30000, firstByteMs: 120000, requestTimeoutMs: 180000 },
   }
 }

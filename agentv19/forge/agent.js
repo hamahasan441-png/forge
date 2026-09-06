@@ -21,6 +21,8 @@ import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy } from "./prov
 import { readHealth, recordHealth } from "./health.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
+import { createToolIntel } from "./toolintel.js"
+import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { DEFAULT_DIR } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -74,7 +76,7 @@ const ROLE_DIRECTIVES = {
   coder: "You are an ANALYSIS sub-agent for implementation planning: identify exact files and edits needed, but do NOT write — the main agent applies the changes.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -95,6 +97,12 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "- Read-only research that would flood context: `delegate` it (role=tuner: researcher/reviewer/tester/security/coder).",
     "- Facts worth remembering later: `memory` append (scope=project for repo conventions, global for user preferences).",
   ]
+  // v20.5: the capability registry speaks for itself — one compact policy
+  // block instead of tool-selection rules scattered through the prompt.
+  if (registry) {
+    const guidance = toolGuidance(task, { registry, cwd, readOnly: readOnly || planOnly })
+    if (guidance) lines.push("", guidance)
+  }
   if (role && ROLE_DIRECTIVES[role]) lines.push("", ROLE_DIRECTIVES[role])
   if (readOnly && !planOnly) lines.push("", "You are a READ-ONLY sub-agent: write tools are disabled. Investigate and report.")
   if (deep) {
@@ -265,8 +273,38 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
         }).then((r) => r.text),
   })
 
+  // v20.5: capability registry → router → policy gate → execution →
+  // observation → verification, wrapped around the UNCHANGED tools.exec (so
+  // ShellGuard / SafePath / NetGuard / secret redaction stay exactly where
+  // they are). Opt out with `forge config set tools.intelligence false`.
+  const intel = createToolIntel({
+    exec: tools.exec,
+    ctx: {
+      cwd: process.cwd(),
+      root: process.cwd(),
+      readOnly: readonly,
+      allowSudo: config.tools?.allowSudo === true,
+      assumeYes: config.tools?.assumeYes === true,
+    },
+    config,
+    onEvent,
+    runId,
+    taskId: runId,
+    task,
+    plugins,
+    legacyEvents: true,
+  })
+  if (!sub && config.tools?.explainRouting !== false) {
+    try {
+      const decision = intel.route(task, { constraints: { readOnly: readonly } })
+      if (decision?.chain?.active?.length) {
+        onEvent?.({ type: "info", text: `routing: ${decision.chain.reason}` })
+      }
+    } catch { /* routing advice is best-effort */ }
+  }
+
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : task },
   ]
 
@@ -282,7 +320,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     if (ended) return
     ended = true
     log?.end(status, extra)
-    onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false })
+    onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats() })
   }
   try {
     while (steps < maxSteps) {
@@ -298,7 +336,8 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
           model: p.model,
           providerName: p.name,
           messages,
-          tools: tools.defs,
+          // v20.5: a tool disabled by policy is never advertised to the model
+          tools: intel.toolDefs(tools.defs),
           signal,
           deep: deepEffort,
           maxTokens: deepEffort ? 16384 : undefined,
@@ -358,42 +397,21 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
           content: msg.content || "",
           tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
         })
-        // v16 parallel execution: read-only tools concurrently, write tools
-        // serialized; results reassembled in the ORIGINAL call order.
-        // v20: `delegate` counts as read-only (safe to parallelize, capped).
-        const results = new Array(msg.toolCalls.length)
-        const runTool = async (tc) => {
-          // hard guard (v16): read-only / plan-mode agents never execute write tools
-          if (readonly && WRITE_TOOLS.has(tc.name)) return "BLOCKED: write tools are disabled in this read-only agent"
-          return await tools.exec(tc.name, safeJson(tc.args))
-        }
-        await Promise.all(
-          msg.toolCalls.map(async (tc, i) => {
-            if (WRITE_TOOLS.has(tc.name)) return
-            onEvent?.({ type: "tool_start", name: tc.name, args: tc.args, step: steps })
-            const tTool = Date.now()
-            let result
-            try {
-              result = await runTool(tc)
-            } catch (e) {
-              result = `ERROR: ${e.message}`
-            }
-            results[i] = { result, ms: Date.now() - tTool }
-          })
+        // v20.5 tool intelligence layer: the router decides what may run
+        // concurrently (read-only, parallel-safe, no target conflict) and what
+        // must be serialized; every call passes the capability check, the
+        // policy gate and the EXISTING safety controls, is classified on
+        // failure and verified after a mutation. Results are reassembled in
+        // the ORIGINAL call order, so the wire history never changes shape.
+        // (v16 behaviour — reads concurrent, writes serialized — is preserved;
+        //  `tools.intelligence: false` reverts to the plain execute path.)
+        const results = await intel.runBatch(
+          msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) })),
+          { step: steps }
         )
         for (let i = 0; i < msg.toolCalls.length; i++) {
           const tc = msg.toolCalls[i]
-          if (WRITE_TOOLS.has(tc.name)) {
-            onEvent?.({ type: "tool_start", name: tc.name, args: tc.args, step: steps })
-            const tTool = Date.now()
-            let result
-            try {
-              result = await runTool(tc)
-            } catch (e) {
-              result = `ERROR: ${e.message}`
-            }
-            results[i] = { result, ms: Date.now() - tTool }
-          }
+          if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
           const { result, ms } = results[i]
           toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
           if (log) {
@@ -402,7 +420,9 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
             log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
             if (okRes && WRITE_TOOLS.has(tc.name) && tc.name !== "bash") for (const [fp, action] of journalFiles(tc.name, tc.args, r)) log.touched(fp, action)
           }
-          onEvent?.({ type: "tool_result", name: tc.name, result: String(result), step: steps, ms })
+          // tool_start / tool_result events are emitted by the intelligence
+          // layer (same shape as v16–v20.4), together with the structured
+          // TOOL_* events the premium UI consumes.
           messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) })
         }
         // v17 token reducer: summarize mid-run when approaching the window budget
@@ -420,7 +440,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
     endRun("completed", { text: finalText, wrote })
-    return { text: finalText, steps, toolLog, planOnly, runId, wrote }
+    return { text: finalText, steps, toolLog, planOnly, runId, wrote, toolStats: intel.stats(), toolRecords: intel.records() }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
@@ -501,6 +521,21 @@ export function agentEventPrinter() {
       console.log(yellow(`  ↻ transient provider error (${ev.error}) — retrying… ${ev.left ?? ""}`))
     } else if (ev.type === "failover") {
       console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
+    } else if (ev.type === "TOOL_VERIFIED") {
+      const label = ev.ok ? green(`✓ verified: ${ev.summary}`) : red(`✗ verification failed: ${ev.summary}`)
+      console.log(dim("  ⌁ ") + label)
+    } else if (ev.type === "TOOL_RETRY") {
+      console.log(yellow(`  ↻ ${ev.tool} — ${ev.reason} → retry ${ev.attempt}`))
+    } else if (ev.type === "TOOL_FALLBACK") {
+      console.log(dim(`  ⇢ ${ev.tool}: ${ev.alternative ? `try ${ev.alternative} — ` : ""}${ev.reason}`))
+    } else if (ev.type === "TOOL_BLOCKED" && !ev.bySafetyControl && !ev.conflict) {
+      console.log(yellow(`  ⛔ ${ev.tool} blocked — ${String(ev.reason).slice(0, 160)}`))
+    } else if (ev.type === "TOOL_SELECTED") {
+      if (process.env.FORGE_DEBUG === "1") console.log(dim(`  ◦ route: ${ev.tool} [${ev.capability}/${ev.klass}/${ev.risk}/${ev.mode}] ${String(ev.reason).slice(0, 100)}`))
+    } else if (ev.type === "TOOL_ESCALATION") {
+      console.log(yellow(`  ? ${ev.tool} needs your decision — ${String(ev.question).slice(0, 160)}`))
+    } else if (ev.type === "TOOL_CACHED") {
+      console.log(dim(`  ⚡ ${ev.tool}: ${ev.reason}`))
     } else if (ev.type === "info") {
       console.log(dim(`  · ${ev.text}`))
     } else if (ev.type === "compacted") {

@@ -3,6 +3,161 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## [Unreleased] — v20.5.0 (in progress) — "tool intelligence"
+
+### Added
+- **Tool intelligence & capability layer.** forge no longer thinks "I have 17
+  tools"; it thinks *"what capability is required, which tool provides it, is
+  it safe, can it run now, can it run in parallel, how do I verify it, and what
+  is the safest recovery if it fails"*. Five new zero-dependency modules, each
+  wrapped **around** the existing safety architecture — ShellGuard, SafePath,
+  NetGuard, secret redaction, checkpoints and the run journal are untouched and
+  still have the last word.
+  - *`capabilities.js` — capability registry.* One central place that describes
+    every tool: `capabilities[]`, class (READ/WRITE/EXECUTE/NETWORK/SECURITY/
+    VERIFICATION/RECOVERY), baseline `risk`, `read_only`, `reversible`,
+    `parallel_safe`, `requires_confirmation`, `requires_network`,
+    `requires_filesystem`, `timeout`, `cost`, `verification_required`,
+    `idempotent`, `preferred_for[]`, `avoid_when[]`, `verify_after[]` and a
+    lifecycle `status` (enabled / disabled / deprecated / experimental).
+    Tool-selection knowledge lives here, not scattered through the agent.
+    `operationRisk()` classifies the **actual operation**, not the tool name:
+    `bash echo hi` is LOW, `bash npm test` is LOW, `bash git commit` is MEDIUM,
+    `rm -rf build` is HIGH and `rm -rf /` is CRITICAL — the level is derived
+    from shellguard, never re-implemented. A registry invariant is asserted in
+    CI: the read/write split must agree with `tools.js` `WRITE_TOOLS`.
+  - *`router.js` — tool router.* Takes task, state, available tools,
+    constraints, risk and context; returns `selected_tool`, `reason`,
+    `arguments`, `execution_mode` and a `verification_plan`, plus the chain the
+    step belongs to. It prefers the **smallest effective chain**: "read
+    src/app.js" is one `read_file`; "find where auth tokens are generated" is
+    search → symbol search → read (and never an edit); "fix the failing auth
+    test" is inspect test → locate implementation → inspect deps → edit →
+    focused test → regression. Steps whose answer forge already has are skipped
+    with a reason instead of being re-run. The router also schedules a batch:
+    independent read-only calls run concurrently, mutations are serialized, and
+    two writes to the same target are flagged as a conflict.
+  - *`diagnose.js` — failure classification & recovery.* Every tool result is
+    classified as INVALID_ARGUMENT / NOT_FOUND / PERMISSION_DENIED / TIMEOUT /
+    NETWORK_FAILURE / DEPENDENCY_FAILURE / SYNTAX_FAILURE / TEST_FAILURE /
+    BUILD_FAILURE / SAFETY_BLOCK / CANCELLED / UNKNOWN, and mapped to an ordered
+    recovery strategy (retry once *only when the operation is idempotent* →
+    reduce scope → alternate tool → fix arguments → escalate → abort). A safety
+    block never suggests a retry. §17 escalation is explicit: forge asks a human
+    for permission/credential decisions, irreversible high-risk operations,
+    dependency additions and strategies that have already failed — not for
+    ordinary coding work.
+  - *`verify.js` — verification contracts.* Mutations declare what must be true
+    afterwards and forge proves it, proportionally to risk: an edit is checked
+    for "the replacement is really in the file" plus a real syntax check
+    (`node --check`, ESM-aware; `JSON.parse` for JSON), a patch for "the files
+    it touched exist", and high-risk changes additionally *recommend* a test or
+    build run that the agent performs through the normal bash tool. Verification
+    never runs `npm test` behind the user's back and never invents a failure:
+    a file type with no local checker is reported as skipped.
+  - *`toolintel.js` — the execution pipeline.* SELECT → capability check →
+    policy gate → **existing** security controls → execute → observe → state
+    update → verify → repair advice, emitting `TOOL_SELECTED`, `TOOL_STARTED`,
+    `TOOL_OUTPUT`, `TOOL_COMPLETED`, `TOOL_FAILED`, `TOOL_RETRY`,
+    `TOOL_FALLBACK`, `TOOL_BLOCKED`, `TOOL_VERIFIED` and `TOOL_CACHED` for the
+    UI. It never repeats a call that already failed twice with identical
+    arguments (it explains what to change instead), detects already-completed
+    mutations (an edit whose replacement is already present is an idempotent
+    no-op, not an error; `mkdir` of an existing directory is "already done"),
+    serves identical reads from a mtime- and mutation-invalidated cache,
+    retries a transient network/timeout failure exactly once for idempotent
+    read-only tools, and records the full per-call state (`tool_call_id`,
+    `task_id`, `run_id`, `arguments_hash`, timings, status, error,
+    `files_changed`, `checkpoint`, `verification`).
+- **`forge tools`** — inspect the capability registry: the table with class,
+  risk, read/write, parallel-safety and status; `forge tools <name>` for the
+  full metadata card; `forge tools --route "task"` to see exactly what the
+  router would select, why, in which mode and how it would be verified;
+  `--capability`, `--class` and `--json` for scripting.
+- **Plugins register through the same system (§18).** A `~/.forge/tools/*.mjs`
+  plugin may declare `capabilities`, `risk`, `parallel_safe`, `timeout`,
+  `verification_required`, `status`, … and is routed, gated, classified and
+  verified exactly like a built-in. Anything it does not declare gets a
+  conservative default (write-class, not parallel-safe, verification required).
+  No core change is needed to add a tool.
+- **Config knobs** (all default to the safe/on setting):
+  `tools.intelligence` (master switch — off restores the pre-v20.5 call path),
+  `tools.verify`, `tools.cache`, `tools.maxRisk`, `tools.disabled[]`,
+  `tools.deprecated[]`, `tools.experimental`, `tools.explainRouting`.
+
+### Changed
+- The agent loop and interactive chat now execute tool batches through the
+  intelligence layer instead of their own copies of "reads parallel, writes
+  serial". Behaviour is preserved (same ordering, same wire history, same
+  `BLOCKED: write tools are disabled in this read-only agent` message) and both
+  modes gain gating, classification, verification and observability.
+- The agent system prompt carries a compact TOOL POLICY block generated *from
+  the registry* (including which tools are disabled/deprecated in this project
+  and the suggested chain for the task) instead of hard-coded tool advice.
+- The terminal UI shows real verification results (the VERIFICATION panel is
+  fed by checks that actually ran) and notices for blocks, retries, fallbacks
+  and cache hits. `FORGE_DEBUG=1` prints a per-run tool-intelligence summary.
+
+### Fixed (full-review audit of the new layer)
+- **Argument hashing erased nested arguments.** `argsHash` passed a key
+  allow-list to `JSON.stringify`, so `{edits:[{old,new}]}` serialized as
+  `{"edits":[{}]}`: two completely different `multi_edit` calls produced the
+  same hash, and a legitimate third edit could be refused as "already failed
+  2× with identical arguments". Hashing is now a deep, order-stable
+  serialization (array order still matters, because it is meaningful).
+- **A retried call left no trace.** The abandoned first attempt was never
+  finished or recorded, so a transient failure was invisible in `records()`,
+  `stats()` and the debug summary, and the reported duration excluded it. The
+  attempt is now recorded (`status: "failed"`, `retried: true`, plus a
+  `TOOL_FAILED{willRetry:true}` event) and the durations are summed.
+- **Escalation was reported as a block.** Asking the user for a judgement call
+  emitted `TOOL_BLOCKED`, so the UI said "blocked" for a call that actually
+  ran. It now emits its own `TOOL_ESCALATION` event, rendered as "needs your
+  decision".
+- **Chat dropped every structured event.** `createToolIntel` was constructed
+  with `onEvent: null`, so verification results, blocks, retries, escalations
+  and cache hits never reached the chat UI. They are bridged now (tool rows are
+  still emitted once, by the chat loop).
+- **Chat could serve a stale cached read.** The in-chat shell pass-through and
+  `/undo` change files behind the layer's back; both now invalidate the cache.
+- **Disabled tools were still advertised to the model.** A tool disabled by
+  policy was sent in the request and only refused after the model called it —
+  which teaches the model to keep calling it. `tools.disabled` (and
+  `tools.experimental: false`) now filter the tool definitions in both agent
+  and chat mode.
+- **Context awareness was never fed.** The "skip a step the run already
+  answered" logic (§11) had no producer in production: the layer now derives
+  `readFiles` / `knownFiles` / `testsJustPassed` from its own records — a file
+  that was read, or found by a search, is not rediscovered.
+- **`intel.route(task, opts)`** lost the working directory when options were
+  passed (the raw options overwrote the merged context).
+- **Result-aware routing after a mutation was dead code** — it looked for a
+  `mutation` field that no record carried. Records now carry `mutation` (and
+  the router also accepts a WRITE/EXECUTE class).
+- **Registry normalization left `klass` and `classes[0]` disagreeing** for a
+  read-only tool that declared itself WRITE; both are corrected now.
+- **Checkpoint attribution** could credit a call with an unrelated older
+  checkpoint (in chat, where runs have no `runId`); it must now also be newer
+  than the call.
+- **Tool records are secret-redacted.** `tools.js` already redacts every
+  model-facing result, but the per-call record is surfaced too (`--json`,
+  `FORGE_DEBUG`, run inspection) and stored the raw slice — a stored secret is
+  a leaked secret.
+- `forge doctor` reports the registry invariant it always documented
+  (`registry: 17 tools, classification matches tools.js`), `/status` shows the
+  per-session tool-intelligence counters, and `describeRoute` is no longer glued
+  to the end of a doc comment.
+
+### Tests
+- Three new suites in `npm test`: `capabilities` (metadata completeness, the
+  WRITE_TOOLS invariant, lifecycle, plugin registration, operation risk),
+  `router` (intent analysis, smallest chain, context skipping, constraints,
+  scheduling/conflicts, cost awareness, result-aware routing) and `toolintel`
+  (security integration, secret redaction, failure classification, recovery,
+  timeout/watchdog, idempotency, caching, verification, escalation, tool state,
+  events, UI bridge, the "layer switched off" regression path, and a dedicated
+  block pinning every audit fix above).
+
 ## [Unreleased] — v20.4.0 (in progress)
 
 ### Added
