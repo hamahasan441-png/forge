@@ -3,6 +3,29 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## [Unreleased] — v20.4.0 (in progress)
+
+### Added
+- **Tests for effort classification, the model cache and skill indexing** —
+  `classifyTaskComplexity`/`resolveEffort` decide whether a task gets DEEP
+  reasoning (bigger budgets, slower, costlier), a user-visible and cost-relevant
+  decision that had no test at all; `modelcache` backs the offline FREE badges;
+  `indexSkills` is what puts skills in front of the model. New
+  `tests/test-effort.mjs` (37 checks) covers the five complexity levels, every
+  profile path (including that a switch is always explained, never silent),
+  cache write/read/merge and corrupt-file resilience, and skill indexing with
+  H1/intro-line description fallback. Export coverage 67.4% → **72.6%**.
+
+### Changed
+- **`PLAN-v21.md` now reflects reality.** It still declared "Status: proposed.
+  Nothing here is implemented yet" while nearly all of it had shipped, and its
+  measured table still claimed no CI, three copies of the version string and 57%
+  uncovered exports. It now carries a delivery ledger (§0.1) recording what
+  shipped, what is partial, and what was deliberately NOT done and why — the
+  Windows shell item in particular, which stays open because the safety engine is
+  POSIX-specific and shipping it without a Windows-aware command classifier would
+  reduce safety.
+
 ## [Unreleased] — v20.3.0 (in progress)
 
 ### Fixed
