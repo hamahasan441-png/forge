@@ -1009,6 +1009,58 @@ async function main() {
 
       err("usage: forge mcp [list|tools|test <name>]"); process.exit(1); return
     }
+    case "lsp": {
+      // v23: inspect Language Server Protocol servers configured under lsp.servers.
+      //   forge lsp             list configured servers
+      //   forge lsp test <file> resolve the server for <file>, open it, and show
+      //                         its diagnostics (a real end-to-end check)
+      const { serverForFile, connectServer, languageIdForFile, pathToUri } = await import("./lsp.js")
+      const sub = (positional[1] || "list").toLowerCase()
+
+      if (sub === "list") {
+        const all = Object.entries(config.lsp?.servers || {})
+        if (JSON_OUT) { emitJson({ servers: all.map(([name, s]) => ({ name, command: s.command, extensions: s.extensions ?? [], disabled: s.disabled === true })) }); return }
+        console.log(bold("LSP servers — configured under lsp.servers"))
+        if (!all.length) {
+          console.log(dim("  (none) — add one, e.g.:"))
+          console.log(dim("    forge config set lsp.servers.ts.command typescript-language-server"))
+          console.log(dim('    forge config set lsp.servers.ts.args \'["--stdio"]\'  (then set lsp.servers.ts.extensions)'))
+          return
+        }
+        for (const [name, s] of all) {
+          const tag = s.disabled === true ? red("disabled") : green("enabled")
+          console.log(`  ${cyan(name.padEnd(14))} ${tag}  ${dim((s.extensions ?? []).join(" "))}  ${dim([s.command, ...(s.args ?? [])].join(" ").slice(0, 50))}`)
+        }
+        return
+      }
+
+      if (sub === "test") {
+        const file = positional[2]
+        if (!file) { err("usage: forge lsp test <file>"); process.exit(1); return }
+        const abs = path.resolve(String(file))
+        if (!fs.existsSync(abs)) { err(`no such file: ${abs}`); process.exit(1); return }
+        const found = serverForFile(config, abs)
+        if (!found) { err(`no LSP server configured for ${path.extname(abs) || "this file type"} (forge lsp — to list)`); process.exit(1); return }
+        console.log(dim(`connecting ${bold(found.name)} for ${path.basename(abs)} — ${[found.spec.command, ...(found.spec.args ?? [])].join(" ")}`))
+        let client
+        try { client = await connectServer(found.name, found.spec, { rootUri: pathToUri(process.cwd()) }) }
+        catch (e) { err(`could not start language server: ${e.message}`); process.exit(1); return }
+        try {
+          const uri = pathToUri(abs)
+          client.openDoc(uri, languageIdForFile(abs, found.spec), fs.readFileSync(abs, "utf8"))
+          const diags = await client.diagnosticsFor(uri, 4000)
+          ok(`connected — ${diags.length} diagnostic(s)`)
+          for (const d of diags.slice(0, 50)) {
+            const sev = ({ 1: red("error"), 2: yellow("warn"), 3: cyan("info"), 4: dim("hint") })[d.severity] || dim("note")
+            console.log(`  ${sev} ${dim((d.range?.start?.line ?? 0) + 1 + ":" + ((d.range?.start?.character ?? 0) + 1))}  ${String(d.message).split("\n")[0].slice(0, 100)}`)
+          }
+          if (JSON_OUT) emitJson({ server: found.name, file: abs, diagnostics: diags })
+        } finally { await client.close() }
+        return
+      }
+
+      err("usage: forge lsp [list|test <file>]"); process.exit(1); return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()

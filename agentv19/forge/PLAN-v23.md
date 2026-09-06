@@ -83,11 +83,22 @@ untested process-management code into the interactive path, it is a separate
 change. Autonomous runs (`forge agent`, the meta controller, delegates, plan
 mode) — where MCP tools matter most — are fully covered.
 
-### 2. LSP bridge — `lsp.js` (planned)
-Zero-dep JSON-RPC to a language server the user already has installed. New
-read-only tools: `definition`, `references`, `hover_type`, `diagnostics`,
-`rename_symbol`; diagnostics feed the verification ledger. Closes the
-code-understanding gap.
+### 2. LSP bridge — `lsp.js`  ✅ client delivered (PR #12); agent tools next
+Zero-dependency JSON-RPC client over the LSP stdio transport (Content-Length
+framing, byte-accurate): initialize handshake, document sync (`didOpen`),
+`textDocument/definition` · `references` · `hover`, server-pushed
+`publishDiagnostics` captured and awaitable, and a polite `shutdown`/`exit` with
+a SIGKILL fallback. Servers are configured per language under `lsp.servers`
+(OFF by default), resolved by file extension, launched from config only —
+read-only, since a language server observes code, never mutates it.
+`forge lsp [list|test <file>]` resolves the server for a file, opens it, and
+prints real diagnostics. `test-lsp.mjs` (25 checks) proves it against a stand-in
+language server, including byte-accurate framing on a multi-byte document.
+
+**Next:** the read-only agent tools on top — `lsp_definition`, `lsp_references`,
+`lsp_hover`, `lsp_diagnostics` — over a per-run session manager that lazily
+starts one server per language and is closed with the run, and feeding
+diagnostics into the verification ledger.
 
 ### 3. Semantic retrieval (planned)
 Optional provider-embedding ranking added to `retrieval.js`, with BM25 kept as

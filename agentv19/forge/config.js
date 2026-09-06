@@ -43,6 +43,12 @@ export function defaultConfig() {
     // choke point as local plugins. Launched from THIS config only, never model
     // output.
     mcp: { servers: {} },
+    // v23: Language Server Protocol servers for real code understanding
+    // (definition/references/hover/diagnostics). OFF by default. Each entry keys
+    // a language: { command, args?, extensions:[".ts",...], languageId?, env?,
+    // disabled? }. Read-only; launched from THIS config only, never model output.
+    lsp: { servers: {} },
+
     retry: { attempts: 3, backoffMs: 1500, connectMs: 30000, firstByteMs: 120000, requestTimeoutMs: 180000 },
   }
 }

@@ -38,6 +38,22 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   namespacing, the plugin adapter, timeout on a hung server, launch failure —
   and, end-to-end, that the real `runAgent` invokes an MCP tool, the result
   flows back, and the server is shut down afterward.
+- **Language Server Protocol (LSP) client** (`lsp.js`, autonomy v23 Tier 1) —
+  the biggest *code-understanding* gain: real go-to-definition, find-references,
+  hover types and compiler diagnostics from the same engine the user's editor
+  uses, instead of a regex repo-map. Zero dependencies: an LSP stdio client with
+  byte-accurate `Content-Length` framing (not MCP's newline framing), the
+  initialize handshake, document sync (`didOpen`), `textDocument/definition`,
+  `references`, `hover`, server-pushed `publishDiagnostics` captured and
+  awaitable, and a polite `shutdown`/`exit` with a SIGKILL fallback so a run
+  never leaks a child process. Servers are configured per language under
+  `lsp.servers` (**off by default**), resolved by file extension, launched from
+  config only — read-only, since a language server observes code, never mutates
+  it. New `forge lsp [list|test <file>]` resolves the server for a file, opens
+  it, and prints real diagnostics. `test-lsp.mjs` (25 checks) proves the
+  protocol against a stand-in language server, including byte-accurate framing on
+  a multi-byte document and diagnostics capture. The read-only agent tools on top
+  (`lsp_definition`/`references`/`hover`/`diagnostics`) are the next step.
 - **`PLAN-v23.md`** — the review of the v21 agent and the roadmap to
   best-in-class (MCP, LSP, semantic retrieval, vision, browser, sandbox,
   benchmark), with this MCP client marked delivered.
