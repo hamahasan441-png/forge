@@ -5,7 +5,9 @@ the **forward plan**: what to improve next, in what order, why, and how we will
 know it worked. Every item below is either something the audit measured, a gap
 a test named, or a limitation the code itself documents.
 
-Status of this document: **proposed**. Nothing here is implemented yet.
+Status of this document: **largely delivered** (v20.1 → v20.4). It is kept as the
+record of what was proposed, what shipped, and what was deliberately not done —
+see §0.1. Items still open are marked OPEN below.
 
 ---
 
@@ -19,9 +21,43 @@ Status of this document: **proposed**. Nothing here is implemented yet.
 | `tests/test-providers.mjs` | 31 checks — 0.3 s |
 | `tests/test-diffpatch.mjs` | 13 checks — 0.2 s |
 | `tests/cleanroom-v20.sh` | 50 checks — 3.5 s (installs into an isolated npm prefix) |
-| exported symbols never named by any test | **60 of 106 (57%)** |
-| CI | **none** (no `.github/`, no `npm test`) |
-| version string defined in | **3 places** (`package.json`, `forge.js:44`, `chat.js:41`) |
+| exported symbols never named by any test | **37 of 135 (27%)** — was 57%; `npm run coverage` (P2-2) |
+| CI | GitHub Actions: Node 20/22 unit lane + full lane, on every push (P2-1) |
+| version string defined in | **1 place** (`package.json`, read via `version.js`) (P1-7) |
+
+### 0.1 What actually shipped
+
+| item | status |
+|---|---|
+| P0-1 … P0-5 (safety: wrapper unwrapping, `$VAR`, redaction, bounded `read_file`, gzip checkpoints) | **done** (v20.1) |
+| P1-2 shared walk policy + `.gitignore`-aware file tools | **done** |
+| P1-3 provider failover | **done** — agent loop *and* interactive chat, opt-in |
+| P1-4 never lose work on Ctrl-C | **done** — partial answer kept, `/retry` regenerates |
+| P1-5 `forge memory` + dedupe/prune | **done** |
+| P1-6 session rotation cap + `--search` | **done** |
+| P1-7 single version source + `npm test` + CHANGELOG | **done** |
+| P1-9 plan files + `forge plan list\|show\|apply` | **done** |
+| P1-10 `install.sh` (single attempt, `--prefix`, pre-flight) | **done** |
+| P2-1 CI | **done** |
+| P2-2 coverage harness | **done** — `npm run coverage`, non-blocking CI job |
+| P2-4 docs consolidation (stop duplicating counts) | **done** |
+| P2-5 skill linting (`forge skills --check`) | **done** — all 69 bundled skills pass |
+| P2-6 structured diagnostics (`--json`, `FORGE_DEBUG`) | **done** |
+| P3-1 repo map / symbol index | **done** — injected per run, bounded |
+| P3-2 retrieval quality | **done** — BM25 ranks the repo map and memory by task |
+| P3-4 multi-file transactions | **done** — `forge undo --run` rolls back a whole run |
+| P3-5 tool plugin API | **done** — `~/.forge/tools/*.mjs`, same redaction/safety choke point |
+| P1-8 faster feedback | **partial** — `tests/run-all.mjs` + `FORGE_FAST` exist; the e2e itself is still serial (~6.5 min) |
+| P3-3 git-native safety | **partial** — run-scoped undo shipped; auto-branch/worktree isolation did not |
+| P1-1 Windows shell | **OPEN, deliberately not done** — the safety engine (shellguard) is POSIX-specific. Executing shell commands on Windows without Windows-aware classification (`del`, `rmdir`, `format`) would *reduce* safety, and it cannot be tested from this Linux sandbox. Needs a Windows-aware classifier first. |
+| P2-3 packaging rename `agentv19/` → `forge/` | **OPEN, deferred** — pure churn across CI/test/doc paths with no functional gain |
+| P3-6 i18n | **OPEN** — large, low value relative to the above |
+
+Defects found *while* delivering the above (each fixed with a regression test):
+non-deterministic `listPlans`/`sessionFiles` ordering (a tie could make
+`pruneSessions` delete a **newer** session), and `retrieval.js` missing from
+`package.json` `files[]` — which would have published a **broken CLI** while
+every suite stayed green.
 
 Already strong — protect these, don't regress them:
 zero-dependency install on Node ≥18 · the v20 safety engine (shellguard /
