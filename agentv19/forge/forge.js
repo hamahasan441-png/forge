@@ -63,14 +63,19 @@ process.on("uncaughtException", (e) => {
   process.exit(1)
 })
 
+// boolean flags that must NOT consume the following positional argument
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all"])
+
 function parseArgs(argv) {
   const positional = [], flags = {}
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a.startsWith("--")) {
-      const key = a.slice(2)
+      const key = a.slice(2).split("=")[0]
+      const eq = a.includes("=") ? a.slice(a.indexOf("=") + 1) : undefined
+      if (eq !== undefined) { flags[key] = coerce(eq); continue }
       const next = argv[i + 1]
-      if (next !== undefined && !next.startsWith("--")) { flags[key] = next; i++ }
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) { flags[key] = next; i++ }
       else flags[key] = true
     } else positional.push(a)
   }
@@ -309,12 +314,44 @@ async function main() {
         if (!con.tty) console.log()
       }
       let res
-      try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
+      try {
+        if (!planMode && (flags.auto === true || cfg.agent?.autonomous === "meta")) {
+          // v21: full autonomous meta-controller lifecycle (segments, DAG,
+          // model strategy, workers, verification ledger, recovery). Opt-in via
+          // `--auto` so the default one-shot keeps its classic, pinned output.
+          const { runMeta } = await import("./meta.js")
+          const m = await runMeta({ config: cfg, provider: p, task, onEvent: con.onEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })
+          res = {
+            text: m.text || `Task ${m.status.toLowerCase()}.`,
+            steps: m.segments,
+            toolLog: [],
+            runId: m.task?.run_id || null,
+            wrote: (m.filesChanged || []).length > 0,
+            taskStatus: m.status,
+            taskId: m.taskId,
+            segments: m.segments,
+            repairs: m.repairs,
+            toolCallsTotal: m.toolCalls,
+            verification: m.verification,
+          }
+        } else {
+          res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal })
+        }
+      }
       catch (e) {
         if (con.tty) { con.finish(null, e?.name === "AbortError" ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(e?.name === "AbortError" ? 130 : 1) }
         throw e
       }
       if (con.tty) { con.finish(res, { elapsedMs: Date.now() - t0 }); con.stop() }
+      else if (res.taskStatus) {
+        // meta-controller autonomous run: segment-based summary
+        console.log()
+        console.log(bold(green("── result " + "─".repeat(50))))
+        console.log(renderMarkdown(res.text))
+        console.log(dim(`  ${res.steps} segment(s) • ${res.toolCallsTotal ?? 0} tool calls${res.repairs ? ` • ${res.repairs} repair(s)` : ""} • ${((Date.now() - t0) / 1000).toFixed(1)}s • ${res.taskStatus}`))
+        if (res.verification && res.wrote) console.log(dim(`  verification: ${res.verification.ok ? green("passed") : yellow(res.verification.reason)}`))
+        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      }
       else {
         console.log()
         console.log(bold(green("── result " + "─".repeat(50))))
@@ -358,6 +395,49 @@ async function main() {
         if (n) warn(`no restorable checkpoint (all ${n} consumed or from other directories)`)
         else warn("no checkpoints yet — files are snapshotted automatically before every write/edit/patch")
       }
+      return
+    }
+    case "tasks": {
+      // v21: inspect the autonomous task-state engine. `forge tasks` lists
+      // recent tasks (--json for machine output); `forge tasks --resume <id>`
+      // reconciles an interrupted task and continues it via the meta controller.
+      const { listTasks, readTask } = await import("./taskstate.js")
+      const { detectInterrupted } = await import("./recovery.js")
+      if (typeof flags.resume === "string") {
+        const rec = readTask(flags.resume)
+        if (!rec) { err(`no task matches "${flags.resume}" — try: forge tasks`); process.exit(1); return }
+        const { runMeta } = await import("./meta.js")
+        const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
+        const t0 = Date.now()
+        try {
+          const m = await runMeta({ config: cfg, provider: p, task: rec.objective, onEvent: con.onEvent, signal: con.signal, resumeTaskId: rec.task_id })
+          if (con.tty) { con.finish({ text: m.text, steps: m.segments, toolLog: [] }, { elapsedMs: Date.now() - t0 }); con.stop() }
+          else {
+            console.log()
+            console.log(bold(green("── resumed task " + "─".repeat(48))))
+            console.log(renderMarkdown(m.text))
+            console.log(dim(`  ${m.segments} segment(s) • ${m.repairs} repair(s) • ${m.status}`))
+          }
+        } catch (e) {
+          if (con.tty) { con.finish(null, { error: e?.message ?? String(e) }); con.stop(); process.exit(1) }
+          throw e
+        }
+        return
+      }
+      const cwd = flags.all === true ? null : process.cwd()
+      const tasks = listTasks({ cwd, max: 30 })
+      if (JSON_OUT) { emitJson({ tasks }); return }
+      if (!tasks.length) { info("no tasks recorded in this directory yet (autonomous agent runs create them)"); return }
+      console.log(bold("tasks") + dim("  (most recent first)"))
+      for (const t of tasks.slice(0, 20)) {
+        const statusColored = t.status === "COMPLETED" ? green(t.status) : t.status === "FAILED" ? red(t.status) : t.status === "CANCELLED" ? dim(t.status) : yellow(t.status)
+        const when = new Date(t.updated_at || t.created_at).toISOString().replace("T", " ").slice(0, 16)
+        console.log(`  ${statusColored.padEnd(14)} ${dim(when)} seg=${String(t.segment_count ?? 0).padStart(2)} repair=${String(t.repair_count ?? 0).padStart(2)}  ${String(t.objective ?? "").slice(0, 60)}`)
+        console.log(dim(`    ${t.task_id}  • ${t.provider_used ?? "?"}/${t.model_used ?? "?"}`))
+      }
+      const interrupted = detectInterrupted({ cwd: process.cwd() })
+      const nInterrupted = interrupted.tasks.length + interrupted.runs.length
+      if (nInterrupted) warn(`${nInterrupted} interrupted run(s) detected — forge tasks --resume <id> continues one (start forge in this dir for the recovery prompt)`)
       return
     }
     case "doctor": {
@@ -910,9 +990,11 @@ ${bold("usage")}
   ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 17 tools (bash, files, web, memory, sub-agents)
+  ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
+  ${cyan("forge tasks")}                  list autonomous tasks (state/DAG/segments) ${dim("(--resume <id> continue an interrupted one, --json)")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
   ${cyan("forge config show|path|get|set|unset")}

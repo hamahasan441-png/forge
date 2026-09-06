@@ -28,6 +28,7 @@ import fs from "node:fs"
 import path from "node:path"
 import crypto from "node:crypto"
 import zlib from "node:zlib"
+import { execFileSync } from "node:child_process"
 import { DEFAULT_DIR } from "./config.js"
 
 export const CHECKPOINTS_DIR = path.join(DEFAULT_DIR, "checkpoints")
@@ -109,6 +110,34 @@ export function snapshotBefore(files, cwd, created = [], runId = null) {
     return id
   } catch {
     return null // checkpointing must NEVER break the actual tool call
+  }
+}
+
+/**
+ * A SEGMENT/RUN boundary checkpoint: even when no file has been touched yet a
+ * boundary is a real rollback anchor — record git HEAD + the untracked set and
+ * the run/segment label so crash-resume and `forge undo --run` can reconcile
+ * against a known point. Returns the checkpoint id (or null if the dir cannot
+ * be written). Never throws.
+ */
+export function boundaryCheckpoint(cwd = process.cwd(), { runId = null, label = null, objective = null } = {}) {
+  try {
+    let head = null
+    try { head = execFileSync("git", ["-C", path.resolve(cwd), "rev-parse", "HEAD"], { encoding: "utf8" }).trim() } catch { /* not a git repo */ }
+    const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
+    const dir = path.join(CHECKPOINTS_DIR, id)
+    fs.mkdirSync(dir, { recursive: true })
+    const manifest = {
+      id, ts: Date.now(), cwd: path.resolve(cwd), boundary: true,
+      ...(runId ? { runId } : {}), ...(label ? { label } : {}), ...(objective ? { objective: String(objective).slice(0, 300) } : {}),
+      ...(head ? { gitHead: head } : {}),
+      files: [],
+    }
+    fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 1))
+    prune()
+    return id
+  } catch {
+    return null
   }
 }
 

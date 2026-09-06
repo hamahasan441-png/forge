@@ -345,6 +345,86 @@ function slurpStdin(ms = 400) {
 
 const HISTORY_PATH = path.join(DEFAULT_DIR, "history")
 
+/**
+ * v21: event sink for the meta controller in NON-interactive (piped) output.
+ * Delegates tool traffic to the classic agent printer and renders the
+ * autonomous lifecycle (segments, model choice, verification, repair, recovery)
+ * as concise lines — never flooding, never showing secrets.
+ */
+function metaEventPrinter(agentPrinter) {
+  const shown = new Set()
+  return function (ev) {
+    if (!ev || !ev.type) return
+    switch (ev.type) {
+      case "TASK_STARTED":
+        console.log(dim(`  ◇ task ${ev.risk ? `[${ev.risk} risk] ` : ""}started — ${String(ev.objective ?? "").slice(0, 80)}`))
+        break
+      case "MODEL_SELECTED":
+        console.log(dim(`  ◇ model: ${cyan(ev.provider + "/" + ev.model)} (${ev.confidence} confidence) — ${String(ev.reason ?? "").slice(0, 80)}`))
+        break
+      case "DAG_BUILT":
+        console.log(dim(`  ◇ plan: dependency graph with ${ev.nodes} node(s)`))
+        break
+      case "SEGMENT_STARTED":
+        console.log(dim(`  ─ segment ${ev.segment} ─ step budget ${ev.maxSteps}`))
+        break
+      case "SEGMENT_COMPLETED":
+        console.log(dim(`  ─ segment ${ev.segment} ${ev.status} (${ev.steps} steps, ${ev.toolCalls} tool calls)${ev.budgetHit ? " — continuing" : ""}`))
+        break
+      case "VERIFICATION_PASSED":
+        console.log(green(`  ✓ verified [${ev.vtype}] ${String(ev.command ?? "").slice(0, 60)}`))
+        break
+      case "VERIFICATION_FAILED":
+        console.log(red(`  ✗ verification failed [${ev.vtype}] exit ${ev.exitCode}: ${String(ev.evidence ?? "").slice(0, 80)}`))
+        break
+      case "VERIFICATION_STATUS":
+        if (!ev.ok) console.log(yellow(`  ⚠ ${String(ev.reason ?? "").slice(0, 100)}`))
+        break
+      case "REPAIR_STARTED":
+        console.log(yellow(`  ↻ repair attempt ${ev.attempt}: ${String(ev.error ?? "").slice(0, 80)}`))
+        break
+      case "STRATEGY_CHANGED":
+        console.log(dim(`  ⇢ strategy: ${String(ev.reason ?? "").slice(0, 100)}`))
+        break
+      case "RESOURCE_ADAPTED":
+        console.log(dim(`  ⚙ resources [${ev.level}]: ${String(ev.summary ?? "").slice(0, 80)}`))
+        break
+      case "RECOVERY_STARTED":
+        console.log(dim(`  ⤺ recovering interrupted task…`))
+        break
+      case "RECOVERY_COMPLETED":
+        console.log(dim(`  ⤺ recovery: ${ev.recommended}`))
+        break
+      case "TASK_COMPLETED":
+        console.log(green(`  ✓ task completed after ${ev.segment} segment(s)`))
+        break
+      case "TASK_FINISHED":
+        if (ev.status !== "COMPLETED") console.log(ev.status === "CANCELLED" ? yellow(`  ◼ task ${ev.status.toLowerCase()}`) : red(`  ✗ task ${ev.status.toLowerCase()}: ${String(ev.text ?? "").slice(0, 100)}`))
+        break
+      case "TOOL_VERIFIED":
+      case "TOOL_BLOCKED":
+      case "TOOL_ESCALATION":
+      case "TOOL_RETRY":
+      case "TOOL_FALLBACK":
+      case "TOOL_CACHED":
+      case "retry":
+      case "failover":
+      case "info":
+      case "compacted":
+      case "reasoning":
+      case "tool_start":
+      case "tool_result":
+      case "command_check":
+        // tool-level traffic: the classic agent printer already renders these,
+        // except command_check (handled above as verification events).
+        if (ev.type !== "command_check") { try { agentPrinter(ev) } catch {} }
+        break
+      default:
+        if (!shown.has(ev.type)) { shown.add(ev.type); try { agentPrinter(ev) } catch {} }
+    }
+  }
+}
+
 export async function runChat({ config, provider, oneShot, resumeFile, deep: deepFlag }) {
   let p = provider
   // v20.2: provider failover (opt-in) for the interactive loop — when the active
@@ -805,7 +885,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         } catch (e) {
           if (e instanceof ProviderError && e.contextOverflow && overflowTries < 2) {
             overflowTries++
-            warn(`context too large for ${p.model} — compressing history and retrying (${overflowTries}/2)`)
+            // v21: keep the canonical "compressing history and retrying" phrase
+            // so the recovery action is greppable/log-stable regardless of the
+            // model name embedded in the message.
+            warn(`compressing history and retrying (context too large for ${p.model} ${overflowTries}/2)`)
             messages = hardShrink(messages)
             await maybeCompact(true).catch(() => {})
             round--
@@ -1041,12 +1124,48 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   /** v20.4 crash-safe startup: journals left at "running" by a process that no
-   *  longer exists are interrupted tasks. Show them, never continue silently. */
+   *  longer exists are interrupted tasks. v21 also surfaces interrupted TASK
+   *  records from the meta controller and can resume one through it. We never
+   *  continue silently. */
   async function startupRecovery() {
+    // v21: interrupted autonomous tasks first (they carry DAG + verification state)
+    try {
+      const { interruptedTasks } = await import("./taskstate.js")
+      const tasks = interruptedTasks({ cwd: process.cwd() })
+      for (const t of tasks.slice(0, 2)) {
+        const handled = await taskRecoveryPrompt(t)
+        if (handled) continue
+      }
+    } catch { /* task recovery is best-effort */ }
     let runs = []
     try { runs = interruptedRuns({ cwd: process.cwd() }) } catch { runs = [] }
     if (!runs.length) return
     for (const run of runs.slice(0, 3)) await recoveryPrompt(run, { startup: true })
+  }
+
+  /** Recovery prompt for an interrupted v21 task record. Returns true if the
+   *  user chose an action that resolves it. */
+  async function taskRecoveryPrompt(task) {
+    dispatchUI({ type: "MODE_CHANGED", mode: "recovery" })
+    dispatchUI({ type: "RECOVERY_STARTED", run: { runId: task.run_id, task: task.objective, step: task.segment_count }, note: "Interrupted autonomous task" })
+    out(bold("interrupted autonomous task:"))
+    out(`  ${dim("objective:")} ${String(task.objective ?? "").slice(0, 80)}`)
+    out(`  ${dim("status:")} ${task.status} • segments ${task.segment_count ?? 0} • repairs ${task.repair_count ?? 0} • files ${(task.files_changed ?? []).length}`)
+    out(dim("  [R] Resume via controller   [C] Cancel (leave as-is)"))
+    const a = ui ? await ui.term.ask(bold("recovery › "), { single: true, keys: ["r", "c"] }) : "c"
+    if (a === "r") {
+      dispatchUI({ type: "RECOVERY_COMPLETED" })
+      setMode("agent")
+      ok(`resuming task ${String(task.task_id).slice(-6)} — reconciling state before continuing`)
+      // close the old journal entry so it is not re-prompted next start
+      try { const { markRun } = await import("./runlog.js"); if (task.run_id) markRun(task.run_id, "cancelled", { note: "resumed as a new autonomous task" }) } catch {}
+      await runAgentTask(task.objective, { resumeTaskId: task.task_id })
+      return true
+    }
+    dispatchUI({ type: "RECOVERY_COMPLETED" })
+    setMode(mode)
+    warn("task left as-is — forge tasks lists it; forge tasks --resume <id> continues it later")
+    return true
   }
   async function recoveryPrompt(run, { startup = false } = {}) {
     dispatchUI({ type: "MODE_CHANGED", mode: "recovery" })
@@ -1129,8 +1248,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   /** One autonomous run (Agent Mode line or /agent <task>). In the interactive
    *  UI the run is rendered from UI state (dock, status, compact tool rows,
-   *  honest completion summary); piped sessions keep the classic printer. */
-  async function runAgentTask(task, { planOnly = false, deep: deepOverride } = {}) {
+   *  honest completion summary); piped sessions keep the classic printer.
+   *  v21: mutating agent tasks run through the meta controller (segment loop /
+   *  DAG / model strategy / workers / resources / verification / recovery);
+   *  --plan and read-only research still use a single plain runAgent pass. */
+  async function runAgentTask(task, { planOnly = false, deep: deepOverride, resumeTaskId = null } = {}) {
     const { runAgent, agentEventPrinter } = await import("./agent.js")
     abort = new AbortController()
     const t0 = Date.now()
@@ -1138,29 +1260,56 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (eff.notice) out(dim(`  · ${eff.notice}`))
     if (ui) dispatchUI({ type: "MODE_CHANGED", mode: planOnly ? "plan" : "agent" })
     let res = null
+    // The premium TTY dock renders the single-run agent loop's compact tool
+    // rows/steps/checkpoints, so interactive TTY agent tasks use that proven
+    // path (which already has failover, overflow recovery, verification and
+    // checkpoints). The meta controller drives piped/non-TTY autonomous runs
+    // and `forge agent`, where its multi-segment lifecycle is printed as lines.
+    const useMeta = !planOnly && config?.agent?.autonomous !== false && !ui
+    const onEvent = ui ? ui.view.onEvent : (config?.agent?.autonomous === false ? agentEventPrinter() : metaEventPrinter(agentEventPrinter()))
     try {
-      res = await runAgent({ config, provider: p, task, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal })
-      if (ui) {
-        lastAgentState = store.state
-        ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
-        if (!planOnly && !(res.text || "").includes("(reached max steps")) {
-          messages.push({ role: "user", content: `[agent task] ${task}` })
-          messages.push({ role: "assistant", content: res.text })
-          persist()
+      if (useMeta) {
+        // v21 autonomous lifecycle through the meta controller.
+        const { runMeta } = await import("./meta.js")
+        const m = await runMeta({ config, provider: p, task, onEvent, signal: abort.signal, deep: eff.deep, resumeTaskId })
+        // adapt the task result to the shape the UI/result renderer expects.
+        res = {
+          text: m.text || `Task ${m.status.toLowerCase()}.`,
+          steps: m.segments,
+          toolLog: [],
+          runId: m.task?.run_id || null,
+          wrote: (m.filesChanged || []).length > 0,
+          taskStatus: m.status,
+          taskId: m.taskId,
+          segments: m.segments,
+          repairs: m.repairs,
+          verification: m.verification,
         }
-        out()
+        if (m.status === "WAITING") res.waiting = true
       } else {
-        console.log()
-        console.log(bold(planOnly ? cyan("── plan " + "─".repeat(54)) : green("── result " + "─".repeat(50))))
-        console.log(renderMarkdown(res.text))
-        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
-        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
-        if (!planOnly) {
-          messages.push({ role: "user", content: `[agent task] ${task}` })
-          messages.push({ role: "assistant", content: res.text })
-          persist()
+        res = await runAgent({ config, provider: p, task, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal })
+        if (ui) {
+          lastAgentState = store.state
+          ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
+          if (!planOnly && !(res.text || "").includes("(reached max steps")) {
+            messages.push({ role: "user", content: `[agent task] ${task}` })
+            messages.push({ role: "assistant", content: res.text })
+            persist()
+          }
+          out()
+        } else {
+          console.log()
+          console.log(bold(planOnly ? cyan("── plan " + "─".repeat(54)) : green("── result " + "─".repeat(50))))
+          console.log(renderMarkdown(res.text))
+          console.log(dim(`  ${res.steps} steps • ${(res.toolLog || []).length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+          if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+          if (!planOnly) {
+            messages.push({ role: "user", content: `[agent task] ${task}` })
+            messages.push({ role: "assistant", content: res.text })
+            persist()
+          }
+          console.log()
         }
-        console.log()
       }
     } catch (e) {
       if (ui) {
