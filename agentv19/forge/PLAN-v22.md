@@ -179,6 +179,30 @@ conservative defaults.
 
 Plus the 22 pre-existing suites, unchanged and green.
 
+## 8.1 Post-implementation audit (v20.5.1)
+
+A full review of the new layer found eleven defects — all fixed, each pinned by
+a test in the "v20.5.1 audit fixes" blocks:
+
+| # | defect | why it mattered |
+|---|---|---|
+| 1 | `argsHash` used a `JSON.stringify` replacer array | nested arguments were erased → different `multi_edit` calls collided → a legitimate edit could be refused as a repeat |
+| 2 | the retried attempt was never recorded | a transient failure was invisible in state, stats and timings |
+| 3 | escalation emitted `TOOL_BLOCKED` | the UI called a call that ran "blocked"; escalation now has its own event |
+| 4 | chat passed `onEvent: null` | verification/blocks/retries/cache hits never reached the chat UI |
+| 5 | chat's shell pass-through and `/undo` bypassed cache invalidation | a cached read could go stale |
+| 6 | disabled tools were still advertised | the model learns to call a tool that will always be refused |
+| 7 | nothing fed the router's context | §11 step-skipping could only fire in tests |
+| 8 | `intel.route(task, opts)` clobbered its own context | routing ran against the wrong cwd |
+| 9 | `nextAction`'s post-mutation branch read a field no record had | the "verify what you just changed" nudge never fired |
+| 10 | `normalizeMeta` left `klass` and `classes[0]` disagreeing | consumers disagreed about a read-only tool's class |
+| 11 | checkpoint attribution accepted an older unrelated checkpoint | a record could point at the wrong undo point |
+
+Lesson worth keeping: every one of these was a *wiring* defect, not an
+algorithmic one. The layer's logic was already covered by unit tests; what was
+missing were tests that asserted the layer is actually connected to the agent,
+the chat, the UI and the model request.
+
 ## 9. Open items (v22+)
 
 1. **Learned preferences** — persist per-project routing outcomes in memory so

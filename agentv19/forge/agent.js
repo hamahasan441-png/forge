@@ -336,7 +336,8 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
           model: p.model,
           providerName: p.name,
           messages,
-          tools: tools.defs,
+          // v20.5: a tool disabled by policy is never advertised to the model
+          tools: intel.toolDefs(tools.defs),
           signal,
           deep: deepEffort,
           maxTokens: deepEffort ? 16384 : undefined,
@@ -531,6 +532,8 @@ export function agentEventPrinter() {
       console.log(yellow(`  ⛔ ${ev.tool} blocked — ${String(ev.reason).slice(0, 160)}`))
     } else if (ev.type === "TOOL_SELECTED") {
       if (process.env.FORGE_DEBUG === "1") console.log(dim(`  ◦ route: ${ev.tool} [${ev.capability}/${ev.klass}/${ev.risk}/${ev.mode}] ${String(ev.reason).slice(0, 100)}`))
+    } else if (ev.type === "TOOL_ESCALATION") {
+      console.log(yellow(`  ? ${ev.tool} needs your decision — ${String(ev.question).slice(0, 160)}`))
     } else if (ev.type === "TOOL_CACHED") {
       console.log(dim(`  ⚡ ${ev.tool}: ${ev.reason}`))
     } else if (ev.type === "info") {

@@ -396,11 +396,16 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   // v20.5: chat tool calls go through the same capability registry, router,
   // policy gate, failure classification and verification as the agent loop —
   // one implementation, not a second one. The UI rows below are unchanged.
+  // The structured TOOL_* events feed the premium UI exactly as in agent mode
+  // (verification results, blocks, retries, escalations, cache hits). The tool
+  // ROWS are still emitted by the chat loop below, and `legacyEvents: false`
+  // keeps the layer from emitting a second copy of them.
+  let chatUIEvent = null // set once the terminal UI exists (declared below)
   const chatIntel = createToolIntel({
     exec: tools.exec,
     ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: config.tools?.allowSudo === true, assumeYes },
     config,
-    onEvent: null,
+    onEvent: (ev) => chatUIEvent?.(ev),
     taskId: "chat",
     plugins,
     legacyEvents: false,
@@ -415,6 +420,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const store = createUIStore({ mode: "chat", provider: p.name, model: p.model, cwd: process.cwd(), terminal: { columns: term?.columns ?? 80, rows: term?.rows ?? 24, tty: !!term } })
   const view = term ? createAgentView({ term, store, cwd: process.cwd(), plain: uiCfg.dock === false, showThinking: uiCfg.thinking !== false }) : null
   const ui = term ? { term, store, view } : null
+  // now that the view exists, let the tool intelligence layer talk to it
+  chatUIEvent = (ev) => { if (ui) ui.view.onEvent(ev) }
   const out = (line = "") => (ui ? ui.term.line(line) : console.log(line))
   const outLines = (lines) => { if (ui) ui.term.lines(lines); else for (const l of lines) console.log(l) }
   const dispatchUI = (ev) => store.dispatch(ev)
@@ -565,6 +572,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     })
     printTerminal(cmd, out)
     noteTerminal(cmd, out)
+    // the user just ran a command in the same working tree: whatever the tool
+    // intelligence layer cached about file contents may now be stale (v20.5.1)
+    chatIntel.invalidate()
   }
 
   function trackUsage(u) {
@@ -680,7 +690,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     let toolCalls = []
     let started = false
     for await (const ev of streamChatResilient(
-      { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? tools.defs : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
+      { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
       { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: ({ attempt, attempts, error }) => console.log(yellow(`  ↻ ${error} — retry ${attempt}/${attempts}…`)) }
     )) {
       if (ev.type === "text") {
@@ -698,7 +708,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   /** One non-streaming round with tools. */
   async function plainRound(wire, deepEffort) {
-    const msg = await chatOnce({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? tools.defs : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, connectMs: config.retry?.connectMs, requestTimeoutMs: config.retry?.requestTimeoutMs })
+    const msg = await chatOnce({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, connectMs: config.retry?.connectMs, requestTimeoutMs: config.retry?.requestTimeoutMs })
     if (msg.reasoning && config.chat?.showReasoning !== false) console.log(dim("·thinking· " + msg.reasoning.slice(0, 800)))
     if (msg.content) process.stdout.write(msg.content)
     trackUsage(msg.usage)
@@ -1408,6 +1418,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           ok(`restored ${r.files} file(s) across ${r.checkpoints} checkpoint(s) from ${shortRun(r.runId)}`)
           for (const n of r.notes ?? []) out(dim(`  · ${n}`))
           markRun(r.runId, "undone", { note: "rolled back with /undo --run" })
+          chatIntel.invalidate() // files moved back on disk — drop cached reads
           if (ui) for (const pth of Object.keys(store.state.changes)) dispatchUI({ type: "FILE_CHANGED", path: pth, action: "modified", added: 0, removed: 0 })
           break
         }
@@ -1415,6 +1426,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (messages.length && messages[messages.length - 1].role === "user") messages.pop()
         // v16: also restore the newest file checkpoint for this directory
         const ck = restoreLast(process.cwd())
+        if (ck) chatIntel.invalidate() // restored files invalidate cached reads
         ok(messages.length ? "last exchange dropped" : "conversation is empty")
         if (ck) {
           ok(`files restored from checkpoint ${ck.id} (${ck.files} file(s))`)
@@ -1472,6 +1484,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
         console.log(`  safety:     writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")} • sudo ${config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")}`)
+        {
+          // v20.5: what the tool intelligence layer did in THIS session
+          const ts = chatIntel.stats()
+          console.log(`  tools:      intelligence ${chatIntel.enabled ? green("on") : yellow("off")} • ${ts.calls} call(s) • ${ts.ok} ok • ${ts.failed} failed • ${ts.blocked} blocked • ${ts.cached} cached • ${ts.verified} verified${ts.verifyFailed ? red(` • ${ts.verifyFailed} verification failure(s)`) : ""}`)
+        }
         break
       }
       case "profile": {

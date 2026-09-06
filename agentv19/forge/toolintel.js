@@ -41,15 +41,27 @@ import { listCheckpoints } from "./checkpoint.js"
 export const TOOL_EVENTS = [
   "TOOL_SELECTED", "TOOL_STARTED", "TOOL_OUTPUT", "TOOL_COMPLETED", "TOOL_FAILED",
   "TOOL_RETRY", "TOOL_FALLBACK", "TOOL_BLOCKED", "TOOL_VERIFIED", "TOOL_CACHED",
+  "TOOL_ESCALATION",
 ]
 
 const CACHE_MAX_BYTES = 256 * 1024
 const CACHE_MAX_ENTRIES = 64
 const NON_CACHEABLE = new Set(["think", "todo", "memory", "delegate", "web_search", "fetch_url", "bash"])
 
+/** Order-independent, DEEP serialization. (v20.5.1: the first implementation
+ *  passed a key allow-list to JSON.stringify, which silently erased nested
+ *  objects — two completely different multi_edit calls hashed identically and
+ *  could be refused as "already failed twice". Never use a replacer array.) */
+function stableStringify(value, depth = 0) {
+  if (value === null || typeof value !== "object" || depth > 6) return JSON.stringify(value ?? null) ?? "null"
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v, depth + 1)).join(",")}]`
+  const keys = Object.keys(value).sort()
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k], depth + 1)}`).join(",")}}`
+}
+
 export function argsHash(name, args) {
   let payload
-  try { payload = JSON.stringify(args ?? {}, Object.keys(args ?? {}).sort()) } catch { payload = String(args) }
+  try { payload = stableStringify(args ?? {}) } catch { payload = String(args) }
   return crypto.createHash("sha256").update(`${name}\u0000${payload}`).digest("hex").slice(0, 16)
 }
 
@@ -98,6 +110,30 @@ export function createToolIntel({
   }
 
   function cacheKey(name, hash) { return `${name}:${hash}` }
+
+  /**
+   * §11 context awareness — what this run ALREADY knows, in the shape the
+   * router expects. Without this the "skip steps we already answered" logic
+   * could only ever fire in tests: nothing was feeding it real state.
+   */
+  function derivedState() {
+    const readFiles = []
+    const knownFiles = []
+    let testsJustPassed = false
+    for (const r of records) {
+      if (r.status !== "ok") continue
+      if (r.tool === "read_file" && r.arguments_summary) readFiles.push(r.arguments_summary)
+      if (r.tool === "grep_files" || r.tool === "glob_files" || r.tool === "list_dir") knownFiles.push(...(r.discovered ?? []))
+      for (const f of r.files_changed ?? []) knownFiles.push(f)
+      if (r.tool === "bash" && /\b(test|jest|vitest|pytest|cargo test|go test)\b/.test(r.arguments_summary ?? "")) testsJustPassed = true
+      if (!r.read_only_call && r.mutation) testsJustPassed = false
+    }
+    return {
+      readFiles: [...new Set(readFiles)].slice(-20),
+      knownFiles: [...new Set([...knownFiles, ...readFiles])].slice(-40),
+      testsJustPassed,
+    }
+  }
 
   function cacheable(meta, name) {
     if (!cacheOn) return false
@@ -160,6 +196,8 @@ export function createToolIntel({
       arguments_hash: hash,
       arguments_summary: summarizeArgs(name, args),
       risk: op.risk,
+      mutation: !meta.read_only,
+      read_only_call: meta.read_only === true,
       execution_mode: mode,
       start_time: t0,
       end_time: null,
@@ -232,11 +270,16 @@ export function createToolIntel({
     // ---- observation (§9) -------------------------------------------------
     let d = classifyFailure(result, { tool: name, args, thrown: threw, idempotent: meta.idempotent })
 
-    // safe, bounded auto-retry for transient failures on idempotent reads
+    // safe, bounded auto-retry for transient failures on idempotent reads.
+    // (v20.5.1: the abandoned attempt is RECORDED before retrying — a retry
+    //  that leaves no trace is invisible in stats, records and the journal.)
     if (d.failed && d.safeToRetry && meta.read_only && attempt < 1) {
+      record.retried = true
+      finish(record, { status: "failed", result, failure: d.code, error: redact(d.evidence), ms })
+      emit({ type: "TOOL_FAILED", tool: name, callId, taskId, runId, step, code: d.code, evidence: redact(String(d.evidence ?? "")).slice(0, 200), ms, willRetry: true })
       emit({ type: "TOOL_RETRY", tool: name, callId, step, attempt: attempt + 1, reason: `${d.code}: ${d.evidence}`.slice(0, 200) })
       const again = await runCall({ ...call, id: `${callId}#r1` }, { step, reason: `retry after ${d.code}`, mode, attempt: attempt + 1 })
-      return again
+      return { ...again, ms: ms + (again.ms ?? 0) }
     }
 
     // §14 — an edit whose replacement is already in place is a completed
@@ -254,12 +297,18 @@ export function createToolIntel({
     if (idemNote) result += `\n[forge] ${idemNote}`
 
     // ---- state update -----------------------------------------------------
+    // what a discovery tool FOUND is context for the next routing decision
+    if (!d.failed && (name === "grep_files" || name === "glob_files" || name === "list_dir")) {
+      record.discovered = discoveredPaths(result)
+    }
     if (!d.failed && !meta.read_only) {
       mutationHappened(name)
       record.files_changed = verifyTargets(name, args, cwd).map((p) => rel(p, cwd))
       try {
         const ck = listCheckpoints(cwd, 1)[0]
-        if (ck && (!runId || ck.runId === runId)) record.checkpoint = ck.id
+        // only attribute a checkpoint that this call actually created: the
+        // right run AND newer than the call start (chat runs have no runId)
+        if (ck && (!runId || ck.runId === runId) && Number(ck.ts) >= t0 - 1500) record.checkpoint = ck.id
       } catch { /* checkpoints are best-effort */ }
     }
 
@@ -303,7 +352,9 @@ export function createToolIntel({
       })
       if (esc.escalate) {
         result += `\n[forge] ask the user: ${esc.question}`
-        emit({ type: "TOOL_BLOCKED", tool: name, callId, step, escalation: true, reason: esc.question, why: esc.why })
+        // an escalation is a REQUEST for judgement, not a refusal — the UI must
+        // not render it as "blocked" (v20.5.1)
+        emit({ type: "TOOL_ESCALATION", tool: name, callId, taskId, runId, step, question: esc.question, why: esc.why, code: d.code })
       }
       const alt = nextAction({ task, history: records, lastResult: { tool: name, argsHash: hash, failure: d.code, status: "failed" }, registry: reg, context: { cwd } })
       if (alt?.specific && alt.tool && alt.tool !== name) {
@@ -341,7 +392,10 @@ export function createToolIntel({
     record.status = status
     record.end_time = record.start_time + ms
     record.duration_ms = ms
-    record.result = typeof result === "string" ? result.slice(0, 400) : null
+    // defence in depth: tools.js already redacts every model-facing result, but
+    // the RECORD is also surfaced (--json, FORGE_DEBUG, run inspection), so it
+    // is redacted here too — a stored secret is a leaked secret.
+    record.result = typeof result === "string" ? redact(result.slice(0, 400)) : null
     record.failure = failure
     record.error = error
     records.push(record)
@@ -391,14 +445,44 @@ export function createToolIntel({
     return out
   }
 
+  /**
+   * §19 — never ADVERTISE a tool the policy would refuse. A disabled tool that
+   * still appears in the request only teaches the model to call it and collect
+   * a BLOCKED string; experimental tools disappear when the project opted out.
+   * Deprecated tools stay (they are a last resort, not a refusal).
+   */
+  function toolDefs(defs = []) {
+    if (!Array.isArray(defs)) return defs
+    const allowExperimental = cfg.experimental !== false
+    const out = defs.filter((d) => {
+      const name = d?.function?.name
+      if (!name) return true
+      const m = reg.get(name)
+      if (!m) return true
+      if (m.status === STATUS.DISABLED) return false
+      if (!allowExperimental && m.status === STATUS.EXPERIMENTAL) return false
+      return true
+    })
+    return out.length ? out : defs
+  }
+
   return {
     registry: reg,
     enabled,
     runCall,
     runBatch,
+    toolDefs,
     plan: (calls) => planExecution(calls, { registry: reg, ctx: { cwd } }),
-    route: (t, opts = {}) => route({ task: t ?? task, registry: reg, context: { cwd, ...(opts.context ?? {}) }, ...opts }),
-    next: (opts = {}) => nextAction({ task, history: records, registry: reg, context: { cwd }, ...opts }),
+    route: (t, opts = {}) =>
+      route({
+        ...opts,
+        task: t ?? task,
+        registry: reg,
+        state: { ...derivedState(), ...(opts.state ?? {}) },
+        context: { cwd, ...(opts.context ?? {}) },
+      }),
+    next: (opts = {}) => nextAction({ task, history: records, registry: reg, context: { cwd, state: derivedState() }, ...opts }),
+    state: derivedState,
     records: () => records.slice(),
     stats,
     invalidate: () => mutationHappened("manual"),
@@ -486,6 +570,19 @@ function idempotencyNote(name, args, result) {
   if (/\bgit (apply|am)\b/.test(cmd) && /patch does not apply|already applied|reverse/i.test(out)) return "idempotency: the patch may already be applied — verify the file state before re-applying"
   if (/\bln -s\b/.test(cmd) && /File exists/i.test(out)) return "idempotency: the symlink already exists"
   return null
+}
+
+/** Paths a discovery tool reported — `path:line: text` (grep) or one per line. */
+function discoveredPaths(result) {
+  const out = []
+  for (const line of String(result ?? "").split("\n")) {
+    const l = line.trim()
+    if (!l || l.startsWith("[") || l.startsWith("(")) continue
+    const m = /^([^\s:]+\.[A-Za-z][\w]{0,7})(?::\d+:|$)/.exec(l)
+    if (m) out.push(m[1])
+    if (out.length >= 20) break
+  }
+  return [...new Set(out)]
 }
 
 function summarizeArgs(name, args) {

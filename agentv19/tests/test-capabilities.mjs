@@ -183,5 +183,24 @@ console.log("== risk helpers ==")
   ok("unknown risk string is treated as medium rank", riskRank("banana") === riskRank(RISK.MEDIUM))
 }
 
+console.log("== v20.5.1 audit fixes ==")
+{
+  // a read-only tool that (wrongly) declares WRITE must be normalized in BOTH
+  // places — leaving classes[0] = WRITE made every consumer that reads the
+  // class list disagree with the one that reads `klass`.
+  const reg = createRegistry({ metas: [] })
+  reg.register({ name: "peek", description: "read-only plugin", capabilities: ["plugin_read"], klass: CLASS.WRITE, classes: [CLASS.WRITE], read_only: true, timeout: 10 })
+  const m = reg.get("peek")
+  ok("klass is corrected to READ", m.klass === CLASS.READ)
+  ok("classes[0] agrees with klass", m.classes[0] === CLASS.READ)
+  ok("the bogus WRITE class is gone", !m.classes.includes(CLASS.WRITE))
+  ok("a read-only tool declares no filesystem mutation", !m.mutates.includes("filesystem"))
+
+  // a shell command is EXECUTE even when it only reads (no accidental READ)
+  const r = operationRisk("bash", { command: "ls -la" }, { cwd: process.cwd() })
+  ok("an inspection command is still EXECUTE class", r.klass === CLASS.EXECUTE)
+  ok("…and stays low risk", r.risk === RISK.LOW)
+}
+
 console.log(`\n== capabilities suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

@@ -633,6 +633,10 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
     case "TOOL_BLOCKED":
       emit({ type: "NOTICE", level: ev.conflict ? "info" : "warn", text: `${ev.tool ?? "tool"} ${ev.conflict ? "serialized" : "blocked"}: ${String(ev.reason ?? "").slice(0, 160)}` })
       break
+    // §17 — forge wants a human decision. That is a QUESTION, not a refusal.
+    case "TOOL_ESCALATION":
+      emit({ type: "NOTICE", level: "warn", text: `needs your decision (${ev.tool}): ${String(ev.question ?? "").slice(0, 160)}` })
+      break
     case "TOOL_RETRY":
       emit({ type: "NOTICE", level: "warn", text: `${ev.tool} retry ${ev.attempt}: ${String(ev.reason ?? "").slice(0, 120)}` })
       break

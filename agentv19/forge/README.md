@@ -347,6 +347,10 @@ forge tools --route "fix the failing auth test"   # what would be selected, and 
 forge tools --capability search --json        # scriptable
 ```
 
+A tool you disable is not just refused — it is never offered to the model, and
+`forge doctor` verifies that the registry still agrees with the shipped safety
+classification (`registry: 17 tools, classification matches tools.js`).
+
 Switches: `tools.intelligence` (master, `false` restores the pre-v20.5 path),
 `tools.verify`, `tools.cache`, `tools.maxRisk`, `tools.explainRouting`,
 `tools.disabled[]`, `tools.deprecated[]`, `tools.experimental`.

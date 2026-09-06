@@ -16,8 +16,8 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { createToolIntel, argsHash } from "../forge/toolintel.js"
-import { classifyFailure, recoveryPlan, diagnose, formatDiagnosis, shouldEscalate, FAILURE, STRATEGY } from "../forge/diagnose.js"
+import { createToolIntel, argsHash, TOOL_EVENTS } from "../forge/toolintel.js"
+import { classifyFailure, recoveryPlan, diagnose, formatDiagnosis, shouldEscalate, FAILURE, FAILURE_CODES, STRATEGY } from "../forge/diagnose.js"
 import { verificationPlan, runVerification, verifyTargets, CHECK } from "../forge/verify.js"
 import { createRegistry, RISK, STATUS } from "../forge/capabilities.js"
 import { makeToolContext } from "../forge/tools.js"
@@ -446,6 +446,125 @@ console.log("== the premium UI consumes the events (§16 + §21) ==")
   ok("a failed verification is recorded, not hidden", store.state.verification.checks.syntax?.ok === false)
   ok("the failure produced a warning notice", store.state.notices.some((n) => /verification failed/i.test(n.text)))
   ok("unknown structured events never break the store", (() => { bridgeAgentEvent(store, { type: "TOOL_SELECTED", tool: "read_file" }, bctx); return store.state.state !== undefined })())
+  fs.rmSync(tmp, { recursive: true, force: true })
+}
+
+console.log("== v20.5.1 audit fixes (regressions that MUST stay fixed) ==")
+{
+  // 1. argument hashing must be DEEP. The first implementation passed a key
+  //    allow-list to JSON.stringify, which erased nested objects: two totally
+  //    different multi_edit calls hashed the same and the third one was
+  //    refused as "already failed twice".
+  const h = (a) => argsHash("multi_edit", a)
+  ok("nested arguments do not collide", h({ path: "a.js", edits: [{ old: "a", new: "b" }] }) !== h({ path: "a.js", edits: [{ old: "X", new: "Y" }] }))
+  ok("argument order still does not matter", argsHash("bash", { a: 1, b: { c: 2, d: [1, 2] } }) === argsHash("bash", { b: { d: [1, 2], c: 2 }, a: 1 }))
+  ok("array order DOES matter (it is meaningful)", h({ edits: [{ old: "1", new: "2" }, { old: "3", new: "4" }] }) !== h({ edits: [{ old: "3", new: "4" }, { old: "1", new: "2" }] }))
+
+  const tmp = project()
+  const { intel } = realIntel(tmp)
+  const bad = { name: "multi_edit", args: { path: "app.js", edits: [{ old: "NOPE", new: "x" }] } }
+  await intel.runCall(bad); await intel.runCall(bad)
+  const other = await intel.runCall({ name: "multi_edit", args: { path: "app.js", edits: [{ old: "return 1", new: "return 2" }] } })
+  ok("a DIFFERENT edit is never blocked by another edit's failures", !/^BLOCKED/.test(other.result))
+  ok("…and it really ran", fs.readFileSync(path.join(tmp, "app.js"), "utf8").includes("return 2"))
+
+  // 2. a retried call must leave a record — an invisible retry is a lie in the
+  //    stats, the journal and `forge tasks`.
+  let n = 0
+  const flaky = createToolIntel({
+    exec: async () => (++n === 1 ? "ERROR: fetch failed" : "OK body"),
+    ctx: { cwd: tmp, root: tmp },
+    config: {},
+  })
+  const r = await flaky.runCall({ name: "fetch_url", args: { url: "https://example.test" } })
+  const recs = flaky.records()
+  ok("the retry still succeeds", r.result === "OK body")
+  ok("the abandoned attempt is recorded", recs.length === 2 && recs[0].status === "failed" && recs[0].retried === true)
+  ok("the retry attempt is recorded as attempt 1", recs[1].attempt === 1 && recs[1].status === "ok")
+  ok("stats count both attempts", flaky.stats().calls === 2 && flaky.stats().failed === 1 && flaky.stats().ok === 1)
+  ok("the reported duration covers both attempts", r.ms >= (recs[0].duration_ms ?? 0))
+
+  // 3. escalation is a QUESTION, not a refusal — it gets its own event.
+  const denied = createToolIntel({
+    exec: async () => "ERROR: EACCES: permission denied, open '/etc/shadow'",
+    ctx: { cwd: tmp, root: tmp },
+    config: {},
+    onEvent: (e) => escEvents.push(e),
+  })
+  const escEvents = []
+  const dres = await denied.runCall({ name: "read_file", args: { path: "/etc/shadow" } })
+  ok("the user is asked about a permission decision", /\[forge\] ask the user:/.test(dres.result))
+  ok("it is emitted as TOOL_ESCALATION", escEvents.some((e) => e.type === "TOOL_ESCALATION" && /grant access/.test(e.question)))
+  ok("…and NOT as a fake block", !escEvents.some((e) => e.type === "TOOL_BLOCKED"))
+
+  // 4. §19 — a tool disabled by policy is never even advertised to the model.
+  const toolsCtx = makeToolContext({ cwd: tmp, root: tmp, memoryPath: path.join(tmp, "m"), todoPath: path.join(tmp, "t") })
+  const off = createToolIntel({ exec: toolsCtx.exec, ctx: { cwd: tmp }, config: { tools: { disabled: ["web_search"] } } })
+  const defs = off.toolDefs(toolsCtx.defs)
+  ok("a disabled tool is removed from the request", !defs.some((d) => d.function.name === "web_search"))
+  ok("every other tool survives", defs.length === toolsCtx.defs.length - 1)
+  ok("with no policy nothing is filtered", createToolIntel({ exec: toolsCtx.exec, ctx: { cwd: tmp }, config: {} }).toolDefs(toolsCtx.defs).length === toolsCtx.defs.length)
+
+  // 5. records carry `mutation`, so result-aware routing can ask for evidence.
+  const { intel: i2 } = realIntel(tmp)
+  await i2.runCall({ name: "edit_file", args: { path: "app.js", old: "return 2", new: "return 3" } })
+  const mrec = i2.records().at(-1)
+  ok("a write record is marked as a mutation", mrec.mutation === true)
+  ok("after a successful mutation the next action is verification", i2.next().tool === "bash")
+  const { intel: i3 } = realIntel(tmp)
+  await i3.runCall({ name: "read_file", args: { path: "app.js" } })
+  ok("a read record is not a mutation", i3.records().at(-1).mutation === false)
+
+  // 6. the cache can be dropped from outside (chat does this after a shell
+  //    command or an undo — those change files behind the layer's back).
+  const { intel: i4, events: e4 } = realIntel(tmp)
+  await i4.runCall({ name: "read_file", args: { path: "app.js" } })
+  await i4.runCall({ name: "read_file", args: { path: "app.js" } })
+  ok("the identical read was cached", e4.some((e) => e.type === "TOOL_CACHED"))
+  i4.invalidate()
+  ok("invalidate() empties the cache", i4.cacheSize() === 0)
+  const before = e4.filter((e) => e.type === "TOOL_CACHED").length
+  await i4.runCall({ name: "read_file", args: { path: "app.js" } })
+  ok("…so the next read really executes again", e4.filter((e) => e.type === "TOOL_CACHED").length === before)
+
+  // 7. §11 — the layer must FEED the router what the run already learned.
+  //    Without this the "skip what we already know" logic could only fire in
+  //    a test that hand-built the context.
+  const { intel: i5 } = realIntel(tmp, { task: "explain app.js" })
+  const chainBefore = i5.route("explain app.js").chain
+  await i5.runCall({ name: "read_file", args: { path: "app.js" } })
+  const chainAfter = i5.route("explain app.js").chain
+  ok("before reading, the chain reads the file", chainBefore.active.length === 1)
+  ok("after reading, that step is skipped as already known", chainAfter.active.length === 0 && chainAfter.steps.some((x) => x.skipped))
+  ok("the state the router sees is real", i5.state().readFiles.includes("app.js"))
+
+  const { intel: i6 } = realIntel(tmp)
+  await i6.runCall({ name: "grep_files", args: { pattern: "hi", path: "." } })
+  ok("what a search FOUND becomes known context", i6.state().knownFiles.some((f) => f.endsWith("app.js")))
+
+  // 8. the emitted event vocabulary is the documented one (§16)
+  const { intel: i7, events: e7 } = realIntel(tmp)
+  await i7.runCall({ name: "edit_file", args: { path: "app.js", old: "return 3", new: "return 4" } })
+  await i7.runCall({ name: "read_file", args: { path: "nope.js" } })
+  const structured = e7.filter((e) => /^TOOL_/.test(e.type))
+  ok("every structured event is in TOOL_EVENTS", structured.length > 0 && structured.every((e) => TOOL_EVENTS.includes(e.type)))
+  ok("every classified failure code is in the taxonomy", i7.records().every((r) => !r.failure || FAILURE_CODES.includes(r.failure)))
+
+  // 9. tool STATE must not become a secret store. tools.js redacts every
+  //    model-facing result; the record is surfaced too (--json, FORGE_DEBUG).
+  const leaky = createToolIntel({
+    exec: async () => "ERROR: auth failed for sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd",
+    ctx: { cwd: tmp },
+    config: {},
+  })
+  await leaky.runCall({ name: "fetch_url", args: { url: "https://example.test" } })
+  ok("a secret never lands in the tool record", !/sk-ABCDEFGHIJ/.test(JSON.stringify(leaky.records())))
+
+  // 10. intel.route(task, opts) must not lose the working directory.
+  const { intel: i8 } = realIntel(tmp)
+  const d2 = i8.route("read app.js", { constraints: { readOnly: true } })
+  ok("route() keeps cwd when options are passed", d2.selected_tool === "read_file")
+  ok("route() honours the constraints it was given", d2.execution_mode !== "blocked")
   fs.rmSync(tmp, { recursive: true, force: true })
 }
 

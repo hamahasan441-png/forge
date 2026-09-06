@@ -360,7 +360,12 @@ function normalizeMeta(meta) {
   m.verify_after = (m.verify_after || []).map(String)
   m.mutates = m.read_only ? (m.mutates || []).filter((x) => x !== "filesystem") : (m.mutates || [])
   // invariant: a read-only tool never declares itself a WRITE-class mutation
-  if (m.read_only && m.klass === CLASS.WRITE) m.klass = CLASS.READ
+  // (v20.5.1: fix `classes` too — leaving WRITE first made klass and
+  //  classes[0] disagree, and every consumer that reads classes[0] saw WRITE)
+  if (m.read_only && m.klass === CLASS.WRITE) {
+    m.classes = [CLASS.READ, ...m.classes.filter((c) => c !== CLASS.WRITE)]
+    m.klass = CLASS.READ
+  }
   return m
 }
 
@@ -559,7 +564,7 @@ export function operationRisk(name, args = {}, ctx = {}) {
       }
       return {
         risk, level: v.level, reasons: reasons.length ? reasons : ["shell command"],
-        klass: READ_CMD.test(command) || TEST_CMD.test(command) ? CLASS.EXECUTE : CLASS.EXECUTE,
+        klass: CLASS.EXECUTE, // a shell command is EXECUTE even when it only reads
         network: VCS_REMOTE.test(command) || INSTALL_CMD.test(command) || /\b(curl|wget)\b/.test(command),
         mutation: !READ_CMD.test(command),
         verify: TEST_CMD.test(command) ? "tests" : INSTALL_CMD.test(command) ? "install" : null,

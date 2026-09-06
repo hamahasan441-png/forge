@@ -229,5 +229,22 @@ console.log("== model-facing guidance is generated from the registry ==")
 }
 
 fs.rmSync(TMP, { recursive: true, force: true })
+console.log("== v20.5.1 audit fixes ==")
+{
+  // result-aware routing after a SUCCESSFUL mutation: records carry `mutation`
+  // (toolintel) — older callers may only carry the class. Both must work.
+  const reg = defaultRegistry()
+  const afterFlag = nextAction({ task: "fix the bug", history: [], lastResult: { tool: "edit_file", status: "ok", mutation: true }, registry: reg })
+  ok("a landed mutation asks for real evidence", afterFlag.tool === "bash" && afterFlag.specific === true)
+  const afterClass = nextAction({ task: "fix the bug", history: [], lastResult: { tool: "edit_file", status: "ok", klass: "WRITE" }, registry: reg })
+  ok("the class alone is enough to know it mutated", afterClass.tool === "bash")
+  const afterRead = nextAction({ task: "fix the bug", history: [], lastResult: { tool: "read_file", status: "ok", mutation: false, klass: "READ" }, registry: reg })
+  ok("a read does not trigger a verification run", afterRead.tool !== "bash" || afterRead.specific === false)
+
+  // describeRoute must be callable (it was glued to the end of a doc comment)
+  const text = describeRoute(route({ task: "read app.js", registry: reg, context: { cwd: process.cwd() } }))
+  ok("describeRoute renders a decision", /selected_tool/.test(text) && /execution_mode/.test(text))
+}
+
 console.log(`\n== router suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

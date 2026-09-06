@@ -399,6 +399,17 @@ async function main() {
         const tested = h?.ok ? green(`✓ tested ${h.ms ?? "?"}ms`) : yellow("not tested yet (forge doctor probes)")
         console.log(`  provider:  ${bold(pDoc.name)}/${pDoc.model || "?"} ${dim(`context ~${Math.round((pDoc.contextWindow || 128000) / 1000)}k tok`)} ${tested}`)
       }
+      // v20.5: the capability registry must agree with the shipped safety
+      // classification — a drift here would mis-route or mis-gate a tool.
+      {
+        const regDoc = createRegistry({ config })
+        const problems = checkWriteClassification(regDoc)
+        const unregistered = [...BUILTIN_TOOL_NAMES].filter((n) => !regDoc.has(n))
+        const line = problems.length || unregistered.length
+          ? red(`${problems.length + unregistered.length} problem(s)`) + dim(` ${[...problems, ...unregistered.map((n) => `${n}: not in the capability registry`)].slice(0, 3).join(" • ")}`)
+          : green(`${regDoc.size()} tools, classification matches tools.js`)
+        console.log(`  ${dim("registry:")}  ${line}`)
+      }
       if (flags.tools) {
         const results = await selfTestTools({ searchUrl: config.tools?.searchUrl || "", memoryPath: path.join(DEFAULT_DIR, "memory.md"), todoPath: path.join(DEFAULT_DIR, "todo.json") })
         let okN = 0, skipN = 0, failN = 0

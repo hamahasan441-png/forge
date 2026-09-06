@@ -98,6 +98,56 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   fed by checks that actually ran) and notices for blocks, retries, fallbacks
   and cache hits. `FORGE_DEBUG=1` prints a per-run tool-intelligence summary.
 
+### Fixed (full-review audit of the new layer)
+- **Argument hashing erased nested arguments.** `argsHash` passed a key
+  allow-list to `JSON.stringify`, so `{edits:[{old,new}]}` serialized as
+  `{"edits":[{}]}`: two completely different `multi_edit` calls produced the
+  same hash, and a legitimate third edit could be refused as "already failed
+  2× with identical arguments". Hashing is now a deep, order-stable
+  serialization (array order still matters, because it is meaningful).
+- **A retried call left no trace.** The abandoned first attempt was never
+  finished or recorded, so a transient failure was invisible in `records()`,
+  `stats()` and the debug summary, and the reported duration excluded it. The
+  attempt is now recorded (`status: "failed"`, `retried: true`, plus a
+  `TOOL_FAILED{willRetry:true}` event) and the durations are summed.
+- **Escalation was reported as a block.** Asking the user for a judgement call
+  emitted `TOOL_BLOCKED`, so the UI said "blocked" for a call that actually
+  ran. It now emits its own `TOOL_ESCALATION` event, rendered as "needs your
+  decision".
+- **Chat dropped every structured event.** `createToolIntel` was constructed
+  with `onEvent: null`, so verification results, blocks, retries, escalations
+  and cache hits never reached the chat UI. They are bridged now (tool rows are
+  still emitted once, by the chat loop).
+- **Chat could serve a stale cached read.** The in-chat shell pass-through and
+  `/undo` change files behind the layer's back; both now invalidate the cache.
+- **Disabled tools were still advertised to the model.** A tool disabled by
+  policy was sent in the request and only refused after the model called it —
+  which teaches the model to keep calling it. `tools.disabled` (and
+  `tools.experimental: false`) now filter the tool definitions in both agent
+  and chat mode.
+- **Context awareness was never fed.** The "skip a step the run already
+  answered" logic (§11) had no producer in production: the layer now derives
+  `readFiles` / `knownFiles` / `testsJustPassed` from its own records — a file
+  that was read, or found by a search, is not rediscovered.
+- **`intel.route(task, opts)`** lost the working directory when options were
+  passed (the raw options overwrote the merged context).
+- **Result-aware routing after a mutation was dead code** — it looked for a
+  `mutation` field that no record carried. Records now carry `mutation` (and
+  the router also accepts a WRITE/EXECUTE class).
+- **Registry normalization left `klass` and `classes[0]` disagreeing** for a
+  read-only tool that declared itself WRITE; both are corrected now.
+- **Checkpoint attribution** could credit a call with an unrelated older
+  checkpoint (in chat, where runs have no `runId`); it must now also be newer
+  than the call.
+- **Tool records are secret-redacted.** `tools.js` already redacts every
+  model-facing result, but the per-call record is surfaced too (`--json`,
+  `FORGE_DEBUG`, run inspection) and stored the raw slice — a stored secret is
+  a leaked secret.
+- `forge doctor` reports the registry invariant it always documented
+  (`registry: 17 tools, classification matches tools.js`), `/status` shows the
+  per-session tool-intelligence counters, and `describeRoute` is no longer glued
+  to the end of a doc comment.
+
 ### Tests
 - Three new suites in `npm test`: `capabilities` (metadata completeness, the
   WRITE_TOOLS invariant, lifecycle, plugin registration, operation risk),
@@ -105,7 +155,8 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   scheduling/conflicts, cost awareness, result-aware routing) and `toolintel`
   (security integration, secret redaction, failure classification, recovery,
   timeout/watchdog, idempotency, caching, verification, escalation, tool state,
-  events, UI bridge, and the "layer switched off" regression path).
+  events, UI bridge, the "layer switched off" regression path, and a dedicated
+  block pinning every audit fix above).
 
 ## [Unreleased] — v20.4.0 (in progress)
 

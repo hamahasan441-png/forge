@@ -284,7 +284,6 @@ function avoidPenalty(meta, analysis) {
     const key = a.toLowerCase()
     if (key.includes("offline") && analysis.needsNetwork === false) p += 1
     if (key.includes("file path is unknown") && !analysis.files.length) p += 2
-    if (key.includes("does not exist") && analysis.files.some((f) => existsRel(f, analysis.context?.cwd))) p += 0
   }
   // creating something new? write_file beats edit_file, and vice versa
   if (/\b(create|new file|scaffold|generate a file)\b/.test(t) && meta.name === "write_file") p -= 2
@@ -597,7 +596,10 @@ export function nextAction({ task = "", history = [], lastResult = null, registr
   if (failure === "SAFETY_BLOCK") {
     return { capability: null, tool: null, why: "blocked by a safety control — do not retry; ask the user or use a permitted approach", changeStrategy: true, escalate: true, specific: true }
   }
-  if (!failure && last.mutation) {
+  // a successful MUTATION should be verified with real evidence. Records from
+  // toolintel carry `mutation`; older/looser callers may only carry the class.
+  const wasMutation = last.mutation ?? (last.klass ? last.klass === CLASS.WRITE || last.klass === CLASS.EXECUTE : false)
+  if (!failure && wasMutation) {
     return { capability: CAPABILITY.TEST_EXECUTION, tool: "bash", why: "a mutation landed — verify it with the project's real test/build command", changeStrategy: false, specific: true }
   }
   const r = route({ task, state: context.state ?? {}, registry, context })
@@ -661,7 +663,8 @@ export function toolGuidance(task, { registry, cwd = process.cwd(), readOnly = f
   return lines.slice(0, maxLines).join("\n")
 }
 
-/** Human-readable rendering of a routing decision (used by `forge tools --route`). */export function describeRoute(decision) {
+/** Human-readable rendering of a routing decision (used by `forge tools --route`). */
+export function describeRoute(decision) {
   const lines = []
   lines.push(`selected_tool     ${decision.selected_tool ?? "(none)"}`)
   lines.push(`reason            ${decision.reason}`)
