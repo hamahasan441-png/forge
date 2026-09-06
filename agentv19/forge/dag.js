@@ -47,6 +47,11 @@ function normalizeNode(n) {
     required_capabilities: Array.isArray(n.required_capabilities) ? n.required_capabilities.map(String) : [],
     role: n.role ?? null, // researcher | coder | tester | reviewer | security | debugger | architect
     read_only: n.read_only ?? false,
+    targetFiles: Array.isArray(n.targetFiles) ? n.targetFiles.map(String) : (Array.isArray(n.target_files) ? n.target_files.map(String) : []),
+    targetSymbols: Array.isArray(n.targetSymbols) ? n.targetSymbols.map(String) : (Array.isArray(n.target_symbols) ? n.target_symbols.map(String) : []),
+    targetDirs: Array.isArray(n.targetDirs) ? n.targetDirs.map(String) : (Array.isArray(n.target_dirs) ? n.target_dirs.map(String) : []),
+    resourceLocks: Array.isArray(n.resourceLocks) ? n.resourceLocks.map(String) : (Array.isArray(n.resource_locks) ? n.resource_locks.map(String) : []),
+    verificationRequirements: Array.isArray(n.verificationRequirements) ? n.verificationRequirements.map(String) : (Array.isArray(n.verification_requirements) ? n.verification_requirements.map(String) : []),
     result: n.result ?? null,
     started_at: n.started_at ?? null,
     ended_at: n.ended_at ?? null,
