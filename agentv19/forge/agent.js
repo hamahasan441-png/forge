@@ -22,6 +22,7 @@ import { readHealth, recordHealth } from "./health.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
+import { createLspSession } from "./lsp.js"
 import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
@@ -264,6 +265,18 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       }
       for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}` })
     } catch { /* MCP is best-effort — a broken server never breaks the run */ }
+  }
+  // v23: LSP tools (definition/references/hover/diagnostics). Read-only, so they
+  // are safe anywhere, but loaded only at the top level to avoid re-spawning a
+  // language server per delegated sub-agent. Servers start lazily on first use
+  // and are closed in the `finally` below. Same plugin path as everything else.
+  let lspSession = null
+  if (!isDelegatedSubAgent && !noTools && config.tools?.lsp !== false && Object.keys(config.lsp?.servers || {}).length) {
+    try {
+      lspSession = createLspSession(config, { cwd: process.cwd() })
+      plugins = [...plugins, ...lspSession.tools]
+      for (const t of lspSession.tools) onEvent?.({ type: "info", text: `lsp tool available: ${t.name}` })
+    } catch { lspSession = null /* best-effort */ }
   }
   let subCounter = 0
   const tools = makeToolContext({
@@ -522,9 +535,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     else endRun("failed", { error: e?.message ?? String(e), wrote })
     throw e
   } finally {
-    // v23: always shut down MCP servers this run spawned — on success, failure,
-    // or cancellation — so a run never leaks child processes.
+    // v23: always shut down MCP + LSP servers this run spawned — on success,
+    // failure, or cancellation — so a run never leaks child processes.
     for (const c of mcpClients) { try { c.close() } catch {} }
+    if (lspSession) { try { lspSession.close() } catch {} }
   }
 }
 

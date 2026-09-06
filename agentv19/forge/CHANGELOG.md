@@ -38,6 +38,34 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   namespacing, the plugin adapter, timeout on a hung server, launch failure —
   and, end-to-end, that the real `runAgent` invokes an MCP tool, the result
   flows back, and the server is shut down afterward.
+- **Language Server Protocol (LSP) client** (`lsp.js`, autonomy v23 Tier 1) —
+  the biggest *code-understanding* gain: real go-to-definition, find-references,
+  hover types and compiler diagnostics from the same engine the user's editor
+  uses, instead of a regex repo-map. Zero dependencies: an LSP stdio client with
+  byte-accurate `Content-Length` framing (not MCP's newline framing), the
+  initialize handshake, document sync (`didOpen`), `textDocument/definition`,
+  `references`, `hover`, server-pushed `publishDiagnostics` captured and
+  awaitable, and a polite `shutdown`/`exit` with a SIGKILL fallback so a run
+  never leaks a child process. Servers are configured per language under
+  `lsp.servers` (**off by default**), resolved by file extension, launched from
+  config only — read-only, since a language server observes code, never mutates
+  it. New `forge lsp [list|test <file>]` resolves the server for a file, opens
+  it, and prints real diagnostics.
+
+  **Agent tools wired in.** `lsp_definition`, `lsp_references`, `lsp_hover` and
+  `lsp_diagnostics` — read-only, plugin-shaped — run over a per-run session
+  manager that lazily starts one language server per language, keeps open
+  documents synced with the file on disk (so results reflect edits the agent
+  just made), and is closed with the run. They flow through the same plugin path
+  and capability registry as every other tool; symbol-based tools take a name
+  and locate its first word-boundary occurrence, so the model never computes a
+  line/column. Loaded only at the top level (never per delegated sub-agent).
+  Automatic feeding of diagnostics into the verification ledger is a separate
+  follow-up; the tool exposes the evidence today. `test-lsp.mjs` (41 checks)
+  proves the protocol and the tools against a stand-in language server —
+  byte-accurate framing on a multi-byte document, diagnostics capture, symbol
+  location, and end-to-end: the real `runAgent` invokes `lsp_diagnostics`, the
+  result flows back, and the server is shut down afterward (no leaked child).
 - **`PLAN-v23.md`** — the review of the v21 agent and the roadmap to
   best-in-class (MCP, LSP, semantic retrieval, vision, browser, sandbox,
   benchmark), with this MCP client marked delivered.
