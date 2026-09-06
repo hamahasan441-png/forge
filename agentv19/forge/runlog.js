@@ -37,13 +37,37 @@ export function runFile(runId) {
   return path.join(RUNS_DIR, String(runId).replace(/[^A-Za-z0-9._-]/g, "_") + ".json")
 }
 
-/** Start a journal for a run. Returns a handle whose methods never throw. */
+/** Start a journal for a run. Returns a handle whose methods never throw.
+ *  v21: reopening the SAME runId (the meta controller runs one task as several
+ *  segments that share a runId so `undo --run` covers the whole task) MERGES
+ *  with the existing journal instead of clobbering it — touched files,
+ *  checkpoints and tool counts accumulate across segments. */
 export function openRun({ runId, task, cwd = process.cwd(), kind = "agent", provider = "", model = "" }) {
   const file = runFile(runId)
-  const rec = {
-    runId, kind, task: String(task ?? "").slice(0, 500), cwd: path.resolve(cwd), provider, model,
-    pid: process.pid, status: "running", startedAt: Date.now(), updatedAt: Date.now(), endedAt: null,
-    step: 0, toolCalls: 0, lastTool: null, files: {}, checkpoints: [], error: null,
+  let rec
+  try {
+    const prior = JSON.parse(fs.readFileSync(file, "utf8"))
+    if (prior && prior.runId === runId) {
+      rec = prior
+      rec.status = "running"
+      rec.pid = process.pid
+      rec.endedAt = null
+      rec.error = null
+      if (provider) rec.provider = provider
+      if (model) rec.model = model
+      if (task && !rec.task) rec.task = String(task).slice(0, 500)
+    } else {
+      rec = freshRec()
+    }
+  } catch {
+    rec = freshRec()
+  }
+  function freshRec() {
+    return {
+      runId, kind, task: String(task ?? "").slice(0, 500), cwd: path.resolve(cwd), provider, model,
+      pid: process.pid, status: "running", startedAt: Date.now(), updatedAt: Date.now(), endedAt: null,
+      step: 0, toolCalls: 0, lastTool: null, files: {}, checkpoints: [], error: null,
+    }
   }
   let dirty = false
   let timer = null

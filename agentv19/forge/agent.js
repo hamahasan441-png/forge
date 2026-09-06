@@ -186,7 +186,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   }
 }
 
-export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true }) {
+export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false }) {
   let p = provider
   const readonly = readOnly || planOnly // plan mode is always read-only
   // v20.4 UI events: every event from a delegated sub-agent is tagged with its
@@ -220,12 +220,14 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   // v20.2 (P3-4): tag every checkpoint from this run with one runId so the whole
   // run can be rolled back atomically (`forge undo --run`). Sub-agents are
   // read-only and never write, so they get no runId.
-  const runId = readonly ? null : "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  // v21: the meta controller shares ONE runId across every segment of a task so
+  // the whole autonomous task is a single atomic undo (`forge undo --run`).
+  const runId = readonly ? null : runIdOverride || "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
   // v20.4 crash-safe journal (~/.forge/runs/<runId>.json): what the run touched,
   // updated after every tool result, closed with a terminal status. An
   // interrupted run (crash / kill) stays "running" → startup recovery screen.
   const log = runId && journal ? openRun({ runId, task, cwd: process.cwd(), kind: "agent", provider: p.name, model: p.model }) : null
-  onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role })
+  if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role })
   // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
   // Sub-agents inherit the same plugins the main run sees.
   let plugins = []
@@ -315,12 +317,16 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   let switchedOk = false // recorded health-ok after a successful failover
   let toolCallCount = 0
   const toolLog = []
+  const commandChecks = [] // v21: actual exit-code verification evidence from bash
   let ended = false
   const endRun = (status, extra = {}) => {
     if (ended) return
     ended = true
-    log?.end(status, extra)
-    onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats() })
+    // v21: an intermediate segment of a multi-segment task keeps the shared
+    // journal "running" — only the controller closes it when the task ends.
+    if (log && !extra.keepRunning) log.end(status, extra)
+    else if (log) log.flush()
+    if (!suppressRunEvents) onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats() })
   }
   try {
     while (steps < maxSteps) {
@@ -336,8 +342,10 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
           model: p.model,
           providerName: p.name,
           messages,
-          // v20.5: a tool disabled by policy is never advertised to the model
-          tools: intel.toolDefs(tools.defs),
+          // v20.5: a tool disabled by policy is never advertised to the model.
+          // v21: a pure-planning request sends NO tools at all so the model
+          // produces a plan instead of trying to execute one.
+          tools: noTools ? undefined : intel.toolDefs(tools.defs),
           signal,
           deep: deepEffort,
           maxTokens: deepEffort ? 16384 : undefined,
@@ -414,6 +422,24 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
           const { result, ms } = results[i]
           toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
+          // v21: capture ACTUAL verification evidence from bash runs (exit code
+          // + output), not command names. The meta controller feeds this to the
+          // structured verification ledger. Test/build/lint/audit commands only.
+          if (tc.name === "bash" && !sub) {
+            try {
+              const rawArgs = safeJson(tc.args)
+              const command = typeof rawArgs === "object" && rawArgs ? String(rawArgs.command ?? "") : ""
+              if (/\b(test|jest|vitest|mocha|pytest|cargo|go test|rspec|build|tsc|make|compile|audit|snyk|semgrep|bandit|gosec|lint)\b/i.test(command)) {
+                const rstr = String(result)
+                const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
+                const timedOut = /timed out after/i.test(rstr)
+                const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
+                const tail = rstr.split("\n").filter(Boolean).slice(-6).join(" ").slice(0, 500)
+                commandChecks.push({ command: command.slice(0, 300), exitCode, timedOut, passed: exitCode === 0 && !timedOut, tail })
+                onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps })
+              }
+            } catch { /* evidence capture is best-effort */ }
+          }
           if (log) {
             const r = String(result)
             const okRes = !(r.startsWith("ERROR") || r.startsWith("BLOCKED"))
@@ -434,13 +460,17 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
       break
     }
 
-    if (steps >= maxSteps && !finalText) {
-      finalText = "(reached max steps without a final answer — raise agent.maxSteps in config)"
+    // v21: distinguish "segment budget spent, task not necessarily finished"
+    // from a genuine final answer. The meta controller continues automatically;
+    // a standalone runAgent caller gets the old message.
+    const budgetHit = steps >= maxSteps
+    if (budgetHit && !finalText) {
+      finalText = "(reached the per-segment step budget without a final answer)"
     }
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
     endRun("completed", { text: finalText, wrote })
-    return { text: finalText, steps, toolLog, planOnly, runId, wrote, toolStats: intel.stats(), toolRecords: intel.records() }
+    return { text: finalText, steps, toolLog, commandChecks, planOnly, runId, wrote, budgetHit, toolStats: intel.stats(), toolRecords: intel.records() }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

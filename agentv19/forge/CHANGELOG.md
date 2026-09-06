@@ -3,6 +3,82 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v21.0.0 — "autonomous orchestration"
+
+forge becomes a genuinely **autonomous, recoverable, long-running coding
+agent**. Every existing boundary (ShellGuard, SafePath, NetGuard, secret
+redaction, checkpoints, undo, provider failover, the terminal UI, sessions,
+memory, skills, plugins) is preserved; the new code is wrapped **around** it.
+New zero-dependency modules:
+
+- **`taskstate.js` — task state engine.** One authoritative persistent record
+  (`~/.forge/tasks/<taskId>.json`) with a validated 12-state lifecycle
+  (IDLE → PLANNING → DISCOVERING → EXECUTING → VERIFYING → REPAIRING →
+  CHECKPOINTING → WAITING / RECOVERING → COMPLETED / FAILED / CANCELLED).
+  Impossible transitions are rejected, never made silently. Persists plan, DAG,
+  completed/pending steps, files changed/created, tests run, verification
+  evidence, errors, decisions, model/provider, checkpoints, resource usage,
+  retry/repair counts, next action and timestamps.
+- **`meta.js` — meta controller.** Replaces `Task → maxSteps → stop` with
+  **bounded segments** that continue automatically: execute → observe →
+  checkpoint → verify → continue, until the objective is satisfied. A fixed
+  step count is never the definition of completion (only a per-segment safety
+  bound and a generous task-level fuse). Failure drives diagnose → strategy
+  change → repair → verify; interruption drives recover → reconcile → resume.
+  Terminal status is always COMPLETED / FAILED / CANCELLED / WAITING.
+- **`dag.js` — DAG planner.** Tasks are a dependency graph (id, objective,
+  dependencies, status, priority, risk, cost, capabilities, result). Independent
+  read-only nodes run concurrently; mutating nodes serialize and never race.
+  Survives interruption via the task record; a failed node recomputes
+  downstream instead of blindly continuing. `parsePlanToDAG` turns a model plan
+  into nodes with inferred roles/dependencies.
+- **`modelstrategy.js` — model strategy engine.** Separates proactive
+  **model selection** (task → required capability → context → risk → latency /
+  token budget → cost → best model among configured providers, with a
+  structured decision + confidence + fallback) from reactive **provider
+  failover** (which stays in `providers.js`). The active provider is never
+  switched on a heuristic tie.
+- **`agentmanager.js` — agent manager.** First-class worker pool: creation,
+  scheduling, role assignment (researcher/coder/tester/reviewer/security/
+  debugger/architect), priority, timeout, cancellation, pause/resume,
+  concurrency, budget enforcement and conflict detection. Read-only roles for
+  research/review/security/test; exactly one mutating context that still flows
+  through Tool Intelligence + the Security Gate.
+- **`resources.js` — resource manager.** Live RAM/CPU/disk/token/latency/
+  workers/time tracking with adaptive decisions (reduce concurrency under low
+  RAM, compact context near token budget, prefer a fast model on slow streaks,
+  narrow retrieval on large repos). Adaptations never widen a security
+  boundary.
+- **`verifyledger.js` — structured verification ledger.** Evidence from actual
+  execution results (exit code + output), never command names — `npm test` that
+  exits 1 is a failure. Risk-proportional depth (docs → syntax; single function
+  → focused test; core → focused + regression + build; security-sensitive →
+  security checks too). Later **mutations invalidate prior evidence**; a later
+  passing check supersedes an earlier failure.
+- **`recovery.js` — recovery & effect reconciliation.** Unknown results are
+  never blindly retried: inspect state → reconcile effect → decide
+  (continue / compensate / retry / ask). Crash recovery loads task + journal +
+  checkpoints, compares expected vs actual filesystem/git state, and produces a
+  resume prompt that forbids replaying the last command.
+- **`lessons.js` — failure learning.** Structured lessons (failure, cause,
+  failed strategy, successful repair, applicable context, confidence) stored per
+  project, redacted; the controller checks for previously-ineffective strategies
+  before repeating an operation.
+- **`context.js` — context engine.** Unifies RepoMap, Retrieval, Memory,
+  Sessions, cache and the project profile behind one demand-driven,
+  token-budgeted entry point; mutations invalidate affected cached state.
+
+Integration:
+- `runAgent` accepts a shared `runId` across segments (one `forge undo --run`
+  rolls back a whole task), emits real exit-code verification evidence, and
+  supports a no-tools planning mode.
+- `runlog.openRun` merges across segments instead of clobbering.
+- New `forge tasks` command (list / `--resume <id>` / `--all` / `--json`);
+  interactive startup also surfaces interrupted tasks.
+- New `forge agent --auto` runs the full meta-controller lifecycle; the default
+  agent one-shot keeps its classic pinned output. New tests: `test-autonomy.mjs`
+  (103 checks) added to the authoritative runner.
+
 ## [Unreleased] — v20.5.0 (in progress) — "tool intelligence"
 
 ### Added

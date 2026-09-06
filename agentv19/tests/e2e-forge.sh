@@ -53,7 +53,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v20.0.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v21.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
@@ -135,7 +135,7 @@ out=$(printf 'hello\n/retry\n/exit\n' | $F chat 2>&1)
 n=$(echo "$out" | grep -c "Hello from mock!")
 if [ "${n:-0}" -ge 2 ]; then PASS=$((PASS+1)); echo "  ok  chat /retry regenerates"
 else FAIL=$((FAIL+1)); echo "  FAIL chat /retry regenerates (got $n answers)"; fi
-check "banner v20" "$out" "v20"
+check "banner v21" "$out" "v21"
 
 # 18. chat /export writes markdown transcript
 mkdir -p "$T/work"
@@ -377,7 +377,7 @@ check "config menu probe ok" "$out" "connection OK"
 
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
-check "autopick banner" "$out" "forge v20"
+check "autopick banner" "$out" "forge v21"
 check "autopick provider" "$out" "provider: custom"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"

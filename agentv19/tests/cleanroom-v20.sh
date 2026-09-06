@@ -61,7 +61,7 @@ check "resolves to temp prefix" "$RESOLVED" "$PREFIX/bin/forge"
 cd "$WORK"   # foreign cwd — nowhere near the repo
 
 # 2. version + help from anywhere
-check "foreign cwd version" "$(forge version 2>&1)" "forge v20.0.0"
+check "foreign cwd version" "$(forge version 2>&1)" "forge v21.0.0"
 check "help mentions AutoPick" "$(forge help 2>&1)" "AutoPick"
 check "help mentions terminal" "$(forge help 2>&1)" "like a real terminal"
 check "help mentions --deep" "$(forge help 2>&1)" "--deep"
@@ -88,7 +88,7 @@ check "wizard health recorded" "$(cat "$T/home/health.json" 2>/dev/null)" '"ok":
 
 # 5. v19/v20 AutoPick: bare `forge` (non-TTY) = zero questions, one notice line
 out=$(printf '' | forge 2>&1)
-check "autopick banner" "$out" "forge v20.0.0"
+check "autopick banner" "$out" "forge v21.0.0"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"
 

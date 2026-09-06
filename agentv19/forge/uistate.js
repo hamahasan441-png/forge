@@ -652,6 +652,63 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
       else emit({ type: "TASK_FAILED", reason: ev.error || "agent run failed", steps: ev.steps, wrote: ev.wrote, endedAt: now })
       break
     }
+    // ---- v21 meta controller lifecycle ------------------------------------
+    // (the meta path suppresses per-segment run_start/run_end and emits these
+    //  task-level events; tool traffic still flows through the cases above).
+    case "TASK_STARTED":
+      emit({ type: "TASK_STARTED", id: ev.taskId || null, title: ev.objective, kind: "agent", startedAt: now })
+      if (ev.risk) emit({ type: "NOTICE", level: "info", text: `autonomous task • risk=${ev.risk}` })
+      break
+    case "MODEL_SELECTED":
+      emit({ type: "NOTICE", level: "info", text: `model ${ev.provider}/${ev.model} (${ev.confidence}) — ${String(ev.reason ?? "").slice(0, 100)}` })
+      if (ev.provider) emit({ type: "PROVIDER_CHANGED", provider: ev.provider, model: ev.model })
+      break
+    case "DAG_BUILT":
+      emit({ type: "NOTICE", level: "info", text: `planned dependency graph: ${ev.nodes} node(s)` })
+      break
+    case "SEGMENT_STARTED":
+      emit({ type: "NOTICE", level: "info", text: `segment ${ev.segment} (budget ${ev.maxSteps} steps)` })
+      break
+    case "SEGMENT_COMPLETED":
+      emit({ type: "NOTICE", level: "info", text: `segment ${ev.segment} ${ev.status} — ${ev.steps} steps, ${ev.toolCalls} tools${ev.budgetHit ? " • continuing" : ""}` })
+      break
+    case "VERIFICATION_PASSED":
+      emit({ type: "VERIFICATION_RECORDED", kind: ev.vtype, ok: true, summary: String(ev.evidence ?? ev.command ?? "").slice(0, 120) })
+      break
+    case "VERIFICATION_FAILED":
+      emit({ type: "VERIFICATION_RECORDED", kind: ev.vtype, ok: false, summary: String(ev.evidence ?? "").slice(0, 120) })
+      emit({ type: "NOTICE", level: "warn", text: `verification failed [${ev.vtype}] exit ${ev.exitCode}` })
+      break
+    case "VERIFICATION_STATUS":
+      if (!ev.ok) emit({ type: "NOTICE", level: "warn", text: String(ev.reason ?? "verification incomplete").slice(0, 120) })
+      break
+    case "REPAIR_STARTED":
+      emit({ type: "REPAIR_ATTEMPT", attempt: ev.attempt, reason: String(ev.error ?? "").slice(0, 120) })
+      break
+    case "STRATEGY_CHANGED":
+      emit({ type: "NOTICE", level: "warn", text: `strategy: ${String(ev.reason ?? "").slice(0, 120)}` })
+      break
+    case "RESOURCE_ADAPTED":
+      emit({ type: "NOTICE", level: "info", text: `resources [${ev.level}] ${String(ev.summary ?? "").slice(0, 90)}` })
+      break
+    case "RECOVERY_STARTED":
+      emit({ type: "RECOVERY_STARTED", note: "recovering interrupted task" })
+      break
+    case "RECOVERY_COMPLETED":
+      emit({ type: "RECOVERY_COMPLETED" })
+      emit({ type: "NOTICE", level: "info", text: `recovery: ${ev.recommended}` })
+      break
+    case "TASK_COMPLETED":
+      emit({ type: "TASK_COMPLETED", text: ev.text, steps: ev.segment, endedAt: now })
+      break
+    case "TASK_FINISHED":
+      if (ev.status === "COMPLETED") emit({ type: "TASK_COMPLETED", text: ev.text, steps: ev.segments, endedAt: now })
+      else if (ev.status === "CANCELLED") emit({ type: "USER_INTERRUPTED", phase: "stopped" })
+      else emit({ type: "TASK_FAILED", reason: ev.text || "task failed", steps: ev.segments, endedAt: now })
+      break
+    case "command_check":
+      // raw evidence signal; VERIFICATION_PASSED/FAILED carry the same info
+      break
     default:
       break
   }
