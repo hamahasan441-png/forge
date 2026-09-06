@@ -188,7 +188,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   }
 }
 
-export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null }) {
+export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null }) {
   let p = provider
   const readonly = readOnly || planOnly // plan mode is always read-only
   // v20.4 UI events: every event from a delegated sub-agent is tagged with its
@@ -528,7 +528,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
     endRun("completed", { text: finalText, wrote })
-    return { text: finalText, steps, toolLog, commandChecks, planOnly, runId, wrote, budgetHit, usage: { ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records() }
+    return { status: "COMPLETED", text: finalText, steps, taskId: taskId ?? null, segmentId: segmentId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

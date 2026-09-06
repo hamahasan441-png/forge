@@ -240,7 +240,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     let dagFindings = ""
     if (dag && workersEnabled && !signal?.aborted) {
       try {
-        const batch = dagLib.scheduleBatch(dag, { maxParallel: Math.max(1, resources.state.maxWorkers), conflictKeys: () => [] })
+        const batch = dagLib.scheduleBatch(dag, { maxParallel: Math.max(1, resources.state.maxWorkers), conflictKeys: (n) => {
+          const keys = []
+          if (Array.isArray(n.targetFiles)) keys.push(...n.targetFiles)
+          if (Array.isArray(n.targetSymbols)) keys.push(...n.targetSymbols)
+          if (Array.isArray(n.targetDirs)) keys.push(...n.targetDirs)
+          if (Array.isArray(n.resourceLocks)) keys.push(...n.resourceLocks)
+          return keys.length ? keys : [n.id]
+        } })
           .filter((n) => n.read_only && n.role && n.role !== "coder")
         if (batch.length) {
           emit({ type: "DAG_DISPATCH", nodes: batch.map((n) => n.id), parallel: batch.length })
@@ -286,14 +293,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       res = await agent({
         config, provider: prov, signal,
         task: segTask,
+        taskId,
+        segmentId,
         extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : ""].filter(Boolean).join("\n\n") || undefined,
         maxStepsOverride: segSteps, deep, onEvent: segmentEvents(emit, segment),
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
     } catch (e) {
-      res = { error: e?.message ?? String(e), aborted: e?.name === "AbortError" || signal?.aborted }
+      res = { status: (e?.name === "AbortError" || signal?.aborted) ? "CANCELLED" : "FAILED", error: e?.message ?? String(e), text: "", steps: 0, taskId: taskId ?? null, segmentId: segmentId ?? null, runId: taskRunId ?? null, toolLog: [], toolRecords: [], toolStats: {}, commandChecks: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, toolCalls: 0 }, budgetHit: false, wrote: false, aborted: e?.name === "AbortError" || signal?.aborted }
     }
     const segMs = Date.now() - segStart
+    const segToolCalls = res?.toolLog?.length ?? 0
 
     // --- observation -------------------------------------------------------
     if (res.aborted || signal?.aborted) { finalStatus = FINAL.CANCELLED; finalText = "cancelled by user"; break }
@@ -338,8 +348,6 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", vtype: rec.type, command: rec.command, exitCode: rec.exitCode, evidence: rec.evidence })
     }
 
-    const segToolCalls = res.toolLog?.length ?? 0
-    totalToolCalls += segToolCalls
     // real resource accounting: latency, token usage (reported by the provider
     // or estimated by agent.js), tool calls and active workers.
     const u = res.usage ?? {}
@@ -390,7 +398,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
       ts.noteError("SEGMENT_FAILED", res.error)
       emit({ type: "REPAIR_STARTED", segment, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId: `seg-${segment}` })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       if (consecutiveFailures >= 3 || !recovered) {
@@ -426,7 +434,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (v.anyFailure) {
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
       emit({ type: "REPAIR_STARTED", segment, attempt: repairCount + 1, error: v.reason })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId: `seg-${segment}` })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0 // a repair is a fresh chance to verify
@@ -461,7 +469,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.setNextAction(`verify: run ${v.missing.join(" / ")} before declaring success`)
       ts.transition(TASK_STATUS.VERIFYING, { reason: "requesting risk-proportional evidence" })
       emit({ type: "STRATEGY_CHANGED", reason: `objective met but evidence is thin for risk=${riskNow} — run ${v.missing.join(", ")} to verify`, missing: v.missing })
-      const verified = await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId })
+      const verified = await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId: `seg-${segment}` })
       if (verified) {
         finalStatus = FINAL.COMPLETED
         finalText = res.text ?? "task completed (verified)"
@@ -469,7 +477,23 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         emit({ type: "TASK_COMPLETED", taskId, segment, text: String(finalText).slice(0, 400) })
         break
       }
-      // verification could not be produced (no test suite etc.) — accept with
+      // HARD GATE for HIGH / CRITICAL: missing required evidence must block
+      // completion unless the ledger independently confirms NOT_AVAILABLE.
+      const hardBlock = (riskLevel === "high" || riskLevel === "critical") && v.missing.length > 0
+      if (hardBlock) {
+        finalStatus = FINAL.WAITING
+        finalText = `verification evidence missing for risk=${riskLevel}: ${v.missing.join(", ")}. Not completing until verified.`
+        ts.transition(TASK_STATUS.VERIFYING, { reason: "hard gate: required verification missing" })
+        emit({ type: "TASK_BLOCKED", taskId, segment, missing: v.missing, risk: riskNow })
+        ts.setNextAction(`wait: provide ${v.missing.join(", ")} before declaring success`)
+        // do NOT break; continue loop to allow user/resume to provide evidence
+        // but since we are at finished state with missing evidence, stay in loop
+        // with continuation prompt; next iteration will hit budget or finish.
+        evidenceRequests = 0
+        ts.transition(TASK_STATUS.EXECUTING, { reason: "waiting for verification evidence" })
+        continue
+      }
+      // verification could not be produced (not-high/critical) — accept with
       // honest local evidence rather than loop; record the shortfall.
       ts.decide("evidence", `accepted without ${v.missing.join(", ")} (not available for this project)`)
       finalStatus = FINAL.COMPLETED
@@ -546,13 +570,13 @@ function segmentEvents(emit, segment) {
  * already blocks that), and re-verifies. Returns true when the next state is
  * healthy.
  */
-async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null }) {
+async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
   const ctxBlock = ctxEngine.build(state.objective, { budgetTokens: 1600 })
   const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${String(error ?? verification?.reason ?? "").slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}\n\nInspect the relevant files first, then make a minimal surgical fix, then run verification.`
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
-    const r = await agent({ config, provider, signal, task: diag, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    const r = await agent({ config, provider, signal, task: diag, taskId, segmentId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
     // learn from the repair
     const fixed = !r.error && !r.budgetHit
     recordLesson({
@@ -587,12 +611,12 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
  * the real exit-code evidence. Returns true when the added evidence satisfies
  * the ledger. Never fakes a pass.
  */
-async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId }) {
+async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId, taskId = null, segmentId = null }) {
   const ctxBuilt = ctxEngine.build(state.objective, { budgetTokens: 1200 })
   const verifyContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBuilt === "string" ? ctxBuilt : ctxBuilt?.text ?? ""}`
   const ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level: ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.`
   try {
-    const r = await agent({ config, provider, signal, task: ask, extraContext: verifyContext, maxStepsOverride: 6, deep: false, onEvent: emit, journal: true, readOnly: false, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    const r = await agent({ config, provider, signal, task: ask, taskId, segmentId, extraContext: verifyContext, maxStepsOverride: 6, deep: false, onEvent: emit, journal: true, readOnly: false, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
     for (const chk of r.commandChecks ?? []) {
       const rec = ledger.recordCommand(chk.command, chk.tail, { exitCode: chk.exitCode })
       ts.noteVerification(rec)
