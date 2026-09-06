@@ -16,6 +16,8 @@
   "files": [
     "version.js",
     "contract.js",
+    "taskstate.js",
+    "orchestrator.js",
     "forge.js",
     "chat.js",
     "agent.js",

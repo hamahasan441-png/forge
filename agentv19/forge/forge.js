@@ -36,6 +36,7 @@ const loadOnboard = () => import("./onboard.js")
 import { readHealth, recordHealth } from "./health.js"
 import { runChat } from "./chat.js"
 import { runAgent, agentEventPrinter } from "./agent.js"
+import { runTask, resolveMaxSegments } from "./orchestrator.js"
 import { selfTestTools, toolCount } from "./tools.js"
 import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
@@ -273,6 +274,7 @@ async function main() {
       const task = positional.slice(1).join(" ") || (typeof flags.task === "string" ? flags.task : "") || (typeof flags.plan === "string" ? flags.plan : "")
       if (!task) { err('usage: forge agent "<task>"   (or: forge agent --plan "<task>")'); process.exit(1); return }
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
+      if (flags.segments === true) { err("usage: forge agent --segments <n>   (n = how many step-budget segments a task may use)"); process.exit(1); return }
       const planMode = flags.plan !== undefined
       console.log(dim(`forge agent — ${bold(task)}${flags.deep === true ? "  " + green("DEEP") : ""}`))
       console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? 25}${planMode ? " • PLAN MODE (read-only)" : ""}`))
@@ -299,12 +301,24 @@ async function main() {
         if (a !== "y" && a !== "yes") { warn("plan not executed"); return }
         console.log()
       }
-      const res = await runAgent({ config: cfg, provider: p, task, onEvent: agentEventPrinter(), deep: flags.deep === true ? true : undefined })
+      // v20.5: one segment by default (unchanged); --segments N (or
+      // agent.maxSegments) lets a task that exhausts its step budget continue
+      // with the context of what it already did.
+      const segLimit = resolveMaxSegments(cfg, flags.segments !== undefined ? flags.segments : undefined)
+      const res = await runTask({
+        config: cfg, provider: p, task, onEvent: agentEventPrinter(),
+        deep: flags.deep === true ? true : undefined, maxSegments: segLimit,
+      })
       console.log()
       console.log(bold(green("── result " + "─".repeat(50))))
       console.log(renderMarkdown(res.text))
-      console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+      const segStr = res.segments > 1 ? `${res.segments} segments • ` : ""
+      console.log(dim(`  ${segStr}${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
       if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      if (res.budgetExhausted) {
+        warn(`the step budget ran out with work remaining (segment ${res.segments}/${segLimit})`)
+        console.log(dim(`  resume it: ${cyan("forge tasks resume " + res.taskId)}   ${dim("(or raise --segments / agent.maxSteps)")}`))
+      }
       debugRunSummary(res)
       return
     }
@@ -604,6 +618,80 @@ async function main() {
       console.log(dim("  resume: forge resume <n|id>  •  search: forge sessions --search \"text\"  •  last: forge chat --continue"))
       return
     }
+    case "tasks": {
+      // v20.5 (Phase 2): long-horizon tasks are durable — list them, inspect
+      // what each segment did and what it cost, and resume unfinished work.
+      const { listTasks, loadTask, isResumable, continuationPrompt } = await import("./taskstate.js")
+      const sub = (positional[1] || "list").toLowerCase()
+      const fmtAge = (ts) => {
+        const m = Math.round((Date.now() - (ts || Date.now())) / 60000)
+        return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`
+      }
+      const fmtTokens = (t) => {
+        if (!t) return "?"
+        const base = t.totalTokens ? `${t.totalTokens} tok` : "0 tok"
+        return t.unknownSegments ? `${base} + ${t.unknownSegments} segment(s) unreported` : base
+      }
+
+      if (sub === "show" || sub === "resume") {
+        const key = positional[2]
+        if (!key) { err(`usage: forge tasks ${sub} <taskId>`); process.exit(1); return }
+        const rec = loadTask(key)
+        if (!rec) { err(`no task matching "${key}" (forge tasks — to list them)`); process.exit(1); return }
+
+        if (sub === "show") {
+          if (JSON_OUT) { emitJson(rec); return }
+          console.log(bold(rec.task))
+          console.log(dim(`  ${rec.taskId} • ${rec.status} • ${rec.provider ?? "?"}/${rec.model ?? "?"} • ${fmtAge(rec.updatedAt)}`))
+          console.log(dim(`  cwd: ${rec.cwd ?? "?"}`))
+          console.log(dim(`  ${rec.totals.segments} segment(s) • ${rec.totals.steps} steps • ${rec.totals.toolCalls} tool calls • ${fmtTokens(rec.totals)}`))
+          rec.segments.forEach((sg, i) => {
+            const tag = sg.status === "COMPLETED" ? green(sg.status) : yellow(sg.status)
+            console.log(`  ${bold(String(i + 1).padStart(2))}. ${tag}${sg.wrote ? red("  wrote") : ""}  ${dim(sg.note ?? "")}`)
+          })
+          if (rec.lastText) { console.log(); console.log(renderMarkdown(rec.lastText)) }
+          if (isResumable(rec)) console.log(dim(`\n  resume: ${cyan("forge tasks resume " + rec.taskId)}`))
+          return
+        }
+
+        // resume
+        if (!isResumable(rec)) { warn(`task ${rec.taskId} is ${rec.status} — nothing to resume`); return }
+        const cfg2 = await onboardIfMissing(config)
+        const p2 = needProvider(cfg2)
+        if (!p2) return
+        if (rec.cwd && fs.existsSync(rec.cwd)) process.chdir(rec.cwd)
+        const segLimit2 = resolveMaxSegments(cfg2, flags.segments !== undefined ? flags.segments : undefined)
+        console.log(dim(`forge tasks resume — ${bold(rec.task)}`))
+        console.log(dim(`cwd: ${process.cwd()} • provider: ${p2.name}/${p2.model} • resuming after ${rec.totals.segments} segment(s)`))
+        console.log()
+        const tR = Date.now()
+        const res = await runTask({
+          config: cfg2, provider: p2, onEvent: agentEventPrinter(),
+          maxSegments: segLimit2, resume: rec, task: rec.task,
+        })
+        console.log()
+        console.log(bold(green("── result " + "─".repeat(50))))
+        console.log(renderMarkdown(res.text))
+        console.log(dim(`  ${res.segments} segment(s) this run • ${res.steps} steps • ${((Date.now() - tR) / 1000).toFixed(1)}s`))
+        if (res.budgetExhausted) console.log(dim(`  still unfinished — resume again: ${cyan("forge tasks resume " + res.taskId)}`))
+        debugRunSummary(res)
+        return
+      }
+
+      if (sub !== "list") { err("usage: forge tasks [list|show <id>|resume <id>]"); process.exit(1); return }
+      const all = flags.all === true
+      const recs = listTasks({ cwd: all ? undefined : process.cwd(), all }).slice(0, JSON_OUT ? 999 : 20)
+      if (JSON_OUT) { emitJson({ count: recs.length, tasks: recs.map((r) => ({ ...r, segments: r.segments.length })) }); return }
+      if (!recs.length) { warn(all ? "no tasks recorded yet" : "no tasks recorded for this directory (--all for every directory)"); return }
+      console.log(bold(`tasks (${recs.length})${all ? "" : dim("  — this directory; --all for every directory")}`))
+      recs.forEach((r, i) => {
+        const tag = r.status === "COMPLETED" ? green(r.status) : yellow(r.status)
+        console.log(`  ${bold(String(i + 1).padStart(2))}. ${dim(r.taskId)}  ${tag}  ${dim(`${r.totals.segments} seg • ${fmtTokens(r.totals)} • ${fmtAge(r.updatedAt)}`)}`)
+        console.log(dim(`      ${String(r.task).replace(/\s+/g, " ").slice(0, 76)}`))
+      })
+      console.log(dim(`  inspect: ${cyan("forge tasks show <id>")}  •  resume unfinished: ${cyan("forge tasks resume <id>")}`))
+      return
+    }
     case "skills": {
       const dir = resolveSkillsDir(config.skills?.dir)
       if (!dir) { err("no skills directory found (looked in ./skills, repo root, cli/forge/skills, ~/.forge/skills)"); process.exit(1); return }
@@ -802,6 +890,7 @@ ${bold("usage")}
   ${cyan("forge config show|path|get|set|unset")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
+  ${cyan("forge tasks")}                  long-horizon tasks ${dim("list | show <id> | resume <id>   (--all = every directory)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
@@ -826,7 +915,7 @@ ${bold("resilience")}
 ${bold("flags")}
   --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>
   --json (machine-readable output: sessions/models/plugins/skills --check/memory list)  •  FORGE_DEBUG=1 (agent trace)
-  --config <path>    --cwd <dir> (agent)  --plan (agent)  --continue  --resume <n|id>  -m "message"  --no-color
+  --config <path>    --cwd <dir> (agent)  --plan (agent)  --segments <n> (agent)  --continue  --resume <n|id>  -m "message"  --no-color
 
 ${bold("config file")}  ${USER_CONFIG_PATH}  (chmod 600, env vars as fallback)
 ${bold("providers")}     ${CATALOG.map((c) => c.name).join(", ")}

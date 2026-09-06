@@ -6,6 +6,41 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.5.0 (in progress)
 
 ### Added
+- **Long-horizon tasks: durable state + segment continuation** (`taskstate.js`,
+  `orchestrator.js`, autonomy Phase 2) — the first real consumer of the Phase 1
+  contract, and the answer to forge's most obvious autonomy limit: a run that
+  exhausted its step budget printed "work remains" and then **forgot
+  everything**. There was no record the task had existed, what it had already
+  done, or what it cost, so "continue where you left off" was impossible and a
+  retry started from zero context. Sessions record a *conversation*; nothing
+  recorded a *task*.
+
+  A task is now a durable record in `~/.forge/tasks/<taskId>.json` — chmod 600,
+  written atomically (tmp + rename, so an interrupted write cannot leave a
+  half-parsed record), secret-redacted before it touches disk, bounded in
+  segments retained and total tasks kept. It holds every segment's status,
+  steps, tool calls, whether it changed files, and its usage.
+
+  `runTask()` sits above `runAgent()` and continues a task across segments —
+  but only on the explicit `CONTINUE_REQUIRED` status, never on a guess, and
+  never past `--segments`/`agent.maxSegments` (default **1**, so `forge agent`
+  behaves exactly as before unless you opt in; hard-capped at 20 because
+  continuation spends real tokens). A continuing segment is handed what earlier
+  segments did and an explicit warning that files may already have been
+  changed, so it verifies before it edits instead of redoing finished work.
+  If `runAgent` throws, the record is marked `FAILED` and the error is
+  **re-thrown** — never swallowed.
+
+  New `forge tasks` — `list` (this directory; `--all` for every one),
+  `show <id>` (per-segment history and cost), `resume <id>`. Ids accept an
+  unambiguous prefix.
+
+  Two honesty properties are enforced rather than assumed, and tested: a task
+  is never more finished than its last segment says it is, and a segment whose
+  provider reported no token counts is **counted as unreported**
+  (`unknownSegments`) instead of folded into the total as `0`, so a cost figure
+  is never quietly understated. New `tests/test-taskstate.mjs` (70 checks).
+
 - **An explicit agent execution contract** (`contract.js`, autonomy Phase 1) — the
   first step toward long-horizon autonomy is that a caller can tell what actually
   happened without guessing. Before this, `runAgent()` returned
@@ -39,6 +74,19 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   one answering, one that only emits tool calls in order to exhaust the step
   budget for real — plus a run of the actual CLI asserting the contract reaches
   the terminal.
+
+### Fixed
+- **Continuation would have silently escalated every resumed segment to DEEP
+  effort.** The `auto` effort profile classifies the task text it is given, and
+  a continuation prompt is long by construction — long enough to score
+  `complex` on word count alone. `add a --verbose flag` classifies as `simple`;
+  wrapped in continuation context it classified as `complex`, which is the
+  expensive reasoning path. `runAgent` now takes the original task text for
+  classification (`classifyTask`), so effort follows the real task, not the
+  scaffolding. Caught by running the CLI, not by reading the code.
+- **A resumed segment rendered as "segment 2/1"** — the banner compared the
+  task's absolute segment number against the *current invocation's* limit. It
+  now reports the highest segment this invocation can reach.
 
 ### Changed
 - **`FORGE_DEBUG=1` reports the contract, not just tool counts** — the run

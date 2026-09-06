@@ -16,6 +16,7 @@ export const DEFAULT_DIR = process.env.FORGE_HOME || path.join(os.homedir(), ".f
 export const USER_CONFIG_PATH = process.env.FORGE_CONFIG || path.join(DEFAULT_DIR, "config.json")
 export const PROJECT_CONFIG_NAME = "forge.config.json"
 export const SESSIONS_DIR = path.join(DEFAULT_DIR, "sessions")
+export const TASKS_DIR = path.join(DEFAULT_DIR, "tasks")
 
 export function defaultConfig() {
   return {
@@ -23,7 +24,7 @@ export function defaultConfig() {
     activeProvider: "",
     providers: {}, // name -> { apiKey, baseUrl, model }
     skills: { enabled: true, dir: "" },
-    agent: { maxSteps: 25, timeoutSec: 45, maxToolOutput: 12000, maxToolCalls: 80, delegateTimeoutSec: 180, maxParallelSubAgents: 2 },
+    agent: { maxSteps: 25, maxSegments: 1, timeoutSec: 45, maxToolOutput: 12000, maxToolCalls: 80, delegateTimeoutSec: 180, maxParallelSubAgents: 2 },
     chat: { stream: true, system: "", showReasoning: true, maxHistoryMessages: 40, tools: true, compact: true, compactAtChars: 48000, profile: "auto", restoreCwd: true, historySize: 300 },
     tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, fetchPrivateUrls: false },
     retry: { attempts: 3, backoffMs: 1500, connectMs: 30000, firstByteMs: 120000, requestTimeoutMs: 180000 },

@@ -24,7 +24,7 @@ import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { DEFAULT_DIR } from "./config.js"
-import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
+import { dim, bold, cyan, green, yellow, red, estimateTokens } from "./ui.js"
 import { relevantMemory, relevantLearnings } from "./memory.js"
 import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap } from "./repomap.js"
@@ -177,7 +177,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   }
 }
 
-export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, taskId, segmentId }) {
+export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, taskId, segmentId, classifyTask }) {
   let p = provider
   // Phase 1 contract: identity is explicit. A caller that owns a longer-lived
   // task passes taskId so every segment of it shares one identity; a bare call
@@ -200,7 +200,12 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     const profile = config.chat?.profile ?? "auto"
     deepEffort = profile === "deep"
     if (profile === "auto") {
-      const level = classifyTaskComplexity(task)
+      // Classify the ORIGINAL task, not the prompt actually sent. A resumed
+      // segment's prompt is wrapped in continuation scaffolding that is long
+      // enough to score as "complex" on word count alone — which would have
+      // silently escalated every continuation to DEEP effort (and its cost),
+      // whatever the task really was.
+      const level = classifyTaskComplexity(classifyTask ?? task)
       deepEffort = level === "complex" || level === "critical"
       if (deepEffort) onEvent?.({ type: "info", text: `auto profile → ${level} task → deep effort` })
     }
@@ -465,6 +470,10 @@ export function agentEventPrinter() {
       console.log(yellow(`  ↻ transient provider error (${ev.error}) — retrying… ${ev.left ?? ""}`))
     } else if (ev.type === "failover") {
       console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
+    } else if (ev.type === "segment") {
+      // v20.5: a new segment of one long-horizon task (see orchestrator.js)
+      console.log()
+      console.log(bold(cyan(`── segment ${ev.index}/${ev.of} ${"─".repeat(44)}`)) + dim(`  ${ev.taskId}`))
     } else if (ev.type === "info") {
       console.log(dim(`  · ${ev.text}`))
     } else if (ev.type === "compacted") {
