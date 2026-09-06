@@ -25,7 +25,8 @@
  */
 import { runAgent } from "./agent.js"
 import { AGENT_STATUS } from "./contract.js"
-import { createTask, recordSegment, setTaskStatus, continuationPrompt, pruneTasks } from "./taskstate.js"
+import { createTask, recordSegment, recordVerification, setTaskStatus, continuationPrompt, pruneTasks } from "./taskstate.js"
+import { verifyProject, repairPrompt, VERIFY_STATUS } from "./verify.js"
 
 /** A ceiling no config value can exceed — continuation spends real tokens. */
 export const HARD_MAX_SEGMENTS = 20
@@ -59,7 +60,7 @@ export function segmentNote(result) {
  *   agent finishing) — the task is still resumable and says so.
  */
 export async function runTask({
-  config, provider, task, onEvent, signal, deep, maxSegments, maxStepsOverride, cwd, resume,
+  config, provider, task, onEvent, signal, deep, maxSegments, maxStepsOverride, cwd, resume, verify = false,
 }) {
   const limit = resolveMaxSegments(config, maxSegments)
   const dir = cwd ?? process.cwd()
@@ -71,11 +72,15 @@ export async function runTask({
   let record = rec0
   let last = null
   let ran = 0
+  let verification = null
+  let repair = null // set when verification failed and a corrective segment is owed
 
   while (ran < limit) {
     // Segment 1 of a fresh task is the task itself; anything after it (or any
     // resumed task) gets the continuation context built from durable state.
-    const segTask = record.segments.length === 0 ? record.task : continuationPrompt(record)
+    // A failed verification overrides both: fix what the checks caught.
+    const segTask = repair ?? (record.segments.length === 0 ? record.task : continuationPrompt(record))
+    repair = null
     if (onEvent && record.segments.length > 0) {
       // `index` is the task's absolute segment number; `of` is the highest it
       // can reach in THIS invocation. On a resume the two must not be compared
@@ -101,13 +106,37 @@ export async function runTask({
     last = result
     record = recordSegment(record.taskId, result, { note: segmentNote(result) }) ?? record
 
-    if (result.status !== AGENT_STATUS.CONTINUE_REQUIRED) break
+    if (result.status === AGENT_STATUS.CONTINUE_REQUIRED) continue
+
+    // The agent says it is done. Before believing it, run the project's checks.
+    if (!verify) break
+    onEvent?.({ type: "verify_start", taskId: record.taskId })
+    verification = await verifyProject(dir, {
+      timeoutSec: config?.agent?.verifyTimeoutSec ?? undefined,
+      allowSudo: config?.tools?.allowSudo === true,
+      assumeYes: config?.tools?.assumeYes === true,
+    })
+    // Recording DEMOTES a COMPLETED task whose checks fail — the record must
+    // not carry the agent's claim when the evidence contradicts it.
+    record = recordVerification(record.taskId, verification) ?? record
+    onEvent?.({ type: "verify_result", status: verification.status, checks: verification.checks })
+
+    if (verification.status !== VERIFY_STATUS.FAILED) break
+    if (ran >= limit) break // out of segments: the demoted status already says so
+    repair = repairPrompt(record.task, verification)
   }
 
+  // Two different reasons a task can be unfinished, and the CLI says different
+  // things about them: the step budget ran out, or the checks disagreed with a
+  // claimed completion. Conflating them would print a misleading hint.
   const budgetExhausted = last?.status === AGENT_STATUS.CONTINUE_REQUIRED
+  const verificationFailed = verification?.status === VERIFY_STATUS.FAILED
   return {
+    unfinished: record.status === AGENT_STATUS.CONTINUE_REQUIRED,
+    verificationFailed,
     taskId: record.taskId,
-    status: last?.status ?? AGENT_STATUS.WAITING,
+    status: record.status ?? last?.status ?? AGENT_STATUS.WAITING,
+    verification,
     segments: ran,
     text: last?.text ?? "",
     wrote: record.segments.some((s) => s.wrote),

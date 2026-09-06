@@ -6,6 +6,48 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.5.0 (in progress)
 
 ### Added
+- **A verification gate: evidence before "done"** (`verify.js`, autonomy
+  Phase 3) — an agent that edits code and then reports `COMPLETED` has
+  *asserted* success, not demonstrated it. Nothing in forge distinguished "I
+  ran the tests and they pass" from "I believe this is right", and the second
+  is how an autonomous agent quietly ruins a repository over several segments.
+
+  With `--verify` (or `agent.verify: true`), a segment that claims completion
+  is checked against the project's own commands before that claim is believed.
+  **A `COMPLETED` segment whose checks fail demotes the task to
+  `CONTINUE_REQUIRED`** in the durable record — the agent's claim does not
+  survive contact with evidence — and, if segments remain, the next one is
+  handed the failing command and its real output and told to fix the cause.
+  That repair prompt explicitly forbids deleting, skipping or weakening a check
+  to make it pass, or editing its assertions to match current behaviour: that
+  is the failure mode a naive self-correction loop rewards.
+
+  The honesty is the point:
+  - `NOT_AVAILABLE` is a first-class result. A project with no test command is
+    NOT_AVAILABLE, **never PASSED** — absence of evidence is never recorded as
+    evidence of correctness, and it does not demote the task either.
+  - `BLOCKED` is a first-class result. Every candidate command goes through
+    `modelMayRun`, the same shellguard policy as the agent's own bash tool —
+    this module has **no private path to the shell**. A refused command is
+    recorded as blocked and not run (tested with a marker file that would exist
+    if it had run), and an all-blocked verification reports `BLOCKED`, never
+    `PASSED`.
+  - A timeout is a failure, not a pass.
+
+  Commands are derived only from the project's own configuration (package.json
+  scripts, Makefile targets, and the conventional entry point for Cargo/Go/
+  pytest projects) — never from model output. `build` is deliberately not run:
+  it is not a check. Checks are capped at 3, cheapest first, each with a
+  bounded timeout; output is secret-redacted and truncated from the *front* so
+  the summary a failing suite prints at the end survives.
+
+  Off by default, so nothing changes until you ask for it. Running a project's
+  test command executes that project's code — which the agent's bash tool could
+  already do — so the gate does not widen what forge can run; it makes running
+  it deliberate, recorded and inspectable via `forge tasks show`.
+  New `tests/test-verify.mjs` (57 checks), including a real red→green
+  self-correction across two segments.
+
 - **Long-horizon tasks: durable state + segment continuation** (`taskstate.js`,
   `orchestrator.js`, autonomy Phase 2) — the first real consumer of the Phase 1
   contract, and the answer to forge's most obvious autonomy limit: a run that

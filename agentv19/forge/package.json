@@ -18,6 +18,7 @@
     "contract.js",
     "taskstate.js",
     "orchestrator.js",
+    "verify.js",
     "forge.js",
     "chat.js",
     "agent.js",

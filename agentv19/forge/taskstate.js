@@ -131,6 +131,32 @@ export function recordSegment(taskId, result, { note } = {}) {
   return rec
 }
 
+/**
+ * Attach verification evidence to a task, and let it DEMOTE a claimed
+ * completion: a segment that said COMPLETED while the project's own checks
+ * fail has not finished, and the record must say so rather than take the
+ * agent's word for it. Verification never promotes a task the other way.
+ */
+export function recordVerification(taskId, verification, { demote = true } = {}) {
+  const rec = loadTask(taskId)
+  if (!rec || !verification) return null
+  rec.verification = {
+    status: verification.status,
+    ranAt: verification.ranAt ?? Date.now(),
+    checks: (verification.checks ?? []).map((c) => ({
+      id: c.id, cmd: c.cmd, source: c.source, ok: !!c.ok, code: c.code ?? null,
+      blocked: !!c.blocked, reason: c.reason ? clip(c.reason, 300) : null,
+      ms: c.ms ?? 0, output: clip(c.output ?? "", 2000),
+    })),
+  }
+  if (demote && verification.status === "FAILED" && rec.status === AGENT_STATUS.COMPLETED) {
+    rec.status = AGENT_STATUS.CONTINUE_REQUIRED
+  }
+  rec.updatedAt = Date.now()
+  try { writeAtomic(taskFile(rec.taskId), rec) } catch { return null }
+  return rec
+}
+
 /** Mark a task terminally, e.g. FAILED when runAgent threw. Returns the record. */
 export function setTaskStatus(taskId, status, { note } = {}) {
   const rec = loadTask(taskId)

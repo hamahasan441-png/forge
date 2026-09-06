@@ -308,6 +308,7 @@ async function main() {
       const res = await runTask({
         config: cfg, provider: p, task, onEvent: agentEventPrinter(),
         deep: flags.deep === true ? true : undefined, maxSegments: segLimit,
+        verify: flags.verify === true || cfg.agent?.verify === true,
       })
       console.log()
       console.log(bold(green("── result " + "─".repeat(50))))
@@ -315,9 +316,15 @@ async function main() {
       const segStr = res.segments > 1 ? `${res.segments} segments • ` : ""
       console.log(dim(`  ${segStr}${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
       if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      if (res.verification) {
+        console.log(dim(`  verification: ${res.verification.status === "PASSED" ? green("PASSED") : res.verification.status === "NOT_AVAILABLE" ? yellow("NOT_AVAILABLE") : red(res.verification.status)}`))
+      }
       if (res.budgetExhausted) {
         warn(`the step budget ran out with work remaining (segment ${res.segments}/${segLimit})`)
         console.log(dim(`  resume it: ${cyan("forge tasks resume " + res.taskId)}   ${dim("(or raise --segments / agent.maxSteps)")}`))
+      } else if (res.verificationFailed) {
+        warn("the agent reported done, but this project's checks fail — recorded as unfinished, not completed")
+        console.log(dim(`  continue it: ${cyan("forge tasks resume " + res.taskId)}   ${dim("(or raise --segments to let it self-correct)")}`))
       }
       debugRunSummary(res)
       return
@@ -649,6 +656,14 @@ async function main() {
             const tag = sg.status === "COMPLETED" ? green(sg.status) : yellow(sg.status)
             console.log(`  ${bold(String(i + 1).padStart(2))}. ${tag}${sg.wrote ? red("  wrote") : ""}  ${dim(sg.note ?? "")}`)
           })
+          if (rec.verification) {
+            const vs = rec.verification.status
+            console.log(dim(`  verification: ${vs === "PASSED" ? green(vs) : vs === "NOT_AVAILABLE" ? yellow(vs) : red(vs)}`))
+            for (const c of rec.verification.checks ?? []) {
+              if (c.blocked) console.log(yellow(`    ⊘ ${c.id}: BLOCKED — ${String(c.reason).slice(0, 80)}`))
+              else console.log(c.ok ? green(`    ✓ ${c.id}: ${c.cmd}`) : red(`    ✗ ${c.id}: ${c.cmd} → exit ${c.code ?? "timeout"}`))
+            }
+          }
           if (rec.lastText) { console.log(); console.log(renderMarkdown(rec.lastText)) }
           if (isResumable(rec)) console.log(dim(`\n  resume: ${cyan("forge tasks resume " + rec.taskId)}`))
           return
@@ -668,6 +683,7 @@ async function main() {
         const res = await runTask({
           config: cfg2, provider: p2, onEvent: agentEventPrinter(),
           maxSegments: segLimit2, resume: rec, task: rec.task,
+          verify: flags.verify === true || cfg2.agent?.verify === true,
         })
         console.log()
         console.log(bold(green("── result " + "─".repeat(50))))
@@ -915,7 +931,7 @@ ${bold("resilience")}
 ${bold("flags")}
   --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>
   --json (machine-readable output: sessions/models/plugins/skills --check/memory list)  •  FORGE_DEBUG=1 (agent trace)
-  --config <path>    --cwd <dir> (agent)  --plan (agent)  --segments <n> (agent)  --continue  --resume <n|id>  -m "message"  --no-color
+  --config <path>    --cwd <dir> (agent)  --plan (agent)  --segments <n> (agent)  --verify (agent)  --continue  --resume <n|id>  -m "message"  --no-color
 
 ${bold("config file")}  ${USER_CONFIG_PATH}  (chmod 600, env vars as fallback)
 ${bold("providers")}     ${CATALOG.map((c) => c.name).join(", ")}

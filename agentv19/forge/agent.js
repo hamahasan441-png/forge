@@ -474,6 +474,18 @@ export function agentEventPrinter() {
       // v20.5: a new segment of one long-horizon task (see orchestrator.js)
       console.log()
       console.log(bold(cyan(`── segment ${ev.index}/${ev.of} ${"─".repeat(44)}`)) + dim(`  ${ev.taskId}`))
+    } else if (ev.type === "verify_start") {
+      console.log()
+      console.log(dim("  ⏱ verifying — running this project's own checks…"))
+    } else if (ev.type === "verify_result") {
+      if (ev.status === "NOT_AVAILABLE") {
+        console.log(yellow("  ⚠ verification NOT_AVAILABLE — this project exposes no test/lint command to run"))
+      } else {
+        for (const c of ev.checks ?? []) {
+          if (c.blocked) console.log(yellow(`  ⊘ ${c.id}: BLOCKED by the safety engine — ${String(c.reason).slice(0, 90)}`))
+          else console.log(c.ok ? green(`  ✓ ${c.id}: ${c.cmd}`) : red(`  ✗ ${c.id}: ${c.cmd} → exit ${c.code ?? "timeout"}`))
+        }
+      }
     } else if (ev.type === "info") {
       console.log(dim(`  · ${ev.text}`))
     } else if (ev.type === "compacted") {
