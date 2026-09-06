@@ -135,6 +135,50 @@ Edit it any time, or use commands: `forge config set providers.openai.apiKey sk-
 
 Inside chat: `/help` `/status` `/profile` `/tools` `/shell` `/deep` `/plan` `/compact` `/tokens` `/usage` `/retry` `/undo` `/export` `/sessions` `/resume` `/model` `/key` `/skills` `/agent` `/save` `/new` `/stream` `/config` — end a line with `\` for multiline input
 
+v20.4 adds: `/tasks` `/checkpoints` `/diff [file]` `/undo --run [RUN-xxxx]` `/details [N]` `/agents` `/verify [cmd]` `/memory` `/settings` `/clear` `/normal` — Tab completes commands, typos get a hint.
+
+## The terminal workstation (v20.4)
+
+Interactive `forge chat` (and `forge agent` in a terminal) is a state-driven
+console, not a scrolling log:
+
+```
+FORGE  AGENT  RUN-4F2A  ● EXECUTING 50%  02:41  openai/gpt-4o
+TASK   Refactor authentication system
+PLAN   ✓ Inspect architecture  ✓ Map dependencies  ● Refactor auth  ○ Run tests
+ACTIVITY
+  ✓ read   src/auth/session.js            400ms
+  ● shell  npm test                       running
+forge [agent] ❯ █
+```
+
+- **Header** — mode (CHAT/AGENT/PLAN/RECOVERY), short run id, state
+  (READY · THINKING · PLANNING · EXECUTING · VERIFYING · RECOVERING · WAITING ·
+  COMPLETED · FAILED · CANCELLED), elapsed time. It adapts to width: 40 columns
+  shows `● EXECUTING 50%`, 80 adds a one-line summary, 100+ the full dashboard.
+  Progress is only ever real plan items done/total — never a guess.
+- **Input** — cursor keys, Home/End, Ctrl+A/E/K/U/W/Y, Backspace/Delete that
+  understand emoji and CJK, ↑↓ history (prefix-aware), Ctrl+R reverse search,
+  Tab completion, multiline (`\` at end of line or Alt+Enter). Pasting is
+  bracketed: a 300-line paste is inserted as one block and submitted once,
+  never executed line by line. Streaming output never corrupts what you type —
+  the draft and cursor are restored after every frame.
+- **Tool rows** — `✓ shell  npm test  1.2s` with exit code; large outputs are
+  collapsed to a line count + error lines; `/details` expands.
+- **Changes & checkpoints** — `/diff` shows a real unified diff of the run,
+  `/checkpoints` lists snapshots, `/undo --run RUN-xxxx` rolls a whole run back.
+- **Honest cancel** — Ctrl+C shows `Stopping… waiting for current tool to
+  terminate`, then `✓ execution stopped safely` only once it actually has.
+- **Crash-safe** — every write run is journaled in `~/.forge/runs/`. If Forge
+  died mid-run, the next start shows `FORGE RECOVERY` with
+  `[R]esume [V]erify [U]ndo [C]ancel` — nothing is replayed silently.
+  `/tasks` lists past runs and their status.
+- **Terminals & accessibility** — `NO_COLOR`, `FORGE_ASCII=1` (ASCII glyphs),
+  `FORGE_A11Y=1` (`SUCCESS:`/`ERROR:`/`ACTIVE:` labels instead of symbols),
+  `/settings` to persist dock/thinking/ascii/a11y/collapse. Meaning is never
+  carried by colour alone. `FORGE_UI=plain` restores the classic line output;
+  piped/non-TTY use is unchanged.
+
 ## New in v19 "TERMINAL"
 
 - **Terminal-in-chat** — type Linux commands as chat lines and they EXECUTE right there,
@@ -300,7 +344,8 @@ Toggle in chat with `/tools off` / `/tools on`. Everything is on by default.
 ~/.forge/checkpoints/      automatic pre-edit snapshots (incl. created files)
 ~/.forge/health.json       last probe result per provider (✓ tested badges)
 ~/.forge/models-cache.json last live model list per provider (FREE badges offline)
-~/.forge/history           persistent chat command history (arrow keys)
+~/.forge/history           persistent chat command history (arrow keys, Ctrl+R; multiline-safe, no secrets)
+~/.forge/runs/             agent-run journals — power /tasks, /undo --run and crash recovery (v20.4)
 <package>/skills/          the 69 bundled skills
 ./forge.config.json        optional per-project overrides (merged on top)
 ```
@@ -311,6 +356,7 @@ Optional tuning (all in the config file — defaults are sensible, start empty):
 "retry":  { "attempts": 3, "backoffMs": 1500, "connectMs": 30000, "requestTimeoutMs": 180000 },
 "agent":  { "maxSteps": 25, "timeoutSec": 45, "maxToolOutput": 12000, "maxToolCalls": 80, "delegateTimeoutSec": 180, "maxParallelSubAgents": 2 },
 "chat":   { "tools": true, "compact": true, "compactAtChars": 48000, "shellAuto": true, "deep": false, "profile": "auto", "restoreCwd": true },
+"ui":     { "dock": true, "thinking": true, "ascii": false, "a11y": false, "collapse": true },
 "tools":  { "searchUrl": "http://your-searxng/search", "allowOutsideProject": false, "allowSudo": false, "assumeYes": false, "fetchPrivateUrls": false },
 "providers": { "openai": { "contextWindow": 128000, "priceIn": 2.5, "priceOut": 10 } }
 ```

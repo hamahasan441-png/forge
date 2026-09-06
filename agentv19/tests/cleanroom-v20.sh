@@ -70,6 +70,8 @@ check "help mentions v20 safety" "$(forge help 2>&1)" "risk-classified"
 # 3. packaged file set — the shipped module + skills actually exist
 PKG="$PREFIX/lib/node_modules/forge-agent-cli"
 check "module shipped" "$(ls "$PKG/tools.js" "$PKG/shellguard.js" "$PKG/memory.js" 2>&1)" "shellguard.js"
+# v20.4 terminal UI modules must ship too (a missing one = broken interactive chat)
+check "ui modules shipped" "$(ls "$PKG/terminal.js" "$PKG/render.js" "$PKG/uistate.js" "$PKG/agentview.js" "$PKG/keys.js" "$PKG/editor.js" "$PKG/runlog.js" "$PKG/textdiff.js" 2>&1 | wc -l)" "8"
 check "skills shipped" "$(ls "$PKG/skills" 2>&1)" "pdf"
 NSKILLS=$(forge skills 2>&1 | head -1)
 check "skills indexed from install" "$NSKILLS" "skills ("
@@ -148,6 +150,17 @@ check "/model switch saved" "$out" "model → mock-coder"
 REF=$(forge sessions 2>&1 </dev/null | grep -oE "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9-]+-[a-z0-9]+" | head -1)
 out=$(cd "$WORK" && printf '' | forge resume "$REF" 2>&1)
 check "forge resume works" "$out" "resumed session"
+
+# 10b. v20.4 UI surface from the installed package: plain-UI chat renders a
+#      compact tool row, /tasks + /checkpoints reach the run journal, and the
+#      piped (non-TTY) path keeps the classic [chat] lines untouched
+out=$(printf 'USE_TOOL inline please\n/tasks\n/checkpoints\n/settings\n/exit\n' | forge chat 2>&1)
+check "piped chat keeps [chat] tool line" "$out" "[chat] bash"
+check "/tasks lists the journaled run" "$out" "RUN-"
+check "/settings lists ui keys" "$out" "collapse"
+out=$(printf 'USE_TOOL inline please\n/exit\n' | FORGE_UI=plain forge chat 2>&1)
+check "FORGE_UI=plain still answers" "$out" "TOOL RESULT RECEIVED"
+check_absent "no raw escape sequences when piped" "$out" "[?2004h"
 
 # 11. agent loop (no deep) still green + SSRF negative (guard ON without opt-in)
 out=$(forge agent "USE_TOOL plain" </dev/null 2>&1)

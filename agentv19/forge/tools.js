@@ -353,11 +353,17 @@ async function runBash(ctx, command, timeoutSec) {
   const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes })
   if (!verdict.ok) return verdict.reason
   const t = Math.min(300, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
+  if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"
   return new Promise((resolve) => {
-    execFile("/bin/sh", ["-c", command], { cwd: ctx.cwd, timeout: t, maxBuffer: 4 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, TERM: "dumb" } }, (error, stdout, stderr) => {
+    // v20.4: the user's Ctrl+C (ctx.signal) terminates the child immediately —
+    // honest cancellation instead of "waiting for the timeout"
+    const opts = { cwd: ctx.cwd, timeout: t, maxBuffer: 4 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, TERM: "dumb" } }
+    if (ctx.signal) opts.signal = ctx.signal
+    execFile("/bin/sh", ["-c", command], opts, (error, stdout, stderr) => {
       let out = ""
       if (stdout) out += stdout
       if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr
+      if (error && (error.name === "AbortError" || error.code === "ABORT_ERR")) return resolve(`ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`)
       if (error && !out) out = String(error.message)
       else if (error && error.killed) out += `\n[command timed out after ${t / 1000}s]`
       else if (error && typeof error.code === "number") out += `\n[exit code: ${error.code}]`
@@ -1007,6 +1013,7 @@ function apply_patch(ctx, args) {
     paths.filter((t) => filesMap.has(t)).map((t) => safePath(ctx, t).abs),
     ctx.cwd,
     applied.created.map((t) => safePath(ctx, t).abs),
+    ctx.runId, // v20.4 fix: patch checkpoints were the only ones missing the run tag (→ /undo --run skipped them)
   )
   for (const [t, content] of applied.results) {
     const p = safePath(ctx, t, { write: true }).abs
@@ -1167,6 +1174,7 @@ async function delegate(ctx, args) {
     }
     return cap(`SUB-AGENT REPORT (${role}):\n${summary}`, ctx.maxToolOutput)
   } catch (e) {
+    if (e?.name === "AbortError" || ctx.signal?.aborted) return "ERROR: cancelled — sub-agent stopped by user interrupt"
     return `ERROR: sub-agent failed: ${String(e?.message ?? e).slice(0, 200)}`
   } finally {
     if (timerId) clearTimeout(timerId)

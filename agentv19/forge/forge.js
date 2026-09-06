@@ -36,6 +36,7 @@ const loadOnboard = () => import("./onboard.js")
 import { readHealth, recordHealth } from "./health.js"
 import { runChat } from "./chat.js"
 import { runAgent, agentEventPrinter } from "./agent.js"
+import { createAgentConsole } from "./agentview.js"
 import { selfTestTools, toolCount } from "./tools.js"
 import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
@@ -278,33 +279,47 @@ async function main() {
       console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? 25}${planMode ? " • PLAN MODE (read-only)" : ""}`))
       console.log()
       const t0 = Date.now()
+      // v20.4: in a terminal the run is rendered from UI state (live dock,
+      // honest Ctrl+C); piped runs keep the classic line printer verbatim.
+      const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd(), planOnly: planMode })
       if (planMode) {
         // v16 plan mode: read-only planning pass first, then optional execution
-        const res = await runAgent({ config: cfg, provider: p, task, onEvent: agentEventPrinter(), planOnly: true, deep: flags.deep === true ? true : undefined })
-        console.log()
-        console.log(bold(cyan("── plan " + "─".repeat(54))))
-        console.log(renderMarkdown(res.text))
-        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        let res
+        try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, planOnly: true, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
+        catch (e) { con.stop(); throw e }
         // v20.2 P1-9: persist the plan so it can be reviewed and executed later
         const saved = savePlan(task, res.text, process.cwd())
-        if (saved.ok) console.log(dim(`  saved → ${path.relative(process.cwd(), saved.file)}  (${cyan("forge plan apply " + saved.slug)} to execute later)`))
+        if (con.tty) con.finish(res, { elapsedMs: Date.now() - t0, planOnly: true, savedPlan: saved.ok ? `${path.relative(process.cwd(), saved.file)}  (forge plan apply ${saved.slug} to execute later)` : null })
+        else {
+          console.log()
+          console.log(bold(cyan("── plan " + "─".repeat(54))))
+          console.log(renderMarkdown(res.text))
+          console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+          if (saved.ok) console.log(dim(`  saved → ${path.relative(process.cwd(), saved.file)}  (${cyan("forge plan apply " + saved.slug)} to execute later)`))
+        }
         if (!process.stdin.isTTY) {
           warn("plan mode: non-interactive — not executing (re-run without --plan to execute)")
+          con.stop()
           return
         }
-        const { default: rlp } = await import("node:readline/promises")
-        const r2 = rlp.createInterface({ input: process.stdin, output: process.stdout })
-        const a = (await r2.question(bold("execute this plan now? [y/N] "))).trim().toLowerCase()
-        r2.close()
-        if (a !== "y" && a !== "yes") { warn("plan not executed"); return }
-        console.log()
+        const a = String((await con.ask(bold("execute this plan now? [y/N] "))) ?? "").trim().toLowerCase()
+        if (a !== "y" && a !== "yes") { con.stop(); warn("plan not executed"); return }
+        if (!con.tty) console.log()
       }
-      const res = await runAgent({ config: cfg, provider: p, task, onEvent: agentEventPrinter(), deep: flags.deep === true ? true : undefined })
-      console.log()
-      console.log(bold(green("── result " + "─".repeat(50))))
-      console.log(renderMarkdown(res.text))
-      console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
-      if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      let res
+      try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
+      catch (e) {
+        if (con.tty) { con.finish(null, e?.name === "AbortError" ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(e?.name === "AbortError" ? 130 : 1) }
+        throw e
+      }
+      if (con.tty) { con.finish(res, { elapsedMs: Date.now() - t0 }); con.stop() }
+      else {
+        console.log()
+        console.log(bold(green("── result " + "─".repeat(50))))
+        console.log(renderMarkdown(res.text))
+        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+      }
       debugRunSummary(res)
       return
     }
@@ -313,11 +328,20 @@ async function main() {
       // v20.2: --run restores the whole last agent run atomically.
       const { restoreLast, restoreRun, listCheckpoints } = await import("./checkpoint.js")
       if (flags.run !== undefined) {
-        const runId = typeof flags.run === "string" ? flags.run : null
+        let runId = typeof flags.run === "string" ? flags.run : null
+        if (runId) {
+          // v20.4: accept the short RUN-XXXX id shown in the UI
+          const { resolveRunId } = await import("./runlog.js")
+          const full = resolveRunId(process.cwd(), runId)
+          if (!full) { err(`unknown run "${runId}" — forge checkpoints or /tasks list the ids`); process.exit(1); return }
+          runId = full
+        }
         const r = restoreRun(process.cwd(), runId)
         if (r) {
           ok(`restored ${r.files} file(s) across ${r.checkpoints} checkpoint(s) from run ${r.runId}`)
           for (const n of r.notes ?? []) console.log(dim(`  · ${n}`))
+          // v20.4: the run journal (/tasks) should reflect the rollback
+          try { const { markRun } = await import("./runlog.js"); markRun(r.runId, "undone", { note: "rolled back with forge undo --run" }) } catch {}
         } else {
           warn(runId ? `no restorable checkpoints for run ${runId}` : "no restorable agent-run checkpoints for this directory")
         }
@@ -667,13 +691,22 @@ async function main() {
         console.log()
         const t0 = Date.now()
         const task = `Execute the following implementation plan step by step. Verify each step (run tests/builds) before moving on, and keep edits minimal.\n\n${r.text}`
-        const res = await runAgent({ config: cfg, provider: p, task, onEvent: agentEventPrinter(), deep: flags.deep === true ? true : undefined })
-        console.log()
-        console.log(bold(green("── result " + "─".repeat(50))))
-        console.log(renderMarkdown(res.text))
-        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
-        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
-      debugRunSummary(res)
+        const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
+        let res
+        try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
+        catch (e) {
+          if (con.tty) { con.finish(null, e?.name === "AbortError" ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(e?.name === "AbortError" ? 130 : 1) }
+          throw e
+        }
+        if (con.tty) { con.finish(res, { elapsedMs: Date.now() - t0 }); con.stop() }
+        else {
+          console.log()
+          console.log(bold(green("── result " + "─".repeat(50))))
+          console.log(renderMarkdown(res.text))
+          console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+          if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+        }
+        debugRunSummary(res)
         return
       }
       err(`unknown: forge plan ${sub} — use list | show <n|slug> | apply <n|slug>`)
