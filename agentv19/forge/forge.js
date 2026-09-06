@@ -768,7 +768,12 @@ function debugRunSummary(res) {
   const counts = {}
   for (const t of res.toolLog ?? []) counts[t.name] = (counts[t.name] || 0) + 1
   const breakdown = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join(" ")
-  console.error(dim(`  [debug] steps=${res.steps} toolCalls=${res.toolLog?.length ?? 0} runId=${res.runId ?? "-"} wrote=${!!res.wrote}${breakdown ? " • " + breakdown : ""}`))
+  // v20.5: report the execution contract, not just tool counts. `status` and
+  // `budgetHit` are what tell a caller whether the work is actually finished,
+  // and usage is only worth recording if it is visible somewhere.
+  const u = res.usage
+  const tokens = u ? `${u.promptTokens}/${u.completionTokens}` : "-"
+  console.error(dim(`  [debug] status=${res.status ?? "-"} budgetHit=${res.budgetHit === true} steps=${res.steps} toolCalls=${res.toolLog?.length ?? 0} tokens=${tokens} runId=${res.runId ?? "-"} taskId=${res.taskId ?? "-"} wrote=${!!res.wrote}${breakdown ? " • " + breakdown : ""}`))
 }
 
 function coerce(v) {

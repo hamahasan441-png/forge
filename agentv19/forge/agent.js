@@ -19,6 +19,7 @@
  */
 import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
+import { AGENT_STATUS, makeUsageAccumulator, newTaskId, newRunId, newSegmentId } from "./contract.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
@@ -176,8 +177,14 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   }
 }
 
-export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role }) {
+export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, taskId, segmentId }) {
   let p = provider
+  // Phase 1 contract: identity is explicit. A caller that owns a longer-lived
+  // task passes taskId so every segment of it shares one identity; a bare call
+  // still gets a stable pair rather than undefined.
+  const _taskId = typeof taskId === "string" && taskId ? taskId : newTaskId()
+  const _segmentId = typeof segmentId === "string" && segmentId ? segmentId : newSegmentId()
+  const usage = makeUsageAccumulator()
   const readonly = readOnly || planOnly // plan mode is always read-only
   // v20.2 provider failover (opt-in): when the active provider keeps failing on
   // transient/auth errors, fall through to the next configured+tested provider
@@ -205,7 +212,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   // v20.2 (P3-4): tag every checkpoint from this run with one runId so the whole
   // run can be rolled back atomically (`forge undo --run`). Sub-agents are
   // read-only and never write, so they get no runId.
-  const runId = readonly ? null : "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  const runId = readonly ? null : newRunId() // §3: one id generator, in contract.js
   // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
   // Sub-agents inherit the same plugins the main run sees.
   let plugins = []
@@ -249,6 +256,9 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
         runAgent({
           config, provider: p, task: subTask, onEvent: null, signal,
           readOnly: true, maxStepsOverride: 10, role: subRole,
+          // §3 run identity: a delegated sub-agent is a segment of THIS task,
+          // so it inherits taskId and only gets a fresh segmentId.
+          taskId: _taskId,
         }).then((r) => r.text),
   })
 
@@ -321,11 +331,14 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     // record it once so the health cache and future runs prefer it
     if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
 
+    usage.addCall(msg.usage) // §6: real usage, never silently dropped
+
     if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning })
 
     if (msg.toolCalls?.length) {
       // v20: runaway guard — stop spawning tool rounds past the budget
       toolCallCount += msg.toolCalls.length
+      usage.addToolCalls(msg.toolCalls.length)
       if (toolCallCount > maxToolCalls) {
         messages.push({ role: "user", content: `(system) tool-call budget exhausted (${maxToolCalls} calls) — stop calling tools and produce your final answer now with what you have.` })
         continue
@@ -386,11 +399,27 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     break
   }
 
-  if (steps >= maxSteps && !finalText) {
-    finalText = "(reached max steps without a final answer — raise agent.maxSteps in config)"
+  // §4 budget contract: budget exhaustion is an EXPLICIT flag, never inferred
+  // from a missing answer or matched out of the answer text.
+  const budgetHit = steps >= maxSteps && !finalText
+  if (budgetHit) {
+    finalText = "(segment budget reached — work remains; this task is resumable)"
   }
   const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
-  return { text: finalText, steps, toolLog, planOnly, runId, wrote }
+  const status = budgetHit ? AGENT_STATUS.CONTINUE_REQUIRED : AGENT_STATUS.COMPLETED
+  return {
+    status,
+    text: finalText,
+    taskId: _taskId,
+    runId,
+    segmentId: _segmentId,
+    steps,
+    budgetHit,
+    wrote,
+    toolLog,
+    usage: usage.snapshot(),
+    planOnly,
+  }
 }
 
 /** Aggressive in-place shrink used only for overflow recovery: stub ALL tool

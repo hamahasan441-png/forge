@@ -32,6 +32,7 @@ const skipCleanroom = fast || process.env.FORGE_SKIP_CLEANROOM === "1"
 // [label, command, args]. Node suites first (fast, self-contained), then the
 // slower bash suites (each manages its own mock-llm on 127.0.0.1:8787).
 const suites = [
+  ["contract", "node", ["test-contract.mjs"]],
   ["security", "node", ["test-security.mjs"]],
   ["providers", "node", ["test-providers.mjs"]],
   ["diffpatch", "node", ["test-diffpatch.mjs"]],

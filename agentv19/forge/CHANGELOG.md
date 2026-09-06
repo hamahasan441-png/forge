@@ -3,6 +3,52 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## [Unreleased] — v20.5.0 (in progress)
+
+### Added
+- **An explicit agent execution contract** (`contract.js`, autonomy Phase 1) — the
+  first step toward long-horizon autonomy is that a caller can tell what actually
+  happened without guessing. Before this, `runAgent()` returned
+  `{ text, steps, toolLog, planOnly, runId, wrote }` and two load-bearing facts
+  were only inferable:
+  - **"did it finish, or did it run out of budget?"** was answered by
+    string-matching the answer text for `"(reached max steps without a final
+    answer…)"`. Any rewording of that sentence silently turned a truncated run
+    into an apparent success — and nothing was checking, so an orchestrator
+    would have marked unfinished work done.
+  - **token usage was discarded entirely.** `chatOnce` returns a `usage` object;
+    the agent loop dropped it on every call, so there was no cost or budget
+    signal at all, and no way to distinguish "the provider reported 0 tokens"
+    from "we never learned the token count".
+
+  `runAgent()` now returns `status` (a six-value enum: `COMPLETED`,
+  `CONTINUE_REQUIRED`, `FAILED`, `CANCELLED`, `BLOCKED`, `WAITING`), an explicit
+  boolean `budgetHit`, accumulated `usage`, and stable `taskId`/`segmentId`
+  identity alongside the existing `runId`. Unknown token counts are reported as
+  the `UNKNOWN` sentinel, never as `0`. A delegated sub-agent inherits its
+  parent's `taskId` and takes a fresh `segmentId`, so one task's segments are
+  linkable. `validateAgentResult()` rejects an invented status, a non-boolean
+  `budgetHit`, and the specific lie of `budgetHit: true` reported as `COMPLETED`.
+
+  Every pre-existing field is still returned, so all eight call sites keep
+  working unchanged. Honesty note, also recorded in the module: only `COMPLETED`
+  and `CONTINUE_REQUIRED` are produced by `runAgent` today — the other four are
+  defined for the orchestration layer that will consume them, and `runAgent`
+  still throws on hard provider errors rather than returning `FAILED`.
+  New `tests/test-contract.mjs` (42 checks) against local stand-in providers —
+  one answering, one that only emits tool calls in order to exhaust the step
+  budget for real — plus a run of the actual CLI asserting the contract reaches
+  the terminal.
+
+### Changed
+- **`FORGE_DEBUG=1` reports the contract, not just tool counts** — the run
+  summary now prints `status`, `budgetHit` and token usage (`UNKNOWN` when the
+  provider reported none). Recording usage is only worth anything if it is
+  visible somewhere.
+- **One run-id generator.** `agent.js` hand-rolled the same `run-<base36>-<rand>`
+  format that `contract.js` now owns; it calls `newRunId()` instead, so the id
+  format cannot drift between the checkpoint tag and the contract.
+
 ## [Unreleased] — v20.4.0 (in progress)
 
 ### Added

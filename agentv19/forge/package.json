@@ -15,6 +15,7 @@
   },
   "files": [
     "version.js",
+    "contract.js",
     "forge.js",
     "chat.js",
     "agent.js",
