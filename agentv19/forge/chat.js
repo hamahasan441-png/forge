@@ -31,27 +31,99 @@ import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
 import { makeToolContext, toolCount, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
-import { restoreLast } from "./checkpoint.js"
+import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
 import { saveSession, loadSession, lastSessionFile, listSessions, findSession } from "./sessions.js"
 import { relevantMemory } from "./memory.js"
-import { profileSummary, resourceProfile } from "./profile.js"
+import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
 import { classifyTaskComplexity } from "./agent.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
 import { VERSION } from "./version.js"
+import { createTerminal } from "./terminal.js"
+import { createUIStore, parseCheckOutput } from "./uistate.js"
+import { createAgentView } from "./agentview.js"
+import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify } from "./render.js"
+import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
+import { unifiedDiff } from "./textdiff.js"
+import { interruptedRuns, verifyRun, markRun, listRuns, resolveRunId } from "./runlog.js"
+import { memoryStats, memoryEntries } from "./memory.js"
+
+/** Command palette — one source of truth for /help, Tab completion and "did you mean". */
+export const COMMANDS = [
+  ["help", "", "this help"],
+  ["status", "", "session + context + safety snapshot"],
+  ["agent", "[task]", "Agent Mode (or run one task now; Ctrl+C cancels)"],
+  ["normal", "", "Normal Chat mode (direct conversation)"],
+  ["chat", "", "Normal Chat mode"],
+  ["plan", "<task>", "plan first (read-only), confirm, then execute"],
+  ["tasks", "", "recent agent runs — interrupted ones are flagged"],
+  ["agents", "[n]", "sub-agents of the current/last run (/agent NN for one)"],
+  ["checkpoints", "", "file checkpoints for this directory (newest first)"],
+  ["diff", "[file]", "what changed this session, as a unified diff"],
+  ["verify", "[command]", "run the project's test command (or yours) — shows exactly what ran"],
+  ["details", "[n]", "full output of the last failed tool / error (n-th last)"],
+  ["undo", "[--run [RUN-x]]", "drop the last exchange + restore its checkpoint • --run rolls back a whole run"],
+  ["retry", "", "regenerate the last answer (also after Ctrl-C interrupts one)"],
+  ["memory", "", "what forge remembers (global + this project)"],
+  ["profile", "[name]", "effort profile: fast | balanced | deep | auto (auto = per-task)"],
+  ["model", "[id]", "show or switch model (saved)"],
+  ["provider", "[name]", "show or switch provider (env key respected)"],
+  ["providers", "", "list providers (key status)"],
+  ["models", "", "list models of active provider (live)"],
+  ["key", "<api-key>", "set API key for active provider"],
+  ["skills", "[name]", "list skills, or load one into the conversation"],
+  ["tools", "[on|off]", "list the 17 agent tools, or toggle auto-tools in chat"],
+  ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
+  ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
+  ["compact", "", "force context compaction (older turns → summary)"],
+  ["usage", "", "session token totals + est. cost"],
+  ["tokens", "", "context gauge — % of the model window used (auto-compact at ~55%)"],
+  ["export", "[file]", "save the conversation as markdown"],
+  ["sessions", "", "list saved conversations"],
+  ["resume", "[n|id]", "resume the last (or listed) conversation"],
+  ["new", "", "fresh conversation"],
+  ["save", "", "save conversation to ~/.forge/sessions/"],
+  ["system", "[text]", "show or set extra system prompt"],
+  ["stream", "", "toggle streaming"],
+  ["settings", "[key [value]]", "UI settings: dock, thinking, ascii, a11y, collapse"],
+  ["config", "", "show config (keys masked)"],
+  ["clear", "", "clear the screen (state is kept)"],
+  ["exit", "", "leave (auto-saves)"],
+]
+const COMMAND_NAMES = new Set([...COMMANDS.map((c) => c[0]), "quit"])
 
 const HELP = `
 ${bold("chat")}
   type anything          talk to the model (streaming)
-  end a line with \\      multiline input (continuation prompt)
+  end a line with \\      multiline input (continuation prompt) • pasted text is inserted as-is
 ${bold("modes")}
-  /agent [task]         activate Agent Mode (or run a task directly; Ctrl+C aborts)
+  /agent [task]         activate Agent Mode (or run a task directly; Ctrl+C cancels)
   /normal               switch to Normal Chat mode (direct conversation)
   /chat                 switch to Normal Chat mode
-${bold("commands")}
-  /help                 this help
+  /plan <task>          plan first (read-only), confirm, then execute
+${bold("task & recovery")}
   /status               session + context + safety snapshot
+  /tasks                recent agent runs — interrupted ones are flagged
+  /agents [n]           sub-agents of the current/last run (/agent NN for one)
+  /checkpoints          file checkpoints for this directory (newest first)
+  /diff [file]          what changed this session, as a unified diff
+  /verify [command]     run the project's test command (or yours) — shows exactly what ran
+  /details [n]          full output of the last failed tool / error (n-th last)
+  /undo                 drop the last exchange + restore its file checkpoint
+  /undo --run [RUN-x]   roll back a whole agent run (newest, or the given run id)
+  /retry                regenerate the last answer (also after Ctrl-C interrupts one)
+${bold("context")}
+  /memory               what forge remembers (global + this project)
+  /compact              force context compaction (older turns → summary)
+  /usage                session token totals + est. cost
+  /tokens               context gauge — % of the model window used (auto-compact at ~55%)
+  /export [file]        save the conversation as markdown
+  /sessions             list saved conversations
+  /resume [n|id]        resume the last (or listed) conversation
+  /new                  fresh conversation
+  /save                 save conversation to ~/.forge/sessions/
+${bold("setup")}
   /profile [name]       effort profile: fast | balanced | deep | auto (auto = per-task)
   /model [id]           show or switch model (saved)
   /provider [name]      show or switch provider (env key respected)
@@ -59,26 +131,37 @@ ${bold("commands")}
   /models               list models of active provider (live)
   /key <api-key>        set API key for active provider
   /skills [name]        list skills, or load one into the conversation
-  /plan <task>          plan first (read-only), confirm, then execute
   /tools [on|off]       list the 17 agent tools, or toggle auto-tools in chat
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
   /deep                 toggle DEEP THINKING (high reasoning effort + bigger budgets)
-  /compact              force context compaction (older turns → summary)
-  /usage                session token totals + est. cost
-  /tokens               context gauge — % of the model window used (auto-compact at ~55%)
-  /retry                regenerate the last answer (also after Ctrl-C interrupts one)
-  /undo                 drop the last exchange + restore its file checkpoint
-  /export [file]        save the conversation as markdown
-  /sessions             list saved conversations
-  /resume [n|id]        resume the last (or listed) conversation
-  /new                  fresh conversation
-  /save                 save conversation to ~/.forge/sessions/
   /system [text]        show or set extra system prompt
   /stream               toggle streaming
+  /settings [k [v]]     UI settings: dock on|off • thinking on|off • ascii on|off • a11y on|off
   /config               show config (keys masked)
+  /clear                clear the screen (state is kept)
   /exit                 leave (auto-saves)
+${bold("keys")}
+  ↑/↓ history (prefix-aware) • Ctrl+R reverse search • Tab completion • Alt+Enter newline
+  Ctrl+A/E line start/end • Ctrl+W delete word • Alt+←/→ word jump • Ctrl+U/K kill • Ctrl+Y yank
+  Ctrl+C cancel task / clear input / twice to exit • Ctrl+D exit • Ctrl+L redraw
 `.trim()
+
+/** "did you mean" for unknown slash commands. */
+export function suggestCommand(name) {
+  const n = String(name || "").toLowerCase()
+  if (!n) return []
+  const dist = (a, b) => {
+    const m = a.length, k = b.length
+    const d = Array.from({ length: m + 1 }, (_, i) => [i, ...new Array(k).fill(0)])
+    for (let j = 1; j <= k; j++) d[0][j] = j
+    for (let i = 1; i <= m; i++) for (let j = 1; j <= k; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    return d[m][k]
+  }
+  const names = [...COMMAND_NAMES]
+  const scored = names.map((c) => ({ c, d: c.startsWith(n) ? 0 : dist(n, c) })).filter((x) => x.d <= Math.max(1, Math.floor(n.length / 2))).sort((a, b) => a.d - b.d || a.c.localeCompare(b.c))
+  return scored.slice(0, 3).map((x) => x.c)
+}
 
 // ---------------------------------------------------------------------------
 // v19/v20 terminal mode — Linux commands typed as chat lines execute LOCALLY
@@ -309,17 +392,35 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       ),
   })
 
+  // ---- v20.4 terminal UI: ONE coordinator owns stdout while interactive ------
+  // Piped/non-TTY sessions never touch it: `ui` is null there and every print
+  // below falls through to plain console output (byte-identical to v20.3).
+  const interactiveUI = process.stdin.isTTY === true && process.stdout.isTTY === true && !oneShot && process.env.FORGE_UI !== "plain"
+  const uiCfg = config.ui || {}
+  const term = interactiveUI ? createTerminal({ ascii: uiCfg.ascii === true ? true : undefined, a11y: uiCfg.a11y === true ? true : undefined }) : null
+  const store = createUIStore({ mode: "chat", provider: p.name, model: p.model, cwd: process.cwd(), terminal: { columns: term?.columns ?? 80, rows: term?.rows ?? 24, tty: !!term } })
+  const view = term ? createAgentView({ term, store, cwd: process.cwd(), plain: uiCfg.dock === false, showThinking: uiCfg.thinking !== false }) : null
+  const ui = term ? { term, store, view } : null
+  const out = (line = "") => (ui ? ui.term.line(line) : console.log(line))
+  const outLines = (lines) => { if (ui) ui.term.lines(lines); else for (const l of lines) console.log(l) }
+  const dispatchUI = (ev) => store.dispatch(ev)
+  const o = term?.opts
+  const recentRuns = () => listRuns({ cwd: process.cwd(), max: 20 })
+  let lastAgentState = null // snapshot of the UI state when the last run ended (for /agents, /diff, /details)
+
   // v20: chat line log for persistent history (~/.forge/history) — shared by
-  // the TTY REPL and the piped line processor, so both persist what was typed
+  // the TTY REPL and the piped line processor, so both persist what was typed.
+  // v20.4: multiline entries survive (one encoded line each), secrets never land.
   const chatLineLog = []
   function readHist() {
-    try { return fs.readFileSync(HISTORY_PATH, "utf8").split("\n").filter(Boolean) } catch { return [] }
+    try { return parseHistoryFile(fs.readFileSync(HISTORY_PATH, "utf8")) } catch { return [] }
   }
   saveHistory = () => {
     try {
-      const all = [...new Set([...readHist(), ...shellState.history, ...chatLineLog])]
+      const live = ui ? ui.term.editor.history : [...shellState.history, ...chatLineLog]
+      const all = dedupe([...readHist(), ...live].filter(historyWorthy))
       fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true })
-      fs.writeFileSync(HISTORY_PATH, all.slice(-Math.max(50, config.chat?.historySize ?? 300)).join("\n") + "\n", { mode: 0o600 })
+      fs.writeFileSync(HISTORY_PATH, serializeHistory(all.slice(-Math.max(50, config.chat?.historySize ?? 300))), { mode: 0o600 })
     } catch {}
   }
 
@@ -352,16 +453,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const shellState = { cwd: process.cwd(), env: {}, history: [] }
   let pendingNotes = [] // terminal runs shared with the model on the next turn
 
-  const termWidth = () => Math.min(process.stdout.columns || 80, 120)
+  const termWidth = () => Math.min((ui ? ui.term.columns : process.stdout.columns) || 80, 120)
 
-  function printTerminal(cmd, out) {
+  function printTerminal(cmd, result) {
     const w = termWidth()
-    console.log(dim(`┌─ terminal ${"─".repeat(Math.max(3, Math.min(40, w - cmd.length - 14)))}`))
-    console.log(dim("$ ") + cmd)
-    const lines = String(out).split("\n")
-    console.log(lines.slice(0, 40).map((l) => dim("│ ") + l).join("\n"))
-    if (lines.length > 40) console.log(dim(`│ … ${lines.length - 40} more lines (${String(out).length} bytes total)`))
-    console.log(dim("└─"))
+    const rows = []
+    rows.push(dim(`┌─ terminal ${"─".repeat(Math.max(3, Math.min(40, w - cmd.length - 14)))}`))
+    rows.push(dim("$ ") + cmd)
+    const lines = String(result).split("\n")
+    rows.push(lines.slice(0, 40).map((l) => dim("│ ") + l).join("\n"))
+    if (lines.length > 40) rows.push(dim(`│ … ${lines.length - 40} more lines (${String(result).length} bytes total)`))
+    rows.push(dim("└─"))
+    outLines(rows)
   }
 
   /** Queue a compact, SECRET-REDACTED note for the model. The raw output is
@@ -374,6 +477,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   /** y/N confirmation for risky terminal commands (TTY only). */
   function confirmPrompt(risk) {
+    if (ui) return ui.term.ask(yellow(`! ${risk} — run it? [y/N] `)).then((a) => /^y(es)?$/i.test(String(a || "").trim()))
     return new Promise((resolve) => {
       const r2 = readline.createInterface({ input: process.stdin, output: process.stdout })
       r2.question(yellow(`! ${risk} — run it? [y/N] `), (a) => { r2.close(); resolve(/^y(es)?$/i.test(String(a || "").trim())) })
@@ -428,7 +532,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         return
       }
     }
-    if (base === "clear") { process.stdout.write("\x1b[2J\x1b[H"); return }
+    if (base === "clear") { if (ui) ui.term.clearScreen(); else process.stdout.write("\x1b[2J\x1b[H"); return }
     if (base === "history") {
       printTerminal(cmd, shellState.history.map((h, i) => `${String(i + 1).padStart(4)}  ${h}`).join("\n"))
       return
@@ -519,9 +623,28 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     return f
   }
 
-  // Ctrl+C: first press aborts the current stream/agent, second press exits
+  // Ctrl+C: first press aborts the current stream/agent, second press exits.
+  // v20.4: in the interactive UI the raw-mode terminal delivers Ctrl+C as a key
+  // (see onCancel below) — SIGINT only fires for the legacy/piped paths.
   let multilineBuf = null
+  /** Honest cancellation: request it, show what we are waiting for, never
+   *  claim success before the tool/stream has actually stopped. */
+  function requestCancel() {
+    if (!abort) return false
+    const ctrl = abort
+    abort = null
+    dispatchUI({ type: "USER_INTERRUPTED", phase: "requested" })
+    ctrl.abort()
+    return true
+  }
+  function exitNow(code = 0) {
+    saveHistory()
+    persist()
+    if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} }
+    process.exit(code)
+  }
   process.on("SIGINT", () => {
+    if (ui) { if (!requestCancel()) exitNow(0); return }
     multilineBuf = null
     if (abort) {
       abort.abort()
@@ -541,17 +664,21 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   async function streamRound(wire, signal, deepEffort, onText) {
     let text = ""
     let toolCalls = []
+    let started = false
     for await (const ev of streamChatResilient(
       { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? tools.defs : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
       { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: ({ attempt, attempts, error }) => console.log(yellow(`  ↻ ${error} — retry ${attempt}/${attempts}…`)) }
     )) {
-      if (ev.type === "text") { process.stdout.write(ev.text); text += ev.text; onText?.(ev.text) }
-      else if (ev.type === "reasoning") {
-        if (config.chat?.showReasoning !== false) process.stdout.write(dim(ev.text.slice(0, 1600)))
+      if (ev.type === "text") {
+        if (!started) { started = true; dispatchUI({ type: "STREAMING", on: true }) }
+        process.stdout.write(ev.text); text += ev.text; onText?.(ev.text)
+      } else if (ev.type === "reasoning") {
+        if (config.chat?.showReasoning !== false && uiCfg.thinking !== false) process.stdout.write(dim(ev.text.slice(0, 1600)))
       } else if (ev.type === "tool_calls") toolCalls = ev.calls
       else if (ev.type === "usage") trackUsage(ev.usage)
       else if (ev.type === "error") err(ev.error)
     }
+    if (started) dispatchUI({ type: "STREAMING", on: false })
     return { text, toolCalls }
   }
 
@@ -567,13 +694,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   /** Execute tool calls (v16: reads in parallel, writes serialized), print
    *  activity, append CANONICAL wire-format messages to history. */
   async function runToolCalls(toolCalls) {
-    process.stdout.write("\n")
+    if (ui) ui.term.endStream(); else process.stdout.write("\n")
     const parsed = toolCalls.map((tc) => {
       let args = {}
       try { args = JSON.parse(tc.args || "{}") } catch {}
       return { tc, args, argStr: JSON.stringify(args).slice(0, 140) }
     })
-    for (const { tc, argStr } of parsed) console.log(dim(`  ┌ [chat] ${cyan(tc.name)} ${dim(argStr)}`))
+    // v20.4 interactive: tool rows come from UI state (compact, collapsible,
+    // /details expands) — the piped path keeps the classic ┌/└ lines.
+    if (ui) {
+      if (!store.state.task) dispatchUI({ type: "TASK_STARTED", kind: "chat", title: "chat tools", id: null })
+      for (const { tc } of parsed) ui.view.onEvent({ type: "tool_start", name: tc.name, args: tc.args, step: 1 })
+    } else for (const { tc, argStr } of parsed) console.log(dim(`  ┌ [chat] ${cyan(tc.name)} ${dim(argStr)}`))
     const isWrite = (n) => WRITE_TOOLS.has(n)
     const results = new Array(parsed.length)
     await Promise.all(
@@ -594,6 +726,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         results[i] = { result, ms: Date.now() - t0 }
       }
       const { result, ms } = results[i]
+      if (ui) { ui.view.onEvent({ type: "tool_result", name: tc.name, result: String(result), step: 1, ms }); continue }
       const one = String(result).split("\n").slice(0, 2).join(" ⏎ ").slice(0, 160)
       console.log(dim(`  └ `) + (String(result).startsWith("ERROR") || String(result).startsWith("BLOCKED") ? red(one) : green(one)) + dim(` ${ms}ms`))
     }
@@ -633,14 +766,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     }
     messages.push({ role: "user", content: userText })
     messages = compact(messages, config.chat?.maxHistoryMessages)
-    process.stdout.write("\n")
+    if (!ui) process.stdout.write("\n")
     const eff = effortFor(userText)
-    if (eff.notice) console.log(dim(`  · ${eff.notice}`))
+    if (eff.notice) out(dim(`  · ${eff.notice}`))
     const systemPrompt = chatSystemPrompt(config, { toolsEnabled: chatToolsEnabled(), deep: eff.deep, query: String(userText).slice(0, 400) })
     abort = new AbortController()
     const signal = abort.signal
     let full = ""
     let overflowTries = 0
+    // v20.4: a chat turn is a lightweight task for the UI (status "Thinking 3.2s",
+    // Ctrl+C cancels it) — the dock stays minimal for chat-kind tasks.
+    if (ui) dispatchUI({ type: "TASK_STARTED", kind: "chat", title: String(userText).slice(0, 80), id: null })
     try {
       // auto-tools loop: stream a round; if the model asks for tools, execute
       // them automatically, feed results back, and stream the next round.
@@ -653,6 +789,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           out = config.chat?.stream !== false
             ? await streamRound(wire, signal, eff.deep, (t) => { streamedPartial += t })
             : await plainRound(wire, eff.deep)
+          if (ui) dispatchUI({ type: "STREAMING", on: false })
         } catch (e) {
           if (e instanceof ProviderError && e.contextOverflow && overflowTries < 2) {
             overflowTries++
@@ -683,10 +820,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         full = text || full
         break
       }
-      process.stdout.write("\n")
+      if (ui) ui.term.endStream(); else process.stdout.write("\n")
     } catch (e) {
-      process.stdout.write("\n")
+      if (ui) ui.term.endStream(); else process.stdout.write("\n")
       if (e?.name === "AbortError") {
+        if (ui) dispatchUI({ type: "USER_INTERRUPTED", phase: "stopped" })
         // v20.2: an interrupted answer is no longer thrown away. If any text was
         // streamed, keep it in the session (marked, and /retry regenerates);
         // if nothing was produced, roll the turn back cleanly.
@@ -711,13 +849,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       return
     } finally {
       abort = null
+      if (ui && (!full || !full.trim())) dispatchUI({ type: "TASK_RESET" })
     }
     if (full.trim()) messages.push({ role: "assistant", content: full })
     const u = lastUsage
-    if (u?.prompt_tokens || u?.completion_tokens) console.log(dim(`  (${u.prompt_tokens ?? "?"} in / ${u.completion_tokens ?? "?"} out tok) • session: ${sessionUsage.prompt} in / ${sessionUsage.completion} out`))
-    else console.log(dim(`  (~${estimateTokens(JSON.stringify(messages))} tok ctx) • session: ${sessionUsage.prompt} in / ${sessionUsage.completion} out`))
+    if (u?.prompt_tokens || u?.completion_tokens) out(dim(`  (${u.prompt_tokens ?? "?"} in / ${u.completion_tokens ?? "?"} out tok) • session: ${sessionUsage.prompt} in / ${sessionUsage.completion} out`))
+    else out(dim(`  (~${estimateTokens(JSON.stringify(messages))} tok ctx) • session: ${sessionUsage.prompt} in / ${sessionUsage.completion} out`))
     persist() // auto-save after every turn — crash-safe
-    console.log()
+    out()
+    if (ui) dispatchUI({ type: "TASK_RESET" })
   }
 
   if (oneShot) {
@@ -733,6 +873,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   let mode = "normal"
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
+  const setMode = (m) => {
+    mode = m
+    dispatchUI({ type: "MODE_CHANGED", mode: m === "agent" ? "agent" : "chat" })
+    if (ui) ui.term.setPrompt(getPrompt())
+    else rl?.setPrompt(getPrompt())
+  }
 
   // Piped / scripted sessions: skip readline entirely — deterministic line
   // processing in order, no EOF-vs-close races, natural (flushing) exit.
@@ -755,7 +901,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   // v20: persistent command history across sessions (arrow keys remember).
-  // loadHistoryInto pre-populates the readline history (TTY only).
+  // loadHistoryInto pre-populates the readline history (legacy TTY path only).
   loadHistoryInto = () => {
     try {
       const hist = readHist()
@@ -763,6 +909,43 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (!rl.history.includes(hist[i])) rl.history.unshift(hist[i])
       }
     } catch {}
+  }
+
+  // Serialize line handling: a streaming turn must finish before the next
+  // line is processed.
+  let queue = Promise.resolve()
+  let busy = false
+  const enqueue = (line) => {
+    queue = queue
+      .then(async () => { busy = true; try { await handleLine(line) } finally { busy = false } })
+      .catch((e) => { err(e?.message ?? String(e)); promptSafe() })
+  }
+
+  if (ui) {
+    // ---- v20.4 interactive terminal: raw-mode editor + render lock -----------
+    ui.term.start({
+      prompt: getPrompt(),
+      continuation: dim("… ") + " ",
+      history: readHist(),
+      onSubmit: (text) => enqueue(text),
+      completer: uiCompleter,
+      onResize: ({ columns, rows }) => dispatchUI({ type: "TERMINAL_RESIZED", columns, rows }),
+      onCancel: ({ hadText }) => {
+        if (abort) { requestCancel(); return "cancelled" }
+        if (hadText) return "cleared"
+        if (busy) return "busy" // a command that cannot be cancelled is finishing
+        return "exit" // idle + empty: coordinator asks for a second Ctrl+C
+      },
+      onEOF: () => {
+        queue.catch(() => {}).then(() => {
+          out(dim("bye"))
+          exitNow(0)
+        })
+      },
+    })
+    ui.term.setDock((cols, rows) => (uiCfg.dock === false ? [renderHeader(store.state, cols, o)] : renderDock(store.state, cols, rows, o)))
+    queue = queue.then(() => startupRecovery()).catch((e) => err(e?.message ?? String(e)))
+    return new Promise(() => {}) // the coordinator owns the event loop until exit
   }
 
   const rl2 = readline.createInterface({
@@ -775,14 +958,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   loadHistoryInto()
   rl.prompt()
 
-  // Serialize line handling: a streaming turn must finish before the next
-  // line is processed.
-  let queue = Promise.resolve()
-  rl.on("line", (line) => {
-    queue = queue
-      .then(() => handleLine(line))
-      .catch((e) => { err(e?.message ?? String(e)); rl.prompt() })
-  })
+  rl.on("line", (line) => enqueue(line))
   // Ctrl+D (interactive EOF): drain the queue, then leave.
   rl.on("close", () => {
     queue.catch(() => {}).then(() => {
@@ -794,12 +970,116 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   })
 
   function completer(line) {
-    const cmds = ["/help", "/status", "/profile", "/model", "/provider", "/providers", "/models", "/key", "/skills", "/agent", "/normal", "/chat", "/plan", "/tools", "/shell", "/deep", "/compact", "/usage", "/tokens", "/retry", "/undo", "/export", "/sessions", "/resume", "/new", "/save", "/system", "/stream", "/config", "/exit"]
+    const cmds = COMMANDS.map((c) => "/" + c[0])
     const hits = cmds.filter((c) => c.startsWith(line))
     return [hits.length ? hits : cmds, line]
   }
 
+  /** Tab completion for the v20.4 editor: slash commands (+ their arguments),
+   *  shell commands at line start, and file paths after a shell command. */
+  function uiCompleter(before) {
+    const m = before.match(/^(\s*)(\S*)$/)
+    if (m) {
+      const word = m[2]
+      const from = m[1].length
+      if (word.startsWith("/")) {
+        const names = COMMANDS.map((c) => "/" + c[0]).filter((c) => c.startsWith(word))
+        return { candidates: names, replaceFrom: from }
+      }
+      if (word.startsWith("!")) {
+        const hits = [...SHELL_COMMANDS].filter((c) => c.startsWith(word.slice(1))).sort().map((c) => "!" + c)
+        return { candidates: hits, replaceFrom: from }
+      }
+      if (word && !word.includes("/")) {
+        const hits = [...SHELL_COMMANDS].filter((c) => c.startsWith(word)).sort()
+        return hits.length ? { candidates: hits, replaceFrom: from } : null
+      }
+      if (!word) return null
+    }
+    // slash command arguments
+    const sm = before.match(/^\/(\w+)\s+(\S*)$/)
+    if (sm) {
+      const [, cmd, part] = sm
+      const from = before.length - part.length
+      const pick = (list) => ({ candidates: list.filter((x) => x.startsWith(part)), replaceFrom: from })
+      if (cmd === "profile") return pick(["fast", "balanced", "deep", "auto"])
+      if (cmd === "tools" || cmd === "shell") return pick(["on", "off"])
+      if (cmd === "settings") return part.includes("=") ? null : pick(["dock", "thinking", "ascii", "a11y", "collapse"])
+      if (cmd === "provider") return pick(CATALOG.map((c) => c.name))
+      if (cmd === "skills") { try { return pick(indexSkills(resolveSkillsDir(config.skills?.dir)).map((x) => x.name)) } catch { return null } }
+      if (cmd === "undo") return pick(["--run"])
+      if (cmd === "diff") return pathCandidates(part, from)
+      return null
+    }
+    // shell command argument → path completion
+    const pm = before.match(/^!?\S+(?:\s+\S+)*\s+(\S*)$/)
+    if (pm && (isShellLine(before) || before.startsWith("!"))) return pathCandidates(pm[1], before.length - pm[1].length)
+    return null
+  }
+  function pathCandidates(part, from) {
+    try {
+      const expanded = part.startsWith("~/") ? path.join(process.env.HOME || "", part.slice(2)) : part
+      const dir = expanded.endsWith("/") ? expanded : path.dirname(expanded || ".")
+      const base = expanded.endsWith("/") ? "" : path.basename(expanded)
+      const abs = path.resolve(shellState.cwd, dir || ".")
+      const ents = fs.readdirSync(abs, { withFileTypes: true }).filter((e) => e.name.startsWith(base) && (base.startsWith(".") || !e.name.startsWith("."))).slice(0, 200)
+      const prefix = part.endsWith("/") || !part ? part : part.slice(0, part.length - base.length)
+      return { candidates: ents.map((e) => prefix + e.name + (e.isDirectory() ? "/" : "")).sort(), replaceFrom: from }
+    } catch { return null }
+  }
+
+  /** v20.4 crash-safe startup: journals left at "running" by a process that no
+   *  longer exists are interrupted tasks. Show them, never continue silently. */
+  async function startupRecovery() {
+    let runs = []
+    try { runs = interruptedRuns({ cwd: process.cwd() }) } catch { runs = [] }
+    if (!runs.length) return
+    for (const run of runs.slice(0, 3)) await recoveryPrompt(run, { startup: true })
+  }
+  async function recoveryPrompt(run, { startup = false } = {}) {
+    dispatchUI({ type: "MODE_CHANGED", mode: "recovery" })
+    dispatchUI({ type: "RECOVERY_STARTED", run, note: "Interrupted task found" })
+    const cps = listCheckpoints(process.cwd(), 999).filter((c) => c.runId === run.runId).map((c) => c.id)
+    const rec = { ...run, checkpoints: run.checkpoints?.length ? run.checkpoints : cps.reverse() }
+    outLines(renderRecovery(rec, termWidth(), o, { startup }))
+    for (;;) {
+      const a = ui ? await ui.term.ask(bold("recovery › "), { single: true, keys: ["r", "v", "u", "c"] }) : "c"
+      if (a === "v") {
+        const v = verifyRun(rec)
+        out(`  ${o.th.muted(padRight("Filesystem", 18))} ${v.filesystem}`)
+        out(`  ${o.th.muted(padRight("Checkpoints", 18))} ${v.checkpoints}`)
+        rec.verify = { filesystem: v.filesystem, checkpoints: v.checkpoints }
+        markRun(run.runId, "running", { verify: rec.verify })
+        out(o.th.muted("  [R] Resume   [V] Verify   [U] Undo   [C] Cancel (keep as-is)"))
+        continue
+      }
+      if (a === "u") {
+        const r = restoreRun(process.cwd(), run.runId)
+        if (r) { ok(`restored ${r.files} file(s) across ${r.checkpoints} checkpoint(s) from ${shortRun(run.runId)}`); for (const n of r.notes ?? []) out(dim(`  · ${n}`)) }
+        else warn("nothing to restore — this run left no checkpoints")
+        markRun(run.runId, "undone", { note: "undone by user at recovery" })
+        break
+      }
+      if (a === "r") {
+        markRun(run.runId, "cancelled", { note: "resumed as a new run" })
+        dispatchUI({ type: "RECOVERY_COMPLETED" })
+        setMode("agent")
+        ok(`resuming ${shortRun(run.runId)} as a new run — the agent re-inspects the tree before touching anything`)
+        const task = `Resume this interrupted task. It was stopped at step ${run.step ?? "?"}${run.lastTool ? ` while running ${run.lastTool.name} ${run.lastTool.target || ""}` : ""}; the files it touched so far: ${Object.keys(run.files || {}).map((f) => path.relative(process.cwd(), f)).join(", ") || "(none recorded)"}. First inspect the current state of those files and the repository, then continue from where it stopped. Do not redo work that is already done.\n\nOriginal task: ${run.task}`
+        await dispatch(task)
+        return
+      }
+      // cancel / Esc / Ctrl-C: keep the tree as-is, stop asking
+      markRun(run.runId, "cancelled", { note: "left as-is by user at recovery" })
+      warn(`${shortRun(run.runId)} left as-is — /undo --run ${shortRun(run.runId)} rolls it back later, /tasks lists it`)
+      break
+    }
+    dispatchUI({ type: "RECOVERY_COMPLETED" })
+    setMode(mode)
+  }
+
   async function handleLine(line) {
+    if (ui) { await dispatch(line); return } // the editor already joined multiline input
     // v20 multiline: a trailing backslash continues the input on the next line
     if (multilineBuf !== null) {
       const joined = multilineBuf + "\n" + line
@@ -827,36 +1107,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (isShellLine(t)) { await runShellLine(t); promptSafe(); return }
     chatLineLog.push(t)
     if (mode === "agent") {
-      const { runAgent, agentEventPrinter } = await import("./agent.js")
-      abort = new AbortController()
-      const t0 = Date.now()
-      const eff = effortFor(t)
-      if (eff.notice) console.log(dim(`  · ${eff.notice}`))
-      try {
-        const res = await runAgent({
-          config,
-          provider: p,
-          task: t,
-          onEvent: agentEventPrinter(),
-          deep: eff.deep,
-          signal: abort.signal,
-        })
-        console.log()
-        console.log(bold(green("── result " + "─".repeat(50))))
-        console.log(renderMarkdown(res.text))
-        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
-        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
-        messages.push({ role: "user", content: `[agent task] ${t}` })
-        messages.push({ role: "assistant", content: res.text })
-        persist()
-        console.log()
-      } catch (e) {
-        console.log()
-        if (e?.name === "AbortError") err("agent run aborted")
-        else err(`agent error: ${e?.message ?? e}`)
-      } finally {
-        abort = null
-      }
+      await runAgentTask(t)
       promptSafe()
       return
     }
@@ -864,16 +1115,238 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     promptSafe()
   }
 
+  /** One autonomous run (Agent Mode line or /agent <task>). In the interactive
+   *  UI the run is rendered from UI state (dock, status, compact tool rows,
+   *  honest completion summary); piped sessions keep the classic printer. */
+  async function runAgentTask(task, { planOnly = false, deep: deepOverride } = {}) {
+    const { runAgent, agentEventPrinter } = await import("./agent.js")
+    abort = new AbortController()
+    const t0 = Date.now()
+    const eff = deepOverride === undefined ? effortFor(task) : { deep: deepOverride, notice: "" }
+    if (eff.notice) out(dim(`  · ${eff.notice}`))
+    if (ui) dispatchUI({ type: "MODE_CHANGED", mode: planOnly ? "plan" : "agent" })
+    let res = null
+    try {
+      res = await runAgent({ config, provider: p, task, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal })
+      if (ui) {
+        lastAgentState = store.state
+        ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
+        if (!planOnly && !(res.text || "").includes("(reached max steps")) {
+          messages.push({ role: "user", content: `[agent task] ${task}` })
+          messages.push({ role: "assistant", content: res.text })
+          persist()
+        }
+        out()
+      } else {
+        console.log()
+        console.log(bold(planOnly ? cyan("── plan " + "─".repeat(54)) : green("── result " + "─".repeat(50))))
+        console.log(renderMarkdown(res.text))
+        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+        if (!planOnly) {
+          messages.push({ role: "user", content: `[agent task] ${task}` })
+          messages.push({ role: "assistant", content: res.text })
+          persist()
+        }
+        console.log()
+      }
+    } catch (e) {
+      if (ui) {
+        lastAgentState = store.state
+        if (e?.name === "AbortError" || abort === null && store.state.cancel) {
+          dispatchUI({ type: "USER_INTERRUPTED", phase: "stopped" })
+          ui.view.printResult(res, { aborted: true })
+        } else {
+          dispatchUI({ type: "TASK_FAILED", reason: e?.message ?? String(e) })
+          ui.view.printResult(res, { error: e?.message ?? String(e) })
+        }
+        out()
+      } else {
+        console.log()
+        if (e?.name === "AbortError") err("agent run aborted")
+        else err(`agent error: ${e?.message ?? e}`)
+      }
+    } finally {
+      abort = null
+      if (ui) { dispatchUI({ type: "TASK_RESET" }); dispatchUI({ type: "MODE_CHANGED", mode: mode === "agent" ? "agent" : "chat" }) }
+    }
+    return res
+  }
+
   async function handleCommand(t) {
     const [cmd, ...rest] = t.slice(1).split(/\s+/)
     const arg = rest.join(" ")
     switch (cmd) {
-      case "help": console.log(HELP); break
+      case "help": out(HELP); break
       case "exit": case "quit": {
         persist()
-        console.log(dim("bye"))
+        out(dim("bye"))
         saveHistory()
+        if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} }
         setTimeout(() => process.exit(0), 30) // let buffered stdout flush
+        break
+      }
+      case "clear": {
+        if (ui) ui.term.clearScreen(); else process.stdout.write("\x1b[2J\x1b[H")
+        break
+      }
+      case "tasks": {
+        const runs = recentRuns()
+        if (!runs.length) { warn("no agent runs recorded yet for this directory"); break }
+        const rows = [bold("TASKS") + dim("  (this directory, newest first)")]
+        for (const r of runs.slice(0, 12)) {
+          const interrupted = r.status === "running"
+          const st = interrupted ? yellow("INTERRUPTED") : r.status === "completed" ? green("completed") : r.status === "cancelled" ? yellow("cancelled") : r.status === "undone" ? dim("undone") : red("failed")
+          const files = Object.keys(r.files || {}).length
+          rows.push(fit(`  ${padRight(shortRun(r.runId), 9)} ${padRight(st, 22)} ${padRight(fmtTime(r.startedAt), 6)} ${dim(`${r.step ?? 0} steps${files ? ` • ${files} file${files === 1 ? "" : "s"}` : ""}${r.checkpoints?.length ? ` • ${shortCheckpoint(r.checkpoints[r.checkpoints.length - 1])}` : ""}`)}  ${r.task}`, termWidth() - 1))
+        }
+        const openRuns = runs.filter((r) => r.status === "running")
+        if (openRuns.length) rows.push(dim(`  ${openRuns.length} interrupted — /undo --run ${shortRun(openRuns[0].runId)} rolls one back; restart forge to get the recovery prompt`))
+        outLines(rows)
+        break
+      }
+      case "agents": {
+        const st = store.state.task ? store.state : lastAgentState
+        const workers = st?.workers ?? []
+        if (!workers.length) { info("no sub-agents in the current/last run — the agent delegates with the `delegate` tool when a task splits"); break }
+        if (arg && /^\d+$/.test(arg)) {
+          const w = workers.find((x) => x.n === Number(arg))
+          if (!w) { err(`no worker ${arg}`); break }
+          const rows = [bold(`WORKER ${String(w.n).padStart(2, "0")}`) + `  ${w.role}  ${w.status}  ${dim(fmtMs((w.endedAt || Date.now()) - w.startedAt))}`, `  task: ${w.task}`]
+          if (w.report) rows.push("", ...String(w.report).split("\n").slice(0, 40).map((l) => "  " + l))
+          outLines(rows)
+          break
+        }
+        outLines(renderWorkers(workers, termWidth(), o ?? (await import("./render.js")).renderOptions({})))
+        break
+      }
+      case "checkpoints": {
+        const list = listCheckpoints(process.cwd(), 20)
+        outLines(renderCheckpoints(list, termWidth(), o ?? (await import("./render.js")).renderOptions({})))
+        if (list.length) out(dim("  /undo restores the newest • /undo --run RUN-x rolls back a whole run • forge undo from the shell"))
+        break
+      }
+      case "diff": {
+        const bctx = ui?.view.bctx
+        const changes = Object.values(store.state.changes)
+        if (!changes.length) { info("no file changes recorded in this session yet"); break }
+        const target = arg ? path.resolve(process.cwd(), arg) : null
+        const files = target ? changes.filter((c) => c.path === target || c.path.endsWith("/" + arg)) : changes
+        if (!files.length) { err(`no recorded change for ${arg}`); break }
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        if (!arg) outLines(renderChanges(store.state.changes, termWidth(), ro, { cwd: process.cwd() }))
+        let shown = 0
+        for (const f of files.slice(0, arg ? 1 : 6)) {
+          const before = bctx?.before.get(f.path)
+          let after = null
+          try { after = fs.existsSync(f.path) ? fs.readFileSync(f.path, "utf8") : "" } catch { after = null }
+          const rel = path.relative(process.cwd(), f.path)
+          if (before?.text == null && before?.exists) { out(dim(`  ${rel}: original too large to diff (${before.size} bytes) — +${f.added} -${f.removed}`)); continue }
+          if (!before || after == null) { out(dim(`  ${rel}: ${f.action} +${f.added} -${f.removed} (no baseline captured — created outside the UI)`)); continue }
+          const text = unifiedDiff(before.exists ? before.text : "", after, { path: rel })
+          if (!text) { out(dim(`  ${rel}: no textual difference from the session baseline`)); continue }
+          outLines(renderDiff(text, termWidth(), ro, { max: arg ? 400 : 60 }))
+          shown++
+        }
+        if (!arg && files.length > 6) out(dim(`  … ${files.length - 6} more files — /diff <file> for one`))
+        void shown
+        break
+      }
+      case "verify": {
+        let command = arg
+        if (!command) {
+          try { command = loadProfile(process.cwd()).scripts?.test || "" } catch { command = "" }
+        }
+        if (!command) { warn("no test command detected for this project — /verify <command> to run one explicitly"); break }
+        const verdict = userMayRun(command, { cwd: process.cwd(), root: process.cwd() }, { interactive: !!ui, assumeYes })
+        if (!verdict.ok) { err(verdict.reason); break }
+        if (verdict.needsConfirm && !(await confirmPrompt(verdict.reason ?? verdict.level))) { warn("skipped"); break }
+        info(`verify: ${bold(command)}`)
+        const t0 = Date.now()
+        if (ui) { dispatchUI({ type: "TASK_STARTED", kind: "chat", title: `verify: ${command}`, id: null }); dispatchUI({ type: "TEST_STARTED", command }) }
+        const timeoutMs = Math.min(600, Math.max(1, config.agent?.timeoutSec ?? 45) * 4) * 1000
+        const result = await new Promise((resolve) => {
+          execFile("/bin/sh", ["-c", command], { cwd: process.cwd(), timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, ...shellState.env, TERM: "dumb" } }, (error, stdout, stderr) => {
+            let r = ""
+            if (stdout) r += stdout
+            if (stderr) r += (r ? "\n--- stderr ---\n" : "") + stderr
+            if (error && !r) r = String(error.message)
+            else if (error && error.killed) r += `\n[command timed out after ${timeoutMs / 1000}s]`
+            else if (error && typeof error.code === "number") r += `\n[exit code: ${error.code}]`
+            resolve(r || "(no output)")
+          })
+        })
+        const parsed = parseCheckOutput("tests", result)
+        const ms = Date.now() - t0
+        if (ui) {
+          dispatchUI({ type: "TEST_COMPLETED", command, passed: parsed.passed, failed: parsed.failed, ok: parsed.ok })
+          store.dispatch({ type: "TOOL_COMPLETED", id: `verify-${t0}`, name: "bash", target: command, ok: parsed.ok, exit: parsed.exit, ms, lines: result.split("\n").length, summary: result.split("\n").filter((l) => l.trim()).slice(-3), output: result, check: "tests", checkResult: parsed })
+          dispatchUI({ type: "TASK_RESET" })
+        }
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        const tail = result.split("\n").filter((l) => l.trim()).slice(-12)
+        outLines(tail.map((l) => dim("  │ ") + l))
+        outLines(renderVerification({ tests: { ok: parsed.ok, passed: parsed.passed, failed: parsed.failed, summary: parsed.summary, command } }, {}, termWidth(), ro))
+        out(dim(`  ${command} • exit ${parsed.exit} • ${fmtMs(ms)}${parsed.ok ? "" : " • /details shows the full output"}`))
+        noteTerminal(command, result)
+        break
+      }
+      case "details": {
+        const st = store.state
+        const pool = [...(st.details || []), ...((store.state.task ? [] : lastAgentState?.details) || [])]
+        const failed = pool.filter((d) => d.ok === false)
+        const list = failed.length ? failed : pool
+        if (!list.length && !st.lastError && !lastAgentState?.lastError) { info("nothing to show — /details expands the last failed tool output or error"); break }
+        const n = arg && /^\d+$/.test(arg) ? Number(arg) : 1
+        const d = list[list.length - n]
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        if (d) {
+          const rows = [bold(`DETAILS`) + dim(`  ${d.name} ${d.target || ""}  ${d.ok === false ? red("failed") : green("ok")}  ${fmtTime(d.at)}`)]
+          const lines = String(d.text).split("\n")
+          const max = 200
+          rows.push(...lines.slice(0, max).map((l) => "  " + l))
+          if (lines.length > max) rows.push(dim(`  … ${lines.length - max} more lines`))
+          outLines(rows)
+        }
+        const e = st.lastError || lastAgentState?.lastError
+        if (e && !d) outLines(renderErrorBlock(e, termWidth(), ro))
+        const rep = st.repair || lastAgentState?.repair
+        if (rep) outLines(renderRepair(rep, termWidth(), ro))
+        break
+      }
+      case "memory": {
+        const stats = memoryStats(process.cwd())
+        const rows = [bold("MEMORY") + dim(`  global ${stats.globalLines} lines • project ${stats.projectLines} lines  (forge memory … to edit)`)]
+        for (const tier of ["global", "project"]) {
+          const entries = memoryEntries(tier, process.cwd())
+          if (!entries.length) continue
+          rows.push(dim(`  ${tier}`))
+          for (const e of entries.slice(-8)) rows.push(fit(`    • ${e.text.split("\n")[0]}`, termWidth() - 1))
+          if (entries.length > 8) rows.push(dim(`    … ${entries.length - 8} more`))
+        }
+        outLines(rows)
+        break
+      }
+      case "settings": {
+        const keys = ["dock", "thinking", "ascii", "a11y", "collapse"]
+        const [k, v] = arg.split(/\s+/)
+        if (!k) {
+          const rows = [bold("UI SETTINGS") + dim("  /settings <key> on|off   (saved to config.ui)")]
+          rows.push(`  ${padRight("dock", 10)} ${uiCfg.dock === false ? "off" : "on "}   live task panel above the prompt`)
+          rows.push(`  ${padRight("thinking", 10)} ${uiCfg.thinking === false ? "off" : "on "}   show model reasoning snippets`)
+          rows.push(`  ${padRight("ascii", 10)} ${uiCfg.ascii === true ? "on " : "off"}   ASCII symbols (also FORGE_ASCII=1)`)
+          rows.push(`  ${padRight("a11y", 10)} ${uiCfg.a11y === true ? "on " : "off"}   text labels instead of glyphs (also FORGE_A11Y=1)`)
+          rows.push(`  ${padRight("collapse", 10)} ${uiCfg.collapse === false ? "off" : "on "}   collapse large tool outputs (/details expands)`)
+          rows.push(dim(`  colors: ${process.env.NO_COLOR ? "off (NO_COLOR)" : "on"} • width tier: ${termWidth() < 50 ? "narrow" : termWidth() < 100 ? "medium" : "wide"} (${termWidth()} cols)`))
+          outLines(rows)
+          break
+        }
+        if (!keys.includes(k) || !["on", "off"].includes(v)) { err(`usage: /settings <${keys.join("|")}> on|off`); break }
+        config.ui = { ...(config.ui || {}), [k]: v === "on" }
+        Object.assign(uiCfg, config.ui)
+        saveConfig(config)
+        ok(`ui.${k} → ${v}${k === "ascii" || k === "a11y" ? " (takes effect on the next start)" : ""}`)
+        if (ui) ui.term.render()
         break
       }
       case "new": messages = []; sessionId = null; sessionSummary = null; ok("fresh conversation"); break
@@ -924,6 +1397,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       }
       case "undo": {
+        // v20.4: /undo --run [RUN-x] rolls back a whole agent run atomically
+        if (rest[0] === "--run") {
+          const want = rest[1] ? resolveRunId(process.cwd(), rest[1]) : null
+          if (rest[1] && !want) { err(`unknown run "${rest[1]}" — /tasks or /checkpoints list the ids`); break }
+          const r = restoreRun(process.cwd(), want)
+          if (!r) { warn(want ? `no checkpoints for ${shortRun(want)}` : "no agent run with checkpoints yet"); break }
+          ok(`restored ${r.files} file(s) across ${r.checkpoints} checkpoint(s) from ${shortRun(r.runId)}`)
+          for (const n of r.notes ?? []) out(dim(`  · ${n}`))
+          markRun(r.runId, "undone", { note: "rolled back with /undo --run" })
+          if (ui) for (const pth of Object.keys(store.state.changes)) dispatchUI({ type: "FILE_CHANGED", path: pth, action: "modified", added: 0, removed: 0 })
+          break
+        }
         while (messages.length && (messages[messages.length - 1].role === "assistant" || messages[messages.length - 1].role === "tool")) messages.pop()
         if (messages.length && messages[messages.length - 1].role === "user") messages.pop()
         // v16: also restore the newest file checkpoint for this directory
@@ -931,7 +1416,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         ok(messages.length ? "last exchange dropped" : "conversation is empty")
         if (ck) {
           ok(`files restored from checkpoint ${ck.id} (${ck.files} file(s))`)
-          for (const n of ck.notes ?? []) console.log(dim(`  · ${n}`))
+          for (const n of ck.notes ?? []) out(dim(`  · ${n}`))
         }
         break
       }
@@ -1011,6 +1496,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       case "plan": {
         if (!arg) { err("usage: /plan <task>"); break }
         info("planning pass (read-only)…")
+        if (ui) {
+          const res = await runAgentTask(arg, { planOnly: true })
+          if (!res) break
+          const a = await ui.term.ask(bold("execute this plan now? [y/N] "))
+          if (a && /^y(es)?$/i.test(a.trim())) await runAgentTask(arg)
+          else warn("plan not executed")
+          break
+        }
         const { runAgent, agentEventPrinter } = await import("./agent.js")
         abort = new AbortController()
         let res
@@ -1170,43 +1663,24 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       }
       case "normal":
       case "chat": {
-        mode = "normal"
-        rl?.setPrompt(getPrompt())
+        setMode("normal")
         ok("Normal Chat mode active — direct conversational mode. Switch to Agent Mode with /agent")
         break
       }
       case "agent": {
         if (!arg) {
-          mode = "agent"
-          rl?.setPrompt(getPrompt())
+          setMode("agent")
           ok("Agent Mode active — every request executes autonomously with tools, checkpoints, and verification. Switch back with /normal or /chat")
           break
         }
-        const { runAgent, agentEventPrinter } = await import("./agent.js")
-        abort = new AbortController()
-        const t0 = Date.now()
-        const eff = effortFor(arg)
-        if (eff.notice) console.log(dim(`  · ${eff.notice}`))
-        let res
-        try {
-          res = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), deep: eff.deep, signal: abort.signal })
-          console.log()
-          console.log(bold(green("── result " + "─".repeat(50))))
-          console.log(renderMarkdown(res.text))
-          console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
-          if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
-          messages.push({ role: "user", content: `[agent task] ${arg}` })
-          messages.push({ role: "assistant", content: res.text })
-          persist()
-          console.log()
-        } catch (e) {
-          console.log()
-          if (e?.name === "AbortError") err("agent run aborted")
-          else err(`agent error: ${e?.message ?? e}`)
-        } finally { abort = null }
+        if (/^\d+$/.test(arg)) { await handleCommand(`/agents ${arg}`); break } // /agent NN → worker detail
+        await runAgentTask(arg)
         break
       }
-      default: err(`unknown /${cmd} — /help`)
+      default: {
+        const sug = suggestCommand(cmd)
+        err(`unknown /${cmd} — ${sug.length ? `did you mean ${sug.map((x) => "/" + x).join(", ")}? • ` : ""}/help`)
+      }
     }
   }
 }

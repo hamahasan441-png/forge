@@ -6,6 +6,88 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.4.0 (in progress)
 
 ### Added
+- **Premium terminal workstation (interactive chat + `forge agent` in a TTY).**
+  The interactive terminal is now state-driven, crash-safe and keyboard-first
+  while the piped/non-TTY path, every command, tool, safety control and test
+  keeps working byte-for-byte as before (`FORGE_UI=plain` forces the classic
+  line renderer in a TTY).
+  - *Architecture* — one central `UIState` (`uistate.js`: mode, task, plan,
+    execution state, workers, tools, changes, tests, checkpoint, recovery,
+    input, terminal) fed by explicit events (`TASK_STARTED`, `PLAN_UPDATED`,
+    `TOOL_STARTED/OUTPUT/COMPLETED`, `FILE_CHANGED`, `TEST_*`,
+    `CHECKPOINT_CREATED`, `ERROR`, `RECOVERY_*`, `TASK_COMPLETED/FAILED`,
+    `USER_INTERRUPTED`, `STREAMING`); pure renderers (`render.js`); a single
+    terminal output coordinator (`terminal.js`) that owns stdout while
+    interactive — it hooks `console.*`/`stdout.write`, so *nothing* prints
+    below the prompt; the agent is bridged into the store by `agentview.js`.
+    Nothing in the UI is fabricated: progress % comes only from real plan
+    items, the verification panel lists only checks that actually ran (parsed
+    from their real output), `+/-` counts are real diffs.
+  - *Header + adaptive layout* — persistent compact header
+    `FORGE · MODE · RUN-xxxx · ● STATE · elapsed · provider/model` with the
+    states READY/THINKING/PLANNING/EXECUTING/VERIFYING/RECOVERING/WAITING/
+    COMPLETED/FAILED/CANCELLED. Very narrow terminals get `● EXECUTING 72%`,
+    medium ones a one-line step/files/tests summary, wide ones the TASK/PLAN/
+    ACTIVITY(/WORKERS) dashboard — all live above a prompt that never moves.
+  - *Input layer* — grapheme-aware editor (`editor.js`): cursor keys,
+    Home/End, Ctrl+A/E/K/U/W/Y, word jumps, Backspace/Delete on emoji and
+    CJK, multiline (`\` continuation, Alt+Enter), ↑↓ prefix-aware history,
+    Ctrl+R reverse search, Tab command completion (`/hel` → `/help`), inputs up
+    to 200k chars windowed to the screen. Real **bracketed paste** (`keys.js`):
+    pasted text — any size, any number of lines — is inserted atomically and
+    never executed line by line. History is deduped, multiline-safe and never
+    stores secrets (`/key …`, `sk-…`, `export *_KEY=`).
+  - *Render lock* — streaming output, tool rows, console.log from plugins,
+    even `process.stdout.write` from a tool all land *above* the live region;
+    the typed draft and cursor are restored after every frame. Status is a
+    single updating row (`● Thinking 14.2s`), never repeated lines.
+  - *Tool rows* — `✓ shell  npm test  1.2s` with target, duration, exit code
+    and a collapsed body (`120 lines hidden — /details`) that surfaces error
+    lines; `/details [N]` expands the last/N-th tool output.
+  - *Agent console* — objective, current step, workers (`/agents`,
+    `/agent NN`), plan with nested steps, CHANGES panel (`/diff [file]` shows a
+    real unified diff against the pre-run baseline), verification panel,
+    repair loop (attempt · diagnosis · verification), completion/failure/
+    cancel panels with concrete next steps. Also used by `forge agent` and
+    `forge plan apply` when run in a TTY (piped output unchanged).
+  - *Honest cancellation* — Ctrl+C during a run shows `Stopping…` →
+    `waiting for current tool to terminate (name)` → `✗ tool … cancelled` →
+    `✓ execution stopped safely` (+ checkpointed files, session saved, input
+    restored). Bash and sub-agents honour the abort signal; nothing claims to
+    have stopped before it has. Ctrl+C with text clears it; twice on an empty
+    prompt exits; Ctrl+D EOF; Ctrl+L redraw.
+  - *Crash-safe recovery* — every write run keeps a journal
+    (`~/.forge/runs/<runId>.json`, `runlog.js`). A run whose process died
+    mid-flight is detected on the next start (dead pid) and shown as a
+    `FORGE RECOVERY` panel with `[R]esume [V]erify [U]ndo [C]ancel`; nothing is
+    replayed automatically. `/tasks` lists runs (running/completed/failed/
+    cancelled/undone), `/checkpoints` lists snapshots, `/undo --run [RUN-xxxx]`
+    and `forge undo --run RUN-xxxx` roll a whole run back by its short id.
+  - *Command palette* — `/help` `/status` `/plan` `/tasks` `/agents`
+    `/memory` `/sessions` `/checkpoints` `/diff` `/undo` `/retry` `/verify`
+    `/clear` `/settings` `/details` `/normal` `/chat` with Tab completion and
+    "did you mean" hints for typos (`/statsu` → `/status`).
+  - *Accessibility & terminals* — restrained semantic colours, meaning never
+    carried by colour alone; `NO_COLOR`; `FORGE_ASCII=1` (or a non-UTF-8
+    locale) swaps glyphs for ASCII; `FORGE_A11Y=1` uses text labels
+    (`SUCCESS:` `ERROR:` `ACTIVE:` `PENDING:`); `/settings dock|thinking|ascii|
+    a11y|collapse on|off` persists to `config.ui`. Resize recomputes the
+    layout and repaints without duplicating rows or losing the draft.
+  - *Security* — the UI only renders what tools return through the existing
+    ShellGuard/SafePath/NetGuard/redaction path; tool targets shown in rows
+    are redacted (`Bearer [REDACTED]`).
+  - *Tests* — new `tests/test-ui.mjs` (233 checks; registered in `run-all.mjs`
+    as `ui`): text-width/Unicode primitives, header/dock at 20–200 cols,
+    panels, key decoding (split escapes, kitty keys, 2 MB paste, CRLF), editor
+    (graphemes, word ops, multiline, history, Ctrl+R), reducer + agent bridge
+    on real files, unified-diff round trips, journal/recovery, and the
+    coordinator driven against a VT100 emulator (`tests/vtscreen.mjs`) —
+    render lock, single-region status, paste atomicity, Ctrl+C states, Tab,
+    resize, `ask()`. When `python3` is available it also drives `forge chat`
+    in a real pseudo-terminal: typing while streaming, 300-line paste, Ctrl+C
+    mid-tool, SIGKILL → recovery screen, `/diff` + `/undo --run`, 40-column
+    terminals, and asserts the piped path is unchanged. Existing suites
+    (FAST 20/20, e2e 247/247, clean-room 56/56) stay green.
 - **Session Operating Modes (`/agent`, `/normal`, `/chat`)** — Forge now supports
   seamless session-level switching between Normal Chat (conversational mode) and
   Agent Mode (autonomous engineering execution with full tool loops, checkpoints,

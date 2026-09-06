@@ -27,6 +27,8 @@ import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
 import { relevantMemory, relevantLearnings } from "./memory.js"
 import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap } from "./repomap.js"
+import { openRun } from "./runlog.js"
+import { listCheckpoints } from "./checkpoint.js"
 import path from "node:path"
 import fs from "node:fs"
 
@@ -176,9 +178,14 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   }
 }
 
-export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role }) {
+export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true }) {
   let p = provider
   const readonly = readOnly || planOnly // plan mode is always read-only
+  // v20.4 UI events: every event from a delegated sub-agent is tagged with its
+  // worker id so the terminal can show it as a worker instead of interleaving
+  // it with the main run's activity.
+  const rawOnEvent = onEvent
+  if (sub && rawOnEvent) onEvent = (ev) => rawOnEvent({ ...ev, sub, role })
   // v20.2 provider failover (opt-in): when the active provider keeps failing on
   // transient/auth errors, fall through to the next configured+tested provider
   // instead of killing the task. Default OFF — a switch is always announced.
@@ -206,6 +213,11 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   // run can be rolled back atomically (`forge undo --run`). Sub-agents are
   // read-only and never write, so they get no runId.
   const runId = readonly ? null : "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  // v20.4 crash-safe journal (~/.forge/runs/<runId>.json): what the run touched,
+  // updated after every tool result, closed with a terminal status. An
+  // interrupted run (crash / kill) stays "running" → startup recovery screen.
+  const log = runId && journal ? openRun({ runId, task, cwd: process.cwd(), kind: "agent", provider: p.name, model: p.model }) : null
+  onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role })
   // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
   // Sub-agents inherit the same plugins the main run sees.
   let plugins = []
@@ -220,6 +232,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
       }
     } catch { /* plugins are best-effort */ }
   }
+  let subCounter = 0
   const tools = makeToolContext({
     plugins,
     cwd: process.cwd(),
@@ -247,8 +260,8 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
       ? null
       : (subTask, subRole) =>
         runAgent({
-          config, provider: p, task: subTask, onEvent: null, signal,
-          readOnly: true, maxStepsOverride: 10, role: subRole,
+          config, provider: p, task: subTask, onEvent: onEvent ? (ev) => onEvent(ev) : null, signal,
+          readOnly: true, maxStepsOverride: 10, role: subRole, sub: `w${++subCounter}`,
         }).then((r) => r.text),
   })
 
@@ -264,133 +277,184 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   let switchedOk = false // recorded health-ok after a successful failover
   let toolCallCount = 0
   const toolLog = []
-
-  while (steps < maxSteps) {
-    steps++
-    let msg
-    try {
-      msg = await chatOnce({
-        protocol: p.protocol,
-        baseUrl: p.baseUrl,
-        apiKey: p.apiKey,
-        model: p.model,
-        providerName: p.name,
-        messages,
-        tools: tools.defs,
-        signal,
-        deep: deepEffort,
-        maxTokens: deepEffort ? 16384 : undefined,
-        connectMs: config.retry?.connectMs,
-        requestTimeoutMs: config.retry?.requestTimeoutMs,
-      })
-    } catch (e) {
-      if (e instanceof ProviderError && e.contextOverflow && overflowBudget > 0) {
-        // v20 recovery: compress hard, then retry the SAME step
-        overflowBudget--
-        onEvent?.({ type: "compacted", before: messages.length, after: -1, estTok: estimateTokens(JSON.stringify(messages)), budgetTok: 0, reason: "context overflow — compressing and retrying" })
-        messages = await compactAgentHistory(messages, p, { onEvent, force: true })
-        messages = hardShrink(messages)
-        steps--
-        continue
-      }
-      if (e instanceof ProviderError && e.retryable && retryBudget > 0) {
-        retryBudget--
-        onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget })
-        // v20: honor Retry-After when the provider sent one
-        const wait = Math.max(2000 * (3 - retryBudget), e.retryAfterMs ?? 0)
-        await new Promise((r) => setTimeout(r, Math.min(60000, wait)))
-        steps-- // retry does not consume a step
-        continue
-      }
-      // v20.2: retries on THIS provider are spent (or the error is a hard
-      // auth/not-found) — fall through to the next configured provider if one
-      // is available. Each provider in the chain is tried once.
-      if (isFailworthy(e) && chainIdx < chain.length) {
-        const next = chain[chainIdx++]
-        recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
-        onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message })
-        p = next
-        retryBudget = 3 // fresh budget for the new provider
-        steps-- // switching does not consume a step
-        continue
-      }
-      throw e
-    }
-
-    // a request that succeeded on a switched-to provider confirms it works —
-    // record it once so the health cache and future runs prefer it
-    if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
-
-    if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning })
-
-    if (msg.toolCalls?.length) {
-      // v20: runaway guard — stop spawning tool rounds past the budget
-      toolCallCount += msg.toolCalls.length
-      if (toolCallCount > maxToolCalls) {
-        messages.push({ role: "user", content: `(system) tool-call budget exhausted (${maxToolCalls} calls) — stop calling tools and produce your final answer now with what you have.` })
-        continue
-      }
-      // canonical wire history: ONE assistant message carrying ALL tool_calls
-      messages.push({
-        role: "assistant",
-        content: msg.content || "",
-        tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
-      })
-      // v16 parallel execution: read-only tools concurrently, write tools
-      // serialized; results reassembled in the ORIGINAL call order.
-      // v20: `delegate` counts as read-only (safe to parallelize, capped).
-      const results = new Array(msg.toolCalls.length)
-      const runTool = async (tc) => {
-        // hard guard (v16): read-only / plan-mode agents never execute write tools
-        if (readonly && WRITE_TOOLS.has(tc.name)) return "BLOCKED: write tools are disabled in this read-only agent"
-        return await tools.exec(tc.name, safeJson(tc.args))
-      }
-      await Promise.all(
-        msg.toolCalls.map(async (tc, i) => {
-          if (WRITE_TOOLS.has(tc.name)) return
-          onEvent?.({ type: "tool_start", name: tc.name, args: tc.args, step: steps })
-          const tTool = Date.now()
-          let result
-          try {
-            result = await runTool(tc)
-          } catch (e) {
-            result = `ERROR: ${e.message}`
-          }
-          results[i] = { result, ms: Date.now() - tTool }
+  let ended = false
+  const endRun = (status, extra = {}) => {
+    if (ended) return
+    ended = true
+    log?.end(status, extra)
+    onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false })
+  }
+  try {
+    while (steps < maxSteps) {
+      steps++
+      log?.step(steps)
+      onEvent?.({ type: "step", step: steps })
+      let msg
+      try {
+        msg = await chatOnce({
+          protocol: p.protocol,
+          baseUrl: p.baseUrl,
+          apiKey: p.apiKey,
+          model: p.model,
+          providerName: p.name,
+          messages,
+          tools: tools.defs,
+          signal,
+          deep: deepEffort,
+          maxTokens: deepEffort ? 16384 : undefined,
+          connectMs: config.retry?.connectMs,
+          requestTimeoutMs: config.retry?.requestTimeoutMs,
         })
-      )
-      for (let i = 0; i < msg.toolCalls.length; i++) {
-        const tc = msg.toolCalls[i]
-        if (WRITE_TOOLS.has(tc.name)) {
-          onEvent?.({ type: "tool_start", name: tc.name, args: tc.args, step: steps })
-          const tTool = Date.now()
-          let result
-          try {
-            result = await runTool(tc)
-          } catch (e) {
-            result = `ERROR: ${e.message}`
-          }
-          results[i] = { result, ms: Date.now() - tTool }
+      } catch (e) {
+        if (e instanceof ProviderError && e.contextOverflow && overflowBudget > 0) {
+          // v20 recovery: compress hard, then retry the SAME step
+          overflowBudget--
+          onEvent?.({ type: "compacted", before: messages.length, after: -1, estTok: estimateTokens(JSON.stringify(messages)), budgetTok: 0, reason: "context overflow — compressing and retrying" })
+          messages = await compactAgentHistory(messages, p, { onEvent, force: true })
+          messages = hardShrink(messages)
+          steps--
+          continue
         }
-        const { result, ms } = results[i]
-        toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
-        onEvent?.({ type: "tool_result", name: tc.name, result: String(result), step: steps, ms })
-        messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) })
+        if (e instanceof ProviderError && e.retryable && retryBudget > 0) {
+          retryBudget--
+          onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget })
+          // v20: honor Retry-After when the provider sent one
+          const wait = Math.max(2000 * (3 - retryBudget), e.retryAfterMs ?? 0)
+          await new Promise((r) => setTimeout(r, Math.min(60000, wait)))
+          steps-- // retry does not consume a step
+          continue
+        }
+        // v20.2: retries on THIS provider are spent (or the error is a hard
+        // auth/not-found) — fall through to the next configured provider if one
+        // is available. Each provider in the chain is tried once.
+        if (isFailworthy(e) && chainIdx < chain.length) {
+          const next = chain[chainIdx++]
+          recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
+          onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message })
+          p = next
+          retryBudget = 3 // fresh budget for the new provider
+          steps-- // switching does not consume a step
+          continue
+        }
+        throw e
       }
-      // v17 token reducer: summarize mid-run when approaching the window budget
-      messages = await compactAgentHistory(messages, p, { onEvent })
-      continue
+
+      // a request that succeeded on a switched-to provider confirms it works —
+      // record it once so the health cache and future runs prefer it
+      if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
+
+      if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning })
+
+      if (msg.toolCalls?.length) {
+        // v20: runaway guard — stop spawning tool rounds past the budget
+        toolCallCount += msg.toolCalls.length
+        if (toolCallCount > maxToolCalls) {
+          messages.push({ role: "user", content: `(system) tool-call budget exhausted (${maxToolCalls} calls) — stop calling tools and produce your final answer now with what you have.` })
+          continue
+        }
+        // canonical wire history: ONE assistant message carrying ALL tool_calls
+        messages.push({
+          role: "assistant",
+          content: msg.content || "",
+          tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
+        })
+        // v16 parallel execution: read-only tools concurrently, write tools
+        // serialized; results reassembled in the ORIGINAL call order.
+        // v20: `delegate` counts as read-only (safe to parallelize, capped).
+        const results = new Array(msg.toolCalls.length)
+        const runTool = async (tc) => {
+          // hard guard (v16): read-only / plan-mode agents never execute write tools
+          if (readonly && WRITE_TOOLS.has(tc.name)) return "BLOCKED: write tools are disabled in this read-only agent"
+          return await tools.exec(tc.name, safeJson(tc.args))
+        }
+        await Promise.all(
+          msg.toolCalls.map(async (tc, i) => {
+            if (WRITE_TOOLS.has(tc.name)) return
+            onEvent?.({ type: "tool_start", name: tc.name, args: tc.args, step: steps })
+            const tTool = Date.now()
+            let result
+            try {
+              result = await runTool(tc)
+            } catch (e) {
+              result = `ERROR: ${e.message}`
+            }
+            results[i] = { result, ms: Date.now() - tTool }
+          })
+        )
+        for (let i = 0; i < msg.toolCalls.length; i++) {
+          const tc = msg.toolCalls[i]
+          if (WRITE_TOOLS.has(tc.name)) {
+            onEvent?.({ type: "tool_start", name: tc.name, args: tc.args, step: steps })
+            const tTool = Date.now()
+            let result
+            try {
+              result = await runTool(tc)
+            } catch (e) {
+              result = `ERROR: ${e.message}`
+            }
+            results[i] = { result, ms: Date.now() - tTool }
+          }
+          const { result, ms } = results[i]
+          toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
+          if (log) {
+            const r = String(result)
+            const okRes = !(r.startsWith("ERROR") || r.startsWith("BLOCKED"))
+            log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
+            if (okRes && WRITE_TOOLS.has(tc.name) && tc.name !== "bash") for (const [fp, action] of journalFiles(tc.name, tc.args, r)) log.touched(fp, action)
+          }
+          onEvent?.({ type: "tool_result", name: tc.name, result: String(result), step: steps, ms })
+          messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) })
+        }
+        // v17 token reducer: summarize mid-run when approaching the window budget
+        messages = await compactAgentHistory(messages, p, { onEvent })
+        continue
+      }
+
+      finalText = msg.content || "(empty answer)"
+      break
     }
 
-    finalText = msg.content || "(empty answer)"
-    break
+    if (steps >= maxSteps && !finalText) {
+      finalText = "(reached max steps without a final answer — raise agent.maxSteps in config)"
+    }
+    const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
+    if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
+    endRun("completed", { text: finalText, wrote })
+    return { text: finalText, steps, toolLog, planOnly, runId, wrote }
+  } catch (e) {
+    const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
+    if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
+    else endRun("failed", { error: e?.message ?? String(e), wrote })
+    throw e
   }
+}
 
-  if (steps >= maxSteps && !finalText) {
-    finalText = "(reached max steps without a final answer — raise agent.maxSteps in config)"
+/** Compact target string for the run journal (never the full args). */
+function journalTarget(name, argStr) {
+  const a = safeJson(argStr || "{}")
+  const t = a.path ?? a.command ?? a.pattern ?? a.url ?? a.query ?? a.name ?? a.action ?? ""
+  return String(t).split("\n")[0].slice(0, 160)
+}
+
+/** Files a successful write tool touched, for the run journal. */
+function journalFiles(name, argStr, result) {
+  const a = safeJson(argStr || "{}")
+  const out = []
+  const abs = (p) => path.resolve(process.cwd(), String(p))
+  if (name === "write_file" && a.path) out.push([abs(a.path), /created/i.test(result) ? "created" : "modified"])
+  else if ((name === "edit_file" || name === "multi_edit") && a.path) out.push([abs(a.path), "modified"])
+  else if (name === "apply_patch") {
+    const m = String(result).match(/created ([^•]+?)(?: •|$| \()/)
+    if (m) for (const f of m[1].split(",")) out.push([abs(f.trim()), "created"])
+    const d = String(result).match(/deleted ([^•]+?)(?: •|$| \()/)
+    if (d) for (const f of d[1].split(",")) out.push([abs(f.trim()), "deleted"])
+    try {
+      const re = /^\+\+\+ (?:b\/)?(\S+)/gm
+      let mm
+      while ((mm = re.exec(String(a.patch ?? "")))) if (mm[1] !== "/dev/null" && !out.some((x) => x[0] === abs(mm[1]))) out.push([abs(mm[1]), "modified"])
+    } catch {}
   }
-  const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
-  return { text: finalText, steps, toolLog, planOnly, runId, wrote }
+  return out
 }
 
 /** Aggressive in-place shrink used only for overflow recovery: stub ALL tool
@@ -420,6 +484,7 @@ function safeJson(s) {
 /** Pretty-print agent events to the terminal. */
 export function agentEventPrinter() {
   return function onEvent(ev) {
+    if (ev.sub) return // sub-agent traffic is summarized by the delegate tool result
     if (ev.type === "tool_start") {
       const args = String(ev.args || "").slice(0, 160)
       console.log(dim(`  ┌ [step ${ev.step}] ${cyan(ev.name)} ${dim(args)}`))
