@@ -36,6 +36,18 @@ const COMPRESS_OVER_BYTES = 256 * 1024 // small files stay plain: instant undo
 const MAX_CHECKPOINTS = 30
 const MAX_CHECKPOINT_DIR_BYTES = 512 * 1024 * 1024 // total budget for all of them
 
+// v20.5: a per-process monotonic sequence baked into the checkpoint id so that
+// lexicographic id order == creation order. The id used to be
+// `<ISO-millisecond>-<random>`, and two checkpoints made in the SAME
+// millisecond tied on the timestamp and then sorted by the RANDOM suffix — an
+// order unrelated to when they were made. Every rollback (restoreRun /
+// restoreRuns) replays newest→oldest by that order, so two same-ms checkpoints
+// could unwind in the wrong sequence and leave a file holding intermediate
+// content instead of its true pre-run state. The zero-padded, monotonic seq
+// breaks ms-ties in creation order. Within one run/task (always one process)
+// this makes rollback ordering exact.
+let _seq = 0
+
 function sha256Head(file) {
   try {
     const st = fs.statSync(file)
@@ -76,7 +88,7 @@ export function snapshotBefore(files, cwd, created = [], runId = null) {
       try { fs.accessSync(f); return false } catch { return true } // must NOT exist yet
     })
     if (!want.length && !creating.length && !tooLarge.length) return null
-    const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
+    const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + String(_seq++).padStart(6, "0") + "-" + Math.random().toString(36).slice(2, 6)
     const dir = path.join(CHECKPOINTS_DIR, id)
     fs.mkdirSync(dir, { recursive: true })
     const manifest = { id, ts: Date.now(), cwd: path.resolve(cwd || process.cwd()), ...(runId ? { runId } : {}), files: [] }
@@ -204,6 +216,50 @@ export function restoreRun(cwd, runId = null) {
     if (r) { files += r.files; checkpoints++; for (const n of r.notes) notes.push(n) }
   }
   return checkpoints ? { runId: rid, checkpoints, files, notes } : null
+}
+
+/**
+ * v20.5 (Phase 4): the files a run touched, absolute, deduplicated, each marked
+ * with whether that run CREATED it. Checkpoint manifests are the authoritative
+ * record of what changed — tool results are prose and cannot be trusted for it.
+ */
+export function filesFromRun(cwd, runId) {
+  if (!runId) return []
+  const seen = new Map()
+  for (const c of listCheckpoints(cwd, 999)) {
+    if (c.runId !== runId) continue
+    for (const f of c.files ?? []) {
+      // A file created and later edited in the same run is still a creation.
+      const prev = seen.get(f.path)
+      seen.set(f.path, { path: f.path, created: !!(prev?.created || f.created), tooLarge: !!f.tooLarge })
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.path.localeCompare(b.path))
+}
+
+/**
+ * v20.5 (Phase 4): restore SEVERAL runs — every segment of one long-horizon
+ * task — as a single rollback.
+ *
+ * Ordering is the whole correctness argument: checkpoints from all the runs are
+ * gathered and replayed newest→oldest ACROSS runs, not run-by-run. Two segments
+ * that both edited the same file must unwind in the reverse of the order they
+ * were made, or the file ends up holding the older segment's content instead of
+ * its true pre-task state.
+ */
+export function restoreRuns(cwd, runIds) {
+  const wanted = new Set((runIds || []).filter(Boolean))
+  if (!wanted.size) return null
+  const group = listCheckpoints(cwd, 999).filter((c) => c.runId && wanted.has(c.runId)) // newest-first
+  if (!group.length) return null
+  let files = 0, checkpoints = 0
+  const notes = []
+  const runs = new Set()
+  for (const c of group) {
+    const r = restoreOne(c)
+    if (r) { files += r.files; checkpoints++; runs.add(c.runId); for (const n of r.notes) notes.push(n) }
+  }
+  return checkpoints ? { runIds: [...runs], checkpoints, files, notes } : null
 }
 
 /** Newest-first checkpoints for cwd (or all if cwd is null). */

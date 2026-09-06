@@ -35,6 +35,7 @@ const suites = [
   ["contract", "node", ["test-contract.mjs"]],
   ["taskstate", "node", ["test-taskstate.mjs"]],
   ["verify", "node", ["test-verify.mjs"]],
+  ["recovery", "node", ["test-recovery.mjs"]],
   ["security", "node", ["test-security.mjs"]],
   ["providers", "node", ["test-providers.mjs"]],
   ["diffpatch", "node", ["test-diffpatch.mjs"]],

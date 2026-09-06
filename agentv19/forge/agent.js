@@ -177,7 +177,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   }
 }
 
-export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, taskId, segmentId, classifyTask }) {
+export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, taskId, segmentId, runId: runIdIn, classifyTask }) {
   let p = provider
   // Phase 1 contract: identity is explicit. A caller that owns a longer-lived
   // task passes taskId so every segment of it shares one identity; a bare call
@@ -217,7 +217,10 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   // v20.2 (P3-4): tag every checkpoint from this run with one runId so the whole
   // run can be rolled back atomically (`forge undo --run`). Sub-agents are
   // read-only and never write, so they get no runId.
-  const runId = readonly ? null : newRunId() // §3: one id generator, in contract.js
+  // §3 one id generator, in contract.js. A caller that must know the runId even
+  // if this call THROWS (the orchestrator, so it can find the files a dead
+  // segment already wrote) supplies it; otherwise one is minted here.
+  const runId = readonly ? null : (typeof runIdIn === "string" && runIdIn ? runIdIn : newRunId())
   // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
   // Sub-agents inherit the same plugins the main run sees.
   let plugins = []

@@ -628,7 +628,7 @@ async function main() {
     case "tasks": {
       // v20.5 (Phase 2): long-horizon tasks are durable — list them, inspect
       // what each segment did and what it cost, and resume unfinished work.
-      const { listTasks, loadTask, isResumable, continuationPrompt } = await import("./taskstate.js")
+      const { listTasks, loadTask, isResumable, reconcileTask, taskRunIds, RECONCILE } = await import("./taskstate.js")
       const sub = (positional[1] || "list").toLowerCase()
       const fmtAge = (ts) => {
         const m = Math.round((Date.now() - (ts || Date.now())) / 60000)
@@ -664,6 +664,14 @@ async function main() {
               else console.log(c.ok ? green(`    ✓ ${c.id}: ${c.cmd}`) : red(`    ✗ ${c.id}: ${c.cmd} → exit ${c.code ?? "timeout"}`))
             }
           }
+          // Phase 4: reconcile the record against the working tree and say so.
+          const rc = reconcileTask(rec)
+          if (rc.status !== RECONCILE.CLEAN || rc.files.length) {
+            const tag = rc.status === RECONCILE.ABANDONED ? red(rc.status) : rc.status === RECONCILE.DIVERGED ? yellow(rc.status) : green(rc.status)
+            console.log(dim(`  effects: ${tag} — ${rc.present.length} present, ${rc.missing.length} missing of ${rc.files.length} changed file(s)`))
+            for (const n of rc.notes) console.log(dim(`    · ${n}`))
+            if (rc.undoable) console.log(dim(`    undo this task's file changes: ${cyan("forge tasks undo " + rec.taskId)}`))
+          }
           if (rec.lastText) { console.log(); console.log(renderMarkdown(rec.lastText)) }
           if (isResumable(rec)) console.log(dim(`\n  resume: ${cyan("forge tasks resume " + rec.taskId)}`))
           return
@@ -694,7 +702,26 @@ async function main() {
         return
       }
 
-      if (sub !== "list") { err("usage: forge tasks [list|show <id>|resume <id>]"); process.exit(1); return }
+      if (sub === "undo") {
+        // Phase 4: roll back EVERY file change this task made, across all its
+        // segments, atomically (newest→oldest across runs). Explicit user
+        // action — reconcile only reports; it never silently reverts.
+        const key = positional[2]
+        if (!key) { err("usage: forge tasks undo <taskId>"); process.exit(1); return }
+        const rec = loadTask(key)
+        if (!rec) { err(`no task matching "${key}" (forge tasks — to list them)`); process.exit(1); return }
+        const runIds = taskRunIds(rec)
+        if (!runIds.length) { warn(`task ${rec.taskId} recorded no file-changing runs — nothing to undo`); return }
+        const { restoreRuns } = await import("./checkpoint.js")
+        const target = rec.cwd && fs.existsSync(rec.cwd) ? rec.cwd : process.cwd()
+        const r = restoreRuns(target, runIds)
+        if (!r) { warn(`no restorable checkpoints remain for task ${rec.taskId} (they may have been pruned)`); return }
+        ok(`rolled back ${r.files} file(s) across ${r.checkpoints} checkpoint(s) from ${r.runIds.length} run(s) of task ${rec.taskId}`)
+        for (const n of r.notes ?? []) console.log(dim(`  · ${n}`))
+        return
+      }
+
+      if (sub !== "list") { err("usage: forge tasks [list|show <id>|resume <id>|undo <id>]"); process.exit(1); return }
       const all = flags.all === true
       const recs = listTasks({ cwd: all ? undefined : process.cwd(), all }).slice(0, JSON_OUT ? 999 : 20)
       if (JSON_OUT) { emitJson({ count: recs.length, tasks: recs.map((r) => ({ ...r, segments: r.segments.length })) }); return }
@@ -705,7 +732,7 @@ async function main() {
         console.log(`  ${bold(String(i + 1).padStart(2))}. ${dim(r.taskId)}  ${tag}  ${dim(`${r.totals.segments} seg • ${fmtTokens(r.totals)} • ${fmtAge(r.updatedAt)}`)}`)
         console.log(dim(`      ${String(r.task).replace(/\s+/g, " ").slice(0, 76)}`))
       })
-      console.log(dim(`  inspect: ${cyan("forge tasks show <id>")}  •  resume unfinished: ${cyan("forge tasks resume <id>")}`))
+      console.log(dim(`  inspect: ${cyan("forge tasks show <id>")}  •  resume unfinished: ${cyan("forge tasks resume <id>")}  •  undo files: ${cyan("forge tasks undo <id>")}`))
       return
     }
     case "skills": {
@@ -906,7 +933,7 @@ ${bold("usage")}
   ${cyan("forge config show|path|get|set|unset")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
-  ${cyan("forge tasks")}                  long-horizon tasks ${dim("list | show <id> | resume <id>   (--all = every directory)")}
+  ${cyan("forge tasks")}                  long-horizon tasks ${dim("list | show <id> | resume <id> | undo <id>   (--all = every directory)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}

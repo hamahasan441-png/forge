@@ -34,6 +34,7 @@ export const MAX_TASKS = 200
 /** Per-task cap on retained segment records (a task is a history, not a log). */
 export const MAX_SEGMENTS = 100
 const MAX_TEXT = 4000 // bytes of remembered answer text per task
+const MAX_FILES = 200 // per-segment cap on recorded file effects
 
 const clip = (s, n = MAX_TEXT) => {
   const t = redact(String(s ?? ""))
@@ -84,7 +85,7 @@ const known = (v) => typeof v === "number" && Number.isFinite(v)
  * `note` is an optional short human/agent-written line about what the segment
  * accomplished; it is what a later segment reads to pick the work back up.
  */
-export function recordSegment(taskId, result, { note } = {}) {
+export function recordSegment(taskId, result, { note, files } = {}) {
   const rec = loadTask(taskId)
   if (!rec || !result) return null
 
@@ -105,6 +106,10 @@ export function recordSegment(taskId, result, { note } = {}) {
     },
     endedAt: Date.now(),
     note: note ? clip(note, 600) : null,
+    // Phase 4: what this segment actually changed on disk, from the checkpoint
+    // manifests. Without it, a segment that died mid-edit left no trace of
+    // WHICH files it had already touched.
+    files: Array.isArray(files) ? files.slice(0, MAX_FILES).map((f) => ({ path: String(f.path), created: !!f.created })) : [],
   }
 
   rec.segments.push(seg)
@@ -216,6 +221,64 @@ export function pruneTasks(max = MAX_TASKS) {
   }
 }
 
+/** Every distinct run id this task produced, oldest segment first. */
+export function taskRunIds(rec) {
+  return [...new Set((rec?.segments ?? []).map((s) => s.runId).filter(Boolean))]
+}
+
+/** Files this task changed, deduplicated across its segments. */
+export function taskFiles(rec) {
+  const seen = new Map()
+  for (const seg of rec?.segments ?? []) {
+    for (const f of seg.files ?? []) {
+      const prev = seen.get(f.path)
+      seen.set(f.path, { path: f.path, created: !!(prev?.created || f.created) })
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.path.localeCompare(b.path))
+}
+
+export const RECONCILE = Object.freeze({
+  CLEAN: "CLEAN",       // nothing was changed, or everything the record claims is present
+  DIVERGED: "DIVERGED", // the record and the working tree disagree
+  ABANDONED: "ABANDONED", // a segment wrote files and then FAILED — partial edits, no completion
+})
+
+/**
+ * Phase 4 — effect reconciliation. Compare what the record says this task did
+ * against what is actually on disk right now, and say so plainly.
+ *
+ * The case that matters: a segment that changed files and then FAILED (the
+ * provider died, the process was killed) leaves half-finished edits behind. The
+ * old behaviour left no record at all, so nobody — user or agent — could tell
+ * which files were mid-edit. This names them.
+ *
+ * It reports; it never repairs. Rolling back is `forge tasks undo`, an explicit
+ * user action, because silently reverting someone's working tree is worse than
+ * a stale record.
+ */
+export function reconcileTask(rec, { statFile } = {}) {
+  const stat = statFile ?? ((p) => { try { return fs.statSync(p) } catch { return null } })
+  const files = taskFiles(rec)
+  const missing = [], present = []
+  for (const f of files) {
+    if (stat(f.path)) present.push(f.path)
+    else missing.push(f.path)
+  }
+  const lastWriting = [...(rec?.segments ?? [])].reverse().find((s) => s.wrote)
+  const abandoned = !!lastWriting && rec?.status === AGENT_STATUS.FAILED
+
+  const notes = []
+  if (abandoned) notes.push(`the last writing segment FAILED — ${present.length} file(s) may hold partial edits`)
+  if (missing.length) notes.push(`${missing.length} file(s) this task changed no longer exist`)
+  if (!files.length) notes.push("this task changed no files")
+
+  const status = abandoned ? RECONCILE.ABANDONED
+    : missing.length ? RECONCILE.DIVERGED
+      : RECONCILE.CLEAN
+  return { status, files, present, missing, notes, undoable: taskRunIds(rec).length > 0 }
+}
+
 /** True when the task has unfinished work a further segment could pick up. */
 export function isResumable(rec) {
   return !!rec && (rec.status === AGENT_STATUS.CONTINUE_REQUIRED || rec.status === AGENT_STATUS.WAITING)
@@ -233,6 +296,16 @@ export function continuationPrompt(rec) {
   if (!rec) return ""
   const done = rec.segments.length
   const notes = rec.segments.map((s, i) => `  ${i + 1}. ${s.status}${s.wrote ? " (changed files)" : ""}${s.note ? " — " + s.note : ""}`).join("\n")
+  // Phase 4: name the files earlier segments changed, and — the case that
+  // matters — call out partial edits left by a segment that FAILED mid-run, so
+  // the resuming segment inspects them before trusting them.
+  const rc = reconcileTask(rec)
+  const changedList = rc.files.length
+    ? `Files earlier segments changed (inspect before editing):\n${rc.files.slice(0, 20).map((f) => `  - ${f.path}${f.created ? " (created)" : ""}`).join("\n")}`
+    : ""
+  const abandonedWarn = rc.status === RECONCILE.ABANDONED
+    ? "WARNING: a previous segment FAILED part-way through while editing files — the files above may hold PARTIAL, inconsistent edits. Read them before trusting or building on them."
+    : ""
   return [
     rec.task,
     "",
@@ -240,6 +313,8 @@ export function continuationPrompt(rec) {
     `This is segment ${done + 1} of an ongoing task; ${done} earlier segment(s) ran and the step budget ran out before the work was finished.`,
     done ? `Earlier segments:\n${notes}` : "",
     rec.lastText ? `Where the last segment stopped:\n${rec.lastText}` : "",
+    changedList,
+    abandonedWarn,
     "",
     "Files in this working directory may ALREADY have been changed by those segments.",
     "Check the current state of the code before editing anything — do not redo work that is already done, and do not assume it was done correctly either.",

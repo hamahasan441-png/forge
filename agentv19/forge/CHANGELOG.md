@@ -6,6 +6,45 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.5.0 (in progress)
 
 ### Added
+- **Recovery + effect reconciliation** (autonomy Phase 4) — a long-horizon task
+  can span many segments, and a segment that changed files and then died
+  (provider dropped, process killed) used to leave partial edits behind with NO
+  record of which files it had touched. Nobody — the user or a resuming agent —
+  could tell. That is now recorded and reconcilable.
+
+  - **Each segment records the files it changed**, read from the checkpoint
+    manifests (the authoritative record — tool output is prose and can't be
+    trusted for it), including whether the run created each file. A segment that
+    throws mid-run still records the files it had already written, under a
+    `FAILED` segment, so an aborted run is never a black hole.
+  - **`reconcileTask()` compares the record against the working tree** and
+    reports `CLEAN`, `DIVERGED` (files the task changed no longer exist), or
+    `ABANDONED` (a writing segment `FAILED` — the files may hold partial,
+    inconsistent edits). It reports; it never repairs. Silently reverting
+    someone's working tree is worse than a stale record.
+  - **`forge tasks undo <id>`** rolls back every file change a task made, across
+    all its segments, as one unit. The ordering is the correctness argument:
+    checkpoints from all the task's runs are replayed newest→oldest *across*
+    runs (`restoreRuns()`/`filesFromRun()` in `checkpoint.js`), so a file two
+    segments both edited returns to its true pre-task state, not an intermediate
+    one. Undo is always an explicit user action.
+  - **A resumed task's continuation prompt now names the changed files** and, if
+    the task was `ABANDONED`, warns that they may be partial and must be
+    inspected before being trusted — so the resuming segment doesn't build on
+    half-written code.
+  - **`runTask` is now authoritative about the working directory.** The agent's
+    file tools resolve against `process.cwd()`, so a `cwd` passed to `runTask`
+    was previously honoured by verification and reconciliation but *silently
+    ignored* by the edits themselves. `runTask` now `chdir`s into its `cwd`
+    (tolerantly falling back if the tree is gone, and recording where work
+    actually happened), so edits, verification, and reconciliation always target
+    the same tree.
+
+  New `tests/test-recovery.mjs` (31 checks) against real checkpoints on real
+  temp files, including an end-to-end run where the agent's own `write_file`
+  tool creates a file, the task records it, reconciliation reports `CLEAN`, and
+  undo removes it.
+
 - **A verification gate: evidence before "done"** (`verify.js`, autonomy
   Phase 3) — an agent that edits code and then reports `COMPLETED` has
   *asserted* success, not demonstrated it. Nothing in forge distinguished "I
@@ -118,6 +157,18 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   the terminal.
 
 ### Fixed
+- **Checkpoint rollback could unwind edits out of order** — a checkpoint id was
+  `<ISO-millisecond>-<random>`, and two checkpoints created in the same
+  millisecond tied on the timestamp and then sorted by the *random* suffix, an
+  order unrelated to when they were made. Every rollback (`forge undo --run`,
+  and now Phase 4's `forge tasks undo`) replays checkpoints newest→oldest by
+  that order, so a burst of edits within one millisecond — easily a single
+  agent run — could restore a file to an intermediate state instead of its true
+  pre-run content. The id now carries a zero-padded, per-process monotonic
+  sequence, so lexicographic order matches creation order and same-millisecond
+  ties break correctly. Found by a Phase 4 rollback test; it also fixes the
+  pre-existing single-run `restoreRun`. Regression-locked with a 12-edit
+  same-millisecond burst.
 - **Continuation would have silently escalated every resumed segment to DEEP
   effort.** The `auto` effort profile classifies the task text it is given, and
   a continuation prompt is long by construction — long enough to score

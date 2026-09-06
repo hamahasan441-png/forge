@@ -24,9 +24,10 @@
  * killing the process mid-task loses at most the segment in flight.
  */
 import { runAgent } from "./agent.js"
-import { AGENT_STATUS } from "./contract.js"
+import { AGENT_STATUS, newRunId } from "./contract.js"
 import { createTask, recordSegment, recordVerification, setTaskStatus, continuationPrompt, pruneTasks } from "./taskstate.js"
 import { verifyProject, repairPrompt, VERIFY_STATUS } from "./verify.js"
+import { filesFromRun } from "./checkpoint.js"
 
 /** A ceiling no config value can exceed — continuation spends real tokens. */
 export const HARD_MAX_SEGMENTS = 20
@@ -63,7 +64,17 @@ export async function runTask({
   config, provider, task, onEvent, signal, deep, maxSegments, maxStepsOverride, cwd, resume, verify = false,
 }) {
   const limit = resolveMaxSegments(config, maxSegments)
-  const dir = cwd ?? process.cwd()
+  // The agent's file tools, verification, and reconciliation must all operate on
+  // the SAME directory. The tools resolve paths against process.cwd(), so a
+  // caller-supplied cwd is only real if we chdir to it. The CLI already chdirs
+  // before calling; doing it here makes the param authoritative rather than a
+  // silent lie. Match the CLI's tolerance: if the requested dir no longer
+  // exists (e.g. resuming a task whose tree was deleted) fall back to the
+  // current dir rather than failing, and record where work ACTUALLY happened.
+  let dir = cwd ?? process.cwd()
+  if (dir !== process.cwd()) {
+    try { process.chdir(dir) } catch { dir = process.cwd() }
+  }
 
   // `resume` is an existing task record: continue it rather than starting over.
   const rec0 = resume ?? createTask({ task, cwd: dir, provider: provider?.name ?? null, model: provider?.model ?? null })
@@ -89,22 +100,39 @@ export async function runTask({
       onEvent({ type: "segment", index: record.segments.length + 1, of: reachable, taskId: record.taskId })
     }
 
+    // Mint the run id here rather than inside runAgent: if the segment throws
+    // we still need it to find the files it had already written.
+    const lastRunId = newRunId()
     let result
     try {
       result = await runAgent({
         config, provider, task: segTask, onEvent, signal, deep, maxStepsOverride,
-        taskId: record.taskId,
+        taskId: record.taskId, runId: lastRunId,
         classifyTask: record.task, // effort follows the real task, not the scaffolding
       })
     } catch (e) {
       // §7: never silently swallow a core-engine error. Record the truth, re-throw.
+      // Phase 4: a segment that died may already have edited files. Record the
+      // FAILED segment with those effects so reconcileTask can name them later —
+      // "it crashed and nobody knows what it touched" is the worst outcome.
+      const orphaned = filesFromRun(dir, lastRunId)
+      if (orphaned.length) {
+        recordSegment(record.taskId, {
+          status: AGENT_STATUS.FAILED, text: e?.message ?? String(e), steps: 0,
+          budgetHit: false, wrote: true, toolLog: [], runId: lastRunId,
+          segmentId: null, usage: {},
+        }, { note: "segment failed mid-run", files: orphaned })
+      }
       setTaskStatus(record.taskId, AGENT_STATUS.FAILED, { note: e?.message ?? String(e) })
       throw e
     }
 
     ran++
     last = result
-    record = recordSegment(record.taskId, result, { note: segmentNote(result) }) ?? record
+    // Phase 4: record WHICH files the segment changed, from the checkpoint
+    // manifests, so a segment that dies mid-edit still leaves a trace.
+    const files = result.wrote ? filesFromRun(dir, result.runId) : []
+    record = recordSegment(record.taskId, result, { note: segmentNote(result), files }) ?? record
 
     if (result.status === AGENT_STATUS.CONTINUE_REQUIRED) continue
 
