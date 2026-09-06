@@ -12,7 +12,7 @@
  * and `forge doctor` reported the HTML-200 case as a WORKING provider.
  */
 import http from "node:http"
-import { chatOnce, streamChat, probe, ProviderError } from "../forge/providers.js"
+import { chatOnce, streamChat, streamChatResilient, toAnthropicMessages, probe, ProviderError, CATALOG, getCatalog, envKeyFor, listModels, OPENROUTER_FREE_FALLBACK, listOpenRouterModels } from "../forge/providers.js"
 
 let PASS = 0, FAIL = 0
 const ok = (name, cond) => { if (cond) { PASS++; console.log("  ok  ", name) } else { FAIL++; console.log("  FAIL", name) } }
@@ -126,6 +126,34 @@ console.log("== doctor probe ==")
   ok("probe: reset message is actionable", /ECONNRESET|closed|fetch|socket|UND_ERR/i.test(dead.error ?? ""))
   const errBody = await probe({ protocol: "openai", baseUrl: url("429ra"), apiKey: "k", model: "m" })
   ok("probe: error status surfaced", errBody.ok === false && errBody.status === 429)
+}
+
+console.log("== catalog and model listing ==")
+{
+  ok("CATALOG is populated array", Array.isArray(CATALOG) && CATALOG.length >= 10)
+  ok("getCatalog finds openai", getCatalog("openai")?.name === "openai")
+  ok("getCatalog returns null for unknown", getCatalog("nonexistent_provider") === null)
+  ok("envKeyFor returns null when env unset", envKeyFor("openai") === (process.env.OPENAI_API_KEY || null))
+  ok("OPENROUTER_FREE_FALLBACK contains free models", Array.isArray(OPENROUTER_FREE_FALLBACK) && OPENROUTER_FREE_FALLBACK.length > 0)
+  
+  // listModels offline fallback
+  const lm = await listModels({ protocol: "openai", baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", catalog: getCatalog("openai") })
+  ok("listModels returns catalog defaults when offline", lm.live === false && Array.isArray(lm.models) && lm.models.length > 0)
+
+  // listOpenRouterModels offline fallback
+  const lorm = await listOpenRouterModels({ baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", timeoutMs: 500 })
+  ok("listOpenRouterModels fails gracefully when offline", lorm.live === false && lorm.warning !== null)
+
+  // toAnthropicMessages conversion check
+  const conv = toAnthropicMessages([{ role: "system", content: "sys" }, { role: "user", content: "hi" }])
+  ok("toAnthropicMessages extracts system and translates messages", conv.system === "sys" && conv.messages.length === 1)
+
+  // streamChatResilient smoke test
+  let resilientText = ""
+  for await (const ev of streamChatResilient({ ...base, baseUrl: url("stream-ok"), firstByteMs: 4000 }, { attempts: 1 })) {
+    if (ev.type === "text") resilientText += ev.text
+  }
+  ok("streamChatResilient streams response", resilientText === "hi")
 }
 
 server.close()

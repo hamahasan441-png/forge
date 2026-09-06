@@ -1155,10 +1155,11 @@ async function delegate(ctx, args) {
   ctx._delegateActive++
   const timeoutMs = Math.max(1, ctx.delegateTimeoutSec ?? 180) * 1000
   const timedOut = { v: false }
+  let timerId = null
   try {
     const work = Promise.resolve(ctx.delegateRunner(task, role))
     const timer = new Promise((resolve) => {
-      setTimeout(() => { timedOut.v = true; resolve(null) }, timeoutMs)
+      timerId = setTimeout(() => { timedOut.v = true; resolve(null) }, timeoutMs)
     })
     const summary = await Promise.race([work, timer])
     if (timedOut.v || summary === null) {
@@ -1168,6 +1169,7 @@ async function delegate(ctx, args) {
   } catch (e) {
     return `ERROR: sub-agent failed: ${String(e?.message ?? e).slice(0, 200)}`
   } finally {
+    if (timerId) clearTimeout(timerId)
     ctx._delegateActive--
   }
 }

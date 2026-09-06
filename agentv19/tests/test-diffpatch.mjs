@@ -1,5 +1,5 @@
 /** Smoke tests for diffpatch.js — run: node tests/test-diffpatch.mjs */
-import { parsePatch, applyUnifiedDiff } from "../forge/diffpatch.js"
+import { parsePatch, applyUnifiedDiff, applyParsedPatch } from "../forge/diffpatch.js"
 
 let pass = 0, fail = 0
 const ok = (name, cond) => { if (cond) { pass++; console.log("  ok ", name) } else { fail++; console.log("  FAIL", name) } }
@@ -23,6 +23,11 @@ const r1 = applyUnifiedDiff(m1, p1)
 ok("create content", r1.results.get("new.txt") === "line one\nline two\n")
 ok("modify hunk", r1.results.get("base.txt") === "first\nNEW LINE\nthird\n")
 ok("created tracked", r1.created.join() === "new.txt")
+
+// direct applyParsedPatch check
+const parsed1 = parsePatch(p1)
+const r1Parsed = applyParsedPatch(new Map([["base.txt", "first\nold line\nthird\n"]]), parsed1)
+ok("applyParsedPatch produces identical results", r1Parsed.results.get("base.txt") === "first\nNEW LINE\nthird\n")
 
 // 2. plain unprefixed headers (diff -u style with timestamps)
 const p2 = `--- base.txt\t2026-01-01
