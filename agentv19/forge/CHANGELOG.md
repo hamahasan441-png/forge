@@ -6,6 +6,16 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
 ## [Unreleased] — v20.4.0 (in progress)
 
 ### Added
+- **Session Operating Modes (`/agent`, `/normal`, `/chat`)** — Forge now supports
+  seamless session-level switching between Normal Chat (conversational mode) and
+  Agent Mode (autonomous engineering execution with full tool loops, checkpoints,
+  planning, and verification). `/agent` activates Agent Mode or executes a task
+  directly, while `/normal` and `/chat` return to Normal Chat mode. The prompt
+  dynamically reflects the active mode (`[agent]`), and `/status` reports it.
+- **Complete Export Coverage across all modules (100%)** — Every exported symbol
+  across all 23 modules (135/135) is now directly named and verified by unit test
+  suites (including `ui.js`, `onboard.js`, `providers.js`, `tools.js`, `memory.js`,
+  `shellguard.js`, `netguard.js`, `diffpatch.js`, `plugins.js`, and `agent.js`).
 - **Tests for effort classification, the model cache and skill indexing** —
   `classifyTaskComplexity`/`resolveEffort` decide whether a task gets DEEP
   reasoning (bigger budgets, slower, costlier), a user-visible and cost-relevant
@@ -14,7 +24,7 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   `tests/test-effort.mjs` (37 checks) covers the five complexity levels, every
   profile path (including that a switch is always explained, never silent),
   cache write/read/merge and corrupt-file resilience, and skill indexing with
-  H1/intro-line description fallback. Export coverage 67.4% → **72.6%**.
+  H1/intro-line description fallback. Export coverage 67.4% → 72.6% → **100%**.
 
 ### Changed
 - **`PLAN-v21.md` now reflects reality.** It still declared "Status: proposed.

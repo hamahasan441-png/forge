@@ -7,7 +7,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { loadToolPlugins } from "../forge/plugins.js"
+import { loadToolPlugins, PLUGINS_DIR } from "../forge/plugins.js"
 import { makeToolContext, BUILTIN_TOOL_NAMES } from "../forge/tools.js"
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "forge-plugins-"))
@@ -77,6 +77,7 @@ console.log("== integration: makeToolContext + execTool ==")
 }
 
 console.log("== empty / missing dir ==")
+ok("PLUGINS_DIR is defined", typeof PLUGINS_DIR === "string" && PLUGINS_DIR.length > 0)
 const r = await loadToolPlugins(path.join(DIR, "does-not-exist"))
 ok("missing dir → empty result, no throw", r.tools.length === 0 && r.errors.length === 0)
 

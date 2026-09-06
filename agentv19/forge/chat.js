@@ -45,6 +45,10 @@ const HELP = `
 ${bold("chat")}
   type anything          talk to the model (streaming)
   end a line with \\      multiline input (continuation prompt)
+${bold("modes")}
+  /agent [task]         activate Agent Mode (or run a task directly; Ctrl+C aborts)
+  /normal               switch to Normal Chat mode (direct conversation)
+  /chat                 switch to Normal Chat mode
 ${bold("commands")}
   /help                 this help
   /status               session + context + safety snapshot
@@ -55,7 +59,6 @@ ${bold("commands")}
   /models               list models of active provider (live)
   /key <api-key>        set API key for active provider
   /skills [name]        list skills, or load one into the conversation
-  /agent <task>         run the coding agent inside chat (Ctrl+C aborts)
   /plan <task>          plan first (read-only), confirm, then execute
   /tools [on|off]       list the 17 agent tools, or toggle auto-tools in chat
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
@@ -728,6 +731,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   console.log(dim(`skills: ${nSkills ? (config.skills?.enabled !== false ? `${nSkills} enabled` : "disabled") : "none found"} • auto-tools: ${chatToolsEnabled() ? green(toolCount() + " ON") : yellow("off")} • terminal: ${config.chat?.shellAuto === false ? yellow("! only") : green("on")} • deep: ${deep ? green("ON") : "off"} • profile: ${cyan(config.chat?.profile ?? "auto")} • resources: ${res.tier} • /status, /help`))
   if (sessionSummary) console.log(dim(`resumed summary: ${sessionSummary.replace(/\s+/g, " ").slice(0, 140)}`))
 
+  let mode = "normal"
+  const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
+
   // Piped / scripted sessions: skip readline entirely — deterministic line
   // processing in order, no EOF-vs-close races, natural (flushing) exit.
   // `rl` stays null here (v16 fix: handleLine must not touch the TTY readline
@@ -762,7 +768,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const rl2 = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: bold(magenta("forge")) + dim(" ❯ "),
+    prompt: getPrompt(),
     completer: completer,
   })
   rl = rl2
@@ -788,7 +794,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   })
 
   function completer(line) {
-    const cmds = ["/help", "/status", "/profile", "/model", "/provider", "/providers", "/models", "/key", "/skills", "/agent", "/plan", "/tools", "/shell", "/deep", "/compact", "/usage", "/tokens", "/retry", "/undo", "/export", "/sessions", "/resume", "/new", "/save", "/system", "/stream", "/config", "/exit"]
+    const cmds = ["/help", "/status", "/profile", "/model", "/provider", "/providers", "/models", "/key", "/skills", "/agent", "/normal", "/chat", "/plan", "/tools", "/shell", "/deep", "/compact", "/usage", "/tokens", "/retry", "/undo", "/export", "/sessions", "/resume", "/new", "/save", "/system", "/stream", "/config", "/exit"]
     const hits = cmds.filter((c) => c.startsWith(line))
     return [hits.length ? hits : cmds, line]
   }
@@ -799,7 +805,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       const joined = multilineBuf + "\n" + line
       if (/\\$/.test(line) && !/\\\\$/.test(line)) { multilineBuf = joined.replace(/\\$/, ""); rl?.setPrompt(dim("… ") + " "); promptSafe(); return }
       multilineBuf = null
-      rl?.setPrompt(bold(magenta("forge")) + dim(" ❯ "))
+      rl?.setPrompt(getPrompt())
       await dispatch(joined)
       return
     }
@@ -820,6 +826,40 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // same chat (output shown here + shared with the model on the next turn)
     if (isShellLine(t)) { await runShellLine(t); promptSafe(); return }
     chatLineLog.push(t)
+    if (mode === "agent") {
+      const { runAgent, agentEventPrinter } = await import("./agent.js")
+      abort = new AbortController()
+      const t0 = Date.now()
+      const eff = effortFor(t)
+      if (eff.notice) console.log(dim(`  · ${eff.notice}`))
+      try {
+        const res = await runAgent({
+          config,
+          provider: p,
+          task: t,
+          onEvent: agentEventPrinter(),
+          deep: eff.deep,
+          signal: abort.signal,
+        })
+        console.log()
+        console.log(bold(green("── result " + "─".repeat(50))))
+        console.log(renderMarkdown(res.text))
+        console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+        messages.push({ role: "user", content: `[agent task] ${t}` })
+        messages.push({ role: "assistant", content: res.text })
+        persist()
+        console.log()
+      } catch (e) {
+        console.log()
+        if (e?.name === "AbortError") err("agent run aborted")
+        else err(`agent error: ${e?.message ?? e}`)
+      } finally {
+        abort = null
+      }
+      promptSafe()
+      return
+    }
     await turn(t)
     promptSafe()
   }
@@ -940,7 +980,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  session:    ${sessionId ? dim(sessionId) : dim("(unsaved)")}`)
         console.log(`  cwd:        ${process.cwd()}`)
         console.log(`  turns:      ${Math.floor(messages.length / 2)} • ~${ctx.toLocaleString()} tok (${pct}% of window)`)
-        console.log(`  effort:     profile=${cyan(config.chat?.profile ?? "auto")} • deep=${deep ? green("on") : "off"} • tools=${chatToolsEnabled() ? green("on") : "off"} • shell=${config.chat?.shellAuto === false ? yellow("! only") : green("auto")}`)
+        console.log(`  mode:       ${mode === "agent" ? cyan("agent (autonomous engineering)") : "normal (conversational)"} • profile=${cyan(config.chat?.profile ?? "auto")} • deep=${deep ? green("on") : "off"} • tools=${chatToolsEnabled() ? green("on") : "off"} • shell=${config.chat?.shellAuto === false ? yellow("! only") : green("auto")}`)
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
         console.log(`  safety:     writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")} • sudo ${config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")}`)
@@ -1127,18 +1167,42 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(JSON.stringify(safe, null, 2))
         break
       }
+      case "normal":
+      case "chat": {
+        mode = "normal"
+        rl?.setPrompt(getPrompt())
+        ok("Normal Chat mode active — direct conversational mode. Switch to Agent Mode with /agent")
+        break
+      }
       case "agent": {
-        if (!arg) { err("usage: /agent <task>"); break }
+        if (!arg) {
+          mode = "agent"
+          rl?.setPrompt(getPrompt())
+          ok("Agent Mode active — every request executes autonomously with tools, checkpoints, and verification. Switch back with /normal or /chat")
+          break
+        }
         const { runAgent, agentEventPrinter } = await import("./agent.js")
         abort = new AbortController()
+        const t0 = Date.now()
+        const eff = effortFor(arg)
+        if (eff.notice) console.log(dim(`  · ${eff.notice}`))
         let res
         try {
-          res = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), deep: undefined, signal: abort.signal })
+          res = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), deep: eff.deep, signal: abort.signal })
+          console.log()
+          console.log(bold(green("── result " + "─".repeat(50))))
+          console.log(renderMarkdown(res.text))
+          console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+          if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+          messages.push({ role: "user", content: `[agent task] ${arg}` })
+          messages.push({ role: "assistant", content: res.text })
+          persist()
+          console.log()
+        } catch (e) {
+          console.log()
+          if (e?.name === "AbortError") err("agent run aborted")
+          else err(`agent error: ${e?.message ?? e}`)
         } finally { abort = null }
-        console.log()
-        console.log(renderMarkdown(res.text))
-        console.log(dim(`  (${res.steps} steps, ${res.toolLog.length} tool calls)`))
-        console.log()
         break
       }
       default: err(`unknown /${cmd} — /help`)

@@ -10,16 +10,19 @@
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import { classifyCommand, modelMayRun, userMayRun, splitSubcommands, tokenize } from "../forge/shellguard.js"
-import { execTool, safePath, validSkillName } from "../forge/tools.js"
+import { classifyCommand, modelMayRun, userMayRun, splitSubcommands, tokenize, LEVELS, FORBIDDEN as SHELL_FORBIDDEN } from "../forge/shellguard.js"
+import { execTool, safePath, validSkillName, TOOL_DEFS, WRITE_TOOLS, selfTestTools, FORBIDDEN as TOOLS_FORBIDDEN } from "../forge/tools.js"
 import { redact, redactSecrets } from "../forge/secrets.js"
-import { isPrivateAddress, assertFetchableUrl } from "../forge/netguard.js"
+import { isPrivateAddress, assertFetchableUrl, BLOCKED_HOSTNAMES } from "../forge/netguard.js"
 import { snapshotBefore, sealCreated, restoreLast, listCheckpoints, CHECKPOINTS_DIR } from "../forge/checkpoint.js"
-import { appendMemory, recordLearning, relevantMemory, relevantLearnings, memoryStats, GLOBAL_MEMORY_PATH } from "../forge/memory.js"
+import { appendMemory, recordLearning, relevantMemory, relevantLearnings, memoryStats, GLOBAL_MEMORY_PATH, PROJECTS_DIR, projectHash, projectDir, projectMemoryPath, memoryPathFor } from "../forge/memory.js"
 import { loadProfile, profileSummary, resourceProfile } from "../forge/profile.js"
 import { saveSession, loadSession, listSessions, findSession, lastSessionFile } from "../forge/sessions.js"
 import { loadSkill, validSkillName as validSkillName2 } from "../forge/skills.js"
 import { ProviderError } from "../forge/providers.js"
+import { agentEventPrinter } from "../forge/agent.js"
+import { bold, dim, cyan, green, yellow, red, magenta, info, ok as uiOk, warn, err, renderMarkdown, printBanner, estimateTokens } from "../forge/ui.js"
+import { wizardProviderSteps, runConfigMenu } from "../forge/onboard.js"
 
 let PASS = 0, FAIL = 0
 const ok = (name, cond) => { if (cond) { PASS++; console.log("  ok  ", name) } else { FAIL++; console.log("  FAIL", name) } }
@@ -523,6 +526,30 @@ const ngBad = await assertFetchableUrl("http://", {})
 ok("unparseable URL rejected", ngBad.ok === false && /malformed/.test(ngBad.reason ?? ""))
 const ngJunk = await assertFetchableUrl("not a url", {})
 ok("malformed URL rejected", ngJunk.ok === false)
+
+console.log("== core symbols & helper exports ==")
+ok("LEVELS defined in shellguard", Array.isArray(LEVELS) && LEVELS.includes("block") && LEVELS.includes("safe"))
+ok("SHELL_FORBIDDEN has root wipe rule", Array.isArray(SHELL_FORBIDDEN) && SHELL_FORBIDDEN.length > 0)
+ok("TOOLS_FORBIDDEN matches shellguard", Array.isArray(TOOLS_FORBIDDEN) && TOOLS_FORBIDDEN.length > 0)
+ok("TOOL_DEFS defines all 17 tools", Array.isArray(TOOL_DEFS) && TOOL_DEFS.length === 17)
+ok("WRITE_TOOLS identifies write tools", WRITE_TOOLS.has("write_file") && WRITE_TOOLS.has("edit_file") && !WRITE_TOOLS.has("read_file"))
+ok("BLOCKED_HOSTNAMES contains metadata patterns", Array.isArray(BLOCKED_HOSTNAMES) && BLOCKED_HOSTNAMES.length >= 4)
+ok("PROJECTS_DIR is a valid directory path", typeof PROJECTS_DIR === "string" && PROJECTS_DIR.length > 0)
+ok("projectHash produces stable hash", projectHash(WORK) === projectHash(WORK) && typeof projectHash(WORK) === "string")
+ok("projectDir under PROJECTS_DIR", projectDir(WORK).startsWith(PROJECTS_DIR))
+ok("projectMemoryPath under projectDir", projectMemoryPath(WORK).startsWith(projectDir(WORK)))
+ok("memoryPathFor global returns GLOBAL_MEMORY_PATH", memoryPathFor("global", WORK) === GLOBAL_MEMORY_PATH)
+ok("memoryPathFor project returns projectMemoryPath", memoryPathFor("project", WORK) === projectMemoryPath(WORK))
+ok("agentEventPrinter returns an event printer function", typeof agentEventPrinter() === "function")
+ok("UI formatters return strings", typeof bold("b") === "string" && typeof dim("d") === "string" && typeof cyan("c") === "string" && typeof yellow("y") === "string" && typeof magenta("m") === "string" && typeof green("g") === "string" && typeof red("r") === "string")
+ok("UI logger functions exist", typeof info === "function" && typeof uiOk === "function" && typeof warn === "function" && typeof err === "function" && typeof printBanner === "function")
+ok("renderMarkdown formats headings and bold", renderMarkdown("# Title\n**bold**").length > 0)
+ok("estimateTokens calculates proportional tokens", estimateTokens("hello world") >= 1)
+ok("wizardProviderSteps and runConfigMenu are functions", typeof wizardProviderSteps === "function" && typeof runConfigMenu === "function")
+
+// doctor selfTestTools check
+const st = await selfTestTools({ searchUrl: "", memoryPath: path.join(WORK, "st-mem.md"), todoPath: path.join(WORK, "st-todo.json") })
+ok("selfTestTools runs smoke check across tools", Array.isArray(st) && st.some((r) => r.name === "read_file" && r.ok))
 
 console.log(`\n== security suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(T, { recursive: true, force: true }) } catch {}

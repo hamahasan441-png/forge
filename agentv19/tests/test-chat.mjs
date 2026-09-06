@@ -4,7 +4,7 @@
  * coverage: the never-lose-work interrupt handler and the shell/sentence
  * classifier. Zero network.
  */
-import { interruptedTurnResult, isShellLine } from "../forge/chat.js"
+import { interruptedTurnResult, isShellLine, SHELL_COMMANDS, chatSystemPrompt } from "../forge/chat.js"
 
 let PASS = 0, FAIL = 0
 const ok = (name, cond) => { if (cond) { PASS++; console.log(`  ok   ${name}`) } else { FAIL++; console.log(`  FAIL ${name}`) } }
@@ -38,6 +38,16 @@ ok("! forces execution", isShellLine("!echo hi") === true)
 ok("question is not a command", isShellLine("what is find?") === false)
 ok("sentence starting with a command word is not a command", isShellLine("make it work please") === false)
 ok("english sentence not executed", isShellLine("find the bug in main.js") === false)
+
+console.log("== SHELL_COMMANDS and chatSystemPrompt ==")
+ok("SHELL_COMMANDS contains core utilities", SHELL_COMMANDS.has("ls") && SHELL_COMMANDS.has("git") && SHELL_COMMANDS.has("grep"))
+{
+  const sp1 = chatSystemPrompt({ chat: { system: "Custom user rule" } }, { toolsEnabled: true, deep: true, query: "test" })
+  ok("chatSystemPrompt contains assistant identity", sp1.includes("You are forge"))
+  ok("chatSystemPrompt mentions tools when enabled", sp1.includes("TOOLS:"))
+  ok("chatSystemPrompt mentions deep thinking when deep=true", sp1.includes("DEEP THINKING MODE"))
+  ok("chatSystemPrompt includes custom user instructions", sp1.includes("USER INSTRUCTIONS: Custom user rule"))
+}
 
 console.log(`\n== chat suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
