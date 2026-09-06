@@ -3,6 +3,40 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## [Unreleased] — v23.0.0 (in progress) — "reaching for the big agents"
+
+### Added
+- **Model Context Protocol (MCP) client** (`mcp.js`, autonomy v23 Tier 1) — the
+  industry-standard way to extend an agent with tools and data from an external
+  process (filesystems, issue trackers, databases, browsers, internal APIs).
+  Before this, forge could only be extended with local `*.mjs` plugins; MCP
+  opens the whole ecosystem. Zero dependencies: an MCP stdio transport
+  (newline-delimited JSON-RPC 2.0) with the initialize handshake, `tools/list`,
+  `tools/call`, per-request timeouts, and clean shutdown — plus best-effort
+  multi-server loading that records a failed server instead of throwing.
+
+  Servers are configured under `mcp.servers` (**off by default**) and launched
+  from that config only, never from model output — the same trust model as
+  plugins. `mcpToolsToPlugins()` adapts a server's tools into the exact shape
+  `plugins.js` already produces, with names namespaced `mcp__<server>__<tool>`
+  (so they can never shadow a built-in) and treated as WRITE-class by default
+  (the protocol does not reliably declare side-effect freedom, so the unsafe
+  case is assumed). New `forge mcp [list|tools|test <name>]` inspects servers
+  from the shell.
+
+  This PR ships the **client and adapter only**. Wiring MCP tools into the agent
+  loop is a deliberately separate next step: because the tools already arrive in
+  plugin shape, that integration reuses the existing plugin choke point (output
+  redaction, write-class serialization, read-only sub-agent blocking, capability
+  registration) rather than opening a second path to tool execution — keeping
+  the security-sensitive change small and isolated. New `tests/test-mcp.mjs`
+  (26 checks) proves the protocol against a stand-in MCP server: handshake,
+  list/call, `isError` handling, namespacing, the plugin adapter, request
+  timeout on a hung server, and a launch failure surfaced as an error.
+- **`PLAN-v23.md`** — the review of the v21 agent and the roadmap to
+  best-in-class (MCP, LSP, semantic retrieval, vision, browser, sandbox,
+  benchmark), with this MCP client marked delivered.
+
 ## v21.0.0 — "autonomous orchestration"
 
 forge becomes a genuinely **autonomous, recoverable, long-running coding

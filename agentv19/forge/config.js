@@ -37,6 +37,12 @@ export function defaultConfig() {
     // v20.5: `intelligence` is the master switch for the capability/router/
     // verification layer; everything below it only matters while it is on.
     tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, fetchPrivateUrls: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true },
+    // v23: Model Context Protocol servers. OFF by default (no servers). Each
+    // entry: { command, args?, env?, disabled?, timeoutMs? }. A server's tools
+    // become agent tools namespaced mcp__<name>__<tool>, behind the same safety
+    // choke point as local plugins. Launched from THIS config only, never model
+    // output.
+    mcp: { servers: {} },
     retry: { attempts: 3, backoffMs: 1500, connectMs: 30000, firstByteMs: 120000, requestTimeoutMs: 180000 },
   }
 }

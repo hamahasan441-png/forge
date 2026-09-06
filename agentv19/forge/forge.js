@@ -950,6 +950,65 @@ async function main() {
       if (loaded.tools.length) console.log(dim(`  ${loaded.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
       return
     }
+    case "mcp": {
+      // v23: inspect Model Context Protocol servers configured under mcp.servers.
+      //   forge mcp            list configured servers
+      //   forge mcp tools      connect every server and list the tools it exposes
+      //   forge mcp test <n>   connect one server and show its tools (diagnostic)
+      const { configuredServers, connectServer, mcpToolsToPlugins, loadMcpTools } = await import("./mcp.js")
+      const sub = (positional[1] || "list").toLowerCase()
+
+      if (sub === "list") {
+        const servers = configuredServers(config)
+        const all = Object.entries(config.mcp?.servers || {})
+        if (JSON_OUT) { emitJson({ servers: all.map(([name, s]) => ({ name, command: s.command, args: s.args ?? [], disabled: s.disabled === true })) }); return }
+        console.log(bold("MCP servers — configured under mcp.servers"))
+        if (!all.length) {
+          console.log(dim("  (none) — add one with: forge config set mcp.servers.<name>.command <cmd>"))
+          console.log(dim("  e.g. forge config set mcp.servers.fs.command npx  then set mcp.servers.fs.args ..."))
+          return
+        }
+        for (const [name, s] of all) {
+          const tag = s.disabled === true ? red("disabled") : green("enabled")
+          console.log(`  ${cyan(name.padEnd(16))} ${tag}  ${dim([s.command, ...(s.args ?? [])].join(" ").slice(0, 70))}`)
+        }
+        console.log(dim(`  ${servers.length} enabled • inspect tools: forge mcp tools • test one: forge mcp test <name>`))
+        return
+      }
+
+      if (sub === "test") {
+        const name = positional[2]
+        if (!name) { err("usage: forge mcp test <server-name>"); process.exit(1); return }
+        const spec = config.mcp?.servers?.[name]
+        if (!spec || !spec.command) { err(`no MCP server "${name}" with a command in config`); process.exit(1); return }
+        console.log(dim(`connecting to MCP server ${bold(name)} — ${[spec.command, ...(spec.args ?? [])].join(" ")}`))
+        let client
+        try { client = await connectServer(name, spec, { timeoutMs: spec.timeoutMs }) }
+        catch (e) { err(`could not connect: ${e.message}`); process.exit(1); return }
+        try {
+          const tools = mcpToolsToPlugins(client, await client.listTools())
+          ok(`connected — ${client.serverInfo?.name ?? name}${client.serverInfo?.version ? " v" + client.serverInfo.version : ""} • ${tools.length} tool(s)`)
+          for (const t of tools) console.log(`  ${green("✓")} ${cyan(t.name.padEnd(32))} ${dim(t.def.function.description.slice(0, 60))}`)
+          if (JSON_OUT) emitJson({ server: name, serverInfo: client.serverInfo, tools: tools.map((t) => ({ name: t.name, description: t.def.function.description })) })
+        } finally { client.close() }
+        return
+      }
+
+      if (sub === "tools") {
+        const res = await loadMcpTools(config)
+        try {
+          if (JSON_OUT) { emitJson({ tools: res.tools.map((t) => ({ name: t.name, description: t.def.function.description, source: t.source })), errors: res.errors }); return }
+          console.log(bold("MCP tools — across all enabled servers"))
+          if (!res.tools.length && !res.errors.length) { console.log(dim("  (none) — configure a server first: forge mcp")); return }
+          for (const t of res.tools) console.log(`  ${green("✓")} ${cyan(t.name.padEnd(32))} ${dim(t.def.function.description.slice(0, 56))}`)
+          for (const e of res.errors) console.log(`  ${red("✗")} ${dim(e)}`)
+          console.log(dim(`  ${res.tools.length} tool(s) from ${res.clients.length} server(s)`))
+        } finally { for (const c of res.clients) c.close() }
+        return
+      }
+
+      err("usage: forge mcp [list|tools|test <name>]"); process.exit(1); return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
