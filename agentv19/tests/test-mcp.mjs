@@ -26,6 +26,8 @@ let PASS = 0, FAIL = 0
 const ok = (n, c) => { if (c) { PASS++; console.log(`  ok   ${n}`) } else { FAIL++; console.log(`  FAIL ${n}`) } }
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "forge-mcp-"))
+process.env.FORGE_HOME = DIR // isolate the agent's ~/.forge before agent.js loads
+import http from "node:http"
 
 // A minimal but real MCP stdio server: newline-delimited JSON-RPC 2.0.
 // Behaviour is switchable via argv[2] so one file drives several scenarios.
@@ -145,6 +147,74 @@ console.log("== configuredServers + loadMcpTools ==")
   ok("the broken server is recorded as an error, not fatal", res.errors.some((e) => /broken/.test(e)))
   ok("clients are returned for cleanup", res.clients.length === 1)
   for (const c of res.clients) c.close()
+}
+
+console.log("== agent loop: an MCP tool is callable end-to-end, and the server is closed ==")
+{
+  // A stub MCP server that greets, and writes a marker file when it exits — so
+  // the test can prove runAgent shut it down (no leaked child process).
+  const marker = path.join(DIR, "server-exited")
+  const agentStub = `
+let buf = ""
+process.stdin.setEncoding("utf8")
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n")
+// close() ends our stdin — the deterministic shutdown signal. Mark it and exit.
+process.stdin.on("end", () => { try { require("fs").writeFileSync(${JSON.stringify(marker)}, "bye") } catch {}; process.exit(0) })
+process.stdin.on("data", (d) => {
+  buf += d; let nl
+  while ((nl = buf.indexOf("\\n")) !== -1) {
+    const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+    if (!line) continue
+    let m; try { m = JSON.parse(line) } catch { continue }
+    if (m.method === "initialize") send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "${PROTOCOL_VERSION}", capabilities: { tools: {} }, serverInfo: { name: "demo", version: "1" } } })
+    else if (m.method === "tools/list") send({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "greet", description: "greet someone", inputSchema: { type: "object", properties: { who: { type: "string" } }, required: ["who"] } }] } })
+    else if (m.method === "tools/call") send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: "HELLO " + ((m.params?.arguments?.who) || "?").toUpperCase() }] } })
+    else if (m.id !== undefined) send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "nope" } })
+  }
+})
+`
+  const agentStubPath = path.join(DIR, "agent-stub.cjs") // .cjs → require() available
+  fs.writeFileSync(agentStubPath, agentStub)
+
+  // Stand-in provider (OpenAI wire): first turn → call the MCP tool; once a tool
+  // result is in the transcript → give the final answer echoing it.
+  const provServer = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (d) => { body += d })
+    req.on("end", () => {
+      let toolRan = false
+      try { toolRan = (JSON.parse(body).messages || []).some((m) => m.role === "tool") } catch {}
+      res.writeHead(200, { "content-type": "application/json" })
+      if (toolRan) {
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "done greeting" }, finish_reason: "stop" }] }))
+      } else {
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "", tool_calls: [
+          { id: "t1", type: "function", function: { name: "mcp__demo__greet", arguments: JSON.stringify({ who: "world" }) } },
+        ] }, finish_reason: "tool_calls" }] }))
+      }
+    })
+  })
+  await new Promise((r) => provServer.listen(0, "127.0.0.1", r))
+  const port = provServer.address().port
+
+  const { runAgent } = await import("../forge/agent.js")
+  const config = {
+    providers: {}, mcp: { servers: { demo: { command: process.execPath, args: [agentStubPath] } } },
+    agent: { maxSteps: 6, timeoutSec: 20 }, skills: { enabled: false }, context: { repoMap: false },
+    tools: { intelligence: true, verify: false }, retry: { attempts: 1, backoffMs: 1 },
+  }
+  const provider = { name: "m", protocol: "openai", baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "k", model: "m", contextWindow: 128000 }
+
+  const r = await runAgent({ config, provider, task: "greet the world via the mcp tool", journal: false })
+  provServer.close()
+
+  const greetCall = (r.toolLog || []).find((t) => t.name === "mcp__demo__greet")
+  ok("the MCP tool was actually invoked by the agent loop", !!greetCall)
+  ok("its result came from the MCP server", greetCall && /HELLO WORLD/.test(String(greetCall.result)))
+  ok("the run produced a final answer", /done greeting/.test(r.text))
+  // give the child a moment to flush its exit marker
+  await new Promise((res) => setTimeout(res, 300))
+  ok("the MCP server was shut down (no leaked child process)", fs.existsSync(marker))
 }
 
 try { fs.rmSync(DIR, { recursive: true, force: true }) } catch {}

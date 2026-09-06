@@ -63,13 +63,25 @@ and treated as WRITE-class by default (the protocol does not reliably declare
 side-effect freedom, so we assume the unsafe case). `forge mcp [list|tools|test
 <name>]` inspects servers from the shell.
 
-**Deliberately deferred to the next PR:** wiring MCP tools into the agent loop.
-Because they already arrive in plugin shape, that step reuses the existing
-plugin choke point — output redaction, write-class serialization, read-only
-sub-agent blocking, and registration into the capability registry — rather than
-opening a second, unreviewed path to tool execution. Shipping the client first,
-proven against a stand-in server (`test-mcp.mjs`, 26 checks), keeps the
-security-sensitive integration a small, isolated, reviewable change.
+**Agent-loop wiring (delivered).** MCP tools are loaded at the top of a run
+(never for a delegated read-only sub-agent — that would re-spawn servers, and
+MCP tools are write-class so they are blocked there anyway) and joined to the
+`plugins` array, so they flow through the EXACT existing plugin path:
+`makeToolContext` for the defs, the capability registry (`registerPlugins`
+classes them WRITE / verification-required), and the policy gate + safety engine
+for execution. No second execution path. Servers are shut down in a `finally`
+on every exit (success, failure, cancellation), gracefully (stdin close) with a
+SIGKILL fallback, so a run never leaks a child process. `test-mcp.mjs` (30
+checks) proves this end-to-end: the real `runAgent` invokes an MCP tool, the
+result flows back, and the server is confirmed shut down.
+
+**Still deferred (a follow-up):** the interactive `chat.js` tool loop. It calls
+`process.exit()` at session end and has several exit paths, so a correct
+MCP-server lifecycle there needs its own synchronous-cleanup handling and can't
+be integration-tested in-process the way the agent loop can. Rather than ship
+untested process-management code into the interactive path, it is a separate
+change. Autonomous runs (`forge agent`, the meta controller, delegates, plan
+mode) — where MCP tools matter most — are fully covered.
 
 ### 2. LSP bridge — `lsp.js` (planned)
 Zero-dep JSON-RPC to a language server the user already has installed. New

@@ -24,15 +24,20 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   case is assumed). New `forge mcp [list|tools|test <name>]` inspects servers
   from the shell.
 
-  This PR ships the **client and adapter only**. Wiring MCP tools into the agent
-  loop is a deliberately separate next step: because the tools already arrive in
-  plugin shape, that integration reuses the existing plugin choke point (output
-  redaction, write-class serialization, read-only sub-agent blocking, capability
-  registration) rather than opening a second path to tool execution — keeping
-  the security-sensitive change small and isolated. New `tests/test-mcp.mjs`
-  (26 checks) proves the protocol against a stand-in MCP server: handshake,
-  list/call, `isError` handling, namespacing, the plugin adapter, request
-  timeout on a hung server, and a launch failure surfaced as an error.
+  **Wired into the agent loop.** MCP tools are loaded at the top of a run (never
+  for a delegated read-only sub-agent) and joined to the plugin list, so they
+  flow through the exact existing plugin path — `makeToolContext`, the capability
+  registry (which classes them WRITE / verification-required), and the policy
+  gate + safety engine — with no second execution path. Servers are shut down in
+  a `finally` on every exit (success/failure/cancellation), gracefully via stdin
+  close with a SIGKILL fallback, so a run never leaks a child process. The
+  interactive `chat.js` loop is a deliberate follow-up (it `process.exit()`s at
+  session end, so its server lifecycle needs separate handling and can't be
+  integration-tested in-process). New `tests/test-mcp.mjs` (30 checks) proves
+  the protocol against a stand-in MCP server — handshake, list/call, `isError`,
+  namespacing, the plugin adapter, timeout on a hung server, launch failure —
+  and, end-to-end, that the real `runAgent` invokes an MCP tool, the result
+  flows back, and the server is shut down afterward.
 - **`PLAN-v23.md`** — the review of the v21 agent and the roadmap to
   best-in-class (MCP, LSP, semantic retrieval, vision, browser, sandbox,
   benchmark), with this MCP client marked delivered.

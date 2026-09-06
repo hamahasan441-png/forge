@@ -177,11 +177,20 @@ class McpClient {
   close() {
     if (this._closed) return
     this._closed = true
-    try { this._notify("notifications/cancelled") } catch {}
     for (const [, p] of this._pending) { clearTimeout(p.timer); p.reject(new Error(`MCP server "${this.name}" closed`)) }
     this._pending.clear()
-    try { this.child?.stdin?.end() } catch {}
-    try { this.child?.kill() } catch {}
+    // Graceful shutdown for the stdio transport: closing our stdin is the
+    // conventional "you may exit now" signal, so a well-behaved server exits on
+    // its own. A SIGKILL fallback (after a grace period) handles a stuck server
+    // without ever leaking a child process. The timer is unref'd so it never
+    // keeps forge's own process alive.
+    const child = this.child
+    try { child?.stdin?.end() } catch {}
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} }, 2000)
+      if (t.unref) t.unref()
+      child.once?.("exit", () => clearTimeout(t))
+    }
   }
 }
 
