@@ -300,6 +300,61 @@ write tools are serialized; every write is auto-checkpointed:
 
 Toggle in chat with `/tools off` / `/tools on`. Everything is on by default.
 
+## Tool intelligence (v20.5) — the *right* tool, not more tools
+
+More tools do not make an agent smarter; picking correctly does. Every tool call
+— in `forge agent`, in chat, from a plugin — now goes through one pipeline:
+
+```
+select → capability check → policy gate → SAFETY (shellguard/safepath/netguard)
+       → execute → observe → record → verify → repair
+```
+
+- **Capability registry.** Each tool is described once, centrally: what it can
+  do, its class (READ / WRITE / EXECUTE / NETWORK / SECURITY / VERIFICATION /
+  RECOVERY), risk, reversibility, parallel-safety, cost, timeout, what must be
+  verified afterwards, what it is preferred for and when to avoid it.
+- **Router.** Chooses the **smallest effective chain** for the task ("read
+  file X" is one read, not a search + read + summarize), skips steps whose
+  answer forge already has, avoids disabled/deprecated tools, and re-routes
+  when a previous result changes the picture.
+- **Risk from the operation, not the name.** `bash echo hi` is LOW,
+  `git commit` MEDIUM, `rm -rf build` HIGH, `rm -rf /` CRITICAL — decided by
+  the same shellguard that has always guarded the shell. Cap it per project
+  with `forge config set tools.maxRisk medium`.
+- **Verification contracts.** An edit is proven: the change is really in the
+  file *and* the file still parses (`node --check`, JSON parse). You see
+  `[verified] …` or `[verification FAILED] …` — no silent "done!".
+- **Never repeat a failed call.** Failures are classified (NOT_FOUND,
+  PERMISSION_DENIED, TIMEOUT, NETWORK_FAILURE, DEPENDENCY_FAILURE,
+  SYNTAX_FAILURE, TEST_FAILURE, BUILD_FAILURE, SAFETY_BLOCK …), each with a
+  recovery strategy. The same call with the same arguments a third time is
+  blocked with an explanation of what to change instead.
+- **Idempotency + cache.** An edit already applied is a no-op, not an error;
+  `mkdir` of an existing directory is "already done"; an identical read is
+  served from cache and the cache is dropped the moment anything mutates.
+- **Real parallelism rules.** Read-only, conflict-free calls run concurrently;
+  writes serialize; two writes to the same file are a detected conflict.
+- **Ask a human only when it matters** — permissions, irreversible high-risk
+  operations, adding a dependency, or a strategy that has repeatedly failed.
+
+Inspect all of it from the shell:
+
+```bash
+forge tools                                   # the registry, with class + risk
+forge tools edit_file                         # one tool's full metadata card
+forge tools --route "fix the failing auth test"   # what would be selected, and why
+forge tools --capability search --json        # scriptable
+```
+
+Switches: `tools.intelligence` (master, `false` restores the pre-v20.5 path),
+`tools.verify`, `tools.cache`, `tools.maxRisk`, `tools.explainRouting`,
+`tools.disabled[]`, `tools.deprecated[]`, `tools.experimental`.
+
+Plugins in `~/.forge/tools/*.mjs` join the same system by declaring
+`capabilities`, `risk`, `parallel_safe`, `verification_required`, … — they are
+routed, gated and verified exactly like built-ins, with conservative defaults.
+
 ## Carried from v16
 
 - **Checkpoints & rewind** — before any write/edit/patch the original is snapshotted

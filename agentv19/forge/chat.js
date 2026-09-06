@@ -28,7 +28,8 @@ import { execFile } from "node:child_process"
 import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
-import { makeToolContext, toolCount, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { createToolIntel } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
@@ -392,6 +393,19 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       ),
   })
 
+  // v20.5: chat tool calls go through the same capability registry, router,
+  // policy gate, failure classification and verification as the agent loop —
+  // one implementation, not a second one. The UI rows below are unchanged.
+  const chatIntel = createToolIntel({
+    exec: tools.exec,
+    ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: config.tools?.allowSudo === true, assumeYes },
+    config,
+    onEvent: null,
+    taskId: "chat",
+    plugins,
+    legacyEvents: false,
+  })
+
   // ---- v20.4 terminal UI: ONE coordinator owns stdout while interactive ------
   // Piped/non-TTY sessions never touch it: `ui` is null there and every print
   // below falls through to plain console output (byte-identical to v20.3).
@@ -706,25 +720,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (!store.state.task) dispatchUI({ type: "TASK_STARTED", kind: "chat", title: "chat tools", id: null })
       for (const { tc } of parsed) ui.view.onEvent({ type: "tool_start", name: tc.name, args: tc.args, step: 1 })
     } else for (const { tc, argStr } of parsed) console.log(dim(`  ┌ [chat] ${cyan(tc.name)} ${dim(argStr)}`))
-    const isWrite = (n) => WRITE_TOOLS.has(n)
-    const results = new Array(parsed.length)
-    await Promise.all(
-      parsed.map(async ({ tc, args }, i) => {
-        if (isWrite(tc.name)) return
-        const t0 = Date.now()
-        let result
-        try { result = await tools.exec(tc.name, args) } catch (e) { result = `ERROR: ${e.message}` }
-        results[i] = { result, ms: Date.now() - t0 }
-      })
-    )
+    // v20.5: the router schedules the batch (independent read-only calls
+    // concurrently, mutations serialized, conflicting writes never together)
+    // and every call passes the same gate + verification as in agent mode.
+    const results = await chatIntel.runBatch(parsed.map(({ tc, args }) => ({ id: tc.id, name: tc.name, args })))
     for (let i = 0; i < parsed.length; i++) {
-      const { tc, args } = parsed[i]
-      if (isWrite(tc.name)) {
-        const t0 = Date.now()
-        let result
-        try { result = await tools.exec(tc.name, args) } catch (e) { result = `ERROR: ${e.message}` }
-        results[i] = { result, ms: Date.now() - t0 }
-      }
+      const { tc } = parsed[i]
+      if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
       const { result, ms } = results[i]
       if (ui) { ui.view.onEvent({ type: "tool_result", name: tc.name, result: String(result), step: 1, ms }); continue }
       const one = String(result).split("\n").slice(0, 2).join(" ⏎ ").slice(0, 160)

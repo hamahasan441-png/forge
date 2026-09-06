@@ -52,6 +52,8 @@ export const EVENTS = [
   // supplementary
   "MODE_CHANGED", "STATE_CHANGED", "PROVIDER_CHANGED", "WORKER_STARTED", "WORKER_COMPLETED",
   "NOTICE", "THOUGHT", "TERMINAL_RESIZED", "INPUT_CHANGED", "TASK_RESET", "REPAIR_ATTEMPT", "STREAMING",
+  // v20.5 tool intelligence layer
+  "VERIFICATION_RECORDED",
 ]
 
 const ACTIVITY_CAP = 60
@@ -225,6 +227,16 @@ export function reduce(s, ev) {
       const entry = { path: p, action, added: (prev?.added || 0) + (ev.added || 0), removed: (prev?.removed || 0) + (ev.removed || 0), at: now, taskId: s.task?.id ?? null }
       const repair = s.repair && s.repair.open ? { ...s.repair, edits: [...new Set([...(s.repair.edits || []), path.basename(p)])].slice(0, 8) } : s.repair
       return { ...s, changes: { ...s.changes, [p]: entry }, repair }
+    }
+    // v20.5: a verification check the tool intelligence layer actually ran
+    // (syntax / types / lint / tests / build …). Only real checks land here.
+    case "VERIFICATION_RECORDED": {
+      if (!ev.kind) return s
+      const prev = s.verification.checks[ev.kind]
+      const entry = { ok: ev.ok ?? null, passed: ev.passed ?? prev?.passed ?? null, failed: ev.failed ?? prev?.failed ?? null, summary: String(ev.summary ?? "").slice(0, 160), command: ev.target ?? prev?.command ?? "", at: now }
+      const next = { ...s, verification: { checks: { ...s.verification.checks, [ev.kind]: entry } } }
+      next.repair = trackRepair(s.repair, { kind: ev.kind, ok: entry.ok, summary: entry.summary, target: entry.command, at: now })
+      return next
     }
     case "TEST_STARTED":
       return { ...s, tests: { running: true, command: ev.command || "", passed: null, failed: null, ok: null, at: now }, state: s.task ? "VERIFYING" : s.state }
@@ -604,6 +616,31 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
       break
     case "compacted":
       emit({ type: "NOTICE", level: "warn", text: ev.after === -1 ? `${ev.reason ?? "context overflow"} (~${ev.estTok} tok) — compressing and retrying` : `context compacted: ${ev.before} → ${ev.after} messages${ev.shrunk ? ` (tool outputs shrunk ~${Math.round(ev.shrunk / 1024)}KB)` : ""}` })
+      break
+    // ---- v20.5 tool intelligence layer -----------------------------------
+    // TOOL_STARTED/OUTPUT/COMPLETED/FAILED/SELECTED are already derived above
+    // from tool_start/tool_result — only the events that carry NEW information
+    // are bridged, so no row is ever rendered twice.
+    case "TOOL_VERIFIED": {
+      for (const c of ev.checks ?? []) {
+        if (c.skipped || c.ok === null) continue
+        if (c.kind === "syntax") emit({ type: "VERIFICATION_RECORDED", kind: "syntax", ok: c.ok, summary: c.detail, target: c.target })
+      }
+      if (ev.ok === false) emit({ type: "NOTICE", level: "warn", text: `verification failed after ${ev.tool}: ${String(ev.summary).slice(0, 160)}` })
+      else if ((ev.checks ?? []).length) emit({ type: "NOTICE", level: "info", text: `verified ${ev.tool}: ${String(ev.summary).slice(0, 120)}` })
+      break
+    }
+    case "TOOL_BLOCKED":
+      emit({ type: "NOTICE", level: ev.conflict ? "info" : "warn", text: `${ev.tool ?? "tool"} ${ev.conflict ? "serialized" : "blocked"}: ${String(ev.reason ?? "").slice(0, 160)}` })
+      break
+    case "TOOL_RETRY":
+      emit({ type: "NOTICE", level: "warn", text: `${ev.tool} retry ${ev.attempt}: ${String(ev.reason ?? "").slice(0, 120)}` })
+      break
+    case "TOOL_FALLBACK":
+      emit({ type: "NOTICE", level: "info", text: `${ev.tool}${ev.alternative ? ` → ${ev.alternative}` : ""}: ${String(ev.reason ?? "").slice(0, 140)}` })
+      break
+    case "TOOL_CACHED":
+      emit({ type: "NOTICE", level: "info", text: `${ev.tool}: ${String(ev.reason ?? "cached").slice(0, 120)}` })
       break
     case "run_end": {
       if (ev.status === "completed") emit({ type: "TASK_COMPLETED", text: ev.text, steps: ev.steps, toolCalls: ev.toolCalls, wrote: ev.wrote, runId: ev.runId, endedAt: now })

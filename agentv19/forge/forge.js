@@ -46,6 +46,8 @@ import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, me
 import { savePlan, listPlans, readPlan } from "./plans.js"
 import { loadToolPlugins, PLUGINS_DIR } from "./plugins.js"
 import { BUILTIN_TOOL_NAMES } from "./tools.js"
+import { createRegistry, registerPlugins, checkWriteClassification, costScore } from "./capabilities.js"
+import { route, describeRoute, planExecution } from "./router.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -770,6 +772,75 @@ async function main() {
       process.exit(1)
       return
     }
+    case "tools": {
+      // v20.5: the capability registry — what every tool IS, what the router
+      // would choose for a task, and how a batch would be scheduled.
+      const reg = createRegistry({ config })
+      if (config.tools?.plugins !== false) {
+        try { registerPlugins(reg, (await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })).tools) } catch { /* best-effort */ }
+      }
+      const cwd = flags.cwd ? path.resolve(String(flags.cwd)) : process.cwd()
+
+      // forge tools --route "task"  → the routing decision + the chain
+      const routeTask = typeof flags.route === "string" ? flags.route : positional.slice(1).join(" ")
+      if (flags.route !== undefined && routeTask) {
+        const decision = route({ task: routeTask, registry: reg, context: { cwd }, constraints: { readOnly: flags["read-only"] === true } })
+        if (JSON_OUT) { emitJson({ task: routeTask, ...decision, chain: { ...decision.chain, steps: decision.chain.steps } }); return }
+        console.log(bold(`routing — ${routeTask}`))
+        console.log(describeRoute(decision))
+        return
+      }
+
+      // forge tools <name> → one capability card
+      const one = positional[1] && positional[1] !== "list" ? positional[1] : null
+      if (one) {
+        const m = reg.get(one)
+        if (!m) { err(`unknown tool "${one}" — run ${cyan("forge tools")} to list them`); process.exit(1); return }
+        if (JSON_OUT) { emitJson(m); return }
+        console.log(bold(`${m.name}`) + dim(`  ${m.klass} • ${m.status}`))
+        console.log(`  ${m.description}`)
+        const row = (k, v) => console.log(`  ${dim(k.padEnd(22))} ${v}`)
+        row("capabilities", m.capabilities.join(", "))
+        row("classes", m.classes.join(", "))
+        row("risk (baseline)", m.risk)
+        row("read_only", String(m.read_only))
+        row("reversible", String(m.reversible))
+        row("parallel_safe", String(m.parallel_safe))
+        row("idempotent", String(m.idempotent))
+        row("requires_confirmation", String(m.requires_confirmation))
+        row("requires_network", String(m.requires_network))
+        row("requires_filesystem", String(m.requires_filesystem))
+        row("timeout", `${m.timeout}s`)
+        row("cost", `~${m.cost.latency}ms • ~${m.cost.tokens} tok • cpu ${m.cost.cpu}${m.cost.network ? " • network" : ""}`)
+        row("verification_required", String(m.verification_required) + (m.verify_after.length ? ` (${m.verify_after.join(", ")})` : ""))
+        if (m.preferred_for.length) { console.log(`  ${dim("preferred_for")}`); for (const x of m.preferred_for) console.log(`    ${green("+")} ${x}`) }
+        if (m.avoid_when.length) { console.log(`  ${dim("avoid_when")}`); for (const x of m.avoid_when) console.log(`    ${yellow("-")} ${x}`) }
+        return
+      }
+
+      // forge tools [--capability x] [--class READ] → the registry
+      const filtered = reg.list({
+        capability: typeof flags.capability === "string" ? flags.capability : undefined,
+        klass: typeof flags.class === "string" ? String(flags.class).toUpperCase() : undefined,
+      })
+      if (JSON_OUT) {
+        emitJson({ count: filtered.length, invariants: checkWriteClassification(reg), tools: filtered })
+        return
+      }
+      console.log(bold(`capability registry (${filtered.length})`) + dim(`  intelligence=${config.tools?.intelligence !== false ? "on" : "off"} • verify=${config.tools?.verify !== false ? "on" : "off"}`))
+      const badge = (m) =>
+        m.status === "disabled" ? red("disabled") : m.status === "deprecated" ? yellow("deprecated") : m.status === "experimental" ? yellow("experimental") : green("enabled")
+      const riskColor = (r) => (r === "critical" || r === "high" ? red(r) : r === "medium" ? yellow(r) : dim(r))
+      for (const m of filtered) {
+        console.log(
+          `  ${cyan(m.name.padEnd(13))} ${dim(m.klass.padEnd(8))} ${riskColor(m.risk.padEnd(8))} ${m.read_only ? dim("read ") : yellow("write")} ${m.parallel_safe ? dim("∥") : " "} ${badge(m).padEnd(9)} ${dim(m.capabilities.slice(0, 3).join(", ").slice(0, 46))}`
+        )
+      }
+      const problems = checkWriteClassification(reg)
+      if (problems.length) for (const p2 of problems) console.log(`  ${red("✗")} ${p2}`)
+      console.log(dim(`  ${cyan("forge tools <name>")} = full metadata • ${cyan('forge tools --route "task"')} = what the router would do • --json`))
+      return
+    }
     case "plugins": {
       // list user tool plugins loaded from ~/.forge/tools
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
@@ -802,6 +873,12 @@ function debugRunSummary(res) {
   for (const t of res.toolLog ?? []) counts[t.name] = (counts[t.name] || 0) + 1
   const breakdown = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join(" ")
   console.error(dim(`  [debug] steps=${res.steps} toolCalls=${res.toolLog?.length ?? 0} runId=${res.runId ?? "-"} wrote=${!!res.wrote}${breakdown ? " • " + breakdown : ""}`))
+  // v20.5: what the tool intelligence layer actually did this run
+  const t = res.toolStats
+  if (t) {
+    const fails = Object.entries(t.byFailure ?? {}).map(([k, v]) => `${k}×${v}`).join(" ")
+    console.error(dim(`  [debug] tools: ok=${t.ok} failed=${t.failed} blocked=${t.blocked} cached=${t.cached} verified=${t.verified}${t.verifyFailed ? ` verifyFailed=${t.verifyFailed}` : ""}${fails ? " • " + fails : ""}`))
+  }
 }
 
 function coerce(v) {
@@ -833,6 +910,7 @@ ${bold("usage")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
+  ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
   ${cyan("forge models [provider] [--free]")}    list models — --free = OpenRouter free tier only
 
