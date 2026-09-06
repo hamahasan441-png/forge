@@ -186,7 +186,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   }
 }
 
-export async function runAgent({ config, provider, task, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false }) {
+export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null }) {
   let p = provider
   const readonly = readOnly || planOnly // plan mode is always read-only
   // v20.4 UI events: every event from a delegated sub-agent is tagged with its
@@ -307,7 +307,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
 
   let messages = [
     { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry }) },
-    { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : task },
+    { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
 
   let steps = 0
@@ -318,6 +318,9 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
   let toolCallCount = 0
   const toolLog = []
   const commandChecks = [] // v21: actual exit-code verification evidence from bash
+  // v21: live token accounting (provider usage when reported; an estimate
+  // otherwise) so the resource manager can compact / switch on real pressure.
+  const tokenUsage = { prompt: 0, completion: 0, total: 0, estimated: false }
   let ended = false
   const endRun = (status, extra = {}) => {
     if (ended) return
@@ -391,6 +394,25 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
       if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
 
       if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning })
+
+      // v21: account tokens (real provider usage when reported; estimate otherwise)
+      try {
+        const u = msg.usage || {}
+        const pin = Number(u.prompt_tokens ?? u.input_tokens ?? 0)
+        const cpl = Number(u.completion_tokens ?? u.output_tokens ?? 0)
+        if (pin || cpl) { tokenUsage.prompt += pin; tokenUsage.completion += cpl; tokenUsage.estimated = false }
+        else {
+          // provider omitted usage: estimate. Prompt side is the cumulative
+          // context (re-sent each round) — take the max so we don't multiply
+          // the same context by the number of rounds; completion is additive.
+          tokenUsage.estimated = true
+          const estIn = estimateTokens(JSON.stringify(messages))
+          if (estIn > tokenUsage.prompt) tokenUsage.prompt = estIn
+          tokenUsage.completion += estimateTokens(msg.content || "")
+        }
+        tokenUsage.total = tokenUsage.prompt + tokenUsage.completion
+        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated })
+      } catch { /* usage accounting is best-effort */ }
 
       if (msg.toolCalls?.length) {
         // v20: runaway guard — stop spawning tool rounds past the budget
@@ -470,7 +492,7 @@ export async function runAgent({ config, provider, task, onEvent, signal, readOn
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
     endRun("completed", { text: finalText, wrote })
-    return { text: finalText, steps, toolLog, commandChecks, planOnly, runId, wrote, budgetHit, toolStats: intel.stats(), toolRecords: intel.records() }
+    return { text: finalText, steps, toolLog, commandChecks, planOnly, runId, wrote, budgetHit, usage: { ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records() }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

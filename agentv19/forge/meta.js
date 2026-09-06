@@ -22,13 +22,15 @@
 import { openTask, readTask, TASK_STATUS, TERMINAL } from "./taskstate.js"
 import { createLedger, riskForChange } from "./verifyledger.js"
 import { createResourceManager, ADAPT } from "./resources.js"
-import { selectModel } from "./modelstrategy.js"
-import { createAgentManager, ROLES } from "./agentmanager.js"
+import { selectModel, reconsiderModel } from "./modelstrategy.js"
+import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { recordLesson, ineffectiveStrategies } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
-import { snapshotBefore } from "./checkpoint.js"
+import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { redact } from "./secrets.js"
+import * as dagLib from "./dag.js"
+import fs from "node:fs"
 import path from "node:path"
 
 const SEGMENT_STEPS = 12 // per-segment step budget (a SAFETY bound, not task completion)
@@ -44,7 +46,7 @@ export const FINAL = { COMPLETED: "COMPLETED", FAILED: "FAILED", CANCELLED: "CAN
  * @param opts     { onEvent, signal, resumeTaskId, segmentSteps, maxSegments,
  *                   runAgent (injected for tests), deep }
  */
-export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep } = {}) {
+export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null } = {}) {
   const emit = (ev) => { try { onEvent?.(ev) } catch { /* observability never breaks */ } }
 
   // --- resume vs fresh -----------------------------------------------------
@@ -75,11 +77,32 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     onEvent: emit,
     signal,
   })
-  manager.configure({ config, provider })
+  // mutable holder so the injected worker runner always sees the CURRENT
+  // provider (initial provider + any model-strategy switch later on).
+  const provRef = { prov: provider }
 
   // agent.js is imported lazily so this module stays cycle-free in tests; the
   // caller may inject a fake runAgent.
   const agent = runAgent ?? (await import("./agent.js")).runAgent
+  // The DAG worker pool fans out REAL sub-agents; with an injected fake
+  // (tests) it defaults OFF unless the caller explicitly opts in.
+  const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
+
+  // the worker pool runs read-only research/review/security sub-agents through
+  // the SAME runAgent (and therefore the same security gate); it is injected
+  // rather than imported so tests can supply a fake runner.
+  manager.configure({
+    config, provider,
+    runner: ({ role, task: subTask, context, readOnly, signal: sig, dagNode }) =>
+      agent({
+        config, provider: provRef.prov, task: subTask,
+        extraContext: context ? `--- relevant project context (demand-loaded) ---\n${context}` : undefined,
+        onEvent: segmentEvents(emit, `worker:${dagNode ?? role}`), signal: sig ?? signal,
+        readOnly: readOnly !== false, maxStepsOverride: 10, worker: { role, dagNode },
+        budgetHit: false, // worker findings never count as "task continues"
+        journal: false, suppressRunEvents: true,
+      }).then((r) => r.text),
+  })
 
   const segSteps = segmentSteps ?? config?.agent?.segmentSteps ?? SEGMENT_STEPS
   const maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
@@ -95,7 +118,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       try {
         const { buildProvider } = await import("./providers.js")
         const np = buildProvider(config, sel.decision.provider)
-        if (np && np.model) { prov = { ...np, model: sel.decision.model }; manager.configure({ config, provider: prov }) }
+        if (np && np.model) { prov = { ...np, model: sel.decision.model }; provRef.prov = prov; manager.configure({ config, provider: prov }) }
       } catch { /* keep the active provider on any trouble */ }
     }
   } else {
@@ -134,12 +157,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   // build the DAG from the plan (best-effort; a bad parse just leaves no DAG)
   let dag = null
+  const persistDAG = () => { if (dag) ts.setDAG(dagLib.serializeDAG(dag)) }
   try {
-    const { buildDAG, parsePlanToDAG, serializeDAG } = await import("./dag.js")
-    const defs = parsePlanToDAG(planText)
+    const defs = dagLib.parsePlanToDAG(planText)
     if (defs.length) {
-      dag = buildDAG(defs)
-      ts.setDAG(serializeDAG(dag))
+      // on resume, prefer rehydrating the CRASH-SURVIVED graph so completed
+      // nodes stay complete; fall back to a fresh build from the new plan.
+      dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(defs)
+      persistDAG()
       emit({ type: "DAG_BUILT", nodes: dag.order.length })
     }
   } catch (e) {
@@ -154,6 +179,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let repairCount = 0
   let evidenceRequests = 0
   let totalToolCalls = 0
+  let slowFailures = 0
   const changedFiles = new Set()
 
   ts.transition(TASK_STATUS.EXECUTING, { reason: "starting segments" })
@@ -163,6 +189,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     segment++
     const segmentId = `seg-${segment}`
+    const segStart = Date.now()
     ts.transition(TASK_STATUS.EXECUTING, { reason: `segment ${segment}` })
     emit({ type: "SEGMENT_STARTED", segment, segmentId, objective: state.objective, maxSteps: segSteps })
     resources.record({ segment: true })
@@ -175,14 +202,29 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // before a risky segment, checkpoint (the controller's own boundary; the
     // tools also checkpoint before each mutation — this covers the segment)
     const riskNow = riskForChange({ filesChanged: changedFiles.size, task: state.objective, securitySensitive: riskLevel === "critical" })
-    if (segment > 1 && (riskNow === "high" || riskNow === "critical")) {
+    if (riskNow === "high" || riskNow === "critical" || segment === 1) {
       ts.transition(TASK_STATUS.CHECKPOINTING, { reason: "boundary before risky segment" })
-      emit({ type: "CHECKPOINT_CREATED", boundary: "segment", segment })
+      // real rollback point: record the fs state (files + git head + untracked
+      // list) so `forge undo --run` and crash-resume can reconcile against it.
+      let cpId = null
+      try {
+        const cwd = process.cwd()
+        // protect the files this task has already touched (the ones an undo
+        // would need to restore); if none exist yet, still record a boundary
+        // anchor (git HEAD + run label) for crash-resume reconciliation.
+        const touched = [...changedFiles].filter((f) => { try { return fs.existsSync(f) } catch { return false } })
+        cpId = touched.length
+          ? snapshotBefore(touched, cwd, [], taskRunId)
+          : boundaryCheckpoint(cwd, { runId: taskRunId, label: `segment-${segment}`, objective: state.objective })
+      } catch (e) { ts.noteError("CHECKPOINT_FAILED", e?.message ?? String(e)) }
+      if (cpId) ts.noteCheckpoint(cpId)
+      emit({ type: "CHECKPOINT_CREATED", boundary: "segment", segment, checkpointId: cpId })
       ts.transition(TASK_STATUS.EXECUTING, { reason: "resume after checkpoint boundary" })
     }
 
     // demand-driven context for THIS segment (never the whole repo)
-    const contextBlock = ctxEngine.build(state.objective, { budgetTokens: 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
+    const contextBuilt = ctxEngine.build(state.objective, { budgetTokens: 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
+    const contextBlock = typeof contextBuilt === "string" ? contextBuilt : contextBuilt?.text ?? ""
 
     // check failure learning BEFORE repeating a known-dead strategy
     const knownBad = ineffectiveStrategies(state.objective, { cwd: process.cwd() })
@@ -191,6 +233,48 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // continuation prompt: resume reconciliation for the first segment of a
     // resumed task, the objective for the first segment of a fresh task, and a
     // state-aware continuation thereafter.
+    // DAG-driven read-only fan-out: independent investigation nodes run as
+    // PARALLEL researcher/reviewer/security workers while mutating nodes stay
+    // with the serialized main agent. Read-only work NEVER mutates (the worker
+    // runs readOnly:true through the same security gate).
+    let dagFindings = ""
+    if (dag && workersEnabled && !signal?.aborted) {
+      try {
+        const batch = dagLib.scheduleBatch(dag, { maxParallel: Math.max(1, resources.state.maxWorkers), conflictKeys: () => [] })
+          .filter((n) => n.read_only && n.role && n.role !== "coder")
+        if (batch.length) {
+          emit({ type: "DAG_DISPATCH", nodes: batch.map((n) => n.id), parallel: batch.length })
+          const jobs = batch.map((n) => {
+            dagLib.markRunning(dag, n.id)
+            const job = manager.spawn({
+              role: n.role,
+              task: `${n.objective}\n\nThis is a read-only investigation subtask of: ${state.objective}. Do NOT modify files. Report concise findings (file paths, symbols, facts) the implementer will need.`,
+              context: contextBlock.slice(0, 3500),
+              dagNode: n.id,
+              timeoutMs: 1000 * 60 * 2,
+            })
+            resources.record({ workers: 1 })
+          return job.promise.then((r) => {
+            if (r.status === "completed") {
+              dagLib.markCompleted(dag, n.id, String(r.result ?? "").slice(0, 2000))
+              dagFindings += `\n\n--- finding from ${n.role} (${n.id}) ---\n${String(r.result ?? "").slice(0, 1200)}`
+            } else {
+              dagLib.markFailed(dag, n.id, r.error ?? r.status)
+            }
+            persistDAG()
+          }).catch((e) => { try { dagLib.markFailed(dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} })
+          })
+          // findings are ADVISORY: give fast read-only workers a short window
+          // to contribute before the mutating segment proceeds; results that
+          // land later still update the persisted DAG for future segments.
+          await Promise.race([
+            Promise.allSettled(jobs),
+            new Promise((resolve) => setTimeout(resolve, 4000)),
+          ])
+        }
+      } catch (e) { ts.noteError("DAG_FANOUT_FAILED", e?.message ?? String(e)) }
+    }
+
     const segTask = resumeRec && segment === 1
       ? resumePrompt(resumeRec, resumeRecon ?? reconcileTask(resumeRec, { cwd: process.cwd() }), process.cwd())
       : segment === 1
@@ -202,12 +286,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       res = await agent({
         config, provider: prov, signal,
         task: segTask,
+        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : ""].filter(Boolean).join("\n\n") || undefined,
         maxStepsOverride: segSteps, deep, onEvent: segmentEvents(emit, segment),
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
     } catch (e) {
       res = { error: e?.message ?? String(e), aborted: e?.name === "AbortError" || signal?.aborted }
     }
+    const segMs = Date.now() - segStart
 
     // --- observation -------------------------------------------------------
     if (res.aborted || signal?.aborted) { finalStatus = FINAL.CANCELLED; finalText = "cancelled by user"; break }
@@ -225,6 +311,21 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     if (changedFiles.size) ctxEngine.invalidateFor([...changedFiles])
 
+    // DAG progress: attribute this segment to the best-matching READY/RUNNING
+    // node and mark it complete (or failed) so the graph reflects reality and
+    // downstream nodes become READY after a crash-safe persist.
+    if (dag) {
+      try {
+        const progress = { files: changedFiles.size, toolCalls: segToolCalls, text: String(res.text ?? "").slice(0, 800), segment }
+        const segNode = attributeSegment(dag, progress)
+        if (segNode) {
+          if (res.error) dagLib.markFailed(dag, segNode.id, String(res.error).slice(0, 200))
+          else dagLib.markCompleted(dag, segNode.id, `segment ${segment}: ${changedFiles.size} file(s), ${segToolCalls} tool call(s)`)
+          persistDAG()
+        }
+      } catch { /* DAG accounting is best-effort */ }
+    }
+
     // structured verification evidence from real command exit codes
     for (const chk of res.commandChecks ?? []) {
       const rec = ledger.recordCommand(chk.command, chk.tail + (chk.passed ? "" : ` [exit code: ${chk.exitCode}]`), {
@@ -239,10 +340,47 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     const segToolCalls = res.toolLog?.length ?? 0
     totalToolCalls += segToolCalls
+    // real resource accounting: latency, token usage (reported by the provider
+    // or estimated by agent.js), tool calls and active workers.
+    const u = res.usage ?? {}
+    const tokIn = u.prompt ?? u.prompt_tokens ?? u.input_tokens ?? 0
+    const tokOut = u.completion ?? u.completion_tokens ?? u.output_tokens ?? 0
+    resources.record({ tokensIn: tokIn, tokensOut: tokOut, toolCalls: segToolCalls, latencyMs: segMs, workers: manager.stats().active })
     const segStatus = res.error ? "failed" : res.budgetHit ? "continued" : "completed"
     ts.addSegment({ segment_id: segmentId, objective: state.objective, status: segStatus, steps: res.steps ?? 0, tool_calls: segToolCalls, continued: !!res.budgetHit })
-    ts.noteUsage({ tool_calls: segToolCalls, ms: 0, workers: manager.stats().active })
+    ts.noteUsage({ tokens_in: tokIn, tokens_out: tokOut, tool_calls: segToolCalls, ms: segMs, workers: manager.stats().active })
     ts.flush()
+
+    // mid-task model reconsideration: when the resource manager's signals
+    // (latency / token pressure / error streak) call for a cheaper or stronger
+    // model, ASK the strategy engine — switching stays its margin-gated call.
+    if (!res.aborted && config?.agent?.modelStrategy !== false) {
+      const rad = resources.evaluate()
+      const wantModel = rad.actions.some((a) => a.action === ADAPT.PREFER_FAST_MODEL) || resources.state.slowStreak >= 3
+      if (wantModel) {
+        const decision = reconsiderModel(config, {
+          task: state.objective,
+          provider: { name: prov?.name, model: prov?.model },
+          failures: res.error ? consecutiveFailures : 0,
+          failureKind: res.error ? "reasoning" : null,
+          resourceLimits: { preferredClass: rad.limits.preferredClass ?? "fast_reasoning" },
+        })
+        if (decision && (decision.provider !== prov?.name || decision.model !== prov?.model)) {
+          try {
+            const { buildProvider } = await import("./providers.js")
+            const np = buildProvider(config, decision.provider)
+            if (np && np.model) {
+              prov = { ...np, model: decision.model }
+              provRef.prov = prov
+              manager.configure({ config, provider: prov })
+              ts.noteModel(decision.provider, decision.model, `reconsidered: ${decision.reason}`)
+              emit({ type: "MODEL_SELECTED", model: decision.model, provider: decision.provider, reason: decision.reason, confidence: decision.confidence, reconsidered: true })
+              emit({ type: "STRATEGY_CHANGED", reason: `model → ${decision.model} (${decision.provider}): ${decision.reason}` })
+            }
+          } catch { /* keep current provider on any trouble */ }
+        }
+      }
+    }
 
     emit({ type: "SEGMENT_COMPLETED", segment, status: segStatus, steps: res.steps, toolCalls: res.toolLog?.length ?? 0, budgetHit: !!res.budgetHit })
 
@@ -410,9 +548,11 @@ function segmentEvents(emit, segment) {
  */
 async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
+  const ctxBlock = ctxEngine.build(state.objective, { budgetTokens: 1600 })
   const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${String(error ?? verification?.reason ?? "").slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}\n\nInspect the relevant files first, then make a minimal surgical fix, then run verification.`
+  const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
-    const r = await agent({ config, provider, signal, task: diag, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    const r = await agent({ config, provider, signal, task: diag, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
     // learn from the repair
     const fixed = !r.error && !r.budgetHit
     recordLesson({
@@ -448,9 +588,11 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
  * the ledger. Never fakes a pass.
  */
 async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId }) {
+  const ctxBuilt = ctxEngine.build(state.objective, { budgetTokens: 1200 })
+  const verifyContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBuilt === "string" ? ctxBuilt : ctxBuilt?.text ?? ""}`
   const ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level: ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.`
   try {
-    const r = await agent({ config, provider, signal, task: ask, maxStepsOverride: 6, deep: false, onEvent: emit, journal: true, readOnly: false, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    const r = await agent({ config, provider, signal, task: ask, extraContext: verifyContext, maxStepsOverride: 6, deep: false, onEvent: emit, journal: true, readOnly: false, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
     for (const chk of r.commandChecks ?? []) {
       const rec = ledger.recordCommand(chk.command, chk.tail, { exitCode: chk.exitCode })
       ts.noteVerification(rec)
@@ -464,6 +606,31 @@ async function requestVerification({ agent, config, provider, signal, emit, stat
     ts.noteError("VERIFY_FAILED", e?.message ?? String(e))
     return false
   }
+}
+
+/**
+ * Attribute a completed segment to the best-matching DAG node so the graph
+ * moves forward. Prefers a RUNNING node (started by the fan-out) then a READY
+ * node whose objective shares the most keywords with the segment's activity.
+ * Returns null when nothing is plausibly attributable.
+ */
+function attributeSegment(dag, { files = 0, toolCalls = 0, text = "" } = {}) {
+  const active = [...dag.nodes.values()].filter((n) => n.status === "running" || n.status === "ready")
+  if (!active.length) return null
+  const hay = String(text).toLowerCase()
+  let best = null
+  let bestScore = 0
+  for (const n of active) {
+    let score = n.status === "running" ? 5 : 0
+    const words = String(n.objective ?? "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3)
+    for (const w of words) if (hay.includes(w)) score++
+    // a mutating segment (files changed) credits a non-read-only node
+    if (files > 0 && !n.read_only) score += 2
+    if (toolCalls > 0) score += 0.5
+    if (score > bestScore) { bestScore = score; best = n }
+  }
+  // require at least a weak signal (a running node counts inherently)
+  return bestScore >= (best?.status === "running" ? 5 : 3) ? best : null
 }
 
 function buildContinuation({ state, segment, planText, riskNow, knownBad }) {

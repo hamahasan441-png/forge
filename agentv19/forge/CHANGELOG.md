@@ -77,7 +77,40 @@ Integration:
   interactive startup also surfaces interrupted tasks.
 - New `forge agent --auto` runs the full meta-controller lifecycle; the default
   agent one-shot keeps its classic pinned output. New tests: `test-autonomy.mjs`
-  (103 checks) added to the authoritative runner.
+  (112 checks) added to the authoritative runner.
+
+### Orchestration wiring (controllers now drive the modules for real)
+- **Token & latency accounting is real.** `runAgent` accumulates per-round
+  provider usage (`prompt_tokens` / `completion_tokens`, with an mtime-stable
+  estimate when a provider omits usage) and returns it as `usage`; the meta
+  controller feeds real tokens, tool calls, worker count and segment latency
+  into the resource manager and the persisted task record (`resource_usage`),
+  instead of `ms: 0`.
+- **The DAG now drives execution and survives progress.** The persisted DAG is
+  rehydrated on resume (completed nodes stay complete); each completed segment
+  is attributed to its best-matching node and marked complete/failed (downstream
+  nodes become READY); independent read-only READY nodes fan out to real
+  **worker sub-agents** (researcher/reviewer/security) through the same
+  security gate, while mutating nodes stay serialized on the main agent. Worker
+  findings feed the segment context; the pool defaults off for injected/test
+  agents and on for production (`agent.workers: false` disables it).
+- **Boundaries take real checkpoints.** Risky segments and the first segment
+  now call the checkpoint layer (`snapshotBefore` over touched files, or a new
+  `boundaryCheckpoint` recording git HEAD + run label when nothing is touched
+  yet), link the checkpoint id to the task record, and emit it with
+  `CHECKPOINT_CREATED` — no more checkpoint events with no checkpoint behind
+  them.
+- **The demand-driven context reaches the model.** The context engine's block
+  (plus completed DAG findings) is attached to every segment, repair and
+  verification prompt via a separate `extraContext` channel, keeping the task
+  prompt recognizable to the planner/failover logic.
+- **Mid-task model reconsideration is live.** When the resource manager
+  signals token/latency pressure (or the streak of slow segments trips it), the
+  controller asks the model-strategy engine to reconsider and switches only on
+  its margin-gated decision, emitting `MODEL_SELECTED` / `STRATEGY_CHANGED`.
+- The worker manager accepts an injected `runner` (and re-`configure` of it),
+  so the production pool and tests share one scheduling/timeout/concurrency
+  path.
 
 ## [Unreleased] — v20.5.0 (in progress) — "tool intelligence"
 

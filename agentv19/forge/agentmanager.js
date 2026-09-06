@@ -122,12 +122,13 @@ export function createAgentManager({
     return rec
   }
 
-  /** Controller-injected config/provider for the default runner. */
-  const ctx = { config: null, provider: null }
+  /** Controller-injected config/provider/runner for the default runner. */
+  const ctx = { config: null, provider: null, runner: null }
 
   async function runOne(rec) {
-    if (typeof runner === "function") {
-      return runner({
+    const run = ctx.runner || runner
+    if (typeof run === "function") {
+      return run({
         role: rec.role,
         task: rec.task,
         context: rec.context,
@@ -147,9 +148,10 @@ export function createAgentManager({
   }
 
   /** Allow the controller to inject config/provider for the default runner. */
-  function configure({ config = null, provider = null } = {}) {
-    ctx.config = config
-    ctx.provider = provider
+  function configure({ config = null, provider = null, runner = null } = {}) {
+    if (config !== null) ctx.config = config
+    if (provider !== null) ctx.provider = provider
+    if (runner !== null) ctx.runner = runner
   }
 
   function cancel(id) {

@@ -423,6 +423,36 @@ console.log("== meta lifecycle: cancellation ==")
 }
 
 // ---------------------------------------------------------------------------
+console.log("== wiring: worker fan-out, real usage, real checkpoints ==")
+{
+  // workers:true must dispatch read-only DAG nodes to the SAME runAgent with
+  // the worker marker (so they are read-only subtasks through the same gate).
+  const seenWorkers = []
+  let call = 0
+  const runAgent = async (o) => {
+    if (o.planOnly) return { text: "1. investigate the module\n2. fix\n3. test", toolRecords: [], commandChecks: [], toolLog: [] }
+    if (o.worker) { seenWorkers.push(o.worker.role); return { text: "finding: module is in src/m.js", toolRecords: [], commandChecks: [], toolLog: [], usage: { prompt: 10, completion: 5 } } }
+    call++
+    if (call === 1) return { text: "done", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [], toolLog: [], usage: { prompt_tokens: 120, completion_tokens: 30 } }
+    return { text: "done", toolRecords: [], commandChecks: [], toolLog: [] }
+  }
+  const events = []
+  const cfg = { providers: {}, agent: { autonomous: true, modelStrategy: false }, tools: {} }
+  const r = await meta.runMeta({ config: cfg, provider: { name: "x", model: "m" }, task: "document the m module usage", runAgent, signal: new AbortController().signal, workers: true, onEvent: (e) => events.push(e) })
+  ok("read-only DAG node dispatched to a worker", seenWorkers.includes("researcher"))
+  ok("DAG_DISPATCH event emitted", events.some((e) => e.type === "DAG_DISPATCH"))
+  ok("WORKER_QUEUED event emitted", events.some((e) => e.type === "WORKER_QUEUED"))
+  ok("segment checkpoint emitted with id", events.some((e) => e.type === "CHECKPOINT_CREATED" && e.checkpointId))
+  const t = readTask(r.taskId)
+  ok("real token usage persisted (tokens_in>0)", (t.resource_usage?.tokens_in ?? 0) >= 120)
+  ok("real latency persisted (ms>0)", (t.resource_usage?.ms ?? 0) > 0)
+  ok("checkpoint linked in task", !!t.checkpoint_id)
+  // DAG persisted with completed node(s)
+  ok("DAG persisted", Array.isArray(t.dag?.nodes) && t.dag.nodes.length >= 3)
+  ok("investigation node marked completed", t.dag.nodes.some((n) => n.status === "completed" && /investigat/i.test(n.objective || "")))
+}
+
+// ---------------------------------------------------------------------------
 console.log("== security: new orchestration never bypasses the gate ==")
 {
   // New orchestration modules contain NO shell execution primitive of their
