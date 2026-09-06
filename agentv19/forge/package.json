@@ -37,6 +37,8 @@
     "plans.js",
     "repomap.js",
     "plugins.js",
+    "mcp.js",
+    "lsp.js",
     "retrieval.js",
     "render.js",
     "uistate.js",

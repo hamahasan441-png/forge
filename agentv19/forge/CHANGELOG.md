@@ -3,6 +3,73 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## [Unreleased] — v23.0.0 (in progress) — "reaching for the big agents"
+
+### Added
+- **Model Context Protocol (MCP) client** (`mcp.js`, autonomy v23 Tier 1) — the
+  industry-standard way to extend an agent with tools and data from an external
+  process (filesystems, issue trackers, databases, browsers, internal APIs).
+  Before this, forge could only be extended with local `*.mjs` plugins; MCP
+  opens the whole ecosystem. Zero dependencies: an MCP stdio transport
+  (newline-delimited JSON-RPC 2.0) with the initialize handshake, `tools/list`,
+  `tools/call`, per-request timeouts, and clean shutdown — plus best-effort
+  multi-server loading that records a failed server instead of throwing.
+
+  Servers are configured under `mcp.servers` (**off by default**) and launched
+  from that config only, never from model output — the same trust model as
+  plugins. `mcpToolsToPlugins()` adapts a server's tools into the exact shape
+  `plugins.js` already produces, with names namespaced `mcp__<server>__<tool>`
+  (so they can never shadow a built-in) and treated as WRITE-class by default
+  (the protocol does not reliably declare side-effect freedom, so the unsafe
+  case is assumed). New `forge mcp [list|tools|test <name>]` inspects servers
+  from the shell.
+
+  **Wired into the agent loop.** MCP tools are loaded at the top of a run (never
+  for a delegated read-only sub-agent) and joined to the plugin list, so they
+  flow through the exact existing plugin path — `makeToolContext`, the capability
+  registry (which classes them WRITE / verification-required), and the policy
+  gate + safety engine — with no second execution path. Servers are shut down in
+  a `finally` on every exit (success/failure/cancellation), gracefully via stdin
+  close with a SIGKILL fallback, so a run never leaks a child process. The
+  interactive `chat.js` loop is a deliberate follow-up (it `process.exit()`s at
+  session end, so its server lifecycle needs separate handling and can't be
+  integration-tested in-process). New `tests/test-mcp.mjs` (30 checks) proves
+  the protocol against a stand-in MCP server — handshake, list/call, `isError`,
+  namespacing, the plugin adapter, timeout on a hung server, launch failure —
+  and, end-to-end, that the real `runAgent` invokes an MCP tool, the result
+  flows back, and the server is shut down afterward.
+- **Language Server Protocol (LSP) client** (`lsp.js`, autonomy v23 Tier 1) —
+  the biggest *code-understanding* gain: real go-to-definition, find-references,
+  hover types and compiler diagnostics from the same engine the user's editor
+  uses, instead of a regex repo-map. Zero dependencies: an LSP stdio client with
+  byte-accurate `Content-Length` framing (not MCP's newline framing), the
+  initialize handshake, document sync (`didOpen`), `textDocument/definition`,
+  `references`, `hover`, server-pushed `publishDiagnostics` captured and
+  awaitable, and a polite `shutdown`/`exit` with a SIGKILL fallback so a run
+  never leaks a child process. Servers are configured per language under
+  `lsp.servers` (**off by default**), resolved by file extension, launched from
+  config only — read-only, since a language server observes code, never mutates
+  it. New `forge lsp [list|test <file>]` resolves the server for a file, opens
+  it, and prints real diagnostics.
+
+  **Agent tools wired in.** `lsp_definition`, `lsp_references`, `lsp_hover` and
+  `lsp_diagnostics` — read-only, plugin-shaped — run over a per-run session
+  manager that lazily starts one language server per language, keeps open
+  documents synced with the file on disk (so results reflect edits the agent
+  just made), and is closed with the run. They flow through the same plugin path
+  and capability registry as every other tool; symbol-based tools take a name
+  and locate its first word-boundary occurrence, so the model never computes a
+  line/column. Loaded only at the top level (never per delegated sub-agent).
+  Automatic feeding of diagnostics into the verification ledger is a separate
+  follow-up; the tool exposes the evidence today. `test-lsp.mjs` (41 checks)
+  proves the protocol and the tools against a stand-in language server —
+  byte-accurate framing on a multi-byte document, diagnostics capture, symbol
+  location, and end-to-end: the real `runAgent` invokes `lsp_diagnostics`, the
+  result flows back, and the server is shut down afterward (no leaked child).
+- **`PLAN-v23.md`** — the review of the v21 agent and the roadmap to
+  best-in-class (MCP, LSP, semantic retrieval, vision, browser, sandbox,
+  benchmark), with this MCP client marked delivered.
+
 ## v21.0.0 — "autonomous orchestration"
 
 forge becomes a genuinely **autonomous, recoverable, long-running coding

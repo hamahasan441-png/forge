@@ -46,6 +46,8 @@ const suites = [
   ["checkpoint", "node", ["test-checkpoint.mjs"]],
   ["repomap", "node", ["test-repomap.mjs"]],
   ["plugins", "node", ["test-plugins.mjs"]],
+  ["mcp", "node", ["test-mcp.mjs"]],
+  ["lsp", "node", ["test-lsp.mjs"]],
   ["retrieval", "node", ["test-retrieval.mjs"]],
   ["sessions", "node", ["test-sessions.mjs"]],
   ["skills", "node", ["test-skills.mjs"]],

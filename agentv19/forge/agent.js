@@ -21,6 +21,8 @@ import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy } from "./prov
 import { readHealth, recordHealth } from "./health.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
+import { loadMcpTools } from "./mcp.js"
+import { createLspSession } from "./lsp.js"
 import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
@@ -230,17 +232,51 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role })
   // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
   // Sub-agents inherit the same plugins the main run sees.
+  // A delegated sub-agent is read-only and not a plan pass. Such workers inherit
+  // local file plugins (cheap) but must NOT spawn their own MCP servers: that
+  // would multiply child processes per delegate, and MCP tools are write-class
+  // so they are blocked in a read-only sub-agent anyway.
+  const isDelegatedSubAgent = readonly && !planOnly
   let plugins = []
   if (config.tools?.plugins !== false) {
     try {
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
       plugins = loaded.tools
-      const isDelegatedSubAgent = readonly && !planOnly
       if (!isDelegatedSubAgent) {
         for (const p of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${p.name}${p.readOnly ? " (read-only)" : ""} — ${p.source}` })
         for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}` })
       }
     } catch { /* plugins are best-effort */ }
+  }
+  // v23: Model Context Protocol tools. Loaded only at the top level (never for a
+  // delegated sub-agent), from `mcp.servers` config (never model output). They
+  // arrive in plugin shape, so they join `plugins` and flow through the SAME
+  // safety choke point (redaction, write-class serialization, read-only
+  // blocking) and the capability registry — no second execution path. The
+  // spawned servers are closed in the `finally` at the end of the run.
+  let mcpClients = []
+  if (!isDelegatedSubAgent && !noTools && config.tools?.mcp !== false) {
+    try {
+      const mcp = await loadMcpTools(config)
+      if (mcp.tools.length) {
+        plugins = [...plugins, ...mcp.tools]
+        mcpClients = mcp.clients
+        for (const t of mcp.tools) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}` })
+      }
+      for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}` })
+    } catch { /* MCP is best-effort — a broken server never breaks the run */ }
+  }
+  // v23: LSP tools (definition/references/hover/diagnostics). Read-only, so they
+  // are safe anywhere, but loaded only at the top level to avoid re-spawning a
+  // language server per delegated sub-agent. Servers start lazily on first use
+  // and are closed in the `finally` below. Same plugin path as everything else.
+  let lspSession = null
+  if (!isDelegatedSubAgent && !noTools && config.tools?.lsp !== false && Object.keys(config.lsp?.servers || {}).length) {
+    try {
+      lspSession = createLspSession(config, { cwd: process.cwd() })
+      plugins = [...plugins, ...lspSession.tools]
+      for (const t of lspSession.tools) onEvent?.({ type: "info", text: `lsp tool available: ${t.name}` })
+    } catch { lspSession = null /* best-effort */ }
   }
   let subCounter = 0
   const tools = makeToolContext({
@@ -498,6 +534,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
     else endRun("failed", { error: e?.message ?? String(e), wrote })
     throw e
+  } finally {
+    // v23: always shut down MCP + LSP servers this run spawned — on success,
+    // failure, or cancellation — so a run never leaks child processes.
+    for (const c of mcpClients) { try { c.close() } catch {} }
+    if (lspSession) { try { lspSession.close() } catch {} }
   }
 }
 
