@@ -21,13 +21,15 @@ import path from "node:path"
 
 const {
   connectServer, pathToUri, uriToPath, normalizeLocations, hoverText,
-  serverForFile, languageIdForFile,
+  serverForFile, languageIdForFile, locateSymbol, formatDiagnostics, createLspSession,
 } = await import("../forge/lsp.js")
+import http from "node:http"
 
 let PASS = 0, FAIL = 0
 const ok = (n, c) => { if (c) { PASS++; console.log(`  ok   ${n}`) } else { FAIL++; console.log(`  FAIL ${n}`) } }
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lsp-"))
+process.env.FORGE_HOME = DIR // isolate the agent's ~/.forge before agent.js loads
 
 // A minimal but real LSP server: Content-Length framing, JSON-RPC 2.0.
 const STUB = String.raw`
@@ -166,6 +168,87 @@ console.log("== serverForFile resolves by extension ==")
   ok("an unconfigured extension resolves to nothing", serverForFile(cfg, "a.rs") === null)
   ok("a disabled server is not resolved", serverForFile(cfg, "a.py") === null)
   ok("no lsp config → nothing", serverForFile({}, "a.ts") === null)
+}
+
+console.log("== symbol location + diagnostics formatting ==")
+{
+  ok("locateSymbol finds a word-boundary match", (() => { const p = locateSymbol("a\n  const foo = 1\n", "foo"); return p.line === 1 && p.character === 8 })())
+  ok("locateSymbol ignores substrings", locateSymbol("foobar = 1", "foo") === null)
+  ok("locateSymbol returns null when absent", locateSymbol("x = 1", "y") === null)
+  ok("formatDiagnostics on clean file says so", /clean/.test(formatDiagnostics([], { file: "a.ts" })))
+  ok("formatDiagnostics renders severity + position", /error 3:5/.test(formatDiagnostics([{ severity: 1, range: { start: { line: 2, character: 4 } }, message: "boom" }], { file: "a.ts" })))
+}
+
+console.log("== createLspSession: read-only plugin-shaped tools ==")
+{
+  const file = path.join(DIR, "sess.ts")
+  fs.writeFileSync(file, "function greet() {}\nconst y = greet\n")
+  const cfg = { lsp: { servers: { ts: { command: process.execPath, args: [stubPath, "normal"], extensions: [".ts"] } } } }
+  const sess = createLspSession(cfg, { cwd: DIR })
+  const names = sess.tools.map((t) => t.name)
+  ok("exposes the four LSP tools", ["lsp_definition", "lsp_references", "lsp_hover", "lsp_diagnostics"].every((n) => names.includes(n)))
+  ok("every LSP tool is read-only", sess.tools.every((t) => t.readOnly === true))
+  ok("tools carry the tool-def shape the loop expects", sess.tools.every((t) => t.def?.function?.parameters?.type === "object"))
+
+  const diagTool = sess.tools.find((t) => t.name === "lsp_diagnostics")
+  const out = await diagTool.run({ path: "sess.ts" })
+  ok("lsp_diagnostics returns the server's diagnostics", /unused variable/.test(out))
+
+  const defTool = sess.tools.find((t) => t.name === "lsp_definition")
+  const defOut = await defTool.run({ path: "sess.ts", symbol: "greet" })
+  ok("lsp_definition resolves a symbol to a location", /sess\.ts:11:3/.test(defOut))
+  ok("a missing symbol is a clear message, not a throw", /not found/.test(await defTool.run({ path: "sess.ts", symbol: "nope" })))
+  fs.writeFileSync(path.join(DIR, "sess.rs"), "fn x() {}\n") // exists, but no server for .rs
+  ok("an unconfigured file type is a clear message", /no language server configured/.test(await defTool.run({ path: "sess.rs", symbol: "x" })))
+  await sess.close()
+}
+
+console.log("== agent loop: an LSP tool is callable end-to-end, and the server is closed ==")
+{
+  const marker = path.join(DIR, "lsp-server-exited")
+  // stub that also records shutdown: on `exit` it writes a marker before quitting
+  const closingStub = stubPath.replace(/\.cjs$/, "-closing.cjs")
+  fs.writeFileSync(closingStub, STUB.replace('else if (msg.method === "exit") {\n    process.exit(0)', `else if (msg.method === "exit") {\n    try { require("fs").writeFileSync(${JSON.stringify(marker)}, "bye") } catch {}\n    process.exit(0)`))
+
+  const file = path.join(DIR, "e2e.ts")
+  fs.writeFileSync(file, "const bad = 1\n")
+
+  const provServer = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (d) => { body += d })
+    req.on("end", () => {
+      let toolRan = false
+      try { toolRan = (JSON.parse(body).messages || []).some((m) => m.role === "tool") } catch {}
+      res.writeHead(200, { "content-type": "application/json" })
+      if (toolRan) res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "checked diagnostics" }, finish_reason: "stop" }] }))
+      else res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "", tool_calls: [
+        { id: "t1", type: "function", function: { name: "lsp_diagnostics", arguments: JSON.stringify({ path: file }) } },
+      ] }, finish_reason: "tool_calls" }] }))
+    })
+  })
+  await new Promise((r) => provServer.listen(0, "127.0.0.1", r))
+  const port = provServer.address().port
+
+  const { runAgent } = await import("../forge/agent.js")
+  const config = {
+    providers: {}, lsp: { servers: { ts: { command: process.execPath, args: [closingStub, "normal"], extensions: [".ts"] } } },
+    agent: { maxSteps: 6, timeoutSec: 20 }, skills: { enabled: false }, context: { repoMap: false },
+    tools: { intelligence: true, verify: false }, retry: { attempts: 1, backoffMs: 1 },
+  }
+  const provider = { name: "m", protocol: "openai", baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "k", model: "m", contextWindow: 128000 }
+  // agent tools resolve paths against process.cwd(); run from DIR so e2e.ts resolves
+  const prevCwd = process.cwd(); process.chdir(DIR)
+  let r
+  try { r = await runAgent({ config, provider, task: "check diagnostics for e2e.ts", journal: false }) }
+  finally { process.chdir(prevCwd) }
+  provServer.close()
+
+  const diagCall = (r.toolLog || []).find((t) => t.name === "lsp_diagnostics")
+  ok("the LSP tool was invoked by the agent loop", !!diagCall)
+  ok("its result came from the language server", diagCall && /unused variable/.test(String(diagCall.result)))
+  ok("the run produced a final answer", /checked diagnostics/.test(r.text))
+  await new Promise((res) => setTimeout(res, 500))
+  ok("the LSP server was shut down (no leaked child process)", fs.existsSync(marker))
 }
 
 try { fs.rmSync(DIR, { recursive: true, force: true }) } catch {}

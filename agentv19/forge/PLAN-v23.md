@@ -95,10 +95,20 @@ read-only, since a language server observes code, never mutates it.
 prints real diagnostics. `test-lsp.mjs` (25 checks) proves it against a stand-in
 language server, including byte-accurate framing on a multi-byte document.
 
-**Next:** the read-only agent tools on top — `lsp_definition`, `lsp_references`,
-`lsp_hover`, `lsp_diagnostics` — over a per-run session manager that lazily
-starts one server per language and is closed with the run, and feeding
-diagnostics into the verification ledger.
+**Agent tools (delivered).** `lsp_definition`, `lsp_references`, `lsp_hover`,
+`lsp_diagnostics` — read-only, plugin-shaped — over a per-run session manager
+that lazily starts one language server per language, keeps documents synced with
+the file on disk (so results reflect edits the agent just made), and is closed
+with the run. They flow through the same plugin path and capability registry as
+every other tool, and are wired into `agent.js` end-to-end (`test-lsp.mjs`, 41
+checks, includes the real `runAgent` calling `lsp_diagnostics` and the server
+being shut down afterward). Symbol-based tools locate the identifier's first
+word-boundary occurrence, so the model passes a name, not a line/column.
+
+**Still open:** feeding diagnostics automatically into the verification ledger
+(running `lsp_diagnostics` on changed files as part of the post-write gate). The
+tool makes the evidence available now; the automatic gate hook is a separate
+change so it can be designed against `verifyledger.js` without widening this PR.
 
 ### 3. Semantic retrieval (planned)
 Optional provider-embedding ranking added to `retrieval.js`, with BM25 kept as

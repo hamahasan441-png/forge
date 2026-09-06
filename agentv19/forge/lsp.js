@@ -19,6 +19,7 @@
  * language server observes code, it never mutates it.
  */
 import { spawn } from "node:child_process"
+import fsMod from "node:fs"
 import path from "node:path"
 import { pathToFileURL, fileURLToPath } from "node:url"
 
@@ -48,6 +49,7 @@ class LspClient {
     this._closed = false
     this._exitReason = null
     this._open = new Map() // uri -> version
+    this._openText = new Map() // uri -> last-synced text
     this.diagnostics = new Map() // uri -> [{range, message, severity, source}]
     this._diagWaiters = new Map() // uri -> [resolve]
     this.serverCapabilities = null
@@ -163,7 +165,24 @@ class LspClient {
   openDoc(uri, languageId, text) {
     if (this._open.has(uri)) return
     this._open.set(uri, 1)
+    this._openText.set(uri, text)
     this._notify("textDocument/didOpen", { textDocument: { uri, languageId, version: 1, text } })
+  }
+
+  /**
+   * Ensure the server sees the CURRENT content of a document. Opens it if new;
+   * if it is open but the text changed (an agent edited the file), sends a full
+   * didChange and clears the cached diagnostics so `diagnosticsFor` waits for
+   * the server's fresh push instead of returning stale results.
+   */
+  syncDoc(uri, languageId, text) {
+    if (!this._open.has(uri)) { this.openDoc(uri, languageId, text); return }
+    if (this._openText.get(uri) === text) return
+    const version = (this._open.get(uri) || 1) + 1
+    this._open.set(uri, version)
+    this._openText.set(uri, text)
+    this.diagnostics.delete(uri) // force a fresh wait on the next diagnosticsFor
+    this._notify("textDocument/didChange", { textDocument: { uri, version }, contentChanges: [{ text }] })
   }
 
   async definition(uri, line, character) {
@@ -259,4 +278,122 @@ export function languageIdForFile(file, spec) {
   const ext = path.extname(String(file || "")).toLowerCase()
   const map = { ".ts": "typescript", ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact", ".py": "python", ".go": "go", ".rs": "rust", ".java": "java", ".c": "c", ".cpp": "cpp", ".rb": "ruby" }
   return map[ext] || "plaintext"
+}
+
+// ---------------------------------------------------------------------------
+// Agent tool layer (v23): read-only LSP tools over a per-run session.
+// ---------------------------------------------------------------------------
+
+const SEVERITY = { 1: "error", 2: "warning", 3: "info", 4: "hint" }
+
+/** Escape a string for use inside a RegExp. */
+function escapeRegExp(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") }
+
+/** First word-boundary occurrence of `symbol` → { line, character } (0-based). */
+export function locateSymbol(text, symbol) {
+  if (!symbol) return null
+  const re = new RegExp(`\\b${escapeRegExp(symbol)}\\b`)
+  const lines = String(text).split("\n")
+  for (let i = 0; i < lines.length; i++) {
+    const idx = lines[i].search(re)
+    if (idx !== -1) return { line: i, character: idx }
+  }
+  return null
+}
+
+const rel = (cwd, p) => { try { return path.relative(cwd, p) || p } catch { return p } }
+
+/** Format diagnostics as concise, bounded text for the model. */
+export function formatDiagnostics(diags, { cwd = process.cwd(), file = "" } = {}) {
+  if (!diags.length) return `no diagnostics for ${rel(cwd, file)} — the language server reports it clean`
+  return diags.slice(0, 100).map((d) => {
+    const ln = (d.range?.start?.line ?? 0) + 1, col = (d.range?.start?.character ?? 0) + 1
+    const sev = SEVERITY[d.severity] || "note"
+    const src = d.source ? ` [${d.source}]` : ""
+    return `${sev} ${ln}:${col}${src} ${String(d.message).split("\n")[0]}`
+  }).join("\n")
+}
+
+/**
+ * A per-run LSP session: lazily starts ONE language server per configured
+ * language (cached by server name, reused across tool calls), keeps documents
+ * in sync with the file on disk, and is closed with the run. Returns
+ * plugin-shaped, READ-ONLY tools so the agent loop treats them exactly like any
+ * other tool (through the same safety choke point and capability registry).
+ */
+export function createLspSession(config, { cwd = process.cwd() } = {}) {
+  const rootUri = pathToUri(cwd)
+  const clients = new Map() // serverName -> Promise<client>
+  const fs2 = fsMod
+
+  async function resolve(file) {
+    const abs = path.resolve(cwd, String(file || ""))
+    if (!fs2.existsSync(abs)) return { error: `no such file: ${rel(cwd, abs)}` }
+    const found = serverForFile(config, abs)
+    if (!found) return { error: `no language server configured for ${path.extname(abs) || "this file type"} (configure lsp.servers, or use grep_files / read_file)` }
+    if (!clients.has(found.name)) {
+      clients.set(found.name, connectServer(found.name, found.spec, { rootUri }).catch((e) => { clients.delete(found.name); throw e }))
+    }
+    let client
+    try { client = await clients.get(found.name) } catch (e) { return { error: `language server "${found.name}" failed to start: ${e.message}` } }
+    let text
+    try { text = fs2.readFileSync(abs, "utf8") } catch (e) { return { error: `could not read ${rel(cwd, abs)}: ${e.message}` } }
+    client.syncDoc(pathToUri(abs), languageIdForFile(abs, found.spec), text)
+    return { client, abs, uri: pathToUri(abs), text }
+  }
+
+  const needSymbol = async (args, fn) => {
+    const r = await resolve(args?.path)
+    if (r.error) return r.error
+    const pos = locateSymbol(r.text, args?.symbol)
+    if (!pos) return `symbol ${JSON.stringify(args?.symbol)} not found in ${rel(cwd, r.abs)}`
+    return fn(r, pos)
+  }
+
+  const mkTool = (name, description, properties, required, run) => ({
+    name, readOnly: true, source: "lsp",
+    def: { type: "function", function: { name, description, parameters: { type: "object", properties, required } } },
+    run,
+  })
+
+  const tools = [
+    mkTool("lsp_definition", "Find where a symbol is defined (go-to-definition via the language server). Returns file:line locations.",
+      { path: { type: "string" }, symbol: { type: "string", description: "identifier to resolve at its first occurrence in the file" } }, ["path", "symbol"],
+      (args) => needSymbol(args, async (r, pos) => {
+        const locs = await r.client.definition(r.uri, pos.line, pos.character)
+        if (!locs.length) return `no definition found for ${args.symbol}`
+        return locs.map((l) => `${rel(cwd, l.path)}:${l.line + 1}:${l.character + 1}`).join("\n")
+      })),
+    mkTool("lsp_references", "Find all references to a symbol (via the language server). Returns file:line locations.",
+      { path: { type: "string" }, symbol: { type: "string" } }, ["path", "symbol"],
+      (args) => needSymbol(args, async (r, pos) => {
+        const locs = await r.client.references(r.uri, pos.line, pos.character, true)
+        if (!locs.length) return `no references found for ${args.symbol}`
+        return `${locs.length} reference(s):\n` + locs.slice(0, 200).map((l) => `${rel(cwd, l.path)}:${l.line + 1}:${l.character + 1}`).join("\n")
+      })),
+    mkTool("lsp_hover", "Get the type/signature/documentation of a symbol (hover via the language server).",
+      { path: { type: "string" }, symbol: { type: "string" } }, ["path", "symbol"],
+      (args) => needSymbol(args, async (r, pos) => {
+        const h = await r.client.hover(r.uri, pos.line, pos.character)
+        return h || `no hover information for ${args.symbol}`
+      })),
+    mkTool("lsp_diagnostics", "Get compiler/linter diagnostics (errors and warnings) for a file from the language server.",
+      { path: { type: "string" } }, ["path"],
+      async (args) => {
+        const r = await resolve(args?.path)
+        if (r.error) return r.error
+        const diags = await r.client.diagnosticsFor(r.uri, 4000)
+        return formatDiagnostics(diags, { cwd, file: r.abs })
+      }),
+  ]
+
+  return {
+    tools,
+    async close() {
+      for (const p of clients.values()) {
+        try { const c = await p; await c.close() } catch {}
+      }
+      clients.clear()
+    },
+  }
 }
