@@ -46,7 +46,9 @@ const FORGE_DIR = path.resolve(__dirname, "../forge")
 const {
   stripAnsi, displayWidth, graphemes, fit, wrapAnsi, renderHeader, renderDock, renderOptions, renderPlan, renderChanges,
   renderVerification, renderRecovery, renderCancel, renderToolLine, progressOf, tierFor, shortRun, shortCheckpoint, detectDialect, renderColumns,
+  renderStatusLine, renderAgentPanel, renderDagBlock, verificationStatus, renderVerificationStatus, stateLabel,
 } = await import("../forge/render.js")
+const { renderBlock, renderLine, createMarkdownStream } = await import("../forge/markdown.js")
 const { createKeyDecoder } = await import("../forge/keys.js")
 const { createEditor, layout, parseHistoryFile, serializeHistory, historyWorthy, dedupe } = await import("../forge/editor.js")
 const { createUIStore, reduce, initialState, bridgeAgentEvent, createBridgeContext, classifyCheck, parseCheckOutput, parseTodo, summarizeToolResult, toolTarget, isBusy } = await import("../forge/uistate.js")
@@ -532,6 +534,45 @@ function fakeTTY(cols = 60, rows = 12) {
   const t7 = fakeTTY(60, 12)
   const term7 = createTerminal({ input: t7.input, output: t7.output, forceTTY: true, env: { FORGE_A11Y: "1" } })
   ok("terminal picks up a11y dialect from env", term7.opts.a11y === true)
+  // command palette: open, filter, navigate, accept, close
+  {
+    const tp = fakeTTY(60, 14)
+    const termp = createTerminal({ input: tp.input, output: tp.output, forceTTY: true })
+    const picked = []
+    const toggled = []
+    termp.start({
+      prompt: "forge > ", onSubmit: () => {}, onEOF: () => {},
+      paletteItems: () => [{ name: "/help", hint: "commands" }, { name: "/status", hint: "task status" }, { name: "/agent", hint: "agent mode" }],
+      onPaletteSelect: (it) => picked.push(it),
+      onToggle: (n) => toggled.push(n),
+    })
+    ok("palette: closed by default", termp._paletteState() === null)
+    termp.openPalette(); termp._renderNow()
+    const st1 = termp._paletteState()
+    ok("palette: opens with all items", st1 && st1.items === 3 && st1.rows === 3 && st1.sel === 0)
+    ok("palette: prompt + rows on screen", tp.screen.all().includes("› /help") && tp.screen.all().includes("/agent"))
+    // ascii dialect: prompt symbol and continuation marker are ASCII
+    {
+      const ta = fakeTTY(50, 12)
+      const terma = createTerminal({ input: ta.input, output: ta.output, forceTTY: true, env: { FORGE_ASCII: "1" } })
+      terma.start({ prompt: "forge > ", onSubmit: () => {}, onEOF: () => {}, paletteItems: () => [{ name: "/help", hint: "commands" }, { name: "/status", hint: "task status" }] })
+      terma.openPalette(); terma._renderNow()
+      ok("palette: ascii prompt symbol + rows", ta.screen.all().includes("> /help") && !/\x1b/.test(ta.screen.all().split("\n").filter((l) => l.includes("/help")).join("")))
+      terma.stop()
+    }
+    termp._feed("st"); termp._renderNow()
+    ok("palette: filters live", termp._paletteState().rows === 1 && tp.screen.all().includes("/status"))
+    termp._feed("\r"); termp._renderNow()
+    ok("palette: enter accepts filtered item", termp._paletteState() === null && picked.length === 1 && picked[0].name === "/status")
+    termp._feed("\x1b")
+    await new Promise((r) => setTimeout(r, 60)) // ESC needs the decoder timeout
+    termp._renderNow()
+    ok("palette: escape closes while open", termp._paletteState() === null)
+    termp._feed("\x0f"); termp._renderNow()
+    ok("palette: Ctrl+O outside palette toggles tools", toggled.length === 1 && toggled[0] === "tools")
+    termp.stop()
+  }
+
   // ask(): single-key question
   const t8 = fakeTTY(60, 12)
   const term8 = createTerminal({ input: t8.input, output: t8.output, forceTTY: true })
@@ -567,6 +608,72 @@ realLog("== command palette ==")
   ok("suggestCommand no wild guesses", suggestCommand("zzzzzzzz").length === 0)
   const names = COMMANDS.map((c) => c[0])
   for (const req of ["help", "status", "plan", "tasks", "agents", "memory", "sessions", "checkpoints", "diff", "undo", "retry", "verify", "clear", "settings", "normal", "chat", "details", "agent"]) ok(`palette has /${req}`, names.includes(req))
+}
+
+realLog("== markdown streaming renderer ==")
+{
+  const mdText = "# Title\n\n## Section\n- bullet one\n- [x] task done\n- [ ] task todo\n1. first\n2. second\n> quote\n\n```diff\n+added\n-removed\n@@ hunk\n```\n\n**bold** and `code` and [link](http://x)\n"
+  const rows = renderBlock(mdText, o, 80).map(stripAnsi)
+  ok("markdown: headings render with a marker", rows.some((r) => r.startsWith("▸ Title")) && rows.some((r) => r.startsWith("▸ Section")))
+  ok("markdown: bullets and tasks keep their symbols", rows.includes("▸ bullet one") && rows.includes("✓ task done") && rows.includes("○ task todo"))
+  ok("markdown: ordered list keeps numbering", rows.includes("1. first") && rows.includes("2. second"))
+  ok("markdown: blockquote gets a branch", rows.includes("│ quote"))
+  ok("markdown: diff fence keeps + - markers", rows.includes("+added") && rows.includes("-removed") && rows.includes("@@ hunk"))
+  ok("markdown: inline code/bold/link stay readable", rows.some((r) => r.includes("bold") && r.includes("code") && r.includes("(http://x)")))
+  ok("markdown: rows never exceed width", renderBlock(mdText, o, 20).every((r) => displayWidth(r) <= 20))
+  // streaming: partial stays live, complete lines are durable, finish flushes
+  const durables = [], partial = { value: "" }
+  const fake = { out: (s) => durables.push(String(s)), setPartial: (s) => { partial.value = s } }
+  const md = createMarkdownStream({ term: fake, o })
+  md.feed("- live item")
+  ok("markdown stream: incomplete tail stays live", partial.value === "- live item")
+  ok("markdown stream: nothing promoted before newline", durables.length === 0)
+  md.feed("\n- done\n")
+  ok("markdown stream: complete lines are styled and durable", durables.length === 2 && stripAnsi(durables[0]) === "▸ live item\n" && stripAnsi(durables[1]) === "▸ done\n")
+  md.finish()
+  ok("markdown stream: finish flushes the tail", partial.value === "")
+  const md2 = createMarkdownStream({ term: fake, o })
+  const beforeReset = durables.length
+  md2.feed("```diff\n+ a\n")
+  const during = durables.length
+  md2.reset()
+  ok("markdown stream: reset drops the tail", partial.value === "" && durables.length === during && during > beforeReset)
+}
+
+realLog("== status line / agent panel / dag / verification ==")
+{
+  const s = sampleState()
+  const sl = renderStatusLine(s, 100, o)
+  ok("status line fits and shows state/task", displayWidth(sl) <= 99 && stripAnsi(sl).includes("VERIFYING") && stripAnsi(sl).includes("Refactor authentication"))
+  ok("status line narrow fits", displayWidth(renderStatusLine(s, 24, o)) <= 23)
+  ok("status line drops hint before mangling it", !stripAnsi(renderStatusLine(s, 20, o)).includes("Alt+P…") && displayWidth(renderStatusLine(s, 20, o)) <= 19)
+  ok("status line ascii dialect has no unicode", /^[\x20-\x7e]*$/.test(stripAnsi(renderStatusLine(s, 60, renderOptions({ ascii: true })))))
+  const slIdle = renderStatusLine(initialState(), 100, o)
+  ok("status line idle shows READY + palette hint", stripAnsi(slIdle).includes("READY") && stripAnsi(slIdle).includes("Alt+P palette"))
+  const ap = renderAgentPanel(s, 100, o).map(stripAnsi)
+  ok("agent panel shows model/role/status", ap.some((r) => r.includes("MODEL openai/gpt-4o")) && ap.some((r) => r.includes("ROLE AGENT")) && ap.some((r) => r.includes("STATUS")))
+  const withView = reduce(s, { type: "VIEW_CHANGED", key: "plan" })
+  const dock = renderDock(withView, 120, 30, o)
+  ok("dock with plan view stays bounded", dock.every((l) => displayWidth(l) <= 119) && dock.length <= 10)
+  // DAG: authoritative graph from meta
+  const dag = { order: ["A", "B", "C"], nodes: [{ id: "A", objective: "inspect", dependencies: [], status: "done" }, { id: "B", objective: "patch auth", dependencies: ["A"], status: "doing" }, { id: "C", objective: "run tests", dependencies: ["B"], status: "todo" }] }
+  const db = renderDagBlock(dag, 100, o, { max: 9 })
+  ok("dag shows nodes in order with deps", stripAnsi(db[0]).includes("inspect") && stripAnsi(db[1]).includes("← A"))
+  const withDag = reduce(withView, { type: "DAG_UPDATED", dag: { order: dag.order, nodes: dag.nodes, ts: 1 } })
+  const dockDag = renderDock(withDag, 120, 30, o)
+  ok("dock dag view bounded", dockDag.length <= 10 && dockDag.every((l) => displayWidth(l) <= 119))
+  ok("verification status: none is honest", verificationStatus({}).status === "none")
+  ok("verification status: all ok → verified", verificationStatus({ syntax: { ok: true }, tests: { ok: true } }).status === "verified")
+  ok("verification status: one fail → required", verificationStatus({ syntax: { ok: true }, tests: { ok: false } }).status === "required")
+  ok("verification status: some pending → partial", verificationStatus({ syntax: { ok: true }, tests: { ok: undefined } }).status === "partial")
+  const vsNone = renderVerificationStatus({}, 80, o)
+  ok("verification one-liners fit", displayWidth(vsNone) <= 79 && stripAnsi(vsNone).includes("no checks"))
+  ok("verification verified one-liner", stripAnsi(renderVerificationStatus({ syntax: { ok: true } }, 80, o)).includes("VERIFIED"))
+  ok("verification required one-liner", stripAnsi(renderVerificationStatus({ tests: { ok: false } }, 80, o)).includes("VERIFICATION REQUIRED"))
+  ok("stateLabel words for a11y", stateLabel(s, oA).includes("STATE:") && stripAnsi(stateLabel(s, o)).includes("VERIFYING"))
+  const vw = reduce(s, { type: "VIEW_CHANGED", key: "verification" })
+  const dockV = renderDock(vw, 120, 30, o)
+  ok("dock verification view fits", dockV.length <= 10 && dockV.every((l) => displayWidth(l) <= 119))
 }
 
 // ---------------------------------------------------------------------------

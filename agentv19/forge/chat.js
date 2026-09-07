@@ -44,6 +44,7 @@ import { VERSION } from "./version.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore, parseCheckOutput } from "./uistate.js"
 import { createAgentView } from "./agentview.js"
+import { createMarkdownStream } from "./markdown.js"
 import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify } from "./render.js"
 import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
 import { unifiedDiff } from "./textdiff.js"
@@ -506,6 +507,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const outLines = (lines) => { if (ui) ui.term.lines(lines); else for (const l of lines) console.log(l) }
   const dispatchUI = (ev) => store.dispatch(ev)
   const o = term?.opts
+  /** Structured streaming renderer for the interactive console (TTY only;
+   *  piped sessions keep byte-identical raw output for scripts/tests). */
+  const mdStream = ui ? createMarkdownStream({ term: ui.term, o }) : null
+  const md = {
+    feed: (text) => { if (mdStream) mdStream.feed(text); else process.stdout.write(text) },
+    finish: () => { if (mdStream) mdStream.finish(); else process.stdout.write("\n") },
+    reset: () => mdStream?.reset(),
+  }
   const recentRuns = () => listRuns({ cwd: process.cwd(), max: 20 })
   let lastAgentState = null // snapshot of the UI state when the last run ended (for /agents, /diff, /details)
 
@@ -763,8 +772,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   })
 
   /** One streaming round: returns {text, toolCalls}. Prints text as it arrives.
-   *  onText (optional) receives each delta so the caller can preserve partial
-   *  output if the stream is interrupted (Ctrl-C) — v20.2 "never lose work". */
+   *  In the interactive console the stream goes through the structured
+   *  markdown renderer (headings, lists, fences, diffs styled incrementally);
+   *  piped sessions keep raw byte output. onText (optional) receives each
+   *  delta so the caller can preserve partial output if the stream is
+   *  interrupted (Ctrl-C) — v20.2 "never lose work". */
   async function streamRound(wire, signal, deepEffort, onText) {
     let text = ""
     let toolCalls = []
@@ -775,8 +787,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     )) {
       if (ev.type === "text") {
         if (!started) { started = true; dispatchUI({ type: "STREAMING", on: true }) }
-        process.stdout.write(ev.text); text += ev.text; onText?.(ev.text)
+        md.feed(ev.text); text += ev.text; onText?.(ev.text)
       } else if (ev.type === "reasoning") {
+        // reasoning is diagnostic, not answer structure: stays raw/dimmed and
+        // never mixes into the markdown stream (which owns the answer partial)
         if (config.chat?.showReasoning !== false && uiCfg.thinking !== false) process.stdout.write(dim(ev.text.slice(0, 1600)))
       } else if (ev.type === "tool_calls") toolCalls = ev.calls
       else if (ev.type === "usage") trackUsage(ev.usage)
@@ -789,8 +803,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   /** One non-streaming round with tools. */
   async function plainRound(wire, deepEffort) {
     const msg = await chatOnce({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, connectMs: config.retry?.connectMs, requestTimeoutMs: config.retry?.requestTimeoutMs })
-    if (msg.reasoning && config.chat?.showReasoning !== false) console.log(dim("·thinking· " + msg.reasoning.slice(0, 800)))
-    if (msg.content) process.stdout.write(msg.content)
+    if (msg.reasoning && config.chat?.showReasoning !== false) {
+      if (ui) md.feed(msg.reasoning.slice(0, 800))
+      else console.log(dim("·thinking· " + msg.reasoning.slice(0, 800)))
+    }
+    if (msg.content) md.feed(msg.content)
     trackUsage(msg.usage)
     return { text: msg.content ?? "", toolCalls: msg.toolCalls ?? [] }
   }
@@ -798,7 +815,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   /** Execute tool calls (v16: reads in parallel, writes serialized), print
    *  activity, append CANONICAL wire-format messages to history. */
   async function runToolCalls(toolCalls) {
-    if (ui) ui.term.endStream(); else process.stdout.write("\n")
+    if (ui) md.finish(); else process.stdout.write("\n")
     const parsed = toolCalls.map((tc) => {
       let args = {}
       try { args = JSON.parse(tc.args || "{}") } catch {}
@@ -915,9 +932,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         full = text || full
         break
       }
-      if (ui) ui.term.endStream(); else process.stdout.write("\n")
+      md.finish()
     } catch (e) {
-      if (ui) ui.term.endStream(); else process.stdout.write("\n")
+      md.finish()
       if (e?.name === "AbortError") {
         if (ui) dispatchUI({ type: "USER_INTERRUPTED", phase: "stopped" })
         // v20.2: an interrupted answer is no longer thrown away. If any text was
@@ -1018,12 +1035,24 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   if (ui) {
     // ---- v20.4 interactive terminal: raw-mode editor + render lock -----------
+    // Palette items come from the single COMMANDS source (name + hint); a
+    // selection is submitted like typed input so command semantics are shared.
+    const paletteItems = () => COMMANDS.map(([name, args, hint]) => ({
+      name: "/" + name + (args ? " " + args : ""),
+      hint: hint || "",
+    }))
     ui.term.start({
       prompt: getPrompt(),
       continuation: dim("… ") + " ",
       history: readHist(),
       onSubmit: (text) => enqueue(text),
       completer: uiCompleter,
+      paletteItems,
+      onPaletteSelect: (item) => {
+        const cmd = String(item?.name || "").trim()
+        if (cmd) enqueue(cmd)
+      },
+      onToggle: (name) => dispatchUI({ type: "VIEW_CHANGED", key: name }),
       onResize: ({ columns, rows }) => dispatchUI({ type: "TERMINAL_RESIZED", columns, rows }),
       onCancel: ({ hadText }) => {
         if (abort) { requestCancel(); return "cancelled" }

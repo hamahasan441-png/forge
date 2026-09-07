@@ -54,7 +54,13 @@ export const EVENTS = [
   "NOTICE", "THOUGHT", "TERMINAL_RESIZED", "INPUT_CHANGED", "TASK_RESET", "REPAIR_ATTEMPT", "STREAMING",
   // v20.5 tool intelligence layer
   "VERIFICATION_RECORDED",
+  // console view toggles (pure presentation, never task truth)
+  "VIEW_CHANGED",
+  // authoritative task metadata from the v21 controller
+  "SEGMENT_UPDATED", "DAG_UPDATED", "META_UPDATE",
 ]
+
+export const VIEWS = ["tools", "plan", "diff", "verification"]
 
 const ACTIVITY_CAP = 60
 const DETAILS_CAP = 12
@@ -96,6 +102,12 @@ export function initialState(over = {}) {
     input: { length: 0, lines: 1, cursor: 0, mode: "edit" },
     terminal: { columns: 80, rows: 24, tty: false },
     streaming: false,
+    // presentation switches only — the UI reads task truth from the fields above
+    view: { tools: false, plan: false, diff: false, verification: false },
+    // authoritative controller metadata (segment/dag summaries, risk level)
+    segment: null,
+    dag: null,
+    risk: null,
     seq: 0,
     ...over,
   }
@@ -134,6 +146,24 @@ export function reduce(s, ev) {
       return { ...s, thought: String(ev.text || "").split("\n")[0].slice(0, 160) }
     case "STREAMING":
       return s.streaming === !!ev.on ? s : { ...s, streaming: !!ev.on }
+    case "VIEW_CHANGED": {
+      const key = VIEWS.includes(ev.key) ? ev.key : null
+      if (!key) return s
+      const value = ev.value === undefined ? !s.view[key] : !!ev.value
+      return { ...s, view: { ...s.view, [key]: value } }
+    }
+    case "SEGMENT_UPDATED":
+      if (!s.task) return s
+      return { ...s, segment: { n: ev.n ?? s.segment?.n ?? null, max: ev.max ?? s.segment?.max ?? null, note: String(ev.note || "").slice(0, 80) } }
+    case "DAG_UPDATED":
+      return { ...s, dag: ev.dag || null }
+    case "META_UPDATE": {
+      const next = { ...s }
+      if (ev.risk) next.risk = String(ev.risk)
+      if (ev.model) next.model = String(ev.model)
+      if (ev.provider) next.provider = String(ev.provider)
+      return next
+    }
 
     case "TASK_STARTED": {
       const kind = ev.kind || "agent"
@@ -657,7 +687,10 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
     //  task-level events; tool traffic still flows through the cases above).
     case "TASK_STARTED":
       emit({ type: "TASK_STARTED", id: ev.taskId || null, title: ev.objective, kind: "agent", startedAt: now })
-      if (ev.risk) emit({ type: "NOTICE", level: "info", text: `autonomous task • risk=${ev.risk}` })
+      if (ev.risk) {
+        store.dispatch({ type: "META_UPDATE", risk: ev.risk })
+        emit({ type: "NOTICE", level: "info", text: `autonomous task • risk=${ev.risk}` })
+      }
       break
     case "MODEL_SELECTED":
       emit({ type: "NOTICE", level: "info", text: `model ${ev.provider}/${ev.model} (${ev.confidence}) — ${String(ev.reason ?? "").slice(0, 100)}` })
@@ -665,8 +698,10 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
       break
     case "DAG_BUILT":
       emit({ type: "NOTICE", level: "info", text: `planned dependency graph: ${ev.nodes} node(s)` })
+      if (ev.graph?.order?.length) emit({ type: "DAG_UPDATED", dag: { order: ev.graph.order, nodes: ev.graph.nodes, ts: now } })
       break
     case "SEGMENT_STARTED":
+      emit({ type: "SEGMENT_UPDATED", n: ev.segment, max: ev.maxSteps })
       emit({ type: "NOTICE", level: "info", text: `segment ${ev.segment} (budget ${ev.maxSteps} steps)` })
       break
     case "SEGMENT_COMPLETED":

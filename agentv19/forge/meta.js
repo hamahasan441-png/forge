@@ -165,7 +165,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // nodes stay complete; fall back to a fresh build from the new plan.
       dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(defs)
       persistDAG()
-      emit({ type: "DAG_BUILT", nodes: dag.order.length })
+      // observability payload: the UI renders exactly this graph (read-only)
+      emit({ type: "DAG_BUILT", nodes: dag.order.length, graph: dagLib.serializeDAG(dag) })
     }
   } catch (e) {
     ts.noteError("DAG_FAILED", e?.message ?? String(e))
