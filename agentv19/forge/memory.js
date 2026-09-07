@@ -19,7 +19,7 @@ import os from "node:os"
 import crypto from "node:crypto"
 import { DEFAULT_DIR } from "./config.js"
 import { redact } from "./secrets.js"
-import { rankDocs } from "./retrieval.js"
+import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 
 export const GLOBAL_MEMORY_PATH = path.join(DEFAULT_DIR, "memory.md")
 export const PROJECTS_DIR = path.join(DEFAULT_DIR, "projects")
@@ -50,32 +50,40 @@ function readLines(p) {
 // v20.2 (P3-2): relevance scoring moved to retrieval.js (BM25). The old
 // token-overlap helpers (words/score) were retired with that switch.
 
-/**
- * Relevant memory for a query from both tiers.
- * Returns a compact string ready for a system prompt ("" when nothing matches).
- */
-export function relevantMemory(query, { cwd = process.cwd(), limit = 10 } = {}) {
-  if (!String(query ?? "").trim()) return ""
+/** Both memory tiers as one scored-at-read pool (400 lines per tier cap). */
+export function memoryPool(cwd = process.cwd()) {
   const global = readLines(GLOBAL_MEMORY_PATH).slice(0, 400)
   const project = readLines(projectMemoryPath(cwd)).slice(0, 400)
-  const pool = [
+  return [
     ...global.map((l) => ({ l, tier: "global" })),
     ...project.map((l) => ({ l, tier: "project" })),
   ]
-  if (!pool.length) return ""
-  // v20.2 (P3-2): BM25 relevance instead of raw token overlap
-  const scored = rankDocs(query, pool.map((e, i) => ({ i, text: e.l })))
+}
+
+/** BM25 shortlist over the pool: pool entries ordered by score > 0. */
+function bm25Shortlist(query, pool, cap = Infinity) {
+  return rankDocs(query, pool.map((e, i) => ({ i, text: e.l })))
     .filter((r) => r.score > 0)
+    .slice(0, cap)
     .map((r) => pool[r.i])
+}
+
+/** Deduplicate (near-)identical lines and cap the pick count. */
+function dedupePick(entries, limit) {
   const seen = new Set()
   const picked = []
-  for (const e of scored) {
+  for (const e of entries) {
     const key = e.l.toLowerCase().slice(0, 80)
     if (seen.has(key)) continue
     seen.add(key)
     picked.push(e)
     if (picked.length >= limit) break
   }
+  return picked
+}
+
+/** Format picked entries as the prompt block ("" when nothing picked). */
+function formatMemory(picked, cwd) {
   if (!picked.length) return ""
   const g = picked.filter((e) => e.tier === "global").map((e) => `- ${e.l}`)
   const p = picked.filter((e) => e.tier === "project").map((e) => `- ${e.l}`)
@@ -83,6 +91,45 @@ export function relevantMemory(query, { cwd = process.cwd(), limit = 10 } = {}) 
   if (g.length) out.push("USER MEMORY (persistent):\n" + g.join("\n"))
   if (p.length) out.push(`PROJECT MEMORY (${path.basename(path.resolve(cwd))}):\n` + p.join("\n"))
   return out.join("\n\n").slice(0, 1600)
+}
+
+/**
+ * Relevant memory for a query from both tiers.
+ * Returns a compact string ready for a system prompt ("" when nothing matches).
+ */
+export function relevantMemory(query, { cwd = process.cwd(), limit = 10 } = {}) {
+  if (!String(query ?? "").trim()) return ""
+  const pool = memoryPool(cwd)
+  if (!pool.length) return ""
+  // v20.2 (P3-2): BM25 relevance instead of raw token overlap
+  return formatMemory(dedupePick(bm25Shortlist(query, pool), limit), cwd)
+}
+
+/**
+ * v23 semantic variant: reranks the BM25 shortlist with provider embeddings
+ * when an `embedder` (embeddings.js createEmbedder) is supplied. The shortlist
+ * is BM25's — embeddings only REORDER it, they never widen it — so a bad or
+ * offline embeddings endpoint degrades to exactly the v20.2 behaviour. Every
+ * failure path returns the plain BM25 result; this function never throws.
+ */
+export async function relevantMemoryAsync(query, { cwd = process.cwd(), limit = 10, embedder = null, alpha, budgetMs = 4000 } = {}) {
+  if (!String(query ?? "").trim()) return ""
+  const pool = memoryPool(cwd)
+  if (!pool.length) return ""
+  if (!embedder || typeof embedder.embed !== "function") return relevantMemory(query, { cwd, limit })
+  try {
+    const shortN = Math.max(limit * 4, 24)
+    const short = bm25Shortlist(query, pool, shortN)
+    if (!short.length) return ""
+    const reranked = await rankDocsHybrid(query, short.map((e) => ({ text: e.l, ref: e })), {
+      embed: (texts) => embedder.embed(texts),
+      alpha,
+      budgetMs,
+    })
+    return formatMemory(dedupePick(reranked.map((r) => r.ref), limit), cwd)
+  } catch {
+    return relevantMemory(query, { cwd, limit })
+  }
 }
 
 /** Full stats for /status and doctor. */
@@ -225,8 +272,8 @@ export function recordLearning({ problem, rootCause, fix } = {}, cwd = process.c
   }
 }
 
-/** Retrieve learned fixes relevant to a query (for the context engine). */
-export function relevantLearnings(query, { cwd = process.cwd(), limit = 3 } = {}) {
+/** Parse LEARNING blocks (a LEARNING: line + its root-cause:/fix: lines). */
+export function parseLearnings(cwd = process.cwd()) {
   const lines = readLines(projectMemoryPath(cwd))
   const learnings = []
   for (let i = 0; i < lines.length; i++) {
@@ -237,6 +284,12 @@ export function relevantLearnings(query, { cwd = process.cwd(), limit = 3 } = {}
     while (j < lines.length && /^(root-cause|fix):/i.test(lines[j])) { block.push(lines[j]); j++ }
     learnings.push(block.join("\n"))
   }
+  return learnings
+}
+
+/** Retrieve learned fixes relevant to a query (for the context engine). */
+export function relevantLearnings(query, { cwd = process.cwd(), limit = 3 } = {}) {
+  const learnings = parseLearnings(cwd)
   if (!learnings.length) return ""
   if (!String(query ?? "").trim()) return ""
   // v20.2 (P3-2): BM25 relevance
@@ -245,6 +298,33 @@ export function relevantLearnings(query, { cwd = process.cwd(), limit = 3 } = {}
     .slice(0, limit)
     .map((r) => learnings[r.i])
   return scored.length ? "LEARNED FIXES (relevant past failures):\n" + scored.join("\n") : ""
+}
+
+/**
+ * v23 semantic variant of relevantLearnings — same BM25-shortlist-then-rerank
+ * contract as relevantMemoryAsync (embeddings reorder, never widen; failures
+ * fall back to the exact BM25 result).
+ */
+export async function relevantLearningsAsync(query, { cwd = process.cwd(), limit = 3, embedder = null, alpha, budgetMs = 4000 } = {}) {
+  if (!String(query ?? "").trim()) return ""
+  const learnings = parseLearnings(cwd)
+  if (!learnings.length) return ""
+  if (!embedder || typeof embedder.embed !== "function") return relevantLearnings(query, { cwd, limit })
+  try {
+    const short = rankDocs(query, learnings.map((l, i) => ({ i, text: l })))
+      .filter((r) => r.score > 0)
+      .slice(0, Math.max(limit * 4, 8))
+    if (!short.length) return ""
+    const reranked = await rankDocsHybrid(query, short.map((r) => ({ text: learnings[r.i], ref: learnings[r.i] })), {
+      embed: (texts) => embedder.embed(texts),
+      alpha,
+      budgetMs,
+    })
+    const picked = reranked.slice(0, limit).map((r) => r.ref)
+    return picked.length ? "LEARNED FIXES (relevant past failures):\n" + picked.join("\n") : ""
+  } catch {
+    return relevantLearnings(query, { cwd, limit })
+  }
 }
 
 // keep os import meaningful (homedir fallback if DEFAULT_DIR unset)

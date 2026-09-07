@@ -31,6 +31,7 @@ import { createResourceManager, ADAPT } from "./resources.js"
 import { selectModel, reconsiderModel } from "./modelstrategy.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
+import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
@@ -80,7 +81,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const ledger = createLedger()
   if (Array.isArray(state.verification_results)) ledger.load(state.verification_results)
   const resources = createResourceManager({ config, cwd: process.cwd() })
-  const ctxEngine = createContextEngine({ cwd: process.cwd(), config })
+  // v23 semantic retrieval: when retrieval.embeddings resolves, the context
+  // engine reranks memory/learnings BM25 shortlists with provider embeddings.
+  // Off by default; a failed resolution simply leaves embedder = null (BM25).
+  const embCfg = resolveEmbeddingsConfig(config)
+  const embedder = embCfg.ok ? createEmbedder(embCfg) : null
+  const ctxEngine = createContextEngine({ cwd: process.cwd(), config, embedder })
+  if (embedder) {
+    emit({ type: "RETRIEVAL_MODE", taskId, runId: taskRunId, segmentId: null, nodeId: null, mode: "semantic", provider: embCfg.provider, model: embCfg.model, alpha: embCfg.alpha })
+  }
   const manager = createAgentManager({
     maxWorkers: resources.state.maxWorkers,
     onEvent: emit,
@@ -291,7 +300,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.transition(TASK_STATUS.EXECUTING, { reason: "resume after checkpoint boundary" })
     }
 
-    const contextBuilt = ctxEngine.build(state.objective, { budgetTokens: 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
+    // v23: buildAsync = hybrid rerank when embeddings are configured, else the
+    // exact synchronous BM25 build (no embedder → no behavior change)
+    const contextBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
     const contextBlock = typeof contextBuilt === "string" ? contextBuilt : contextBuilt?.text ?? ""
 
     const knownBad = ineffectiveStrategies(state.objective, { cwd: process.cwd() })
@@ -647,7 +658,7 @@ function segmentEvents(emit, segment, ids = {}) {
 
 async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
-  const ctxBlock = ctxEngine.build(state.objective, { budgetTokens: 1600 })
+  const ctxBlock = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1600 })
   const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${String(error ?? verification?.reason ?? "").slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}\n\nInspect the relevant files first, then make a minimal surgical fix, then run verification.`
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
@@ -678,7 +689,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
 }
 
 async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId, taskId = null, segmentId = null, nodeId = null }) {
-  const ctxBuilt = ctxEngine.build(state.objective, { budgetTokens: 1200 })
+  const ctxBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1200 })
   const verifyContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBuilt === "string" ? ctxBuilt : ctxBuilt?.text ?? ""}`
   const ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level: ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.`
   try {

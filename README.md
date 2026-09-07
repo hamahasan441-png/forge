@@ -10,7 +10,7 @@ hardened tools, and 69 bundled skills.
 agentv19/
   README.txt          quick start (install, daily use, in-chat commands)
   PACKAGE_INFO.txt    what's in the build
-  forge/              the CLI (forge.js + 18 modules + skills/) — this is the npm package
+  forge/              the CLI (forge.js + its modules + skills/) — this is the npm package
   tests/              e2e + unit + clean-room install suites
 forge-v20-production.zip   the upstream release archive (untracked; contents extracted)
 ```
