@@ -187,7 +187,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
-  // deterministic identity for this execution
+  // deterministic identity for this execution — define runId early to avoid TDZ in identityMeta closure (e2e regression)
+  const generatedRunId = "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  const effectiveRunId = readonly ? null : (runIdParam ?? runIdOverride ?? generatedRunId)
   const effectiveTaskId = taskId ?? null
   const effectiveSegmentId = segmentId ?? null
   const effectiveNodeId = nodeId ?? worker?.dagNode ?? null
@@ -232,8 +234,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   const maxToolCalls = Math.min(500, Math.max(10, config.agent?.maxToolCalls ?? 80))
   const skillsDir = resolveSkillsDir(config.skills?.dir)
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
-  const generatedRunId = "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
-  const effectiveRunId = readonly ? null : (runIdParam ?? runIdOverride ?? generatedRunId)
   const runId = effectiveRunId
   const log = runId && journal ? openRun({ runId, task, cwd: process.cwd(), kind: "agent", provider: p.name, model: p.model }) : null
   if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role, taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
