@@ -89,21 +89,51 @@ if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom-pkg", "node", ["test-clean-room-package.mjs"]])
 
+/** Escape a string for a GitHub Actions workflow command (::error::). */
+function wfEscape(s) {
+  return String(s ?? "")
+    .replace(/%/g, "%25")
+    .replace(/\r/g, "%0D")
+    .replace(/\n/g, "%0A")
+}
+
+/**
+ * Emit a GitHub annotation for a failing suite.
+ *
+ * CI logs are not always reachable from a workstation, but annotations are
+ * exposed through the Checks API — so a red build can be diagnosed without
+ * downloading the job log.
+ */
+function annotate(label, output, limit = 2400) {
+  const lines = String(output ?? "").split("\n")
+  const interesting = lines.filter((l) => /FAIL|Error|error:|AssertionError|✗|failed|not ok|Traceback/i.test(l))
+  const body = (interesting.length ? interesting : lines.slice(-25)).slice(0, 25).join(" ⏎ ")
+  console.log(`::error title=suite "${label}" failed::${wfEscape(body.slice(0, limit))}`)
+}
+
 function run([label, cmd, args]) {
   return new Promise((resolve) => {
     const target = path.join(here, args[0])
     if (!fs.existsSync(target)) {
       console.log(`\n\x1b[33m▷ ${label} — SKIPPED (${args[0]} not found)\x1b[0m`)
-      return resolve({ label, ok: null, ms: 0 })
+      return resolve({ label, ok: null, ms: 0, output: "" })
     }
     console.log(`\n\x1b[1m\x1b[36m▷ ${label}\x1b[0m  (${cmd} ${args.join(" ")})`)
     const t0 = Date.now()
-    const child = spawn(cmd, args, { cwd: here, stdio: "inherit" })
+    let buf = ""
+    const child = spawn(cmd, args, { cwd: here, stdio: ["ignore", "pipe", "pipe"] })
+    const forward = (chunk) => { const s = String(chunk); buf += s; process.stdout.write(s) }
+    child.stdout?.on("data", forward)
+    child.stderr?.on("data", forward)
     child.on("error", (e) => {
       console.log(`\x1b[31m  cannot launch ${cmd}: ${e.message}\x1b[0m`)
-      resolve({ label, ok: false, ms: Date.now() - t0 })
+      resolve({ label, ok: false, ms: Date.now() - t0, output: buf })
     })
-    child.on("close", (code) => resolve({ label, ok: code === 0, ms: Date.now() - t0 }))
+    child.on("close", (code) => {
+      const ok = code === 0
+      if (!ok) annotate(label, buf)
+      resolve({ label, ok, ms: Date.now() - t0, output: buf })
+    })
   })
 }
 
