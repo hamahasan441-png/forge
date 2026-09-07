@@ -54,8 +54,12 @@ console.log("== no timer is left holding the event loop open ==")
   const timeouts = info.filter((x) => x === "Timeout")
   ok(`no pending Timeout handles (${JSON.stringify(info)})`, timeouts.length === 0)
   // and a completed run really would let node exit: drain check via a child
+  // The probe is written to a temp dir, so it must reach the module by a path
+  // that is resolved HERE (the checkout can live anywhere — CI puts it under
+  // /home/runner/work/...). A file:// URL is importable and location-proof.
+  const metaUrl = new URL("../forge/meta.js", import.meta.url).href
   const probe = `
-import { runMeta } from "/home/user/forge/agentv19/forge/meta.js"
+import { runMeta } from "${metaUrl}"
 const fake = async (a) => a.planOnly
   ? { text: "1. investigate a\\n2. implement a", toolRecords: [], commandChecks: [], toolLog: [] }
   : { text: "done", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [], toolLog: [] }

@@ -84,6 +84,7 @@ const suites = [
   ["leaks", "node", ["test-resource-leaks.mjs"]],
   ["version", "node", ["test-version-consistency.mjs"]],
   ["lessons", "node", ["test-lessons-schema.mjs"]],
+  ["hygiene", "node", ["test-path-hygiene.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])
