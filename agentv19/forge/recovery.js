@@ -27,11 +27,26 @@ import { readTask, interruptedTasks } from "./taskstate.js"
 import { listCheckpoints } from "./checkpoint.js"
 
 export const UNKNOWN_DECISION = {
-  CONTINUE: "continue",       // effect already present as desired — nothing to redo
-  COMPENSATE: "compensate",   // partial/wrong effect — undo or repair first
-  RETRY: "retry",             // effect provably absent + operation is safe to repeat
-  ASK_USER: "ask_user",       // cannot determine safely — human judgement needed
+  CONTINUE: "continue",
+  COMPENSATE: "compensate",
+  RETRY: "retry",
+  ASK_USER: "ask_user",
 }
+
+export const EFFECT_STATUS = {
+  DONE: "DONE",
+  PARTIAL: "PARTIAL",
+  NOT_DONE: "NOT_DONE",
+  UNKNOWN: "UNKNOWN",
+}
+
+function toEffectStatus(decision) {
+  if (decision === UNKNOWN_DECISION.CONTINUE) return EFFECT_STATUS.DONE
+  if (decision === UNKNOWN_DECISION.COMPENSATE) return EFFECT_STATUS.PARTIAL
+  if (decision === UNKNOWN_DECISION.RETRY) return EFFECT_STATUS.NOT_DONE
+  return EFFECT_STATUS.UNKNOWN
+}
+
 
 function sha256Head(file, bytes = 1024 * 1024) {
   try {
@@ -64,26 +79,26 @@ export function reconcileEffect(expected = {}, cwd = process.cwd()) {
       if (!exists) {
         // provably did NOT happen → a write/create may be retried; an edit can't
         return expected.kind === "file_write"
-          ? { decision: UNKNOWN_DECISION.RETRY, reason: "target file does not exist — the write did not land", observed }
-          : { decision: UNKNOWN_DECISION.COMPENSATE, reason: "file missing that an edit expected to modify — inspect before acting", observed }
+          ? { decision: UNKNOWN_DECISION.RETRY, reason: "target file does not exist — the write did not land", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.NOT_DONE }
+          : { decision: UNKNOWN_DECISION.COMPENSATE, reason: "file missing that an edit expected to modify — inspect before acting", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.PARTIAL }
       }
       if (expected.contains) {
         let text = ""
         try { text = fs.readFileSync(p, "utf8") } catch {}
         observed.contains = text.includes(String(expected.contains))
-        if (observed.contains) return { decision: UNKNOWN_DECISION.CONTINUE, reason: "the intended content is already present — do not re-apply", observed }
-        return { decision: UNKNOWN_DECISION.COMPENSATE, reason: "file exists but the intended change is absent — re-apply after inspecting", observed }
+        if (observed.contains) return { decision: UNKNOWN_DECISION.CONTINUE, reason: "the intended content is already present — do not re-apply", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.DONE }
+        return { decision: UNKNOWN_DECISION.COMPENSATE, reason: "file exists but the intended change is absent — re-apply after inspecting", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.PARTIAL }
       }
       // file exists but we don't know the exact intended content → inspect, don't blindly overwrite
       observed.sha = sha256Head(p)
-      return { decision: UNKNOWN_DECISION.ASK_USER, reason: "file exists but desired end-state is unknown — inspect before retrying", observed }
+      return { decision: UNKNOWN_DECISION.ASK_USER, reason: "file exists but desired end-state is unknown — inspect before retrying", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.UNKNOWN }
     }
     case "file_delete": {
       const p = path.resolve(cwd, String(expected.path ?? ""))
       const exists = fs.existsSync(p)
       observed.exists = exists
-      if (!exists) return { decision: UNKNOWN_DECISION.CONTINUE, reason: "file is already gone — delete succeeded", observed }
-      return { decision: UNKNOWN_DECISION.RETRY, reason: "file still present and deletes are idempotent — safe to remove once", observed }
+      if (!exists) return { decision: UNKNOWN_DECISION.CONTINUE, reason: "file is already gone — delete succeeded", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.DONE }
+      return { decision: UNKNOWN_DECISION.RETRY, reason: "file still present and deletes are idempotent — safe to remove once", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.NOT_DONE }
     }
     case "bash":
     case "fetch":
@@ -94,9 +109,9 @@ export function reconcileEffect(expected = {}, cwd = process.cwd()) {
       if (idempotent) {
         // idempotent and unverifiable from here: a single guarded retry is
         // acceptable, but the controller should still inspect first.
-        return { decision: UNKNOWN_DECISION.RETRY, reason: "idempotent operation with an unobserved result — one guarded retry is safe after inspection", observed }
+        return { decision: UNKNOWN_DECISION.RETRY, reason: "idempotent operation with an unobserved result — one guarded retry is safe after inspection", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.NOT_DONE }
       }
-      return { decision: UNKNOWN_DECISION.ASK_USER, reason: "uncertain external side effect; cannot prove the operation did or did not happen — inspect or ask", observed }
+      return { decision: UNKNOWN_DECISION.ASK_USER, reason: "uncertain external side effect; cannot prove the operation did or did not happen — inspect or ask", observed, expectedEffects: expected, observedEffects: observed, effectStatus: EFFECT_STATUS.UNKNOWN }
     }
   }
 }

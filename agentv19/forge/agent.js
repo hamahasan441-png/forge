@@ -16,6 +16,10 @@
  *     system prompt (context engine) instead of raw memory dumps
  *   - adaptive effort: profile auto → deep thinking for complex tasks
  *   - Retry-After honored on transient provider errors
+ * v23 hardening:
+ *   - runAgent accepts explicit taskId, runId, segmentId, nodeId (exact DAG identity)
+ *   - every execution event carries taskId, runId, segmentId, nodeId, toolCallId
+ *   - deterministic node execution via executeNode/markCompleted
  */
 import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
@@ -36,9 +40,6 @@ import { listCheckpoints } from "./checkpoint.js"
 import path from "node:path"
 import fs from "node:fs"
 
-/** v20 adaptive effort: cheap task-complexity classifier.
- *  TRIVIAL/SIMPLE → fast path (no deep reasoning), MODERATE → normal,
- *  COMPLEX/CRITICAL → deep. Transparent: the choice is printed, never hidden. */
 export function classifyTaskComplexity(task) {
   const t = String(task ?? "").toLowerCase()
   const words = t.split(/\s+/).length
@@ -56,7 +57,6 @@ export function classifyTaskComplexity(task) {
   return "critical"
 }
 
-/** Map a profile + task to the effort actually used. Returns {deep, why}. */
 export function resolveEffort(profile, task) {
   switch (profile) {
     case "fast": return { deep: false, why: "profile=fast" }
@@ -99,8 +99,6 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "- Read-only research that would flood context: `delegate` it (role=tuner: researcher/reviewer/tester/security/coder).",
     "- Facts worth remembering later: `memory` append (scope=project for repo conventions, global for user preferences).",
   ]
-  // v20.5: the capability registry speaks for itself — one compact policy
-  // block instead of tool-selection rules scattered through the prompt.
   if (registry) {
     const guidance = toolGuidance(task, { registry, cwd, readOnly: readOnly || planOnly })
     if (guidance) lines.push("", guidance)
@@ -112,15 +110,13 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
       "DEEP THINKING MODE: think like the big models — before EACH tool batch, reason about what to do and why; consider alternatives and failure modes; after edits, VERIFY with tests/builds before claiming success. Prefer correctness over speed.")
   }
   if (planOnly) lines.push("", "PLAN MODE: investigate and produce a numbered, step-by-step implementation plan (files to touch, edits to make, how to verify). Do NOT execute any changes — read-only tools only. End with 'END OF PLAN'.")
-  // v20 context engine: project profile + repo map + relevant memory + learned fixes
   const prof = profileSummary(cwd)
   if (prof) lines.push("", prof)
-  // v20.2 (P3-1): a compact symbol map so the agent locates code without ls/grep
   if (repoMap) {
     try {
-      const map = buildRepoMap(cwd, { query: task || "" }) // P3-2: rank by task relevance
+      const map = buildRepoMap(cwd, { query: task || "" })
       if (map) lines.push("", map)
-    } catch { /* repo map is best-effort — never break the prompt */ }
+    } catch { }
   }
   if (task) {
     const mem = relevantMemory(task, { cwd })
@@ -138,11 +134,6 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   return lines.join("\n")
 }
 
-/** v17 token reducer, v19 TIERED: stage 1 SHRINKS big tool outputs in the
- *  history (keeps the real work-log, drops the bulk) at ~40% of the window;
- *  stage 2 (unchanged) summarizes the middle at ~55% — long agent runs no
- *  longer march into a 400, and shrinking preserves far more information.
- *  v20: `force` lets context-overflow recovery trigger it explicitly. */
 async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   try {
     const estTok0 = estimateTokens(JSON.stringify(messages))
@@ -150,8 +141,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
     const shrinkBudget = Math.floor((window * 40) / 100)
     const budgetTok = Math.floor((window * 55) / 100)
     if (!force && estTok0 < shrinkBudget) return messages
-    const tail = 4 // keep the 4 most recent messages verbatim
-    // stage 1 — shrink big tool outputs outside the recent tail
+    const tail = 4
     let next = messages
     let shrunk = 0
     if (messages.length > tail + 2) {
@@ -168,7 +158,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
       if (shrunk > 0) onEvent?.({ type: "compacted", before: messages.length, after: next.length, estTok: estTok0, budgetTok, shrunk })
       return next
     }
-    if (next.length < 2 + tail + 2) return next // need a real middle to summarize
+    if (next.length < 2 + tail + 2) return next
     const middle = next.slice(2, next.length - tail)
     const digest = middle
       .map((m) => `[${m.role}] ${String(typeof m.content === "string" ? m.content : "(tool activity)").slice(0, 400)}`)
@@ -184,27 +174,52 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
     onEvent?.({ type: "compacted", before: messages.length, after: summarized.length, estTok: estTok0, budgetTok, shrunk })
     return summarized
   } catch {
-    return messages // graceful — compaction must never break the agent loop
+    return messages
   }
 }
 
-export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null }) {
+/**
+ * Exact DAG node identity:
+ * runAgent MUST accept taskId, runId, segmentId, nodeId
+ * Every execution event carries taskId, runId, segmentId, nodeId, toolCallId
+ */
+export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null }) {
   let p = provider
-  const readonly = readOnly || planOnly // plan mode is always read-only
-  // v20.4 UI events: every event from a delegated sub-agent is tagged with its
-  // worker id so the terminal can show it as a worker instead of interleaving
-  // it with the main run's activity.
+  const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
-  if (sub && rawOnEvent) onEvent = (ev) => rawOnEvent({ ...ev, sub, role })
-  // v20.2 provider failover (opt-in): when the active provider keeps failing on
-  // transient/auth errors, fall through to the next configured+tested provider
-  // instead of killing the task. Default OFF — a switch is always announced.
+  // deterministic identity for this execution — define runId early to avoid TDZ in identityMeta closure (e2e regression)
+  const generatedRunId = "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  const effectiveRunId = readonly ? null : (runIdParam ?? runIdOverride ?? generatedRunId)
+  const effectiveTaskId = taskId ?? null
+  const effectiveSegmentId = segmentId ?? null
+  const effectiveNodeId = nodeId ?? worker?.dagNode ?? null
+
+  // Wrap onEvent to inject exact identity into every event (hard requirement)
+  const identityMeta = () => ({
+    taskId: effectiveTaskId,
+    runId: effectiveRunId,
+    segmentId: effectiveSegmentId,
+    nodeId: effectiveNodeId,
+  })
+  if (sub && rawOnEvent) {
+    onEvent = (ev) => {
+      try {
+        rawOnEvent({ ...identityMeta(), ...ev, sub, role, toolCallId: ev?.callId ?? ev?.toolCallId ?? ev?.tool_call_id ?? null })
+      } catch {}
+    }
+  } else if (rawOnEvent) {
+    onEvent = (ev) => {
+      try {
+        rawOnEvent({ ...identityMeta(), ...ev, toolCallId: ev?.callId ?? ev?.toolCallId ?? ev?.tool_call_id ?? null })
+      } catch {}
+    }
+  }
+
   const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
   const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
   let chainIdx = 0
   const isFailworthy = isFailoverWorthy
-  const res = resourceProfile()
-  // v20 adaptive effort: deep may be resolved from the profile when unset
+  const resProfile = resourceProfile()
   let deepEffort = deep
   if (deepEffort === undefined) {
     const profile = config.chat?.profile ?? "auto"
@@ -212,30 +227,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     if (profile === "auto") {
       const level = classifyTaskComplexity(task)
       deepEffort = level === "complex" || level === "critical"
-      if (deepEffort) onEvent?.({ type: "info", text: `auto profile → ${level} task → deep effort` })
+      if (deepEffort) onEvent?.({ type: "info", text: `auto profile → ${level} task → deep effort`, ...identityMeta() })
     }
   }
   const maxSteps = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? 25, readonly ? 10 : 1000)
-  const maxToolCalls = Math.min(500, Math.max(10, config.agent?.maxToolCalls ?? 80)) // v20: hard stop for runaway tool loops
-  const skillsDir = resolveSkillsDir(config.skills?.dir) // bundled skills work in agent mode too
+  const maxToolCalls = Math.min(500, Math.max(10, config.agent?.maxToolCalls ?? 80))
+  const skillsDir = resolveSkillsDir(config.skills?.dir)
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
-  // v20.2 (P3-4): tag every checkpoint from this run with one runId so the whole
-  // run can be rolled back atomically (`forge undo --run`). Sub-agents are
-  // read-only and never write, so they get no runId.
-  // v21: the meta controller shares ONE runId across every segment of a task so
-  // the whole autonomous task is a single atomic undo (`forge undo --run`).
-  const runId = readonly ? null : runIdOverride || "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
-  // v20.4 crash-safe journal (~/.forge/runs/<runId>.json): what the run touched,
-  // updated after every tool result, closed with a terminal status. An
-  // interrupted run (crash / kill) stays "running" → startup recovery screen.
+  const runId = effectiveRunId
   const log = runId && journal ? openRun({ runId, task, cwd: process.cwd(), kind: "agent", provider: p.name, model: p.model }) : null
-  if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role })
-  // v20.2 P3-5: load user tool plugins from ~/.forge/tools (empty by default).
-  // Sub-agents inherit the same plugins the main run sees.
-  // A delegated sub-agent is read-only and not a plan pass. Such workers inherit
-  // local file plugins (cheap) but must NOT spawn their own MCP servers: that
-  // would multiply child processes per delegate, and MCP tools are write-class
-  // so they are blocked in a read-only sub-agent anyway.
+  if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role, taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
+
   const isDelegatedSubAgent = readonly && !planOnly
   let plugins = []
   if (config.tools?.plugins !== false) {
@@ -243,17 +245,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
       plugins = loaded.tools
       if (!isDelegatedSubAgent) {
-        for (const p of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${p.name}${p.readOnly ? " (read-only)" : ""} — ${p.source}` })
-        for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}` })
+        for (const pp of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${pp.name}${pp.readOnly ? " (read-only)" : ""} — ${pp.source}`, ...identityMeta() })
+        for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}`, ...identityMeta() })
       }
-    } catch { /* plugins are best-effort */ }
+    } catch { }
   }
-  // v23: Model Context Protocol tools. Loaded only at the top level (never for a
-  // delegated sub-agent), from `mcp.servers` config (never model output). They
-  // arrive in plugin shape, so they join `plugins` and flow through the SAME
-  // safety choke point (redaction, write-class serialization, read-only
-  // blocking) and the capability registry — no second execution path. The
-  // spawned servers are closed in the `finally` at the end of the run.
   let mcpClients = []
   if (!isDelegatedSubAgent && !noTools && config.tools?.mcp !== false) {
     try {
@@ -261,22 +257,18 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       if (mcp.tools.length) {
         plugins = [...plugins, ...mcp.tools]
         mcpClients = mcp.clients
-        for (const t of mcp.tools) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}` })
+        for (const t of mcp.tools) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
       }
-      for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}` })
-    } catch { /* MCP is best-effort — a broken server never breaks the run */ }
+      for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}`, ...identityMeta() })
+    } catch { }
   }
-  // v23: LSP tools (definition/references/hover/diagnostics). Read-only, so they
-  // are safe anywhere, but loaded only at the top level to avoid re-spawning a
-  // language server per delegated sub-agent. Servers start lazily on first use
-  // and are closed in the `finally` below. Same plugin path as everything else.
   let lspSession = null
   if (!isDelegatedSubAgent && !noTools && config.tools?.lsp !== false && Object.keys(config.lsp?.servers || {}).length) {
     try {
       lspSession = createLspSession(config, { cwd: process.cwd() })
       plugins = [...plugins, ...lspSession.tools]
-      for (const t of lspSession.tools) onEvent?.({ type: "info", text: `lsp tool available: ${t.name}` })
-    } catch { lspSession = null /* best-effort */ }
+      for (const t of lspSession.tools) onEvent?.({ type: "info", text: `lsp tool available: ${t.name}`, ...identityMeta() })
+    } catch { lspSession = null }
   }
   let subCounter = 0
   const tools = makeToolContext({
@@ -296,25 +288,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     assumeYes: config.tools?.assumeYes === true,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? 180,
-    // low-RAM devices (Termux/proot) get 1 concurrent sub-agent, not a stall
-    maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : 2),
+    maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : 2),
     signal,
     subAgent: readonly && !planOnly,
-    // plan-mode agents may delegate read-only research; sub-agents may not
-    // (their delegateRunner is null) → delegation depth is capped at 2.
     delegateRunner: readOnly && !planOnly
       ? null
       : (subTask, subRole) =>
         runAgent({
-          config, provider: p, task: subTask, onEvent: onEvent ? (ev) => onEvent(ev) : null, signal,
+          config, provider: p, task: subTask, onEvent: rawOnEvent ? (ev) => rawOnEvent(ev) : null, signal,
           readOnly: true, maxStepsOverride: 10, role: subRole, sub: `w${++subCounter}`,
+          taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId, runId: effectiveRunId,
         }).then((r) => r.text),
   })
 
-  // v20.5: capability registry → router → policy gate → execution →
-  // observation → verification, wrapped around the UNCHANGED tools.exec (so
-  // ShellGuard / SafePath / NetGuard / secret redaction stay exactly where
-  // they are). Opt out with `forge config set tools.intelligence false`.
   const intel = createToolIntel({
     exec: tools.exec,
     ctx: {
@@ -327,7 +313,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     config,
     onEvent,
     runId,
-    taskId: runId,
+    taskId: effectiveTaskId ?? runId,
     task,
     plugins,
     legacyEvents: true,
@@ -336,9 +322,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     try {
       const decision = intel.route(task, { constraints: { readOnly: readonly } })
       if (decision?.chain?.active?.length) {
-        onEvent?.({ type: "info", text: `routing: ${decision.chain.reason}` })
+        onEvent?.({ type: "info", text: `routing: ${decision.chain.reason}`, ...identityMeta() })
       }
-    } catch { /* routing advice is best-effort */ }
+    } catch { }
   }
 
   let messages = [
@@ -348,30 +334,26 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
 
   let steps = 0
   let finalText = ""
-  let retryBudget = 3 // transient-error retries do NOT burn maxSteps
-  let overflowBudget = 2 // v20: context-overflow compress+retry attempts
-  let switchedOk = false // recorded health-ok after a successful failover
+  let retryBudget = 3
+  let overflowBudget = 2
+  let switchedOk = false
   let toolCallCount = 0
   const toolLog = []
-  const commandChecks = [] // v21: actual exit-code verification evidence from bash
-  // v21: live token accounting (provider usage when reported; an estimate
-  // otherwise) so the resource manager can compact / switch on real pressure.
+  const commandChecks = []
   const tokenUsage = { prompt: 0, completion: 0, total: 0, estimated: false }
   let ended = false
   const endRun = (status, extra = {}) => {
     if (ended) return
     ended = true
-    // v21: an intermediate segment of a multi-segment task keeps the shared
-    // journal "running" — only the controller closes it when the task ends.
     if (log && !extra.keepRunning) log.end(status, extra)
     else if (log) log.flush()
-    if (!suppressRunEvents) onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats() })
+    if (!suppressRunEvents) onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats(), taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
   }
   try {
     while (steps < maxSteps) {
       steps++
       log?.step(steps)
-      onEvent?.({ type: "step", step: steps })
+      onEvent?.({ type: "step", step: steps, ...identityMeta() })
       let msg
       try {
         msg = await chatOnce({
@@ -381,9 +363,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           model: p.model,
           providerName: p.name,
           messages,
-          // v20.5: a tool disabled by policy is never advertised to the model.
-          // v21: a pure-planning request sends NO tools at all so the model
-          // produces a plan instead of trying to execute one.
           tools: noTools ? undefined : intel.toolDefs(tools.defs),
           signal,
           deep: deepEffort,
@@ -393,9 +372,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         })
       } catch (e) {
         if (e instanceof ProviderError && e.contextOverflow && overflowBudget > 0) {
-          // v20 recovery: compress hard, then retry the SAME step
           overflowBudget--
-          onEvent?.({ type: "compacted", before: messages.length, after: -1, estTok: estimateTokens(JSON.stringify(messages)), budgetTok: 0, reason: "context overflow — compressing and retrying" })
+          onEvent?.({ type: "compacted", before: messages.length, after: -1, estTok: estimateTokens(JSON.stringify(messages)), budgetTok: 0, reason: "context overflow — compressing and retrying", ...identityMeta() })
           messages = await compactAgentHistory(messages, p, { onEvent, force: true })
           messages = hardShrink(messages)
           steps--
@@ -403,74 +381,54 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         }
         if (e instanceof ProviderError && e.retryable && retryBudget > 0) {
           retryBudget--
-          onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget })
-          // v20: honor Retry-After when the provider sent one
+          onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget, ...identityMeta() })
           const wait = Math.max(2000 * (3 - retryBudget), e.retryAfterMs ?? 0)
           await new Promise((r) => setTimeout(r, Math.min(60000, wait)))
-          steps-- // retry does not consume a step
+          steps--
           continue
         }
-        // v20.2: retries on THIS provider are spent (or the error is a hard
-        // auth/not-found) — fall through to the next configured provider if one
-        // is available. Each provider in the chain is tried once.
         if (isFailworthy(e) && chainIdx < chain.length) {
           const next = chain[chainIdx++]
           recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
-          onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message })
+          onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message, ...identityMeta() })
           p = next
-          retryBudget = 3 // fresh budget for the new provider
-          steps-- // switching does not consume a step
+          retryBudget = 3
+          steps--
           continue
         }
         throw e
       }
 
-      // a request that succeeded on a switched-to provider confirms it works —
-      // record it once so the health cache and future runs prefer it
       if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
 
-      if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning })
+      if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning, ...identityMeta() })
 
-      // v21: account tokens (real provider usage when reported; estimate otherwise)
       try {
         const u = msg.usage || {}
         const pin = Number(u.prompt_tokens ?? u.input_tokens ?? 0)
         const cpl = Number(u.completion_tokens ?? u.output_tokens ?? 0)
         if (pin || cpl) { tokenUsage.prompt += pin; tokenUsage.completion += cpl; tokenUsage.estimated = false }
         else {
-          // provider omitted usage: estimate. Prompt side is the cumulative
-          // context (re-sent each round) — take the max so we don't multiply
-          // the same context by the number of rounds; completion is additive.
           tokenUsage.estimated = true
           const estIn = estimateTokens(JSON.stringify(messages))
           if (estIn > tokenUsage.prompt) tokenUsage.prompt = estIn
           tokenUsage.completion += estimateTokens(msg.content || "")
         }
         tokenUsage.total = tokenUsage.prompt + tokenUsage.completion
-        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated })
-      } catch { /* usage accounting is best-effort */ }
+        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, ...identityMeta() })
+      } catch { }
 
       if (msg.toolCalls?.length) {
-        // v20: runaway guard — stop spawning tool rounds past the budget
         toolCallCount += msg.toolCalls.length
         if (toolCallCount > maxToolCalls) {
           messages.push({ role: "user", content: `(system) tool-call budget exhausted (${maxToolCalls} calls) — stop calling tools and produce your final answer now with what you have.` })
           continue
         }
-        // canonical wire history: ONE assistant message carrying ALL tool_calls
         messages.push({
           role: "assistant",
           content: msg.content || "",
           tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
         })
-        // v20.5 tool intelligence layer: the router decides what may run
-        // concurrently (read-only, parallel-safe, no target conflict) and what
-        // must be serialized; every call passes the capability check, the
-        // policy gate and the EXISTING safety controls, is classified on
-        // failure and verified after a mutation. Results are reassembled in
-        // the ORIGINAL call order, so the wire history never changes shape.
-        // (v16 behaviour — reads concurrent, writes serialized — is preserved;
-        //  `tools.intelligence: false` reverts to the plain execute path.)
         const results = await intel.runBatch(
           msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) })),
           { step: steps }
@@ -480,9 +438,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
           const { result, ms } = results[i]
           toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
-          // v21: capture ACTUAL verification evidence from bash runs (exit code
-          // + output), not command names. The meta controller feeds this to the
-          // structured verification ledger. Test/build/lint/audit commands only.
           if (tc.name === "bash" && !sub) {
             try {
               const rawArgs = safeJson(tc.args)
@@ -494,9 +449,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
                 const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
                 const tail = rstr.split("\n").filter(Boolean).slice(-6).join(" ").slice(0, 500)
                 commandChecks.push({ command: command.slice(0, 300), exitCode, timedOut, passed: exitCode === 0 && !timedOut, tail })
-                onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps })
+                onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
               }
-            } catch { /* evidence capture is best-effort */ }
+            } catch { }
           }
           if (log) {
             const r = String(result)
@@ -504,12 +459,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
             if (okRes && WRITE_TOOLS.has(tc.name) && tc.name !== "bash") for (const [fp, action] of journalFiles(tc.name, tc.args, r)) log.touched(fp, action)
           }
-          // tool_start / tool_result events are emitted by the intelligence
-          // layer (same shape as v16–v20.4), together with the structured
-          // TOOL_* events the premium UI consumes.
           messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) })
         }
-        // v17 token reducer: summarize mid-run when approaching the window budget
         messages = await compactAgentHistory(messages, p, { onEvent })
         continue
       }
@@ -518,9 +469,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       break
     }
 
-    // v21: distinguish "segment budget spent, task not necessarily finished"
-    // from a genuine final answer. The meta controller continues automatically;
-    // a standalone runAgent caller gets the old message.
     const budgetHit = steps >= maxSteps
     if (budgetHit && !finalText) {
       finalText = "(reached the per-segment step budget without a final answer)"
@@ -528,28 +476,24 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
     endRun("completed", { text: finalText, wrote })
-    return { status: "COMPLETED", text: finalText, steps, taskId: taskId ?? null, segmentId: segmentId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
+    return { status: "COMPLETED", text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
     else endRun("failed", { error: e?.message ?? String(e), wrote })
     throw e
   } finally {
-    // v23: always shut down MCP + LSP servers this run spawned — on success,
-    // failure, or cancellation — so a run never leaks child processes.
     for (const c of mcpClients) { try { c.close() } catch {} }
     if (lspSession) { try { lspSession.close() } catch {} }
   }
 }
 
-/** Compact target string for the run journal (never the full args). */
 function journalTarget(name, argStr) {
   const a = safeJson(argStr || "{}")
   const t = a.path ?? a.command ?? a.pattern ?? a.url ?? a.query ?? a.name ?? a.action ?? ""
   return String(t).split("\n")[0].slice(0, 160)
 }
 
-/** Files a successful write tool touched, for the run journal. */
 function journalFiles(name, argStr, result) {
   const a = safeJson(argStr || "{}")
   const out = []
@@ -557,9 +501,9 @@ function journalFiles(name, argStr, result) {
   if (name === "write_file" && a.path) out.push([abs(a.path), /created/i.test(result) ? "created" : "modified"])
   else if ((name === "edit_file" || name === "multi_edit") && a.path) out.push([abs(a.path), "modified"])
   else if (name === "apply_patch") {
-    const m = String(result).match(/created ([^•]+?)(?: •|$| \()/)
+    const m = String(result).match(/created ([^•]+?)(?: •|$| \(|)/)
     if (m) for (const f of m[1].split(",")) out.push([abs(f.trim()), "created"])
-    const d = String(result).match(/deleted ([^•]+?)(?: •|$| \()/)
+    const d = String(result).match(/deleted ([^•]+?)(?: •|$| \(|)/)
     if (d) for (const f of d[1].split(",")) out.push([abs(f.trim()), "deleted"])
     try {
       const re = /^\+\+\+ (?:b\/)?(\S+)/gm
@@ -570,9 +514,6 @@ function journalFiles(name, argStr, result) {
   return out
 }
 
-/** Aggressive in-place shrink used only for overflow recovery: stub ALL tool
- *  outputs outside the last 6 messages regardless of size, dedupe repeated
- *  tool results, and drop oversized single messages. Never drops task state. */
 function hardShrink(messages) {
   const seen = new Map()
   return messages.map((m, i) => {
@@ -594,10 +535,9 @@ function safeJson(s) {
   }
 }
 
-/** Pretty-print agent events to the terminal. */
 export function agentEventPrinter() {
   return function onEvent(ev) {
-    if (ev.sub) return // sub-agent traffic is summarized by the delegate tool result
+    if (ev.sub) return
     if (ev.type === "tool_start") {
       const args = String(ev.args || "").slice(0, 160)
       console.log(dim(`  ┌ [step ${ev.step}] ${cyan(ev.name)} ${dim(args)}`))
@@ -641,5 +581,4 @@ export function agentEventPrinter() {
   }
 }
 
-// keep fs import used (profile reads may be added here)
 void fs

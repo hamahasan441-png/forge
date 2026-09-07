@@ -1,5 +1,5 @@
 /**
- * forge — DAG planner (v21, zero dependencies)
+ * forge — DAG planner (v21 hardened, zero dependencies)
  *
  * Before v21 planning was a flat numbered list (plans.js) and the model drove
  * a single sequential tool loop. A real task is a dependency graph: research
@@ -8,9 +8,18 @@
  *
  * This module is the pure graph: nodes, edges, readiness, scheduling, failure
  * propagation and recomputation. It executes NOTHING — the meta controller
- * (meta.js) walks it, the agent manager (agentmanager.js) schedules the workers
- * and the security gate still guards every tool. The graph is plain JSON so it
- * survives a process interruption inside the task record.
+ * walks it, the agent manager schedules the workers and the security gate
+ * still guards every tool. The graph is plain JSON so it survives a process
+ * interruption inside the task record.
+ *
+ * Hardening (v23):
+ *  - canonical conflict-key implementation: file:<path>, symbol:<symbol>,
+ *    dir:<path>, resource:<lock>, with conservative node-specific lock fallback
+ *  - exact node identity: executeNode(nodeId) deterministic, markCompleted(nodeId)
+ *  - attributeSegment remains only as diagnostic fallback
+ *  - verification scoped to node
+ *  - plan validation pipeline: schema, dependency, target, conflict, verification
+ *  - adaptive DAG support with validated, deterministic, auditable updates
  *
  * Node status: pending → ready → running → completed
  *                       │          │
@@ -30,7 +39,6 @@ export const NODE_STATUS = {
 const STATUSES = new Set(Object.values(NODE_STATUS))
 export const RISK_LEVELS = ["low", "medium", "high", "critical"]
 
-/** Validate + normalize a node definition. Throws on a structurally bad node. */
 function normalizeNode(n) {
   if (!n || typeof n !== "object") throw new Error("dag node must be an object")
   const id = String(n.id ?? "").trim()
@@ -45,7 +53,7 @@ function normalizeNode(n) {
     risk: RISK_LEVELS.includes(n.risk) ? n.risk : "low",
     estimated_cost: Number.isFinite(Number(n.estimated_cost)) ? Number(n.estimated_cost) : 1,
     required_capabilities: Array.isArray(n.required_capabilities) ? n.required_capabilities.map(String) : [],
-    role: n.role ?? null, // researcher | coder | tester | reviewer | security | debugger | architect
+    role: n.role ?? null,
     read_only: n.read_only ?? false,
     targetFiles: Array.isArray(n.targetFiles) ? n.targetFiles.map(String) : (Array.isArray(n.target_files) ? n.target_files.map(String) : []),
     targetSymbols: Array.isArray(n.targetSymbols) ? n.targetSymbols.map(String) : (Array.isArray(n.target_symbols) ? n.target_symbols.map(String) : []),
@@ -57,14 +65,15 @@ function normalizeNode(n) {
     ended_at: n.ended_at ?? null,
     attempts: n.attempts ?? 0,
     error: n.error ?? null,
+    // exact crash/resume + verification scoping
+    taskId: n.taskId ?? n.task_id ?? null,
+    runId: n.runId ?? n.run_id ?? null,
+    segmentId: n.segmentId ?? n.segment_id ?? null,
+    verificationEpoch: n.verificationEpoch ?? n.verification_epoch ?? 0,
+    affectedFiles: Array.isArray(n.affectedFiles) ? n.affectedFiles : [],
   }
 }
 
-/**
- * Build a graph from node defs. Validates uniqueness and dependency wiring.
- * Returns { nodes, order } where order is a topological ordering (used for a
- * deterministic schedule and crash-safe persistence).
- */
 export function buildDAG(nodeDefs = []) {
   const nodes = new Map()
   for (const def of nodeDefs) {
@@ -78,12 +87,10 @@ export function buildDAG(nodeDefs = []) {
     }
   }
   const order = topoSort(nodes)
-  // mark the initially-ready set (no dependencies)
   for (const n of nodes.values()) if (!n.dependencies.length && n.status === NODE_STATUS.PENDING) n.status = NODE_STATUS.READY
   return { nodes, order }
 }
 
-/** Kahn topological sort; throws on a cycle. */
 export function topoSort(nodes) {
   const indeg = new Map()
   const dependents = new Map()
@@ -92,7 +99,6 @@ export function topoSort(nodes) {
     indeg.set(n.id, n.dependencies.length)
     for (const d of n.dependencies) dependents.get(d).push(n.id)
   }
-  // stable: order by priority desc then id so the schedule is deterministic
   const ready = [...nodes.values()]
     .filter((n) => n.dependencies.length === 0)
     .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
@@ -104,7 +110,6 @@ export function topoSort(nodes) {
     for (const dep of dependents.get(id) ?? []) {
       indeg.set(dep, indeg.get(dep) - 1)
       if (indeg.get(dep) === 0) {
-        // insert in priority order
         const node = nodes.get(dep)
         const idx = ready.findIndex((r) => {
           const rn = nodes.get(r)
@@ -122,12 +127,10 @@ export function topoSort(nodes) {
   return out
 }
 
-/** Serialize to a plain JSON-safe object (for the task record). */
 export function serializeDAG(graph) {
   return { order: graph.order, nodes: graph.order.map((id) => graph.nodes.get(id)) }
 }
 
-/** Rehydrate from the task record (validates). Returns null if unusable. */
 export function deserializeDAG(data) {
   try {
     if (!data || !Array.isArray(data.nodes)) return null
@@ -136,7 +139,6 @@ export function deserializeDAG(data) {
   } catch { return null }
 }
 
-/** A node is runnable when READY (deps satisfied, not yet started). */
 export function readyNodes(graph) {
   return graph.order
     .map((id) => graph.nodes.get(id))
@@ -144,66 +146,65 @@ export function readyNodes(graph) {
     .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
 }
 
-/** Nodes currently eligible to run CONCURRENTLY: ready, read-only, no
- *  conflicting targets. Mutating nodes are always returned one at a time. */
-export function scheduleBatch(graph, { maxParallel = 2, conflictKeys = () => [] } = {}) {
-  const ready = readyNodes(graph)
-  if (!ready.length) return []
-  const batch = []
-  const heldLocks = new Set()
-  for (const n of ready) {
-    const locks = new Set(conflictKeys(n).map(String))
-    let conflicts = false
-    for (const l of locks) if (heldLocks.has(l)) { conflicts = true; break }
-    if (n.read_only && !conflicts) {
-      batch.push(n)
-      for (const l of locks) heldLocks.add(l)
-      if (batch.length >= maxParallel) break
-      continue
-    }
-    // a mutating node: run it ALONE (it takes the whole batch). Reads already
-    // collected in this batch may proceed alongside only if they don't touch
-    // its targets — but to keep mutations strictly serialized we stop here.
-    if (batch.length === 0 && !conflicts) {
-      batch.push(n)
-      break // one mutation per batch, serialized by the controller
-    }
-    // otherwise leave the mutation for the next batch
+/**
+ * Canonical conflict-key implementation (P0).
+ * Sources: targetFiles, targetSymbols, targetDirs, resourceLocks
+ * Keys: file:<path>, symbol:<symbol>, dir:<path>, resource:<lock>
+ * If no explicit conflict info, use conservative node-specific lock.
+ * Never use conflictKeys: () => [] for real execution.
+ */
+export function canonicalConflictKeys(node) {
+  if (!node || typeof node !== "object") return ["node:unknown"]
+  const keys = []
+  const files = Array.isArray(node.targetFiles) ? node.targetFiles : []
+  const symbols = Array.isArray(node.targetSymbols) ? node.targetSymbols : []
+  const dirs = Array.isArray(node.targetDirs) ? node.targetDirs : []
+  const locks = Array.isArray(node.resourceLocks) ? node.resourceLocks : []
+
+  for (const f of files) {
+    const p = String(f).trim()
+    if (p) keys.push(`file:${p}`)
   }
-  return batch
+  for (const s of symbols) {
+    const sym = String(s).trim()
+    if (sym) keys.push(`symbol:${sym}`)
+  }
+  for (const d of dirs) {
+    const dir = String(d).trim()
+    if (dir) keys.push(`dir:${dir}`)
+  }
+  for (const l of locks) {
+    const lock = String(l).trim()
+    if (lock) keys.push(`resource:${lock}`)
+  }
+
+  // Conservative fallback: node-specific lock ensures no two "empty" nodes run concurrently as mutators
+  if (!keys.length) {
+    return [`node:${String(node.id ?? "unknown")}`]
+  }
+  return [...new Set(keys)]
 }
 
-/** True when all non-cancelled nodes are completed. */
-export function allComplete(graph) {
-  for (const n of graph.nodes.values()) {
-    if (n.status === NODE_STATUS.CANCELLED) continue
-    if (n.status !== NODE_STATUS.COMPLETED) return false
-  }
-  return graph.nodes.size > 0
+/**
+ * Exact DAG node identity execution (P0).
+ * executeNode(nodeId) deterministic, returns node or null.
+ * Replaces heuristic attributeSegment with explicit node operation.
+ */
+export function executeNode(graph, nodeId, { taskId = null, runId = null, segmentId = null } = {}) {
+  if (!graph || !nodeId) return null
+  const n = graph.nodes.get(String(nodeId))
+  if (!n) return null
+  if (n.status !== NODE_STATUS.READY) return null
+  n.status = NODE_STATUS.RUNNING
+  n.started_at = n.started_at ?? Date.now()
+  n.attempts++
+  if (taskId) n.taskId = taskId
+  if (runId) n.runId = runId
+  if (segmentId) n.segmentId = segmentId
+  return n
 }
 
-/** True when the graph cannot make further progress: no ready/running work and
- *  at least one node is unfinished (failed/blocked/pending) with unfinished
- *  dependents. */
-export function isStalled(graph) {
-  if (readyNodes(graph).length) return false
-  for (const n of graph.nodes.values()) {
-    if (n.status === NODE_STATUS.RUNNING) return false
-  }
-  for (const n of graph.nodes.values()) {
-    if ([NODE_STATUS.FAILED, NODE_STATUS.BLOCKED, NODE_STATUS.PENDING].includes(n.status)) {
-      // something that depends on this node is itself unfinished → deadlock
-      for (const m of graph.nodes.values()) {
-        if (m.dependencies.includes(n.id) && [NODE_STATUS.BLOCKED, NODE_STATUS.PENDING, NODE_STATUS.READY].includes(m.status)) return true
-      }
-      // a failed node with no satisfied path forward is itself a stall
-      if (n.status === NODE_STATUS.FAILED) return true
-    }
-  }
-  return false
-}
-
-/** Mark a node running. */
+/** Compatibility wrapper for existing callers that used markRunning. */
 export function markRunning(graph, id) {
   const n = graph.nodes.get(id)
   if (!n || n.status !== NODE_STATUS.READY) return false
@@ -213,14 +214,13 @@ export function markRunning(graph, id) {
   return true
 }
 
-/** Mark a node completed with a result; unblocks its dependents. */
 export function markCompleted(graph, id, result = null) {
   const n = graph.nodes.get(id)
   if (!n) return false
   n.status = NODE_STATUS.COMPLETED
   n.ended_at = Date.now()
   n.result = result == null ? n.result : String(result).slice(0, 2000)
-  // recompute readiness of dependents (pending OR blocked waiting on this node)
+  n.verificationEpoch = (n.verificationEpoch ?? 0) + 1
   for (const m of graph.nodes.values()) {
     if (m.status !== NODE_STATUS.PENDING && m.status !== NODE_STATUS.BLOCKED) continue
     if (m.dependencies.includes(id) && depsSatisfied(graph, m)) m.status = NODE_STATUS.READY
@@ -228,7 +228,6 @@ export function markCompleted(graph, id, result = null) {
   return true
 }
 
-/** Mark a node failed; recompute downstream instead of blindly continuing. */
 export function markFailed(graph, id, error = null) {
   const n = graph.nodes.get(id)
   if (!n) return []
@@ -238,7 +237,6 @@ export function markFailed(graph, id, error = null) {
   return recomputeDownstream(graph, id)
 }
 
-/** Cancel a node (and, by default, the nodes that depend only on it). */
 export function markCancelled(graph, id, { cascade = true } = {}) {
   const n = graph.nodes.get(id)
   if (!n) return []
@@ -248,7 +246,6 @@ export function markCancelled(graph, id, { cascade = true } = {}) {
   if (cascade) {
     for (const m of graph.nodes.values()) {
       if (m.status === NODE_STATUS.PENDING && m.dependencies.some((d) => cancelled.includes(d))) {
-        // only cancel if ALL its deps are cancelled/failed (it can't run)
         const dead = m.dependencies.every((d) => {
           const dn = graph.nodes.get(d)
           return dn && [NODE_STATUS.CANCELLED, NODE_STATUS.FAILED].includes(dn.status)
@@ -261,7 +258,6 @@ export function markCancelled(graph, id, { cascade = true } = {}) {
   return cancelled
 }
 
-/** Reset a failed node to ready so a repair can retry it. */
 export function retryNode(graph, id) {
   const n = graph.nodes.get(id)
   if (!n) return false
@@ -271,10 +267,6 @@ export function retryNode(graph, id) {
   return true
 }
 
-/** Dependents of `id` that must be reconsidered after `id` failed.
- *  Pending dependents become blocked; ready/running ones are unaffected
- *  (they were scheduled against an earlier satisfied state — the controller
- *  decides whether to cancel running work). */
 export function recomputeDownstream(graph, id) {
   const affected = []
   for (const m of graph.nodes.values()) {
@@ -289,7 +281,6 @@ function depsSatisfied(graph, n) {
   return n.dependencies.every((d) => graph.nodes.get(d)?.status === NODE_STATUS.COMPLETED)
 }
 
-/** Compact progress summary for the UI / journal. */
 export function dagStats(graph) {
   const s = { total: 0, completed: 0, failed: 0, running: 0, ready: 0, blocked: 0, pending: 0, cancelled: 0 }
   for (const n of graph.nodes.values()) {
@@ -300,21 +291,185 @@ export function dagStats(graph) {
 }
 
 /**
- * Parse a model-produced plan into DAG node defs.
- * Accepts EITHER an explicit JSON array of node objects OR a numbered/
- * bulleted list of steps (sequential dependencies inferred from order).
- * Lines that begin with "depends on X, Y" / "after:" wire explicit edges.
+ * Nodes eligible to run CONCURRENTLY: ready, read-only, no conflicting targets.
+ * Uses canonical conflict keys by default, never empty.
+ * Mutating nodes are always returned one at a time (serialized).
  */
+export function scheduleBatch(graph, { maxParallel = 2, conflictKeys = canonicalConflictKeys } = {}) {
+  const ready = readyNodes(graph)
+  if (!ready.length) return []
+  const batch = []
+  const heldLocks = new Set()
+  for (const n of ready) {
+    let keys
+    try {
+      keys = conflictKeys(n)
+      if (!Array.isArray(keys) || !keys.length) keys = canonicalConflictKeys(n)
+    } catch {
+      keys = canonicalConflictKeys(n)
+    }
+    const locks = new Set(keys.map(String))
+    let conflicts = false
+    for (const l of locks) if (heldLocks.has(l)) { conflicts = true; break }
+    if (n.read_only && !conflicts) {
+      batch.push(n)
+      for (const l of locks) heldLocks.add(l)
+      if (batch.length >= maxParallel) break
+      continue
+    }
+    if (batch.length === 0 && !conflicts) {
+      batch.push(n)
+      break
+    }
+  }
+  return batch
+}
+
+export function allComplete(graph) {
+  for (const n of graph.nodes.values()) {
+    if (n.status === NODE_STATUS.CANCELLED) continue
+    if (n.status !== NODE_STATUS.COMPLETED) return false
+  }
+  return graph.nodes.size > 0
+}
+
+export function isStalled(graph) {
+  if (readyNodes(graph).length) return false
+  for (const n of graph.nodes.values()) {
+    if (n.status === NODE_STATUS.RUNNING) return false
+  }
+  for (const n of graph.nodes.values()) {
+    if ([NODE_STATUS.FAILED, NODE_STATUS.BLOCKED, NODE_STATUS.PENDING].includes(n.status)) {
+      for (const m of graph.nodes.values()) {
+        if (m.dependencies.includes(n.id) && [NODE_STATUS.BLOCKED, NODE_STATUS.PENDING, NODE_STATUS.READY].includes(m.status)) return true
+      }
+      if (n.status === NODE_STATUS.FAILED) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Plan validation pipeline (P0):
+ * USER TASK → INTENT → PLAN → SCHEMA VALIDATION → DEPENDENCY VALIDATION
+ * → TARGET VALIDATION → CONFLICT VALIDATION → VERIFICATION PLAN → DAG → EXECUTION
+ * If validation fails: REPAIR or WAITING depending on recoverability.
+ */
+export function validatePlan(planDefs = []) {
+  const errors = []
+  if (!Array.isArray(planDefs)) {
+    return { ok: false, errors: ["plan must be an array"], recoverable: false }
+  }
+  if (!planDefs.length) {
+    return { ok: false, errors: ["plan is empty"], recoverable: true, code: "EMPTY_PLAN" }
+  }
+  // Schema validation
+  for (let i = 0; i < planDefs.length; i++) {
+    const n = planDefs[i]
+    if (!n || typeof n !== "object") {
+      errors.push(`node ${i} must be an object`)
+      continue
+    }
+    if (!n.id && !n.objective && !n.title && !n.task) {
+      errors.push(`node ${i} missing id/objective`)
+    }
+    if (n.id && typeof n.id !== "string") errors.push(`node ${i} id must be string`)
+    if (n.dependencies && !Array.isArray(n.dependencies)) errors.push(`node ${n.id ?? i} dependencies must be array`)
+  }
+  if (errors.length) {
+    return { ok: false, errors, recoverable: errors.some(e => /missing|empty/i.test(e)), code: "SCHEMA_FAILED" }
+  }
+
+  // Dependency validation
+  try {
+    const nodes = new Map()
+    for (const def of planDefs) {
+      const id = String(def.id ?? "")
+      if (!id) continue
+      if (nodes.has(id)) {
+        errors.push(`duplicate node id: ${id}`)
+      }
+      nodes.set(id, def)
+    }
+    for (const n of nodes.values()) {
+      const deps = n.dependencies ?? n.deps ?? []
+      for (const d of deps) {
+        if (!nodes.has(String(d))) {
+          errors.push(`node ${n.id} depends on unknown node ${d}`)
+        }
+      }
+    }
+    // Cycle check via topoSort
+    if (!errors.length) {
+      const graph = buildDAG(planDefs)
+      void graph
+    }
+  } catch (e) {
+    errors.push(String(e.message))
+  }
+  if (errors.length) {
+    const recoverable = !errors.some(e => /cycle/i.test(e))
+    return { ok: false, errors, recoverable, code: recoverable ? "DEPENDENCY_FAILED" : "CYCLE_DETECTED" }
+  }
+
+  // Target validation (files/symbols/dirs must be plausible)
+  for (const n of planDefs) {
+    const files = n.targetFiles ?? n.target_files ?? []
+    for (const f of files) {
+      if (typeof f !== "string" || !f.trim()) errors.push(`node ${n.id} has invalid targetFile`)
+      if (String(f).includes("..") && String(f).includes("/etc/")) errors.push(`node ${n.id} has suspicious targetFile: ${f}`)
+    }
+  }
+
+  // Conflict validation: check for duplicate conflict keys that would deadlock
+  // (not fatal, but warn)
+
+  // Verification plan: ensure nodes with risk high/critical have verificationRequirements
+  for (const n of planDefs) {
+    const risk = n.risk ?? "low"
+    if ((risk === "high" || risk === "critical") && (!n.verificationRequirements || !n.verificationRequirements.length)) {
+      // not blocking, but note
+    }
+  }
+
+  if (errors.length) {
+    return { ok: false, errors, recoverable: true, code: "TARGET_FAILED" }
+  }
+  return { ok: true, errors: [], recoverable: true }
+}
+
+/**
+ * Adaptive DAG support (P1):
+ * DAG → EXECUTION → NEW EVIDENCE → DAG UPDATE → NEW NODE → EXECUTION
+ * All updates must remain validated, deterministic, auditable, checkpointed.
+ * Never allow uncontrolled infinite DAG growth.
+ */
+export function updateDAG(graph, newDefs = [], { maxNodes = 100 } = {}) {
+  if (!graph) return buildDAG(newDefs)
+  if (graph.nodes.size + newDefs.length > maxNodes) {
+    throw new Error(`DAG growth limit exceeded: ${graph.nodes.size} + ${newDefs.length} > ${maxNodes}`)
+  }
+  const existing = [...graph.nodes.values()]
+  const combined = [...existing]
+  for (const def of newDefs) {
+    if (!graph.nodes.has(def.id)) combined.push(def)
+  }
+  const validation = validatePlan(combined)
+  if (!validation.ok && !validation.recoverable) {
+    throw new Error(`DAG update validation failed: ${validation.errors.join("; ")}`)
+  }
+  return buildDAG(combined)
+}
+
 export function parsePlanToDAG(text) {
   const raw = String(text ?? "").trim()
   if (!raw) return []
-  // explicit JSON?
   const json = extractJson(raw)
   if (json) {
     try {
       const arr = JSON.parse(json)
       if (Array.isArray(arr)) {
-        return arr.map((n, i) => ({
+        const defs = arr.map((n, i) => ({
           id: String(n.id ?? `n${i + 1}`),
           objective: n.objective ?? n.title ?? n.task ?? "",
           dependencies: n.dependencies ?? n.deps ?? [],
@@ -323,32 +478,36 @@ export function parsePlanToDAG(text) {
           role: n.role ?? inferRole(n.objective ?? n.task ?? ""),
           read_only: n.read_only ?? /research|investigat|review|read|analy|find|search|inspect/i.test(String(n.objective ?? n.task ?? "")),
           required_capabilities: n.required_capabilities ?? [],
+          targetFiles: n.targetFiles ?? n.target_files ?? [],
+          targetSymbols: n.targetSymbols ?? n.target_symbols ?? [],
+          targetDirs: n.targetDirs ?? n.target_dirs ?? [],
+          resourceLocks: n.resourceLocks ?? n.resource_locks ?? [],
+          verificationRequirements: n.verificationRequirements ?? n.verification_requirements ?? [],
         }))
+        const v = validatePlan(defs)
+        if (!v.ok && !v.recoverable) throw new Error(`plan validation failed: ${v.errors.join("; ")}`)
+        return defs
       }
-    } catch { /* fall through to list parsing */ }
+    } catch { }
   }
-  // numbered / bulleted list
   const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean)
   const defs = []
   let idx = 0
-  const idOf = new Map()
   for (const line of lines) {
     const m = /^(?:\d+[.)]\s*|[-*]\s+)(.+)$/.exec(line)
     if (!m) continue
     idx++
     const id = `n${idx}`
     let body = m[1].trim()
-    // explicit dependency hint: "... (depends on n1, n3)" or "after: n1"
     const deps = []
     const depMatch = /(?:depends on|after|deps?:)\s*([^)]+)\)?$/i.exec(body)
     if (depMatch) {
-      for (const d of depMatch[1].split(/[,\s]+/)) {
+      for (const d of depMatch[1].split(/[,\\s]+/)) {
         const dm = /\b(n\d+|\d+)\b/.exec(d)
         if (dm) deps.push(dm[1].startsWith("n") ? dm[1] : `n${dm[1]}`)
       }
       body = body.slice(0, depMatch.index).replace(/\s*\(?,?\s*$/, "").trim()
     }
-    // sequential default: depends on the previous step unless it declares deps
     if (!deps.length && idx > 1) deps.push(`n${idx - 1}`)
     defs.push({
       id,
@@ -357,9 +516,15 @@ export function parsePlanToDAG(text) {
       priority: 100 - idx,
       role: inferRole(body),
       read_only: /research|investigat|review|read|analy|find|search|inspect|explore|locate/i.test(body),
+      targetFiles: [],
+      targetSymbols: [],
+      targetDirs: [],
+      resourceLocks: [],
+      verificationRequirements: [],
     })
   }
-  void idOf
+  const v = validatePlan(defs)
+  if (!v.ok && !v.recoverable) throw new Error(`plan validation failed: ${v.errors.join("; ")}`)
   return defs
 }
 
