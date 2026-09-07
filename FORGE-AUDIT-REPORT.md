@@ -1,6 +1,7 @@
 # FORGE — FINAL AUDIT REPORT
 
-**Branch:** `arena/01a07c59-forge` · **Base:** `b093dcf` · **Head:** `47434f4` (pushed)
+**Branch:** `arena/01a07c59-forge` · **Base:** `b093dcf` · **Head:** `d175992` (pushed, **CI green**)
+**CI:** `gh pr checks 17` → `node suites (Node 20) pass · node suites (Node 22) pass · full suite (e2e + cleanroom) pass · export coverage pass`
 **Scope:** `agentv19/` — `forge-agent-cli` v21.0.0 (ESM, zero runtime deps, Node ≥18; local Node v22.22.3)
 **Date:** 2026-09-07
 **Method:** audit → locate root cause → reproduce → patch → regression test → run → repair failures → re-run → harden.
@@ -11,8 +12,12 @@ Every claim below is backed by a command that was actually executed; results are
 ## 0. The baseline in one line
 
 `npm test` before this work: **28 suites, all green, ~16 s.**
-`npm test` now: **54 suites, 2 422 assertions, 0 failures, ~120 s** — the original 28 suites still pass
+`npm test` now: **55 suites, 2 432 assertions, 0 failures, ~120 s** — the original 28 suites still pass
 with their original assertion counts (nothing was weakened to make a new test pass).
+CI (`.github/workflows/ci.yml`, both Node 20 and Node 22, plus the e2e + clean-room lane) is **green**.
+
+**Correction to the first version of this report:** the audit branch initially turned CI **red**. The
+cause was not a product defect — it was `test-resource-leaks.mjs` (§2). Fixed and guarded; see §2.1.
 
 ---
 
@@ -74,10 +79,12 @@ Environment: `agentv19/forge/`, Node v22.22.3, zero dependencies installed.
 
 | Command | Result |
 |---|---|
-| `npm test` (full: 51 node suites + e2e bash + cleanroom bash + cleanroom-pkg) | `all 54 suite(s) passed` — 120.0 s |
-| `npm test` (repeat, determinism check) | `all 54 suite(s) passed` — 119.8 s |
-| `FORGE_FAST=1 npm test` (node-only fast lane) | `all 51 suite(s) passed` — 36.9 s |
+| `npm test` (full: 52 node suites + e2e bash + cleanroom bash + cleanroom-pkg) | `all 55 suite(s) passed` — 118.5 s, **2 432 assertions** |
+| `npm test` (repeat, determinism check) | `all 55 suite(s) passed` — 119.8 s |
+| `FORGE_FAST=1 npm test` (node-only fast lane) | `all 52 suite(s) passed` — 36.8 s |
+| `FORGE_FAST=1 node ../tests/run-all.mjs` **from a relocated checkout** (`/tmp/altpath/deep/forge/agentv19/forge`) | `all 52 suite(s) passed` — 36.8 s |
 | `node tests/test-<name>.mjs` (each new suite standalone, during development) | all 0 failures |
+| `gh pr checks 17` (GitHub Actions, Ubuntu, Node 20 + 22) | **4/4 pass** — node suites 47 s / 42 s, full suite 2 m 12 s, coverage 9 s |
 
 ### Per-suite assertion counts (from the run logged to `/tmp/full-test-3.log`)
 
@@ -94,14 +101,47 @@ mcp-lifecycle 32          lsp-lifecycle 17            clean-room-package 30
 resource-leaks 16         version-consistency 27      lessons-schema 49
 ```
 
-**Pre-existing suites — unchanged and still green (1 499 assertions):**
+**Pre-existing suites — unchanged and still green (1 499 assertions)** + `path-hygiene 10`:
 `security 241`, `ui 271`, `toolintel 172`, `semantic 93`, `capabilities 87`, `router 87`,
 `provider 40`, `lsp 41`, `mcp 30`, `effort 37`, `plugins 24`, `autonomy 127`, `chaos 44`,
 `repomap 19`, `memory 14`, `sessions 14`, `failover 18`, `plans 18`, `chat 20`,
 `checkpoint 12`, `config 32`, `json 13`, `skills 10`, `install 8`, `package 6`,
 `retrieval 11`, `walk 10`, `diffpatch`.
 
-**Total: 2 422 assertions, 0 failures.**
+**Total: 2 432 assertions, 0 failures.**
+
+### 2.1 The CI failure this branch caused, and how it was found and fixed
+
+The sandbox cannot download GitHub Actions logs (`results-receiver.actions.githubusercontent.com` and
+`*.blob.core.windows.net` are blocked), and the App token may not modify `.github/workflows/*`. So the
+runner was taught to report on itself: `run-all.mjs` now emits a GitHub **annotation** (`::error::`) for a
+failing suite, and annotations are readable through the Checks API (`gh api …/check-runs/<id>/annotations`).
+That produced the answer verbatim:
+
+```
+failure  suite "leaks" failed
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/user/forge/agentv19/forge/meta.js'
+imported from /tmp/forge-leak-K47KRA/drain-probe.mjs
+  FAIL the child process exited on its own (wall 32ms, work 0ms)
+== resource-leaks suite: 15 passed, 1 failed ==
+```
+
+**Root cause:** the child "drain probe" in `test-resource-leaks.mjs` imported `meta.js` by the *literal
+sandbox path*. CI checks out under `/home/runner/work/forge/forge`, so the path did not exist — the suite
+passed on the author's machine and failed every CI job. **A test that only passes in one directory is not
+a test.**
+
+**Fix:** the probe resolves the module from `import.meta.url` (`new URL("../forge/meta.js", import.meta.url).href`
+— a `file://` URL is importable wherever the checkout lives).
+
+**Guard (new suite `test-path-hygiene.mjs`, 10 assertions):** fails the build if any test bakes in a
+machine-specific absolute path, if a relative import does not resolve, if a suite is missing from
+`run-all.mjs`, or if a suite touches a home directory it did not create. Verified by re-introducing the
+literal path in a scratch copy: `FAIL no hardcoded absolute paths (got 1, want 0)`.
+
+**Also checked and cleared:** the suites were re-run under `LC_ALL=C`/`LANG=C`, `TZ=UTC`, `CI=true`, a
+`HOME` outside the project, and 4× CPU load — the `ui` suite's PTY assertions are locale-sensitive
+(they expect `✓`), which is worth knowing but is not what CI hit (CI sets `LANG=C.UTF-8`).
 
 Repairs made during this audit (suite → failure → resolution, all re-run green):
 
@@ -239,10 +279,12 @@ No performance regression was introduced; the two dominant costs are deliberate 
   user-agent, the banner and `--version` (fix #18). `CHANGELOG.md` states the rule and documents every fix above.
 * **Changes:** 45 files, **+6 580 / −322**. 20 modules patched, 1 new module (`completion.js`),
   **24 new regression suites** (3 566 lines) plus registration in `tests/run-all.mjs`.
-* **Commit:** `47434f4` — “forge: P0/P1 full-system audit — completion gate, verification, recovery, 24 new regression suites”.
-* **Pushed** to `origin/arena/01a07c59-forge`.
+* **Commits:** `47434f4` (audit fixes + 24 suites), `d446205` (this report), `0af4074` (CI annotations),
+`d175992` (location-independent tests + `test-path-hygiene`).
+* **Pushed** to `origin/arena/01a07c59-forge`; **CI green on all four checks**.
 * **PR:** https://github.com/hamahasan441-png/forge/pull/new/arena/01a07c59-forge
-* **Release gate:** `npm test` green twice consecutively (54/54, 2 422 assertions).
+* **Release gate:** `npm test` green three times consecutively (55/55, 2 432 assertions) **and**
+  `gh pr checks` green on Node 20 and Node 22.
 
 ---
 
@@ -268,7 +310,11 @@ Nothing below is a claim of success; none of it is hidden by a test.
    tell you a file is half-written, not that an edit was applied to the wrong symbol.
 8. **No vision / browser / multimodal tool**; LSP has no auto-install of language servers and no cross-session
    server persistence (by design — a server is owned by its session and proven dead after `close()`).
-9. **Two suites are wall-clock sensitive** (`worker-timeout-cleanup` 10.1 s, `ui` 41.2 s). They pass on a
-   quiet machine; they would flake under heavy parallel load.
-10. **POSIX-only validation.** Path handling, `chmod 600` and process-tree liveness are exercised on Linux only;
+9. **Two suites are wall-clock sensitive** (`worker-timeout-cleanup` 10.1 s, `ui` 41.2 s). They passed
+   under a deliberate 4× CPU load in this environment, but timing assertions are inherently fragile.
+10. **The `ui` PTY assertions depend on the locale.** Under `LC_ALL=C` (no UTF-8) the banner glyph `✓` is
+    not rendered as expected and 5 PTY assertions fail; GitHub sets `LANG=C.UTF-8`, so CI is fine, but a
+    contributor with a non-UTF-8 locale will see red. The right fix is for the UI to choose ASCII glyphs
+    when the locale cannot represent them (or for the suite to force `LC_ALL=C.UTF-8` itself).
+11. **POSIX-only validation.** Path handling, `chmod 600` and process-tree liveness are exercised on Linux only;
     Windows is untested.
