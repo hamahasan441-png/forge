@@ -1,5 +1,5 @@
 /**
- * forge — model strategy engine (v21, zero dependencies)
+ * forge — model strategy engine (v21 hardened v23, zero dependencies)
  *
  * Provider failover (providers.js: fallbackChain) answers a DIFFERENT question
  * — "the current provider just errored, what's the next runnable provider?".
@@ -8,17 +8,17 @@
  *   task → required capability → context requirements → risk → latency budget
  *        → token budget → cost → available models → best model
  *
- * It never moves keys or opens sockets. It ranks the models the user has ALREADY
- * configured/tested (no surprises, no billing the user for a provider they never
- * set up) and returns a structured decision with a confidence and a fallback
- * chain. Failover still handles hard errors at request time; this chooses the
- * starting model and when a STRATEGY change (not a transport error) warrants a
- * different model mid-task.
+ * Hardening v23 P1: capability registry not name heuristic.
+ * Instead of substring matching on model names (e.g. /mini/ → fast),
+ * we maintain an explicit MODEL_CAPABILITY_REGISTRY that records
+ * for each known model its capabilities, performance tier, context,
+ * latency and cost. Unknown models get a neutral profile.
+ * The registry is the single source for routing decisions.
  */
+
 import { buildProvider, fallbackChain, getCatalog } from "./providers.js"
 import { classifyTaskComplexity } from "./agent.js"
 
-/** Capability classes a model choice is made for. */
 export const CAPABILITY_CLASS = {
   FAST_REASONING: "fast_reasoning",
   CODING: "coding",
@@ -32,27 +32,76 @@ export const CAPABILITY_CLASS = {
 }
 
 /**
- * Heuristic capability tags for models we know by name. Unknown models get a
- * neutral profile so they are never preferred for work they may not be good at.
- * Tags: fast, coding, largectx, reasoning, cheap.
+ * Explicit model capability registry (P1).
+ * Each entry: capabilities, tags (fast, cheap, coding, reasoning, largectx),
+ * performance tier, contextWindow, latency, cost.
+ * This replaces pure name heuristic with structured registry.
  */
-const MODEL_PROFILES = [
-  { match: /gpt-4o-mini|haiku|flash|mini|instant|8b|small|air/i, tags: ["fast", "cheap", "coding"] },
-  { match: /o3-mini|o3|reasoner|grok-4|gpt-4o|sonnet|deepseek-v3|deepseek-chat|qwen-max|glm-4\.6|llama-3\.3-70b|mistral-large/i, tags: ["coding", "reasoning"] },
-  { match: /opus|pro|o1|gpt-5|gemini-2\.5-pro/i, tags: ["coding", "reasoning", "largectx"] },
-  { match: /gemini|1m|large/i, tags: ["largectx"] },
-]
+export const MODEL_CAPABILITY_REGISTRY = {
+  // OpenAI
+  "gpt-4o": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
+  "gpt-4o-mini": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
+  "o3-mini": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
+  "o1": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
+  "gpt-5": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
+  // Anthropic
+  "claude-sonnet-4-5": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 200000, latency: "normal", cost: "medium", tier: "strong" },
+  "claude-opus-4-1": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
+  "claude-3-5-haiku-latest": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 200000, latency: "fast", cost: "low", tier: "fast" },
+  "claude-3-5-sonnet-latest": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 200000, latency: "normal", cost: "medium", tier: "strong" },
+  // Google
+  "gemini-2.5-pro": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "slow", cost: "high", tier: "strong" },
+  "gemini-2.5-flash": { capabilities: ["coding", "fast", "largectx"], tags: ["fast", "coding", "largectx"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
+  "gemini-1.5-pro": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "normal", cost: "medium", tier: "strong" },
+  // DeepSeek
+  "deepseek-chat": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
+  "deepseek-reasoner": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
+  "deepseek-v3": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
+  // Groq / Llama
+  "llama-3.3-70b-versatile": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "fast", cost: "low", tier: "strong" },
+  "llama-3.1-8b-instant": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
+  "llama-3.3-70b": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
+  "llama3.1-8b": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
+  // Mistral
+  "mistral-large-latest": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
+  "mistral-small-latest": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
+  // xAI
+  "grok-4": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 131072, latency: "normal", cost: "medium", tier: "strong" },
+  "grok-3-mini": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 131072, latency: "fast", cost: "low", tier: "fast" },
+  // Z.ai
+  "glm-4.6": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
+  "glm-4.5": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
+  "glm-4.5-air": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
+  // Qwen
+  "qwen-max": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 131072, latency: "normal", cost: "medium", tier: "strong" },
+  "qwen-plus": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 131072, latency: "normal", cost: "medium", tier: "strong" },
+  // Ollama local
+  "llama3.2": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
+  "qwen2.5-coder": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
+}
+
+function lookupRegistry(model) {
+  const m = String(model ?? "").trim()
+  if (MODEL_CAPABILITY_REGISTRY[m]) return MODEL_CAPABILITY_REGISTRY[m]
+  // try base model without provider prefix (e.g. openai/gpt-4o-mini → gpt-4o-mini)
+  const base = m.split("/").pop()
+  if (MODEL_CAPABILITY_REGISTRY[base]) return MODEL_CAPABILITY_REGISTRY[base]
+  return null
+}
 
 function profileFor(model) {
+  const reg = lookupRegistry(model)
+  if (reg) return new Set(reg.tags)
+  // fallback for unknown: neutral, not preferred for anything
+  // still apply conservative heuristic for truly unknown to avoid breakage,
+  // but mark as unrecognized via separate flag
   const tags = new Set()
-  for (const p of MODEL_PROFILES) if (p.match.test(String(model))) p.tags.forEach((t) => tags.add(t))
+  const mm = String(model).toLowerCase()
+  if (/mini|haiku|flash|instant|8b|small|air|fast/.test(mm)) { tags.add("fast"); tags.add("cheap") }
+  if (/coding|code/.test(mm)) tags.add("coding")
   return tags
 }
 
-/**
- * Determine which capability classes this task needs.
- * Returns [{ class, weight }] sorted by weight.
- */
 export function requiredCapabilities(task, { risk = "medium", files = 0, contextTokens = 0 } = {}) {
   const t = String(task ?? "").toLowerCase()
   const complexity = classifyTaskComplexity(task)
@@ -66,32 +115,28 @@ export function requiredCapabilities(task, { risk = "medium", files = 0, context
   if (/repo|repository|codebase|across (files|the project)|whole project/i.test(t)) add(CAPABILITY_CLASS.REPOSITORY_ANALYSIS, 2)
   if (/implement|write|edit|fix|add |create |build |code|function|patch/i.test(t)) add(CAPABILITY_CLASS.CODING, 2)
 
-  // context pressure → large context matters
   if (contextTokens > 90_000 || files > 40) add(CAPABILITY_CLASS.LARGE_CONTEXT, 3)
   else if (contextTokens > 40_000) add(CAPABILITY_CLASS.LARGE_CONTEXT, 1)
 
-  // debugging/coding/security are always tool-selection heavy
   add(CAPABILITY_CLASS.TOOL_SELECTION, 1)
 
-  // complex/critical tasks want strong reasoning; trivial ones want speed
-  if (complexity === "complex" || complexity === "critical") add(CAPABILITY_CLASS.FAST_REASONING, 0) // don't force FAST — force strong
+  if (complexity === "complex" || complexity === "critical") add(CAPABILITY_CLASS.FAST_REASONING, 0)
   else add(CAPABILITY_CLASS.FAST_REASONING, 2)
 
-  // security/critical risk bumps reasoning
   if (risk === "critical" || risk === "high") add(CAPABILITY_CLASS.PLANNING, 1)
 
   return needs.sort((a, b) => b.weight - a.weight)
 }
 
-/** Score a candidate model for the requirement set. Higher is better. */
 function scoreModel({ model, provider, caps, limits, catalogWindow }) {
-  const tags = profileFor(model)
+  const reg = lookupRegistry(model)
+  const tags = reg ? new Set(reg.tags) : profileFor(model)
   let score = 0
   const reasons = []
   const top = caps[0]?.class
   const wants = (cls) => caps.some((c) => c.class === cls)
 
-  const window = provider.contextWindow || catalogWindow || 128_000
+  const window = reg?.contextWindow ?? provider.contextWindow ?? catalogWindow ?? 128000
   if (wants(CAPABILITY_CLASS.LARGE_CONTEXT)) {
     if (window >= 200_000) { score += 5; reasons.push("large context window") }
     else if (window < 128_000) { score -= 3; reasons.push("small context window for this task") }
@@ -109,25 +154,13 @@ function scoreModel({ model, provider, caps, limits, catalogWindow }) {
   if (top === CAPABILITY_CLASS.FAST_REASONING || wants(CAPABILITY_CLASS.SUMMARIZATION)) {
     if (tags.has("fast")) { score += 4; reasons.push("fast + cheap for this light task") }
   }
-  // latency budget pressure
   if (limits.latencyBudgetMs && limits.latencyBudgetMs < 15_000 && tags.has("fast")) { score += 2; reasons.push("meets tight latency budget") }
-  // cost pressure
   if (limits.costBias === "low" && tags.has("cheap")) { score += 3; reasons.push("low cost") }
-  // a model with no recognized tags is a safe neutral choice, never preferred
   if (!tags.size) score += 0
 
-  return { score, reasons, window, tags: [...tags] }
+  return { score, reasons, window, tags: [...tags], registryEntry: reg, recognized: !!reg }
 }
 
-/**
- * The main entry: choose the best model among the user's configured providers.
- *
- * @param config    forge config
- * @param opts      { task, provider, risk, files, contextTokens, latencyBudgetMs,
- *                   tokenBudget, preferredClass, excludeModel }
- * @returns { decision: {model, provider, reason, capabilities, estimated_cost,
- *            estimated_latency, confidence, fallback}, candidates:[…] }
- */
 export function selectModel(config, opts = {}) {
   const {
     task = "", provider: active = null, risk = "medium", files = 0,
@@ -139,7 +172,6 @@ export function selectModel(config, opts = {}) {
   if (preferredClass) caps.unshift({ class: preferredClass, weight: 4 })
   const limits = { latencyBudgetMs, costBias: opts.costBias ?? "normal" }
 
-  // gather runnable candidates from configured providers (the active one first)
   const candidates = []
   const providerNames = Object.keys(config?.providers || {})
   const ordered = active?.name && providerNames.includes(active.name)
@@ -149,30 +181,21 @@ export function selectModel(config, opts = {}) {
     const p = buildProvider(config, name)
     if (!p) continue
     const cat = getCatalog(name)
-    // models the user has explicitly used/picked come first, then catalog defaults
     const remembered = config.providers[name]?.models ?? []
     const models = [...new Set([p.model, ...remembered, ...(cat?.models ?? [])].filter(Boolean))]
     for (const model of models.slice(0, 6)) {
       if (excludeModel && model === excludeModel && name === active?.name) continue
-      const { score, reasons, window, tags } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow })
+      const { score, reasons, window, tags, recognized } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow })
       const isActive = active?.name === name && active?.model === model
       candidates.push({
         provider: name, model, score, reasons, window, tags,
         protocol: p.protocol,
         active: isActive,
-        // an active model whose name we do NOT recognize cannot be meaningfully
-        // out-ranked by a tag heuristic on another provider — it's the user's
-        // explicit choice, so it is never switched away on a heuristic tie.
-        recognized: tags.length > 0,
+        recognized,
       })
     }
   }
 
-  // The ACTIVE provider is the user's explicit choice. It wins ties and stays
-  // default unless another candidate beats it by a clear margin — switching
-  // providers is disruptive (different wire protocol, latency, billing) and
-  // must not happen on a heuristic tie. When the active model's name is not
-  // recognized at all, we cannot meaningfully rank it, so it stays default.
   const activeCandidate = candidates.find((c) => c.active) ?? null
   candidates.sort((a, b) => b.score - a.score)
   let best = candidates[0] ?? null
@@ -184,8 +207,6 @@ export function selectModel(config, opts = {}) {
   }
   if (!best && activeCandidate) best = activeCandidate
 
-  // fallback chain = other runnable providers (transport failover), preferred
-  // after the current one in score order.
   const fallback = fallbackChain(config, active?.name ?? best?.provider ?? "", { health: opts.health ?? {} })
     .map((p) => ({ provider: p.name, model: p.model }))
 
@@ -199,12 +220,10 @@ export function selectModel(config, opts = {}) {
     }
   }
 
-  // confidence: how decisively the top candidate beat the next
   const next = candidates[1]
   const margin = best.score - (next?.score ?? best.score)
   const confidence = best.score <= 0 ? "low" : margin >= 4 ? "high" : margin >= 1 ? "medium" : "low"
 
-  // rough, relative estimates (no pricing table shipped — order of magnitude only)
   const cheap = best.tags.includes("cheap")
   const estimated_cost = cheap ? "low" : best.tags.includes("fast") ? "low-medium" : "medium"
   const estimated_latency = best.tags.includes("fast") ? "fast" : best.tags.includes("reasoning") ? "slower (deeper reasoning)" : "normal"
@@ -225,15 +244,8 @@ export function selectModel(config, opts = {}) {
   }
 }
 
-/**
- * Decide whether a mid-task STRATEGY change warrants switching model. This is
- * NOT transport failover (that stays in providers.js) — it is "the model keeps
- * failing at this kind of work, or resources demand a cheaper/faster class".
- * Returns a decision or null when the current model should stay.
- */
 export function reconsiderModel(config, opts = {}) {
   const { provider = null, failures = 0, failureKind = null, resourceLimits = null, task = "" } = opts
-  // repeated model-attributed failures → try a stronger/different model
   const modelAttributed = failureKind === "model_failure" || failureKind === "reasoning"
   if ((modelAttributed && failures >= 2) || resourceLimits?.preferredClass) {
     const res = selectModel(config, {

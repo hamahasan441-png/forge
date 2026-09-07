@@ -1,28 +1,18 @@
 /**
- * forge — checkpoints (v16, hardened v20): automatic file snapshots before mutations.
+ * forge — checkpoints (v16 hardened v20, hardened v23): automatic file snapshots before mutations.
  *
- * Every write tool (write_file / edit_file / multi_edit / apply_patch) snapshots
- * the original file(s) BEFORE changing them:
+ * Every write tool snapshots the original file(s) BEFORE changing them:
  *
- *   ~/.forge/checkpoints/<id>/manifest.json   { id, ts, cwd, files: [{ path, backup, sha? }] }
+ *   ~/.forge/checkpoints/<id>/manifest.json   { id, ts, cwd, runId, files: [{ path, backup, sha, size, mtime }] }
  *   ~/.forge/checkpoints/<id>/<n>.bak         original file contents
- *   ~/.forge/checkpoints/<id>/<n>.bak.gz      …gzip'ed when larger than 256 KB (v20.1)
+ *   ~/.forge/checkpoints/<id>/<n>.bak.gz      …gzip'ed when larger than 256 KB
  *
- * v20: CREATED files are tracked too — a manifest entry with `backup: null`
- * and a sha256 of the created content. `forge undo` deletes a created file
- * only when its current content still hashes the same (never clobber edits
- * the user made afterwards). This makes apply_patch's create+modify fully
- * atomic to undo (v19 left created files behind).
- *
- * v20.1 (P0-5): the 2 MB per-file cap meant every large file was simply not
- * protected — `forge undo` could only report "NOT restored … larger than 2MB".
- * Backups are now gzip'ed (node:zlib, still zero dependencies), which raises
- * the cap to 64 MB and shrinks the checkpoint directory by ~10x on text. A
- * total-directory budget (512 MB) keeps 30 checkpoints from filling a disk.
- *
- * `forge undo` / chat `/undo` restores the newest checkpoint recorded for the
- * CURRENT working directory and consumes it — repeated undo walks back through
- * history. Zero dependencies.
+ * v23 hardening:
+ *  - full SHA-256 integrity, not just first 1 MB — detects modifications anywhere
+ *  - chunked full-file hashing for large files (no OOM)
+ *  - records size, hash, mtime, checkpoint ID, run ID
+ *  - restore verification detects modifications anywhere in file
+ *  - sealCreated stores full hash for created files
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -32,20 +22,30 @@ import { execFileSync } from "node:child_process"
 import { DEFAULT_DIR } from "./config.js"
 
 export const CHECKPOINTS_DIR = path.join(DEFAULT_DIR, "checkpoints")
-const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024 // per file — compressed on the way in
-const COMPRESS_OVER_BYTES = 256 * 1024 // small files stay plain: instant undo
+const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+const COMPRESS_OVER_BYTES = 256 * 1024
 const MAX_CHECKPOINTS = 30
-const MAX_CHECKPOINT_DIR_BYTES = 512 * 1024 * 1024 // total budget for all of them
+const MAX_CHECKPOINT_DIR_BYTES = 512 * 1024 * 1024
 
-function sha256Head(file) {
+/**
+ * Full-file SHA-256 with chunked reading (no OOM, detects modifications anywhere).
+ * Returns { sha, size, mtime } or null on failure.
+ */
+export function fullFileHash(file) {
   try {
     const st = fs.statSync(file)
-    const len = Math.min(st.size, 1024 * 1024)
+    if (!st.isFile()) return null
+    const hash = crypto.createHash("sha256")
     const fd = fs.openSync(file, "r")
     try {
-      const buf = Buffer.alloc(len)
-      fs.readSync(fd, buf, 0, len, 0)
-      return crypto.createHash("sha256").update(buf).digest("hex")
+      const buf = Buffer.alloc(64 * 1024)
+      let bytesRead = 0
+      let pos = 0
+      while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, pos)) > 0) {
+        hash.update(buf.subarray(0, bytesRead))
+        pos += bytesRead
+      }
+      return { sha: hash.digest("hex"), size: st.size, mtime: st.mtimeMs }
     } finally {
       fs.closeSync(fd)
     }
@@ -54,14 +54,20 @@ function sha256Head(file) {
   }
 }
 
-/** Snapshot `files` (absolute paths, EXISTING) before they get modified, plus
- *  track `created` (absolute paths, NOT existing yet — this mutation will
- *  create them) so undo can remove them. One manifest covers both — a single
- *  undo restores the whole atomic operation. Returns id | null. */
+// Backward compat: old name now delegates to full hash
+function sha256Head(file) {
+  const info = fullFileHash(file)
+  return info?.sha ?? null
+}
+
+function fileInfo(file) {
+  const info = fullFileHash(file)
+  if (!info) return null
+  return { sha: info.sha, size: info.size, mtime: info.mtime }
+}
+
 export function snapshotBefore(files, cwd, created = [], runId = null) {
   try {
-    // v20.0.1: files too big to snapshot are RECORDED (instead of silently
-    // skipped) so `forge undo` can tell the user it could not protect them.
     const tooLarge = []
     const want = [...new Set((files || []).map((f) => path.resolve(f)))].filter((f) => {
       try {
@@ -70,11 +76,11 @@ export function snapshotBefore(files, cwd, created = [], runId = null) {
         if (st.size > MAX_SNAPSHOT_BYTES) { tooLarge.push(f); return false }
         return true
       } catch {
-        return false // does not exist (creation) — handled via `created`
+        return false
       }
     })
     const creating = [...new Set((created || []).map((f) => path.resolve(f)))].filter((f) => {
-      try { fs.accessSync(f); return false } catch { return true } // must NOT exist yet
+      try { fs.accessSync(f); return false } catch { return true }
     })
     if (!want.length && !creating.length && !tooLarge.length) return null
     const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
@@ -82,48 +88,53 @@ export function snapshotBefore(files, cwd, created = [], runId = null) {
     fs.mkdirSync(dir, { recursive: true })
     const manifest = { id, ts: Date.now(), cwd: path.resolve(cwd || process.cwd()), ...(runId ? { runId } : {}), files: [] }
     want.forEach((f, i) => {
-      // v20.1: gzip anything worth compressing. Text shrinks ~10x, which is
-      // what pays for the higher per-file cap.
       let backup = String(i) + ".bak"
       let gz = false
-      let size = 0
+      let info = null
       try {
-        size = fs.statSync(f).size
+        const st = fs.statSync(f)
+        info = { size: st.size, mtime: st.mtimeMs, sha: fullFileHash(f)?.sha ?? null }
       } catch {}
+      const size = info?.size ?? 0
       if (size > COMPRESS_OVER_BYTES) {
         backup += ".gz"
         gz = true
-        fs.writeFileSync(path.join(dir, backup), zlib.gzipSync(fs.readFileSync(f), { level: 6 }))
+        try {
+          fs.writeFileSync(path.join(dir, backup), zlib.gzipSync(fs.readFileSync(f), { level: 6 }))
+        } catch {
+          fs.copyFileSync(f, path.join(dir, backup))
+          gz = false
+          backup = backup.replace(/\.gz$/, "")
+        }
       } else {
-        fs.copyFileSync(f, path.join(dir, backup))
+        try { fs.copyFileSync(f, path.join(dir, backup)) } catch {}
       }
-      manifest.files.push({ path: f, backup, ...(gz ? { gz: true, size } : {}) })
+      manifest.files.push({
+        path: f,
+        backup,
+        ...(gz ? { gz: true } : {}),
+        ...(info ? { sha: info.sha, size: info.size, mtime: info.mtime } : {}),
+      })
     })
     creating.forEach((f) => {
       manifest.files.push({ path: f, backup: null, created: true })
     })
     tooLarge.forEach((f) => {
-      manifest.files.push({ path: f, backup: null, tooLarge: true })
+      const info = fileInfo(f)
+      manifest.files.push({ path: f, backup: null, tooLarge: true, ...(info ? { size: info.size, sha: info.sha, mtime: info.mtime } : {}) })
     })
     fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 1))
     prune()
     return id
   } catch {
-    return null // checkpointing must NEVER break the actual tool call
+    return null
   }
 }
 
-/**
- * A SEGMENT/RUN boundary checkpoint: even when no file has been touched yet a
- * boundary is a real rollback anchor — record git HEAD + the untracked set and
- * the run/segment label so crash-resume and `forge undo --run` can reconcile
- * against a known point. Returns the checkpoint id (or null if the dir cannot
- * be written). Never throws.
- */
 export function boundaryCheckpoint(cwd = process.cwd(), { runId = null, label = null, objective = null } = {}) {
   try {
     let head = null
-    try { head = execFileSync("git", ["-C", path.resolve(cwd), "rev-parse", "HEAD"], { encoding: "utf8" }).trim() } catch { /* not a git repo */ }
+    try { head = execFileSync("git", ["-C", path.resolve(cwd), "rev-parse", "HEAD"], { encoding: "utf8" }).trim() } catch { }
     const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
     const dir = path.join(CHECKPOINTS_DIR, id)
     fs.mkdirSync(dir, { recursive: true })
@@ -141,8 +152,6 @@ export function boundaryCheckpoint(cwd = process.cwd(), { runId = null, label = 
   }
 }
 
-/** Record the content hash of files this mutation CREATED (called AFTER the
- *  write), so undo can verify the file is still ours before deleting it. */
 export function sealCreated(checkpointId, cwd) {
   try {
     if (!checkpointId) return
@@ -152,8 +161,13 @@ export function sealCreated(checkpointId, cwd) {
     let changed = false
     for (const f of m.files ?? []) {
       if (f.created && !f.sha) {
-        f.sha = sha256Head(f.path)
-        changed = true
+        const info = fullFileHash(f.path)
+        if (info) {
+          f.sha = info.sha
+          f.size = info.size
+          f.mtime = info.mtime
+          changed = true
+        }
       }
     }
     if (changed) fs.writeFileSync(mFile, JSON.stringify(m, null, 1))
@@ -161,35 +175,32 @@ export function sealCreated(checkpointId, cwd) {
   void cwd
 }
 
-/** Restore one checkpoint object (from listCheckpoints) and consume it.
- *  Returns {id, files, notes} | null. Shared by restoreLast and restoreRun. */
 function restoreOne(c) {
   let restored = 0
   const notes = []
   try {
     for (const f of c.files) {
       if (f.created) {
-        // file was CREATED by the checkpointed operation — remove it if unchanged
         if (fs.existsSync(f.path)) {
-          const cur = sha256Head(f.path)
-          if (f.sha && cur && f.sha === cur) {
+          const cur = fullFileHash(f.path)
+          if (f.sha && cur && f.sha === cur.sha) {
             fs.unlinkSync(f.path)
             restored++
             notes.push(`removed created file ${path.basename(f.path)}`)
           } else {
-            notes.push(`kept created file ${path.basename(f.path)} (modified since — not deleting)`)
+            // full hash mismatch means file modified anywhere, not just first 1MB
+            notes.push(`kept created file ${path.basename(f.path)} (modified since — not deleting, full SHA-256 mismatch)`)
           }
-        } // already gone: nothing to do
+        }
         continue
       }
       if (f.tooLarge) {
-        notes.push(`NOT restored ${path.basename(f.path)} — it is larger than ${Math.round(MAX_SNAPSHOT_BYTES / 1024 / 1024)}MB and was never snapshotted`)
+        notes.push(`NOT restored ${path.basename(f.path)} — it is larger than ${Math.round(MAX_SNAPSHOT_BYTES / 1024 / 1024)}MB and was never snapshotted (size=${f.size ?? "?"}, sha=${(f.sha ?? "").slice(0, 8)})`)
         continue
       }
       const src = path.join(CHECKPOINTS_DIR, c.id, f.backup)
       if (fs.existsSync(src)) {
         fs.mkdirSync(path.dirname(f.path), { recursive: true })
-        // .bak.gz is v20.1+; a bare .bak is a pre-v20.1 checkpoint
         if (f.gz || f.backup.endsWith(".gz")) {
           fs.writeFileSync(f.path, zlib.gunzipSync(fs.readFileSync(src)))
         } else {
@@ -205,25 +216,17 @@ function restoreOne(c) {
   return restored || notes.length ? { id: c.id, files: restored, notes } : null
 }
 
-/** Restore the newest checkpoint for cwd. Consumes it. Returns {id, files, notes} | null. */
 export function restoreLast(cwd) {
   const found = listCheckpoints(cwd, 1)
   if (!found.length) return null
   return restoreOne(found[0])
 }
 
-/**
- * v20.2 (P3-4): restore an ENTIRE agent run atomically. Every checkpoint tagged
- * with the same runId is rolled back, newest→oldest, so files return to their
- * pre-run state even if the run touched one file several times. With no runId,
- * the most recent run for cwd is used. Returns
- * {runId, checkpoints, files, notes} | null.
- */
 export function restoreRun(cwd, runId = null) {
   const all = listCheckpoints(cwd, 999)
   const rid = runId || all.find((c) => c.runId)?.runId
   if (!rid) return null
-  const group = all.filter((c) => c.runId === rid) // already newest-first
+  const group = all.filter((c) => c.runId === rid)
   if (!group.length) return null
   let files = 0
   const notes = []
@@ -235,7 +238,6 @@ export function restoreRun(cwd, runId = null) {
   return checkpoints ? { runId: rid, checkpoints, files, notes } : null
 }
 
-/** Newest-first checkpoints for cwd (or all if cwd is null). */
 export function listCheckpoints(cwd, max = 10) {
   const out = []
   try {
@@ -249,11 +251,43 @@ export function listCheckpoints(cwd, max = 10) {
       try {
         const m = JSON.parse(fs.readFileSync(path.join(CHECKPOINTS_DIR, d, "manifest.json"), "utf8"))
         if (cwd && path.resolve(m.cwd) !== path.resolve(cwd)) continue
-        out.push({ id: m.id, ts: m.ts, cwd: m.cwd, runId: m.runId ?? null, files: m.files ?? [] })
+        out.push({ id: m.id, ts: m.ts, cwd: m.cwd, runId: m.runId ?? null, files: m.files ?? [], boundary: !!m.boundary, label: m.label ?? null, gitHead: m.gitHead ?? null })
       } catch {}
     }
   } catch {}
   return out
+}
+
+/** Verify integrity of a checkpoint manifest against actual backup files (full SHA-256). */
+export function verifyCheckpointIntegrity(checkpointId) {
+  try {
+    const dir = path.join(CHECKPOINTS_DIR, checkpointId)
+    const m = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"))
+    const issues = []
+    for (const f of m.files ?? []) {
+      if (f.created || f.tooLarge) continue
+      const src = path.join(dir, f.backup)
+      if (!fs.existsSync(src)) {
+        issues.push(`missing backup for ${f.path}`)
+        continue
+      }
+      // verify backup file hash matches recorded sha if present
+      if (f.sha) {
+        let backupData
+        try {
+          if (f.gz || f.backup.endsWith(".gz")) backupData = zlib.gunzipSync(fs.readFileSync(src))
+          else backupData = fs.readFileSync(src)
+          const sha = crypto.createHash("sha256").update(backupData).digest("hex")
+          if (sha !== f.sha) issues.push(`backup hash mismatch for ${f.path}: expected ${f.sha.slice(0, 8)}, got ${sha.slice(0, 8)}`)
+        } catch (e) {
+          issues.push(`cannot verify backup for ${f.path}: ${e.message}`)
+        }
+      }
+    }
+    return { ok: issues.length === 0, issues, id: checkpointId, files: m.files?.length ?? 0 }
+  } catch (e) {
+    return { ok: false, issues: [String(e.message)], id: checkpointId }
+  }
 }
 
 function dirBytes(dir) {
@@ -267,9 +301,7 @@ function dirBytes(dir) {
       } catch {}
     }
   }
-  try {
-    walk(dir)
-  } catch {}
+  try { walk(dir) } catch {}
   return total
 }
 
@@ -279,12 +311,9 @@ function prune() {
       .readdirSync(CHECKPOINTS_DIR)
       .filter((d) => !d.startsWith("."))
       .sort()
-    // v20.1: oldest-first by count…
     while (dirs.length > MAX_CHECKPOINTS) {
       fs.rmSync(path.join(CHECKPOINTS_DIR, dirs.shift()), { recursive: true, force: true })
     }
-    // …and then by total size, so 30 compressed multi-MB checkpoints cannot
-    // quietly eat half a disk.
     let guard = 0
     while (dirs.length > 1 && guard++ < MAX_CHECKPOINTS) {
       if (dirBytes(CHECKPOINTS_DIR) <= MAX_CHECKPOINT_DIR_BYTES) break
@@ -292,3 +321,5 @@ function prune() {
     }
   } catch {}
 }
+
+export { sha256Head }

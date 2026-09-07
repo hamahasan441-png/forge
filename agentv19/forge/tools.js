@@ -282,6 +282,66 @@ export const TOOL_DEFS = [
  *  in read-only (plan / sub-agent) mode. v20 fix: `delegate` is READ-ONLY and
  *  no longer listed here (v19 blocked plan-mode delegation by mistake). */
 export const WRITE_TOOLS = new Set(["bash", "write_file", "edit_file", "multi_edit", "apply_patch"])
+export const FORGE_STATE_MUTATING_TOOLS = new Set(["memory", "todo"])
+
+export const MUTATION_CLASS = {
+  FILESYSTEM: "filesystem_mutation",
+  FORGE_STATE: "forge_state_mutation",
+  NONE: "none",
+}
+
+const READONLY_ALLOWED_BASH_PATTERNS = [
+  /\b(test|jest|vitest|mocha|pytest|cargo|go)\s+(test|run)\b/i,
+  /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(test|lint|typecheck|check|build)\b/i,
+  /\btsc\b/i,
+  /\bnode\s+--check\b/i,
+  /\b(cargo|go)\s+(build|vet|check)\b/i,
+  /\b(make|gradle|mvn)\b.*\b(test|check|verify)\b/i,
+  /\b(git\s+status|git\s+log|git\s+diff|ls|cat|pwd|echo|which|env|date)\b/i,
+]
+
+function isReadOnlyAllowedBash(command) {
+  const cmd = String(command ?? "")
+  if (/^\s*(ls|cat|head|tail|wc|pwd|echo|which|env|date|git\s+(status|log|diff|show|branch)|node\s+-v|npm\s+(ls|view|outdated))\b/i.test(cmd)) return true
+  for (const re of READONLY_ALLOWED_BASH_PATTERNS) if (re.test(cmd)) return true
+  return false
+}
+
+function getMutationClass(name, args) {
+  if (WRITE_TOOLS.has(name)) return MUTATION_CLASS.FILESYSTEM
+  if (name === "bash") {
+    const cmd = String(args?.command ?? "")
+    if (isReadOnlyAllowedBash(cmd)) return MUTATION_CLASS.NONE
+    return MUTATION_CLASS.FILESYSTEM
+  }
+  if (FORGE_STATE_MUTATING_TOOLS.has(name)) {
+    if (name === "memory") {
+      const action = String(args?.action ?? "read")
+      if (action === "read") return MUTATION_CLASS.NONE
+      return MUTATION_CLASS.FORGE_STATE
+    }
+    if (name === "todo") {
+      const action = String(args?.action ?? "list")
+      if (action === "list") return MUTATION_CLASS.NONE
+      return MUTATION_CLASS.FORGE_STATE
+    }
+    return MUTATION_CLASS.FORGE_STATE
+  }
+  return MUTATION_CLASS.NONE
+}
+
+export function isReadOnlyViolation(name, args, readOnly) {
+  if (!readOnly) return null
+  const mutationClass = getMutationClass(name, args)
+  if (mutationClass === MUTATION_CLASS.FILESYSTEM) {
+    if (name === "bash" && isReadOnlyAllowedBash(args?.command)) return null
+    return `BLOCKED: ${name} is a filesystem mutation and is disabled in this read-only agent (mutation class: ${mutationClass})`
+  }
+  if (mutationClass === MUTATION_CLASS.FORGE_STATE) {
+    return `BLOCKED: ${name} mutates persistent Forge state (${args?.action ?? "write"}) and is disabled in read-only mode — read-only workers may only inspect/search/analyze/read/verify`
+  }
+  return null
+}
 
 // ---------------------------------------------------------------------------
 // tool context
@@ -330,7 +390,18 @@ export function makeToolContext(opts = {}) {
     _delegateMax: Math.max(1, Math.min(4, maxParallelDelegates)),
   }
   const allDefs = plugins.length ? [...TOOL_DEFS, ...plugins.map((p) => p.def)] : TOOL_DEFS
-  return { defs: readOnly ? allDefs.filter((t) => !WRITE_TOOLS.has(t.function.name)) : allDefs, exec: (name, args) => execTool(ctx, name, args || {}) }
+  let filteredDefs = allDefs
+  if (readOnly) {
+    filteredDefs = allDefs.filter((t) => {
+      const n = t.function.name
+      if (WRITE_TOOLS.has(n)) {
+        if (n === "bash") return true
+        return false
+      }
+      return true
+    })
+  }
+  return { defs: filteredDefs, exec: (name, args) => execTool(ctx, name, args || {}) }
 }
 
 /** Built-in tool names — used to reject plugins that shadow a built-in. */
@@ -350,6 +421,12 @@ function cap(s, limit) {
 // ---------------------------------------------------------------------------
 
 async function runBash(ctx, command, timeoutSec) {
+  if (ctx.readOnly) {
+    const mutationCheck = getMutationClass("bash", { command })
+    if (mutationCheck === MUTATION_CLASS.FILESYSTEM && !isReadOnlyAllowedBash(command)) {
+      return `BLOCKED: write tools are disabled in this read-only agent — bash command "${String(command).slice(0, 80)}" is a filesystem mutation. Read-only workers may run approved verification commands (test/build/lint) but not arbitrary mutations.`
+    }
+  }
   const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes })
   if (!verdict.ok) return verdict.reason
   const t = Math.min(300, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
@@ -1073,6 +1150,9 @@ function todo(ctx, args) {
   const p = ctx.todoPath
   if (!p) return "ERROR: no todo path configured"
   const action = args.action || "list"
+  if (ctx.readOnly && action !== "list") {
+    return `BLOCKED: todo ${action} mutates persistent Forge state and is disabled in read-only mode — read-only workers may only inspect/search/analyze/read/verify`
+  }
   const state = readTodo(ctx)
   if (action === "list") return renderTodo(state.items)
   if (action === "set") {
@@ -1103,6 +1183,9 @@ function think(_ctx, args) {
 
 function memory(ctx, args) {
   const action = args.action || "read"
+  if (ctx.readOnly && action !== "read") {
+    return `BLOCKED: memory ${action} mutates persistent Forge state and is disabled in read-only mode — read-only workers may only inspect/search/analyze/read/verify. Memory mutations: append, replace, learn are blocked.`
+  }
   const scope = args.scope === "project" ? "project" : "global"
   const globalPath = ctx.memoryPath || path.join(DEFAULT_DIR, "memory.md")
 
@@ -1263,10 +1346,15 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
 const REDACTED_TOOLS = new Set(["bash", "read_file", "fetch_url", "web_search", "delegate", "git_status", "grep_files", "memory"])
 
 export async function execTool(ctx, name, args) {
-  // v20.0.1: a model can emit `arguments: null` / `arguments: "null"` (or omit
-  // them). Normalize so a malformed call returns a normal tool error instead of
-  // throwing a TypeError into the agent loop.
   if (!args || typeof args !== "object" || Array.isArray(args)) args = {}
+  if (ctx.readOnly) {
+    const violation = isReadOnlyViolation(name, args, true)
+    if (violation) return violation
+    const pl = ctx._plugins?.get(name)
+    if (pl && !pl.readOnly) {
+      return `BLOCKED: write tools are disabled in this read-only agent — plugin ${name} is not read-only`
+    }
+  }
   let result
   switch (name) {
     case "bash": result = await runBash(ctx, String(args.command ?? ""), args.timeout_sec); break
