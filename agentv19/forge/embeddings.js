@@ -249,8 +249,13 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)) }
 export function createEmbedder(cfg, { fetchImpl, cacheDoc, now } = {}) {
   const clock = typeof now === "function" ? now : () => Date.now()
   const doc = cacheDoc || loadEmbeddingCache(cfg.cachePath)
-  if (doc.model && cfg.model && doc.model !== cfg.model) doc.entries = {} // model changed → stale
+  if (doc.model && cfg.model && doc.model !== cfg.model) { doc.entries = {}; doc.dim = 0 } // model changed → stale vectors AND dims
   doc.model = cfg.model
+  // NOTE on concurrent embedders (meta controller + agent loop may hold one
+  // each in the same run): each persists its own loaded snapshot, last writer
+  // wins — an entry another embedder added can be evicted from the file and
+  // will simply be re-embedded next time. The cache is a speedup, never a
+  // correctness dependency, so this is accepted instead of a merge protocol.
   const stats = { calls: 0, texts: 0, hits: 0, misses: 0, requests: 0, errors: 0 }
 
   async function embed(texts, { signal } = {}) {

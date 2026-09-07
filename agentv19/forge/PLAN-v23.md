@@ -174,3 +174,29 @@ memory + learnings, the highest-value injected slices), and rerank of
   async memory/learnings rerank wired through context engine, agent loop and
   meta controller, `forge embeddings` CLI, 83-check suite. BM25 remains the
   default; embeddings reorder BM25 shortlists only; disabled by default.
+- **v23.1.1 — audit of the semantic layer (4 defects fixed, each with a
+  regression test; suite 83 → 93 checks).**
+  1. `forge embeddings test --json` printed human lines before the JSON —
+     violates the repo's "--json = exactly one JSON document" contract
+     (test-json.mjs). Now pure JSON; the contract check is pinned there.
+  2. `rankDocsHybrid` carried the doc index under the string key `__ri` — a
+     caller doc with its own `__ri`/`_i` field could corrupt the score mapping.
+     Now a symbol-keyed tag (collision-proof; pinned by test).
+  3. The context engine's memory cache key ignored `precision` — a precise
+     build could be served the normal-precision slice (limit 10 where 6 was
+     asked) and vice versa. Latent since v21; the key now carries precision on
+     both the BM25 and the hybrid paths (pinned by test).
+  4. Switching the embedding model cleared stale cache vectors but kept the
+     stale `dim`. Both reset now (pinned by test).
+
+  Verified-not-bugs during the audit: the budget-timeout race already absorbs
+  late embed rejections (`Promise.race` attaches handlers to both promises —
+  proven empirically, now pinned by a regression test, since an unhandled
+  rejection crashes Node ≥15); `forge config set ... enabled true` stores a
+  real boolean via `coerce()`; `agentview` ignores unknown event types
+  (`RETRIEVAL_MODE` safe); no API key ever reaches CLI output or error
+  strings; the embeddings endpoint is config-only (same trust model as
+  provider baseUrl). Accepted by design: two embedders alive in one run
+  (meta + agent) persist last-writer-wins cache snapshots — an entry may be
+  evicted and re-embedded; the cache is a speedup, never a correctness
+  dependency.

@@ -31,6 +31,7 @@ const { defaultConfig } = await import("../forge/config.js")
 
 let PASS = 0, FAIL = 0
 const ok = (name, cond) => { if (cond) { PASS++; console.log(`  ok   ${name}`) } else { FAIL++; console.log(`  FAIL ${name}`) } }
+const SCRATCH = [] // temp project dirs, removed at the end
 
 // ---------------------------------------------------------------------------
 console.log("== cosineSimilarity ==")
@@ -250,6 +251,7 @@ console.log("== embeddings client (local mock server) ==")
 console.log("== memory + learnings async wiring ==")
 {
   const PROJ = fs.mkdtempSync(path.join(os.tmpdir(), "forge-sem-proj-"))
+  SCRATCH.push(PROJ)
   process.chdir(PROJ)
   appendMemory("global", "deploy pipeline uses docker compose")
   appendMemory("global", "deploy keys rotate every quarter")
@@ -309,9 +311,67 @@ console.log("== memory + learnings async wiring ==")
 }
 
 // ---------------------------------------------------------------------------
+console.log("== audit regressions ==")
+{
+  // 1. index tagging must be collision-proof (docs may carry _i/__ri fields)
+  const tricky = [
+    { id: "x", text: "alpha beta", __ri: 99, _i: 7 },
+    { id: "y", text: "gamma delta", __ri: 0, _i: 3 },
+  ]
+  const V2 = { "alpha zeta": [1, 0], "alpha beta": [0, 1], "gamma delta": [1, 0] }
+  const r = await rankDocsHybrid("alpha zeta", tricky, { embed: async (t) => t.map((x) => V2[x] ?? [0, 0]), alpha: 1 })
+  ok("docs with their own _i/__ri fields still map correctly", r[0].id === "y" && r[0].__ri === 0 && r[1].id === "x" && r[1].__ri === 99)
+  ok("no symbol tag leaks into output", Object.getOwnPropertySymbols(r[0]).length === 0)
+
+  // 2. budget race must absorb a late embed rejection (no unhandledRejection,
+  //    which crashes the CLI since Node 15)
+  let unhandled = null
+  const onUh = (e) => { unhandled = e }
+  process.on("unhandledRejection", onUh)
+  const raced = await rankDocsHybrid("retry network", [{ text: "retry backoff" }, { text: "ui colors" }], {
+    embed: () => new Promise((_, rej) => setTimeout(() => rej(new Error("late boom")), 120)),
+    budgetMs: 25,
+  })
+  await new Promise((res) => setTimeout(res, 260))
+  process.off("unhandledRejection", onUh)
+  ok("budget exceeded → bm25-timeout", raced[0].scoreDetail.mode === "bm25-timeout")
+  ok("late rejection after timeout is absorbed", unhandled === null)
+
+  // 3. switching the embedding model invalidates stale cache vectors AND dims
+  const mcCfg = { baseUrl: "http://unused", apiKey: "k", model: "new-model", batchSize: 4, timeoutMs: 1000, rerankBudgetMs: 0, maxTexts: 8, cachePath: path.join(HOME, "cache", "modelchange.json"), cacheMaxEntries: 10, alpha: 0.5 }
+  const oldDoc = { version: 1, model: "old-model", dim: 3, entries: { [textKey("tt")]: { v: [9, 9, 9], t: 1 } } }
+  const mcEmbedder = createEmbedder(mcCfg, {
+    cacheDoc: oldDoc,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ data: [{ index: 0, embedding: [0.1, 0.2] }] }) }),
+  })
+  const mcVecs = await mcEmbedder.embed(["tt"])
+  ok("model change discards stale vectors (re-embedded)", JSON.stringify(mcVecs[0]) === "[0.1,0.2]" && mcEmbedder.stats().misses === 1 && mcEmbedder.stats().hits === 0)
+}
+
+// ---------------------------------------------------------------------------
+console.log("== context cache: precision isolation ==")
+{
+  const PROJ2 = fs.mkdtempSync(path.join(os.tmpdir(), "forge-sem-prec-"))
+  SCRATCH.push(PROJ2)
+  process.chdir(PROJ2)
+  for (let i = 0; i < 8; i++) appendMemory("global", `cachekey deployment note number ${i}`)
+  const eng = createContextEngine({ cwd: PROJ2, config: {} })
+  const query = "cachekey deployment"
+  const countMemLines = (b) => (b.sections.find((s) => s.name === "memory")?.text || "").split("\n").filter((l) => l.startsWith("- ")).length
+  const normal = eng.build(query, { budgetTokens: 4000 })
+  ok("normal build lists all 8 matching lines", countMemLines(normal) === 8)
+  const precise = eng.build(query, { budgetTokens: 4000, precision: "precise" })
+  ok("precise build after warm cache caps at 6 (no slice bleed)", countMemLines(precise) === 6)
+  const normalAgain = eng.build(query, { budgetTokens: 4000 })
+  ok("normal cache untouched by the precise build", countMemLines(normalAgain) === 8)
+  process.chdir(HOME)
+}
+
+// ---------------------------------------------------------------------------
 console.log("== runAgent end-to-end (mock chat + mock embeddings) ==")
 {
   const PROJ = fs.mkdtempSync(path.join(os.tmpdir(), "forge-sem-agent-"))
+  SCRATCH.push(PROJ)
   process.chdir(PROJ)
   appendMemory("global", "kubernetes namespace convention per team")
   appendMemory("global", "kubernetes secrets via sealed-secrets only")
@@ -379,6 +439,7 @@ console.log("== runAgent end-to-end (mock chat + mock embeddings) ==")
 
 if (SAVED_OPENAI_KEY !== undefined) process.env.OPENAI_API_KEY = SAVED_OPENAI_KEY
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch { }
+for (const d of SCRATCH) { try { fs.rmSync(d, { recursive: true, force: true }) } catch { } }
 
 console.log(`\n== semantic suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

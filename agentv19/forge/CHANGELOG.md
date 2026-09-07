@@ -102,6 +102,28 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   best-in-class (MCP, LSP, semantic retrieval, vision, browser, sandbox,
   benchmark), with MCP, LSP and semantic retrieval marked delivered.
 
+### Fixed (audit of the semantic-retrieval layer — each with a regression test)
+- **`forge embeddings test --json` broke the `--json` contract.** It printed
+  human progress lines before the JSON document; the repo's contract
+  (test-json.mjs) is exactly one JSON document. Now pure JSON, with the
+  embeddings status pinned in test-json.mjs.
+- **`rankDocsHybrid` index tag could collide with caller fields.** The doc
+  index traveled under the string key `__ri`; a doc carrying its own
+  `__ri`/`_i` field could corrupt the BM25↔doc mapping. Now a symbol-keyed
+  tag — collision-proof by construction.
+- **Context-engine memory slices bled across precision modes.** The cache key
+  omitted `precision`, so a precise build (limit 6) could be served a
+  normal-precision slice (limit 10) and vice versa. Latent since v21; fixed on
+  both the BM25 and the hybrid paths.
+- **Model change kept a stale cache `dim`.** Switching the embedding model
+  discarded stale vectors but not their dimension; both are reset now.
+- Audit also **proved safe** (and pinned where crash-worthy): the rerank
+  budget-timeout absorbs late embed rejections — no unhandled rejection
+  (which crashes Node ≥15); `coerce()` makes
+  `forge config set retrieval.embeddings.enabled true` a real boolean;
+  `agentview` ignores unknown events (`RETRIEVAL_MODE`); no API key ever
+  reaches CLI output or error strings; endpoint resolution stays config-only.
+
 ## v21.0.0 — "autonomous orchestration"
 
 forge becomes a genuinely **autonomous, recoverable, long-running coding

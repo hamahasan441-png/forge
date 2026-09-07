@@ -98,7 +98,7 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     if (opts.includeMemory !== false && task) {
       const alpha = config?.retrieval?.embeddings?.alpha
       const budgetMs = config?.retrieval?.embeddings?.rerankBudgetMs ?? 4000
-      pre.memory = await cachedAsync("memory+sem:" + bucket(task), [], () =>
+      pre.memory = await cachedAsync(`memory+sem:${bucket(task)}:${precise ? "p" : "n"}`, [], () =>
         relevantMemoryAsync(task, { cwd, limit: precise ? 6 : 10, embedder, alpha, budgetMs }))
       pre.learnings = await cachedAsync("learnings+sem:" + bucket(task), [], () =>
         relevantLearningsAsync(task, { cwd, limit: 2, embedder, alpha, budgetMs }))
@@ -131,9 +131,11 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     // 3. relevant memory (global + project) — demand-driven BM25, or the v23
     // hybrid rerank when buildAsync() precomputed those slices
     if (opts.includeMemory !== false && task) {
+      // v23.0.1 (audit): the key carries precision — a normal-precision build
+      // (limit 10) must not be served to a precise build (limit 6) or vice versa
       const mem = pre.memory !== undefined
         ? pre.memory
-        : cached("memory:" + bucket(task), [], () => relevantMemory(task, { cwd, limit: precise ? 6 : 10 }))
+        : cached(`memory:${bucket(task)}:${precise ? "p" : "n"}`, [], () => relevantMemory(task, { cwd, limit: precise ? 6 : 10 }))
       if (mem) sections.push({ name: "memory", text: mem })
       const learn = pre.learnings !== undefined
         ? pre.learnings

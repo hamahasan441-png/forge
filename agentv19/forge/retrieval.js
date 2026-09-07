@@ -110,6 +110,9 @@ export function minMaxNormalize(scores) {
 
 function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)) }
 const TIMEOUT = Symbol("hybrid-timeout")
+// Symbol-keyed index tag: immune to collisions with whatever fields the caller's
+// docs carry (a string key like `_i`/`__ri` could be shadowed by the input).
+const RI = Symbol("rank-index")
 
 /**
  * Hybrid BM25 + semantic ranking.
@@ -131,13 +134,13 @@ export async function rankDocsHybrid(query, docs, { embed, alpha = 0.5, budgetMs
   const list = Array.isArray(docs) ? docs : []
   const a = Math.min(1, Math.max(0, Number(alpha) || 0))
   // NOTE: rankDocs strips its own `_i` tag on output, so carry the index
-  // through under a distinct key.
-  const tagged = list.map((d, i) => ({ ...(d && typeof d === "object" ? d : { text: String(d) }), __ri: i }))
-  const bm = rankDocs(query, tagged) // BM25 ordering, each entry keeps __ri
-  const bmByIndex = new Map(bm.map((r) => [r.__ri, r.score]))
+  // through under a symbol key (spread copies enumerable symbol properties).
+  const tagged = list.map((d, i) => ({ ...(d && typeof d === "object" ? d : { text: String(d) }), [RI]: i }))
+  const bm = rankDocs(query, tagged) // BM25 ordering, each entry keeps [RI]
+  const bmByIndex = new Map(bm.map((r) => [r[RI], r.score]))
   const bmScores = list.map((_, i) => bmByIndex.get(i) ?? 0)
 
-  const plain = (mode) => bm.map(({ __ri, ...rest }) => ({
+  const plain = (mode) => bm.map(({ [RI]: _tag, ...rest }) => ({
     ...rest, scoreDetail: { mode, bm25: rest.score, semantic: null, alpha: a },
   }))
 

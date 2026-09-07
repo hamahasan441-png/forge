@@ -1095,24 +1095,30 @@ async function main() {
         if (!texts.length) { err("usage: forge embeddings test <text> [more texts...]"); process.exit(1); return }
         if (!resolved.ok) { err(`embeddings not usable: ${resolved.reason}`); process.exit(1); return }
         const embedder = createEmbedder(resolved)
-        console.log(dim(`embedding ${texts.length} text(s) with ${resolved.provider}/${resolved.model}`))
+        // --json contract: exactly one JSON document, no human lines (test-json.mjs)
+        if (!JSON_OUT) console.log(dim(`embedding ${texts.length} text(s) with ${resolved.provider}/${resolved.model}`))
         const t0 = Date.now()
         let vecs
         try { vecs = await embedder.embed(texts) }
         catch (e) { err(`embeddings request failed: ${e.message}`); process.exit(1); return }
         const dt = Date.now() - t0
         const s = embedder.stats()
-        ok(`done in ${dt}ms — dim ${vecs[0].length} • ${s.hits} cache hit(s), ${s.requests} request(s)`)
+        const pairs = []
         if (texts.length > 1) {
-          console.log(dim("  cosine similarity (1.0 = identical direction):"))
           for (let i = 0; i < texts.length; i++) {
             for (let j = i + 1; j < texts.length; j++) {
-              const c = cosineSimilarity(vecs[i], vecs[j])
-              console.log(`  ${String(i + 1)}↔${String(j + 1)}  ${c >= 0 ? green(c.toFixed(3)) : red(c.toFixed(3))}  ${dim(`"${texts[i].slice(0, 34)}" × "${texts[j].slice(0, 34)}"`)}`)
+              pairs.push({ i: i + 1, j: j + 1, cosine: Number(cosineSimilarity(vecs[i], vecs[j]).toFixed(4)) })
             }
           }
         }
-        if (JSON_OUT) emitJson({ provider: resolved.provider, model: resolved.model, dim: vecs[0].length, latencyMs: dt, stats: s })
+        if (JSON_OUT) { emitJson({ provider: resolved.provider, model: resolved.model, dim: vecs[0].length, latencyMs: dt, stats: s, pairs }); return }
+        ok(`done in ${dt}ms — dim ${vecs[0].length} • ${s.hits} cache hit(s), ${s.requests} request(s)`)
+        if (pairs.length) {
+          console.log(dim("  cosine similarity (1.0 = identical direction):"))
+          for (const p of pairs) {
+            console.log(`  ${String(p.i)}↔${String(p.j)}  ${p.cosine >= 0 ? green(p.cosine.toFixed(3)) : red(p.cosine.toFixed(3))}  ${dim(`"${texts[p.i - 1].slice(0, 34)}" × "${texts[p.j - 1].slice(0, 34)}"`)}`)
+          }
+        }
         return
       }
 
