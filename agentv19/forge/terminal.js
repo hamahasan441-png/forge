@@ -48,7 +48,7 @@ import util from "node:util"
 import readline from "node:readline"
 import { createKeyDecoder } from "./keys.js"
 import { createEditor, layout } from "./editor.js"
-import { displayWidth, fit, wrapAnsi, stripAnsi, renderColumns, detectDialect, renderOptions } from "./render.js"
+import { displayWidth, fitS, wrapAnsi, stripAnsi, renderColumns, detectDialect, renderOptions } from "./render.js"
 
 const ESC = "\x1b"
 const CSI = ESC + "["
@@ -85,6 +85,7 @@ export function createTerminal({
   let dockFn = null // () => string[]
   let status = null // string | null
   let hint = [] // completion candidate rows
+  let palette = null // { items, query, sel, rows } — command palette overlay
   let prompt = "forge > "
   let contPrompt = "... "
   let active = false // raw-mode interactive session running
@@ -128,10 +129,10 @@ export function createTerminal({
     if (dockFn && visible) {
       let rowsForDock = []
       try { rowsForDock = dockFn(cols, lines) || [] } catch { rowsForDock = [] }
-      for (const r of rowsForDock) out.push(fit(r, w))
+      for (const r of rowsForDock) out.push(fitS(r, w, opts))
     }
-    if (status) out.push(fit(status, w))
-    for (const h of hint) out.push(fit(h, w))
+    if (status) out.push(fitS(status, w, opts))
+    for (const h of hint) out.push(fitS(h, w, opts))
     const q = question
     if (hideInput && !q) {
       // monitor mode: no input row; park the cursor at the end of the region
@@ -142,22 +143,35 @@ export function createTerminal({
     const pText = q ? q.promptText : prompt
     const pw = displayWidth(pText)
     const cw = displayWidth(contPrompt)
-    const lay = layout(editor.text, editor.cursor, w, pw, cw)
-    const inputRows = lay.rows.map((r, i) => (i === 0 ? pText : contPrompt) + r)
-    // keep an oversized input within the screen: window around the cursor
-    const budget = Math.max(3, lines - 2 - out.length)
-    let first = 0
-    if (inputRows.length > budget) {
-      first = Math.max(0, Math.min(lay.cursorRow - Math.floor(budget / 2), inputRows.length - budget))
-    }
-    const shown = inputRows.slice(first, first + budget)
-    cursorRow = out.length + (lay.cursorRow - first)
-    cursorCol = lay.cursorCol
-    for (const r of shown) out.push(r)
-    if (editor.searching) {
-      const s = editor.search
-      const label = s.failed ? "(failed reverse-i-search)" : "(reverse-i-search)"
-      out.push(fit(opts.th.muted(`${label}'${s.query}': `) + (s.match != null ? fit(s.match.split("\n")[0], 40) : ""), w))
+    let shown = []
+    // command palette overlay: it owns the input rows while open
+    if (palette) {
+      const rowCount = Math.min(palette.rows.length, Math.max(3, lines - 2 - out.length - (status ? 1 : 0)))
+      const rows = palette.rows.slice(0, rowCount)
+      shown = rows
+      for (const r of rows) out.push(fitS(r, w, opts))
+      if (palette.rows.length > rowCount) out.push(fitS(o.th.muted(`  ${opts.sym.ell} ${palette.rows.length - rowCount} more`), w, opts))
+      const pw2 = displayWidth(palette.prompt || "❯ ")
+      cursorRow = out.length - rows.length
+      cursorCol = pw2 + displayWidth(palette.query)
+    } else {
+      const lay = layout(editor.text, editor.cursor, w, pw, cw)
+      const inputRows = lay.rows.map((r, i) => (i === 0 ? pText : contPrompt) + r)
+      // keep an oversized input within the screen: window around the cursor
+      const budget = Math.max(3, lines - 2 - out.length)
+      let first = 0
+      if (inputRows.length > budget) {
+        first = Math.max(0, Math.min(lay.cursorRow - Math.floor(budget / 2), inputRows.length - budget))
+      }
+      shown = inputRows.slice(first, first + budget)
+      cursorRow = out.length + (lay.cursorRow - first)
+      cursorCol = lay.cursorCol
+      for (const r of shown) out.push(r)
+      if (editor.searching) {
+        const s = editor.search
+        const label = s.failed ? "(failed reverse-i-search)" : "(reverse-i-search)"
+        out.push(fitS(opts.th.muted(`${label}'${s.query}': `) + (s.match != null ? fitS(s.match.split("\n")[0], 40, opts) : ""), w, opts))
+      }
     }
     // the whole region must fit on screen; drop from the top (partial rows) if it does not
     while (out.length > lines - 1 && out.length > shown.length) { out.shift(); cursorRow-- }
@@ -311,8 +325,78 @@ export function createTerminal({
       editor.set(editor.text.slice(0, replaceFrom) + pref + editor.text.slice(editor.cursor), replaceFrom + pref.length)
     }
     hint = renderColumns(candidates.slice(0, 40), cols, opts)
-    if (candidates.length > 40) hint.push(opts.th.muted(`  … ${candidates.length - 40} more`))
+    if (candidates.length > 40) hint.push(opts.th.muted(`  ${opts.sym.ell} ${candidates.length - 40} more`))
     scheduleRender()
+  }
+
+  // ---- command palette ----------------------------------------------------
+  const PALETTE_PROMPT = opts.sym.prompt + " "
+  const PALETTE_MAX_ROWS = 9
+
+  function paletteItems() {
+    try { return callbacks.paletteItems?.() ?? [] } catch { return [] }
+  }
+  function paletteFilter(items, query) {
+    const q = String(query || "").trim().toLowerCase()
+    if (!q) return items
+    return items.filter((it) => String(it.name || "").toLowerCase().includes(q) || String(it.hint || "").toLowerCase().includes(q))
+  }
+  function paletteRows(list) {
+    const rows = []
+    const sel = Math.min(palette.sel, Math.max(0, list.length - 1))
+    const shown = list.slice(0, PALETTE_MAX_ROWS)
+    shown.forEach((it, i) => {
+      const mark = i === sel ? opts.th.accent(opts.sym.prompt) : " "
+      const name = (i === sel ? opts.th.primary : opts.th.bold)(it.name)
+      const hint = it.hint ? opts.th.muted("  " + fitS(it.hint, Math.max(8, cols - displayWidth(it.name) - 12), opts)) : ""
+      rows.push(`${mark} ${name}${hint}`)
+    })
+    return rows
+  }
+  function openPalette(items) {
+    if (question || hideInput || !callbacks.paletteItems) return
+    palette = { items: items || paletteItems(), query: "", sel: 0, rows: [], prompt: PALETTE_PROMPT }
+    palette.rows = paletteRows(paletteFilter(palette.items, ""))
+    scheduleRender()
+  }
+  function closePalette() {
+    if (!palette) return
+    palette = null
+    scheduleRender()
+  }
+  function paletteType(text) {
+    palette.query += String(text ?? "")
+    const list = paletteFilter(palette.items, palette.query)
+    palette.sel = Math.min(palette.sel, Math.max(0, list.length - 1))
+    palette.rows = paletteRows(list)
+    scheduleRender()
+  }
+  function paletteBackspace() {
+    if (!palette.query) return
+    // grapheme-safe: drop the last grapheme
+    const gs = [...palette.query]
+    palette.query = gs.slice(0, -1).join("")
+    const list = paletteFilter(palette.items, palette.query)
+    palette.sel = Math.min(palette.sel, Math.max(0, list.length - 1))
+    palette.rows = paletteRows(list)
+    scheduleRender()
+  }
+  function paletteMove(delta) {
+    const list = paletteFilter(palette.items, palette.query)
+    if (!list.length) return
+    palette.sel = (palette.sel + delta + list.length) % list.length
+    palette.rows = paletteRows(list)
+    scheduleRender()
+  }
+  function paletteAccept() {
+    if (!palette) return
+    const list = paletteFilter(palette.items, palette.query)
+    const item = list[Math.min(palette.sel, list.length - 1)]
+    palette = null
+    scheduleRender()
+    if (item) {
+      try { callbacks.onPaletteSelect?.(item) } catch { /* never break the loop */ }
+    }
   }
 
   function onKey(ev) {
@@ -325,6 +409,7 @@ export function createTerminal({
       return
     }
     if (ev.type === "text") {
+      if (palette) { paletteType(ev.text); return }
       if (hideInput && !question) return
       if (question && question.single) {
         const k = ev.text.toLowerCase()
@@ -347,6 +432,16 @@ export function createTerminal({
     }
     if (ev.type !== "key") return
     const { name, ctrl, alt } = ev
+    if (palette) {
+      if (ctrl && name === "c") { closePalette(); return }
+      if (name === "enter") { paletteAccept(); return }
+      if (name === "escape") { closePalette(); return }
+      if (name === "backspace") { if (ctrl) { palette.query = ""; palette.rows = paletteRows(paletteFilter(palette.items, "")); palette.sel = 0; scheduleRender() } else paletteBackspace(); return }
+      if (ctrl && (name === "u") && !ev.alt) { palette.query = ""; palette.sel = 0; palette.rows = paletteRows(paletteFilter(palette.items, "")); scheduleRender(); return }
+      if (name === "up" || (ctrl && name === "p")) { paletteMove(-1); return }
+      if (name === "down" || (ctrl && name === "n") || name === "tab") { paletteMove(1); return }
+      return // all other keys are consumed while the palette is open
+    }
     if (hideInput && !question) {
       if (ctrl && name === "c") handleCtrlC()
       else if (ctrl && name === "d") callbacks.onEOF?.()
@@ -391,6 +486,10 @@ export function createTerminal({
         case "right": editor.wordRight(); break
         case "p": if (!editor.historyPrev()) return; break
         case "n": if (!editor.historyNext()) return; break
+        // premium-console toggles (free keys; standard emacs semantics untouched)
+        case "o": callbacks.onToggle?.("tools"); hint = []; scheduleRender(); return
+        case "v": callbacks.onToggle?.("verification"); hint = []; scheduleRender(); return
+        case "g": callbacks.onToggle?.("plan"); hint = []; scheduleRender(); return
         default: return
       }
       hint = []
@@ -404,6 +503,7 @@ export function createTerminal({
         case "d": editor.deleteWordRight(); break
         case "backspace": editor.deleteWordLeft(); break
         case "enter": editor.newline(); break
+        case "p": openPalette(); return
         default: return
       }
       hint = []
@@ -545,11 +645,24 @@ export function createTerminal({
     get lastFrame() { return lastFrame },
     get busyQuestion() { return !!question },
     get hideInput() { return hideInput },
+    get palette() { return palette },
     setHideInput(v) { hideInput = !!v; scheduleRender() },
 
+    /**
+     * Replace the live streamed partial line (no durable output). Used by the
+     * streaming markdown renderer so a line that is still being typed stays
+     * live and is promoted styled once its newline arrives.
+     */
+    setPartial(text) {
+      const next = String(text ?? "")
+      if (next === partial) return
+      partial = next
+      scheduleRender()
+    },
+
     /** Enter interactive mode. */
-    start({ prompt: p, continuation, history = [], onSubmit, onCancel, onEOF, completer, onResize: onRs, hideInput: hide = false } = {}) {
-      callbacks = { onSubmit, onCancel, onEOF, completer, onResize: onRs }
+    start({ prompt: p, continuation, history = [], onSubmit, onCancel, onEOF, completer, onResize: onRs, hideInput: hide = false, paletteItems, onPaletteSelect, onToggle } = {}) {
+      callbacks = { onSubmit, onCancel, onEOF, completer, onResize: onRs, paletteItems, onPaletteSelect, onToggle }
       hideInput = !!hide
       if (p) prompt = p
       if (continuation) contPrompt = continuation
@@ -635,6 +748,13 @@ export function createTerminal({
     scheduleRender,
     clearScreen,
 
+    /** Open the command palette (Alt+P). Items: {name, hint}[]; selecting one
+     *  invokes the `onPaletteSelect` callback supplied to start(). */
+    openPalette(items) { openPalette(items) },
+    closePalette,
+    /** Test hook: palette state. */
+    _paletteState() { return palette ? { query: palette.query, sel: palette.sel, rows: palette.rows.length, items: palette.items.length } : null },
+
     /**
      * Ask a question inline. Resolves with the typed text, `null` on Ctrl-C /
      * Esc. `{ single: true, keys: ["r","v"] }` resolves on one keypress.
@@ -677,7 +797,7 @@ export function createTerminal({
     _flushEsc() { if (escTimer) { clearTimeout(escTimer); escTimer = null } for (const ev of decoder.flush()) onKey(ev) },
     _renderNow() { if (renderTimer) { clearTimeout(renderTimer); renderTimer = null } frame() },
     _resize(c, r) { cols = Math.max(20, c || cols); lines = Math.max(6, r || lines); onResize() },
-    _state() { return { liveRows, liveCursorRow, partial, status, prompt, cols, lines, question: !!question } },
+    _state() { return { liveRows, liveCursorRow, partial, status, prompt, cols, lines, question: !!question, palette: !!palette } },
   }
   return term
 }

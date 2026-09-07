@@ -41,6 +41,7 @@
     "lsp.js",
     "retrieval.js",
     "render.js",
+    "markdown.js",
     "uistate.js",
     "terminal.js",
     "keys.js",

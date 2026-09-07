@@ -14,7 +14,7 @@
  */
 import path from "node:path"
 import { bridgeAgentEvent, createBridgeContext, isBusy } from "./uistate.js"
-import { renderDock, renderToolLine, renderPlan, renderWorkers, renderCompletion, renderFailure, renderCancel, renderVerification, renderChanges, fmtMs, fmtClock, shortCheckpoint, shortRun, fit, padRight, mark } from "./render.js"
+import { renderDock, renderToolLine, renderPlan, renderWorkers, renderCompletion, renderFailure, renderCancel, renderVerification, renderChanges, renderStatusLine, fmtMs, fmtClock, shortCheckpoint, shortRun, fit, padRight, mark } from "./render.js"
 import { renderMarkdown } from "./ui.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore } from "./uistate.js"
@@ -40,7 +40,8 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
   const W = () => term.columns || 80
 
   function statusText(s) {
-    if (!isBusy(s)) return null
+    // Persistent status bar: idle and running both have a single live row.
+    if (!isBusy(s)) return renderStatusLine(s, W(), o)
     if (s.cancel && s.cancel.phase !== "stopped") return o.th.warn(`${mark("warn", o)} Stopping…`) + o.th.muted(s.cancel.tool ? `  waiting for ${s.cancel.tool}` : "")
     const running = s.activity.filter((a) => !a.endedAt)
     if (s.streaming && !running.length) return null // the streamed text is the progress
@@ -57,9 +58,14 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     return o.th.active(`${mark("active", o)} ${verb}${elapsed < 1000 ? "…" : ""}`) + (elapsed >= 1000 ? `  ${o.th.muted(el)}` : "") + thought
   }
 
+  function refreshStatus() {
+    const s = store.state
+    term.setStatus(statusText(s))
+    if (isBusy(s)) startTicker(); else stopTicker()
+  }
   function tick() {
     const s = store.state
-    if (!isBusy(s)) { stopTicker(); term.setStatus(null); return }
+    if (!isBusy(s)) { stopTicker(); term.setStatus(renderStatusLine(s, W(), o)); return }
     term.setStatus(statusText(s))
     term.scheduleRender?.()
   }
@@ -83,7 +89,7 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     switch (ev.type) {
       case "TASK_STARTED":
         cancelPrinted = ""
-        if (live) { term.setDock(dock); startTicker(); tick() }
+        if (live) { term.setDock(dock); refreshStatus() }
         break
       case "TOOL_STARTED": {
         if (!live) {
@@ -146,12 +152,17 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
       }
       case "TASK_COMPLETED":
       case "TASK_FAILED":
-        stopTicker(); term.setStatus(null)
-        if (live) term.render?.()
+        stopTicker(); if (live) refreshStatus()
         break
       case "TASK_RESET":
-        stopTicker(); term.setStatus(null)
-        if (live) term.render?.()
+        stopTicker(); if (live) refreshStatus()
+        break
+      case "VIEW_CHANGED":
+        if (live) { term.setDock(dock); refreshStatus() }
+        break
+      case "SEGMENT_UPDATED":
+      case "DAG_UPDATED":
+        if (live) term.scheduleRender?.()
         break
       default:
         break
@@ -159,6 +170,8 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
   }
 
   const unsubscribe = silent ? () => {} : store.subscribe((s, ev) => { try { onEvent(s, ev) } catch { /* never break the agent */ } })
+  // persistent status bar: show it once, even while idle
+  try { refreshStatus() } catch { /* never break startup */ }
 
   /** Print the final result of a run + an honest engineering summary. */
   function printResult(res, { elapsedMs = 0, planOnly = false, aborted = false, error = null, savedPlan = null } = {}) {

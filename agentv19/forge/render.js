@@ -148,6 +148,11 @@ export function fit(s, width, { ellipsis = "…" } = {}) {
   return out
 }
 
+/** fit() threaded with the current dialect, so ASCII mode uses "..." not "…". */
+export function fitS(s, width, o) {
+  return fit(s, width, { ellipsis: o?.ascii ? o.sym?.ell ?? "..." : "…" })
+}
+
 const SGR_RE = /^\x1b\[[0-9;]*m$/
 
 /**
@@ -279,7 +284,12 @@ export function detectDialect(env = process.env, cfg = {}) {
 }
 
 const IDENT = (s) => s
-export const THEME = { bold, dim, ok: green, warn: yellow, fail: red, active: cyan, info: IDENT, muted: dim }
+export const THEME = {
+  primary: bold, success: green, warning: yellow, error: red, info: cyan, accent: cyan, muted: dim,
+  // legacy aliases (kept for existing call sites and tests)
+  ok: green, warn: yellow, fail: red, active: cyan, bold, dim, cyan, green, yellow, red,
+  paint(kind, s) { return (this[kind] || IDENT)(s) },
+}
 
 /** Options bag every renderer takes; build once per UI. */
 export function renderOptions({ ascii = false, a11y = false, now } = {}) {
@@ -365,7 +375,7 @@ export function renderHeader(state, width, o) {
   if (tierFor(width) === "narrow") {
     const s = o.a11y ? `STATE: ${st}` : `${stateSymbol(st, o)} ${st}`
     const p = prog && st !== "READY" ? `  ${prog.pct}%` : ""
-    return fit(paint(kind, s, o) + p, width - 1)
+    return fitS(paint(kind, s, o) + p, width - 1, o)
   }
   const stateSeg = o.a11y ? `STATE: ${st}` : paint(kind, `${stateSymbol(st, o)} ${st}`, o)
   const pctSeg = prog && !["READY", "COMPLETED", "FAILED", "CANCELLED"].includes(st) ? ` ${prog.pct}%` : ""
@@ -376,16 +386,114 @@ export function renderHeader(state, width, o) {
   const core = stateSeg + pctSeg
   const tail = []
   if (elapsed && st !== "READY") tail.push(o.th.muted(elapsed))
+  if (state.risk) tail.push(o.th.warn(`risk ${state.risk}`))
   if (state.provider || state.model) tail.push(o.th.muted([state.provider, state.model].filter(Boolean).join("/")))
-  // try richest first, then drop tail pieces, then the run id
+  // WHAT: task title (truncated); WHERE: node/segment; then state, then tail
+  const titleSeg = state.task?.title ? o.th.muted(fitS(state.task.title, Math.max(10, Math.min(24, width >> 2)), o)) : ""
+  const segSeg = state.segment?.n ? `node ${state.segment.n}${state.segment.max ? "/" + state.segment.max : ""}` : state.task?.step ? `step ${state.task.step}` : ""
+  // try richest first, then drop tail pieces, then title/where, then the run id
   const attempts = []
-  for (let t = tail.length; t >= 0; t--) attempts.push([...must, ...optional, core, ...tail.slice(0, t)])
+  for (let t = tail.length; t >= 0; t--) attempts.push([...must, ...optional, titleSeg, segSeg, core, ...tail.slice(0, t)])
+  attempts.push([...must, ...optional, core])
   attempts.push([...must, core])
   for (const segs of attempts) {
-    const line = segs.join("  ")
+    const line = segs.filter(Boolean).join("  ")
     if (displayWidth(line) <= width - 1) return line
   }
-  return fit([...must, core].join("  "), width - 1)
+  return fitS([...must, core].join("  "), width - 1, o)
+}
+
+/** Label for a state: "✓ COMPLETED" (symbol) or "STATE: COMPLETED" (a11y). */
+export function stateLabel(state, o) {
+  const st = state?.state || "READY"
+  return o.a11y ? `STATE: ${st}` : `${stateSymbol(st, o)} ${st}`
+}
+
+/** Verification summary from RECORDED checks (nothing is invented):
+ *  none    no checks recorded
+ *  partial some checks ran, none failed, not all recorded yet
+ *  verified every recorded check ok===true
+ *  required at least one recorded check ok===false */
+export function verificationStatus(checks) {
+  const list = Object.values(checks ?? {})
+  const flat = list.flatMap((v) => (Array.isArray(v) ? v : [v]))
+  const done = flat.filter((c) => c && c.ok !== undefined)
+  if (!flat.length) return { status: "none", done: 0, failed: 0, keys: [] }
+  const failed = done.filter((c) => c.ok === false).length
+  const okDone = done.filter((c) => c.ok === true).length
+  if (failed > 0) return { status: "required", done: okDone, failed, keys: done.map((c) => c.name || c.id || "").filter(Boolean) }
+  if (done.length === flat.length) return { status: "verified", done: okDone, failed: 0, keys: done.map((c) => c.name || c.id || "").filter(Boolean) }
+  return { status: "partial", done: okDone, failed: 0, keys: done.map((c) => c.name || c.id || "").filter(Boolean) }
+}
+
+/** One-line verification state — explicit, never optimistic. */
+export function renderVerificationStatus(checks, width, o) {
+  const v = verificationStatus(checks)
+  if (v.status === "none") return fitS(`  ${o.th.muted("verification: no checks recorded")}`, width - 1, o)
+  if (v.status === "verified") return fitS(`${o.th.ok(mark("ok", o))} VERIFIED  ${o.th.muted(`${v.done} check${v.done === 1 ? "" : "s"} recorded`)}`, width - 1, o)
+  if (v.status === "required") return fitS(`${o.th.warn(mark("warn", o))} VERIFICATION REQUIRED  ${o.th.muted(`${v.failed} failing of ${v.done + v.failed} recorded`)}`, width - 1, o)
+  return fitS(`${o.th.warn(mark("warn", o))} verification ${o.th.muted(`${v.done}/${v.done + v.failed} recorded, still running`)}`, width - 1, o)
+}
+
+/** Persistent status bar: what Forge is doing RIGHT NOW (or idle).
+ *  Hint/meta pieces are DROPPED before anything gets mangled — at very
+ *  narrow widths only the state label survives. */
+export function renderStatusLine(state, width, o) {
+  const st = state.state || "READY"
+  const title = state.task?.title ? state.task.title : ""
+  const seg = state.segment?.n ? `node ${state.segment.n}${state.segment.max ? "/" + state.segment.max : ""}` : state.task?.step ? `step ${state.task.step}` : ""
+  const model = state.model || state.provider || ""
+  const attempts = []
+  attempts.push([stateLabel(state, o), title && o.th.muted(fitS(title, Math.max(10, Math.min(28, width >> 2)), o)), seg && o.th.muted(seg), model && o.th.muted(model), o.th.muted("Alt+P palette")].filter(Boolean))
+  attempts.push([stateLabel(state, o), title && o.th.muted(fitS(title, Math.max(10, Math.min(28, width >> 2)), o)), seg && o.th.muted(seg), model && o.th.muted(model)].filter(Boolean))
+  attempts.push([stateLabel(state, o), title && o.th.muted(fitS(title, Math.max(10, Math.min(28, width >> 2)), o)), seg && o.th.muted(seg)].filter(Boolean))
+  attempts.push([stateLabel(state, o), title && o.th.muted(fitS(title, Math.max(10, Math.min(28, width >> 2)), o))].filter(Boolean))
+  attempts.push([stateLabel(state, o)])
+  for (const pieces of attempts) {
+    const line = pieces.join(` ${o.sym.dot} `)
+    if (displayWidth(line) <= width - 1) return line
+  }
+  return fitS(stateLabel(state, o), width - 1, o)
+}
+
+/** Compact agent panel — MODEL / ROLE / SEGMENT / STATUS / RISK (known only). */
+export function renderAgentPanel(state, width, o) {
+  const row = []
+  if (state.provider || state.model) row.push(`MODEL ${[state.provider, state.model].filter(Boolean).join("/")}`)
+  if (state.task?.kind) row.push(`ROLE ${state.task.kind.toUpperCase()}`)
+  if (state.segment?.n) row.push(`SEGMENT ${state.segment.n}${state.segment.max ? "/" + state.segment.max : ""}`)
+  row.push(`STATUS ${stateLabel(state, o)}`)
+  if (state.risk) row.push(o.th.warn(`RISK ${state.risk}`))
+  const out = []
+  out.push(fitS(`${o.th.muted("AGENT")}  ${row.join(`  ${o.sym.dot}  `)}`, width - 1, o))
+  return out
+}
+
+/** Compact DAG view: a bounded window over the authoritative serialized graph. */
+export function renderDagBlock(graph, width, o, { max = 9, current = null } = {}) {
+  const out = []
+  if (!graph || !Array.isArray(graph.order) || !Array.isArray(graph.nodes)) {
+    out.push(fitS(`  ${o.th.muted("(no plan graph yet)")}`, width - 1, o))
+    return out
+  }
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]))
+  const order = graph.order
+  const cur = current !== null && byId.has(current) ? current : (order.find((id) => byId.get(id)?.status === "doing") ?? null)
+  const curI = cur ? order.indexOf(cur) : -1
+  let start = 0
+  if (order.length > max) start = Math.max(0, Math.min(order.length - max, (curI < 0 ? order.length : curI) - Math.floor(max / 2)))
+  for (const id of order.slice(start, start + max)) {
+    const n = byId.get(id)
+    const mark2 = n ? mark(n.status === "done" ? "ok" : n.status === "doing" ? "active" : n.status === "failed" ? "fail" : "todo", o) : mark("todo", o)
+    const text = String(n?.objective ?? id).slice(0, Math.max(12, width - 40))
+    let line = `  ${mark2} ${fitS(text, Math.max(12, width - 34), o)}`
+    const deps = (n?.dependencies ?? []).map((d) => (byId.get(d)?.id ?? d)).join(",")
+    if (deps) line += o.th.muted(`  ← ${fitS(deps, Math.max(6, width >> 3), o)}`)
+    if (n?.status === "doing" && current === null) line += o.th.active(`  ${o.sym.active}`)
+    out.push(fitS(line, width - 1, o))
+  }
+  if (order.length > max) out.push(fitS(o.th.muted(`  … ${order.length - max} more nodes`), width - 1, o))
+  return out
 }
 
 /** Current step text: plan item in progress → running tool → state word. */
@@ -475,37 +583,54 @@ export function renderDock(state, width, rows, o) {
     if (cc.total) bits.push(`files ${cc.total}`)
     if (tt) bits.push(`tests ${tt}`)
     if (state.checkpoint) bits.push(shortCheckpoint(state.checkpoint))
-    if (bits.length) lines.push(fit("  " + bits.join(`  ${o.sym.dot}  `), width - 1))
+    if (bits.length) lines.push(fitS("  " + bits.join(`  ${o.sym.dot}  `), width - 1, o))
     return lines
   }
   const body = []
   const label = (s) => o.th.muted(s.padEnd(9))
-  if (state.task?.title) body.push(fit(label("TASK") + state.task.title, width - 1))
+  if (state.task?.title) body.push(fitS(label("TASK") + state.task.title, width - 1, o))
   const plan = state.plan ?? []
-  if (plan.length) body.push(fit(label("PLAN") + inlinePlan(plan, width - 10, o), width - 1))
+  if (plan.length) body.push(fitS(label("PLAN") + inlinePlan(plan, width - 10, o), width - 1, o))
   const prog = progressOf(state)
   const meta = []
   if (prog) meta.push(progressBar(prog.pct, 20, o) + ` ${prog.pct}%  ${prog.done}/${prog.total} steps`)
   else if (state.task?.step) meta.push(`step ${state.task.step}`)
-  if (step) meta.push(fit(step, 40))
+  if (step) meta.push(fitS(step, 40, o))
   if (cc.total) meta.push(`files ${cc.total}`)
   if (tt) meta.push(`tests ${tt}`)
   if (state.checkpoint) meta.push(shortCheckpoint(state.checkpoint))
-  if (meta.length) body.push(fit(label("") + meta.join(`  ${o.sym.dot}  `), width - 1))
+  if (meta.length) body.push(fitS(label("") + meta.join(`  ${o.sym.dot}  `), width - 1, o))
   const act = (state.activity ?? []).slice(-3)
   if (act.length) {
     body.push(o.th.muted("ACTIVITY"))
     for (const l of renderActivity(act, width, o)) body.push(l)
   }
   const workers = (state.workers ?? []).filter((w) => w.status === "running")
-  if (workers.length) body.push(fit(label("WORKERS") + workers.map((w) => `${String(w.n).padStart(2, "0")} ${w.role} ${mark("active", o)}`).join(`  ${o.sym.dot}  `), width - 1))
+  if (workers.length) body.push(fitS(label("WORKERS") + workers.map((w) => `${String(w.n).padStart(2, "0")} ${w.role} ${mark("active", o)}`).join(`  ${o.sym.dot}  `), width - 1, o))
   // bound by rows: drop activity first, then workers, then plan
   while (body.length > maxBody) {
     const i = body.findIndex((l) => stripAnsi(l).startsWith("ACTIVITY"))
     if (i !== -1) { body.splice(i, body.length - i); continue }
     body.pop()
   }
-  return [...lines, ...body]
+  // ---- view-gated sections (keyboard: Ctrl+O tools, Ctrl+G plan,
+  //      Ctrl+V verification; diff opens via /diff or the palette) ------
+  const view = state.view || {}
+  const viewBody = []
+  const addBlock = (block) => { if (block?.length) viewBody.push(...block.map((l) => "  " + l)) }
+  if (view.plan) {
+    if (state.dag?.nodes?.length) addBlock([o.th.muted("DAG"), ...renderDagBlock(state.dag, width, o, { max: Math.max(3, maxBody) })])
+    else if (plan.length) addBlock(renderPlan(plan, width, o, { title: "PLAN" }))
+  }
+  if (view.verification) viewBody.push(renderVerificationStatus(state.verification?.checks ?? {}, width, o))
+  if (view.diff) addBlock(renderChanges(state.changes ?? {}, width, o, { cwd: state.cwd }))
+  if (view.tools) {
+    viewBody.push(o.th.muted("TOOLS"))
+    for (const a of (state.activity ?? []).slice(-4)) addBlock(renderToolLine(a, width - 2, o))
+  }
+  // view panels are capped last so the core summary always survives
+  while (body.length + viewBody.length > maxBody && viewBody.length) viewBody.pop()
+  return [...lines, ...body, ...viewBody]
 }
 
 /** ✓ a · ✓ b · ● c · ○ d  (+3) — a plan as one line. */
@@ -519,13 +644,13 @@ export function inlinePlan(items, width, o) {
   const visible = new Set()
   let used = 0
   for (const i of order) {
-    const piece = fit(parts[i], 36)
+    const piece = fitS(parts[i], 36, o)
     const w = displayWidth(piece) + (visible.size ? 3 : 0)
     if (used + w + 6 > width) break
     visible.add(i); used += w
   }
   const seq = [...visible].sort((a, b) => a - b)
-  out = seq.map((i) => fit(parts[i], 36)).join(` ${o.sym.dot} `)
+  out = seq.map((i) => fitS(parts[i], 36, o)).join(` ${o.sym.dot} `)
   shown = seq.length
   if (shown < items.length) out += o.th.muted(`  (+${items.length - shown})`)
   return out
@@ -549,7 +674,7 @@ export function renderPlan(items, width, o, { title = "PLAN" } = {}) {
       const indent = depth ? "   ".repeat(depth) : ""
       const tree = depth ? (idx === list.length - 1 ? o.sym.end + " " : o.sym.mid + " ") : ""
       const label = `${indent}${tree}${num.padStart(2, "0")} ${mark(kind, o)} ${it.text}`
-      out.push(fit(label, width - 1))
+      out.push(fitS(label, width - 1, o))
       if (it.children?.length) walk(it.children, depth + 1)
     })
   }
@@ -580,7 +705,7 @@ export function renderWorkers(workers, width, o) {
     const left = `  ${String(w.n).padStart(2, "0")}  ${padRight(w.role, 14)} ${mark(kind, o)}  ${word}`
     const right = w.endedAt ? fmtMs(w.endedAt - w.startedAt) : fmtMs(o.now - w.startedAt)
     out.push(columns2(left, o.th.muted(right), width - 1))
-    if (w.task) out.push(fit(`      ${o.th.muted(w.task)}`, width - 1))
+    if (w.task) out.push(fitS(`      ${o.th.muted(w.task)}`, width - 1, o))
   }
   return out
 }
@@ -595,7 +720,7 @@ export function renderChanges(changes, width, o, { cwd = process.cwd() } = {}) {
     const code = f.action === "created" ? o.th.ok("A") : f.action === "deleted" ? o.th.fail("D") : o.th.warn("M")
     const plus = f.added ? o.th.ok(`+${f.added}`) : ""
     const minus = f.removed ? o.th.fail(`-${f.removed}`) : ""
-    out.push(fit(`${code}  ${padRight(rel(f.path), nameW)}  ${[plus, minus].filter(Boolean).join(" ")}`, width - 1))
+    out.push(fitS(`${code}  ${padRight(rel(f.path), nameW)}  ${[plus, minus].filter(Boolean).join(" ")}`, width - 1, o))
   }
   return out
 }
@@ -613,7 +738,7 @@ export function renderVerification(checks, meta = {}, width, o) {
     let detail = ""
     if (k === "tests" && c.passed != null) detail = c.failed ? `${c.passed}/${c.passed + c.failed}` : `${c.passed}/${c.passed}`
     else if (c.summary) detail = c.summary
-    out.push(fit(`  ${padRight(CHECK_LABEL[k], 14)} ${mark(kind, o)}  ${detail}`, width - 1))
+    out.push(fitS(`  ${padRight(CHECK_LABEL[k], 14)} ${mark(kind, o)}  ${detail}`, width - 1, o))
   }
   out.push("")
   if (meta.files != null) out.push(`  ${padRight("Files changed", 14)} ${meta.files}`)
@@ -624,7 +749,7 @@ export function renderVerification(checks, meta = {}, width, o) {
 export function renderCompletion(info, width, o) {
   const out = []
   out.push(o.th.ok(`${mark("ok", o)} COMPLETED`))
-  if (info.title) out.push(fit(info.title, width - 1))
+  if (info.title) out.push(fitS(info.title, width - 1, o))
   out.push("")
   const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(`  ${padRight(k, 12)} ${v}`) }
   row("Changes", info.files != null ? `${info.files} file${info.files === 1 ? "" : "s"}` : undefined)
@@ -641,7 +766,7 @@ export function renderFailure(info, width, o) {
   const out = []
   out.push(o.th.fail(`${mark("fail", o)} TASK FAILED`))
   out.push("")
-  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fit(`  ${padRight(k, 12)} ${v}`, width - 1)) }
+  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fitS(`  ${padRight(k, 12)} ${v}`, width - 1, o)) }
   row("Reason", info.reason)
   if (info.completed != null && info.total != null) row("Completed", `${info.completed}/${info.total} steps`)
   else if (info.steps != null) row("Steps", `${info.steps}`)
@@ -666,14 +791,14 @@ export function renderCancel(phase, info = {}, width, o) {
     if (info.sessionSaved) out.push(`${o.th.ok(mark("ok", o))} session saved`)
     if (info.inputRestored !== false) out.push(`${o.th.ok(mark("ok", o))} input restored`)
   }
-  return out.map((l) => fit(l, width - 1))
+  return out.map((l) => fitS(l, width - 1, o))
 }
 
 export function renderRecovery(run, width, o, { startup = false } = {}) {
   const out = []
   out.push(o.th.warn(`${mark("warn", o)} ${startup ? "FORGE RECOVERY — an interrupted task was found" : "INTERRUPTED TASK"}`))
   out.push("")
-  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fit(`  ${padRight(k, 18)} ${v}`, width - 1)) }
+  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fitS(`  ${padRight(k, 18)} ${v}`, width - 1, o)) }
   row("Run", shortRun(run.runId) + (run.startedAt ? o.th.muted(`  started ${fmtTime(run.startedAt)}`) : ""))
   row("Task", run.task)
   row("Status", run.status === "running" ? "INTERRUPTED" : String(run.status || "").toUpperCase())
@@ -693,7 +818,7 @@ export function renderRecovery(run, width, o, { startup = false } = {}) {
   const keys = width >= 70
     ? `  ${o.th.bold("[R]")} Resume   ${o.th.bold("[V]")} Verify   ${o.th.bold("[U]")} Undo   ${o.th.bold("[C]")} Cancel (keep as-is)`
     : `  ${o.th.bold("[R]")}esume  ${o.th.bold("[V]")}erify  ${o.th.bold("[U]")}ndo  ${o.th.bold("[C]")}ancel`
-  out.push(fit(keys, width - 1))
+  out.push(fitS(keys, width - 1, o))
   return out
 }
 
@@ -703,14 +828,14 @@ export function renderIdle(info, width, o) {
   out.push("")
   out.push("Ready.")
   out.push("")
-  const row = (k, v) => { if (v) out.push(fit(`  ${padRight(k, 10)} ${v}`, width - 1)) }
+  const row = (k, v) => { if (v) out.push(fitS(`  ${padRight(k, 10)} ${v}`, width - 1, o)) }
   row("Project", info.project)
   row("Branch", info.branch)
   row("Session", info.session)
   row("Provider", info.provider)
   row("Mode", info.mode)
   if (info.lastTask) row("Last task", info.lastTask)
-  if (info.hint) { out.push(""); out.push(o.th.muted(fit(info.hint, width - 1))) }
+  if (info.hint) { out.push(""); out.push(o.th.muted(fitS(info.hint, width - 1, o))) }
   return out
 }
 
@@ -724,9 +849,9 @@ export function renderToolLine(entry, width, o) {
   const left = `${mark(kind, o)} ${padRight(toolLabel(entry.name), 9)} ${entry.target || ""}`
   const main = columns2(left, o.th.muted(dur), width - 1)
   const out = [main]
-  for (const s of entry.summary ?? []) out.push(fit(`  ${s}`, width - 1))
-  if (entry.exit != null && entry.exit !== 0) out.push(fit(`  exit ${entry.exit}`, width - 1))
-  if (entry.hidden) out.push(fit(o.th.muted(`  ${fmtInt(entry.hidden)} lines hidden  ${o.sym.dot}  /details to expand`), width - 1))
+  for (const s of entry.summary ?? []) out.push(fitS(`  ${s}`, width - 1, o))
+  if (entry.exit != null && entry.exit !== 0) out.push(fitS(`  exit ${entry.exit}`, width - 1, o))
+  if (entry.hidden) out.push(fitS(o.th.muted(`  ${fmtInt(entry.hidden)} lines hidden  ${o.sym.dot}  /details to expand`), width - 1, o))
   return out
 }
 
@@ -738,7 +863,7 @@ export function renderCheckpoints(list, width, o, { runFilter } = {}) {
     const files = (c.files ?? []).length
     const names = (c.files ?? []).slice(0, 2).map((f) => String(f.path).split("/").pop()).join(", ")
     const more = files > 2 ? ` +${files - 2}` : ""
-    out.push(fit(`  ${padRight(shortCheckpoint(c.id), 8)} ${fmtTime(c.ts)}  ${padRight(String(files) + " file" + (files === 1 ? "" : "s"), 8)} ${o.th.muted(names + more)}${c.runId ? o.th.muted(`  ${shortRun(c.runId)}`) : ""}`, width - 1))
+    out.push(fitS(`  ${padRight(shortCheckpoint(c.id), 8)} ${fmtTime(c.ts)}  ${padRight(String(files) + " file" + (files === 1 ? "" : "s"), 8)} ${o.th.muted(names + more)}${c.runId ? o.th.muted(`  ${shortRun(c.runId)}`) : ""}`, width - 1, o))
   }
   return out
 }
@@ -746,12 +871,12 @@ export function renderCheckpoints(list, width, o, { runFilter } = {}) {
 export function renderErrorBlock(err, width, o) {
   const out = []
   out.push(o.th.fail(`${mark("fail", o)} ${err.title || "ERROR"}`))
-  if (err.command) { out.push(""); out.push(fit(err.command, width - 1)) }
-  if (err.summary) { out.push(""); out.push(fit(err.summary, width - 1)) }
-  if (err.cause) { out.push(""); out.push(o.th.muted("Root cause:")); out.push(fit(err.cause, width - 1)) }
+  if (err.command) { out.push(""); out.push(fitS(err.command, width - 1, o)) }
+  if (err.summary) { out.push(""); out.push(fitS(err.summary, width - 1, o)) }
+  if (err.cause) { out.push(""); out.push(o.th.muted("Root cause:")); out.push(fitS(err.cause, width - 1, o)) }
   if (err.actions?.length) {
     out.push(""); out.push(o.th.muted("Forge:"))
-    for (const a of err.actions) out.push(fit(`${o.sym.bullet} ${a}`, width - 1))
+    for (const a of err.actions) out.push(fitS(`${o.sym.bullet} ${a}`, width - 1, o))
   }
   if (err.hasDetails) out.push(o.th.muted(`  /details for the full output`))
   return out
@@ -763,8 +888,8 @@ export function renderRepair(repair, width, o) {
   if (!attempts.length) { out.push(o.th.muted("  (no repair attempts)")); return out }
   attempts.forEach((a) => {
     out.push(`  Attempt ${a.n}`)
-    out.push(fit(`  ${mark(a.ok ? "ok" : "fail", o)} ${a.summary || (a.ok ? "verification passed" : "verification failed")}`, width - 1))
-    if (a.diagnosis) { out.push(o.th.muted("  Diagnosis:")); out.push(fit(`  ${a.diagnosis}`, width - 1)) }
+    out.push(fitS(`  ${mark(a.ok ? "ok" : "fail", o)} ${a.summary || (a.ok ? "verification passed" : "verification failed")}`, width - 1, o))
+    if (a.diagnosis) { out.push(o.th.muted("  Diagnosis:")); out.push(fitS(`  ${a.diagnosis}`, width - 1, o)) }
     out.push("")
   })
   out.pop()
@@ -781,7 +906,7 @@ export function renderDiff(text, width, o, { max = 120 } = {}) {
     else if (l.startsWith("@@")) s = o.th.active(l)
     else if (l.startsWith("+")) s = o.th.ok(l)
     else if (l.startsWith("-")) s = o.th.fail(l)
-    out.push(fit(s, width - 1))
+    out.push(fitS(s, width - 1, o))
   }
   if (lines.length > max) out.push(o.th.muted(`  ${fmtInt(lines.length - max)} more lines ${o.sym.dot} /details to expand`))
   return out
@@ -790,7 +915,7 @@ export function renderDiff(text, width, o, { max = 120 } = {}) {
 /** Full vertical task panel (for /status and /tasks). */
 export function renderTaskPanel(state, width, o) {
   const out = section("TASK", width, o)
-  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fit(`  ${padRight(k, 11)} ${v}`, width - 1)) }
+  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fitS(`  ${padRight(k, 11)} ${v}`, width - 1, o)) }
   row("Objective", state.task?.title || o.th.muted("(none)"))
   const prog = progressOf(state)
   if (prog) row("Progress", `${progressBar(prog.pct, 18, o)} ${prog.pct}%  ${o.th.muted(`${prog.done}/${prog.total} steps`)}`)
@@ -813,6 +938,6 @@ export function renderColumns(items, width, o) {
   const w = Math.max(...items.map((s) => displayWidth(s))) + 2
   const per = Math.max(1, Math.floor((width - 1) / w))
   const out = []
-  for (let i = 0; i < items.length; i += per) out.push(fit(items.slice(i, i + per).map((s) => padRight(s, w)).join(""), width - 1))
+  for (let i = 0; i < items.length; i += per) out.push(fitS(items.slice(i, i + per).map((s) => padRight(s, w)).join(""), width - 1, o))
   return out
 }
