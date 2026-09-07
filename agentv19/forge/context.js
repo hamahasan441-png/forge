@@ -14,15 +14,21 @@
  * Mutations invalidate the affected cached state via invalidateFor(paths).
  */
 import { buildRepoMap } from "./repomap.js"
-import { relevantMemory, relevantLearnings, appendMemory } from "./memory.js"
+import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearningsAsync, appendMemory } from "./memory.js"
 import { lessonsForPrompt } from "./lessons.js"
 import { profileSummary, loadProfile } from "./profile.js"
-import { rankDocs } from "./retrieval.js"
+import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import fs from "node:fs"
 import path from "node:path"
 import { estimateTokens } from "./ui.js"
 
-export function createContextEngine({ cwd = process.cwd(), config = null, skillsIndex = null } = {}) {
+/**
+ * `embedder` (v23, optional): an embeddings.js embedder. When supplied,
+ * buildAsync()/rankAsync() rerank BM25 shortlists with provider embeddings;
+ * build()/rank() stay synchronous + BM25 so nothing in the hot path changes
+ * when semantic retrieval is off (the default).
+ */
+export function createContextEngine({ cwd = process.cwd(), config = null, skillsIndex = null, embedder = null } = {}) {
   // cache of expensive-to-build slices; a generation counter + path tags drive
   // invalidation (mutations bump the generation and tag the affected files).
   let generation = 0
@@ -32,6 +38,16 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     const hit = cache.get(key)
     if (hit && hit.generation === generation) return hit.value
     const value = build()
+    cache.set(key, { generation, tags: new Set(tags || []), value })
+    return value
+  }
+
+  /** Async twin of cached(): checks the same generation-keyed store, awaits
+   *  the builder only on a miss. */
+  async function cachedAsync(key, tags, build) {
+    const hit = cache.get(key)
+    if (hit && hit.generation === generation) return hit.value
+    const value = await build()
     cache.set(key, { generation, tags: new Set(tags || []), value })
     return value
   }
@@ -66,6 +82,33 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
    * Returns { text, tokens, sections:[{name,text,tokens}], sources }.
    */
   function build(task, opts = {}) {
+    return _assemble(task, opts, {})
+  }
+
+  /**
+   * v23: async build. With no embedder this IS build() (pure BM25, sync core).
+   * With an embedder, the memory/learnings slices are computed by the hybrid
+   * BM25+embeddings rerank (BM25 shortlist, embeddings reorder only) under a
+   * hard rerank budget — every failure degrades to the exact BM25 slice.
+   */
+  async function buildAsync(task, opts = {}) {
+    if (!embedder) return build(task, opts)
+    const precise = opts.precision === "precise"
+    const pre = {}
+    if (opts.includeMemory !== false && task) {
+      const alpha = config?.retrieval?.embeddings?.alpha
+      const budgetMs = config?.retrieval?.embeddings?.rerankBudgetMs ?? 4000
+      pre.memory = await cachedAsync(`memory+sem:${bucket(task)}:${precise ? "p" : "n"}`, [], () =>
+        relevantMemoryAsync(task, { cwd, limit: precise ? 6 : 10, embedder, alpha, budgetMs }))
+      pre.learnings = await cachedAsync("learnings+sem:" + bucket(task), [], () =>
+        relevantLearningsAsync(task, { cwd, limit: 2, embedder, alpha, budgetMs }))
+    }
+    return _assemble(task, opts, pre)
+  }
+
+  /** Core assembler. pre.memory / pre.learnings (when not undefined) override
+   *  the synchronous BM25 computation of those two slices. */
+  function _assemble(task, opts = {}, pre = {}) {
     const budget = opts.budgetTokens ?? 2400
     const precise = opts.precision === "precise"
     const sections = []
@@ -85,11 +128,18 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
       if (map) { sections.push({ name: "repomap", text: map }); sources.repomap = true }
     }
 
-    // 3. relevant memory (global + project) — demand-driven BM25
+    // 3. relevant memory (global + project) — demand-driven BM25, or the v23
+    // hybrid rerank when buildAsync() precomputed those slices
     if (opts.includeMemory !== false && task) {
-      const mem = cached("memory:" + bucket(task), [], () => relevantMemory(task, { cwd, limit: precise ? 6 : 10 }))
+      // v23.0.1 (audit): the key carries precision — a normal-precision build
+      // (limit 10) must not be served to a precise build (limit 6) or vice versa
+      const mem = pre.memory !== undefined
+        ? pre.memory
+        : cached(`memory:${bucket(task)}:${precise ? "p" : "n"}`, [], () => relevantMemory(task, { cwd, limit: precise ? 6 : 10 }))
       if (mem) sections.push({ name: "memory", text: mem })
-      const learn = cached("learnings:" + bucket(task), [], () => relevantLearnings(task, { cwd, limit: 2 }))
+      const learn = pre.learnings !== undefined
+        ? pre.learnings
+        : cached("learnings:" + bucket(task), [], () => relevantLearnings(task, { cwd, limit: 2 }))
       if (learn) sections.push({ name: "learnings", text: learn })
     }
 
@@ -129,6 +179,20 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     return rankDocs(query, docs.map((d, i) => ({ i, text: typeof d === "string" ? d : d.text ?? "" })))
   }
 
+  /** v23: async rank — hybrid BM25+embeddings when an embedder is configured,
+   *  otherwise the exact BM25 result. Entries carry .scoreDetail in hybrid
+   *  mode (see retrieval.rankDocsHybrid). Never throws. */
+  async function rankAsync(query, docs) {
+    if (!Array.isArray(docs) || !docs.length) return []
+    const mapped = docs.map((d, i) => ({ i, text: typeof d === "string" ? d : d.text ?? "" }))
+    if (!embedder) return rankDocs(query, mapped)
+    return rankDocsHybrid(query, mapped, {
+      embed: (texts) => embedder.embed(texts),
+      alpha: config?.retrieval?.embeddings?.alpha,
+      budgetMs: config?.retrieval?.embeddings?.rerankBudgetMs ?? 4000,
+    })
+  }
+
   /** Persist a durable note through the EXISTING memory layer (redacted). */
   function remember(text, tier = "project") {
     return appendMemory(tier, text, cwd)
@@ -139,7 +203,7 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     try { return [path.resolve(cwd)] } catch { return [] }
   }
 
-  return { build, rank, invalidateFor, remember, repoSizeFiles, generation: () => generation }
+  return { build, buildAsync, rank, rankAsync, invalidateFor, remember, repoSizeFiles, generation: () => generation, hasEmbedder: () => Boolean(embedder) }
 }
 
 function bucket(task) {

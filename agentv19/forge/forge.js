@@ -1061,6 +1061,69 @@ async function main() {
 
       err("usage: forge lsp [list|test <file>]"); process.exit(1); return
     }
+    case "embeddings": {
+      // v23: inspect semantic retrieval (retrieval.embeddings).
+      //   forge embeddings            resolved config + cache stats
+      //   forge embeddings test ...  embed texts live, show dims/latency/cosine
+      const { resolveEmbeddingsConfig, createEmbedder, embeddingCacheStats } = await import("./embeddings.js")
+      const { cosineSimilarity } = await import("./retrieval.js")
+      const sub = (positional[1] || "list").toLowerCase()
+      const resolved = resolveEmbeddingsConfig(config)
+
+      if (sub === "list") {
+        if (JSON_OUT) {
+          emitJson({ enabled: resolved.ok, reason: resolved.ok ? null : resolved.reason, provider: resolved.provider ?? null, model: resolved.model ?? null, alpha: resolved.alpha ?? null, cache: resolved.ok ? embeddingCacheStats(resolved.cachePath) : null })
+          return
+        }
+        console.log(bold("Semantic retrieval — config under retrieval.embeddings"))
+        if (!resolved.ok) {
+          console.log(`  ${red("off")} — ${resolved.reason}`)
+          console.log(dim("  enable: forge config set retrieval.embeddings.enabled true"))
+          console.log(dim("  (BM25 stays the offline-safe default; embeddings only rerank BM25 shortlists)"))
+          return
+        }
+        const cache = embeddingCacheStats(resolved.cachePath)
+        console.log(`  ${green("on")}  provider ${cyan(resolved.provider)} • model ${cyan(resolved.model)} • alpha ${resolved.alpha}`)
+        console.log(dim(`  endpoint ${resolved.baseUrl}/embeddings • batch ${resolved.batchSize} • timeout ${resolved.timeoutMs / 1000}s • rerank budget ${resolved.rerankBudgetMs / 1000}s`))
+        console.log(dim(`  cache ${resolved.cachePath} — ${cache.entries} vector(s)${cache.dim ? `, dim ${cache.dim}` : ""}`))
+        console.log(dim("  live check: forge embeddings test \"some text\" \"other text\""))
+        return
+      }
+
+      if (sub === "test") {
+        const texts = positional.slice(2)
+        if (!texts.length) { err("usage: forge embeddings test <text> [more texts...]"); process.exit(1); return }
+        if (!resolved.ok) { err(`embeddings not usable: ${resolved.reason}`); process.exit(1); return }
+        const embedder = createEmbedder(resolved)
+        // --json contract: exactly one JSON document, no human lines (test-json.mjs)
+        if (!JSON_OUT) console.log(dim(`embedding ${texts.length} text(s) with ${resolved.provider}/${resolved.model}`))
+        const t0 = Date.now()
+        let vecs
+        try { vecs = await embedder.embed(texts) }
+        catch (e) { err(`embeddings request failed: ${e.message}`); process.exit(1); return }
+        const dt = Date.now() - t0
+        const s = embedder.stats()
+        const pairs = []
+        if (texts.length > 1) {
+          for (let i = 0; i < texts.length; i++) {
+            for (let j = i + 1; j < texts.length; j++) {
+              pairs.push({ i: i + 1, j: j + 1, cosine: Number(cosineSimilarity(vecs[i], vecs[j]).toFixed(4)) })
+            }
+          }
+        }
+        if (JSON_OUT) { emitJson({ provider: resolved.provider, model: resolved.model, dim: vecs[0].length, latencyMs: dt, stats: s, pairs }); return }
+        ok(`done in ${dt}ms — dim ${vecs[0].length} • ${s.hits} cache hit(s), ${s.requests} request(s)`)
+        if (pairs.length) {
+          console.log(dim("  cosine similarity (1.0 = identical direction):"))
+          for (const p of pairs) {
+            console.log(`  ${String(p.i)}↔${String(p.j)}  ${p.cosine >= 0 ? green(p.cosine.toFixed(3)) : red(p.cosine.toFixed(3))}  ${dim(`"${texts[p.i - 1].slice(0, 34)}" × "${texts[p.j - 1].slice(0, 34)}"`)}`)
+          }
+        }
+        return
+      }
+
+      err("usage: forge embeddings [list|test <text> ...]"); process.exit(1); return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -1113,6 +1176,7 @@ ${bold("usage")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
+  ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

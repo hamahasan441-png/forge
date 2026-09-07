@@ -66,9 +66,63 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   byte-accurate framing on a multi-byte document, diagnostics capture, symbol
   location, and end-to-end: the real `runAgent` invokes `lsp_diagnostics`, the
   result flows back, and the server is shut down afterward (no leaked child).
+- **Semantic retrieval** (`embeddings.js` + hybrid `retrieval.js`, autonomy v23
+  Tier 1) — embeddings-ranked relevance on top of BM25, with BM25 kept as the
+  zero-config, **offline-safe default**. The safety rule: embeddings only ever
+  **reorder the BM25 shortlist — they never widen it**, and every failure mode
+  (disabled/unresolved config, HTTP error, malformed vectors, timeout, corrupt
+  cache) degrades to exactly the v20.2 BM25 behaviour. Semantic retrieval can
+  never break retrieval.
+
+  `embeddings.js` is a zero-dependency OpenAI-compatible `/embeddings` client
+  (batched, one transient retry, hard request-timeout guard, strict payload
+  validation) with a sha1-keyed JSON disk cache under `~/.forge/cache`
+  (atomic tmp+rename writes, pruned to `cacheMaxEntries`, invalidated on model
+  change), and `resolveEmbeddingsConfig()` which resolves provider/model/key
+  from `retrieval.embeddings` + catalog + env and refuses Anthropic (no
+  embeddings endpoint) rather than guessing. `rankDocsHybrid()` fuses
+  min-max-normalized BM25 and cosine scores
+  (`fused = (1-α)·bm25 + α·semantic`, negative cosine clamped to 0) and tags
+  every result `hybrid` / `bm25` / `bm25-fallback` / `bm25-timeout`.
+
+  **Wired in:** `memory.js` (`relevantMemoryAsync`, `relevantLearningsAsync`),
+  `context.js` (`buildAsync`, `rankAsync` — without an embedder these ARE the
+  sync BM25 paths), the agent loop (precomputes the hybrid memory/learnings
+  block for the system prompt; delegated read-only sub-agents stay on BM25,
+  same trade-off as MCP/LSP) and the meta controller (`RETRIEVAL_MODE` event).
+  New `forge embeddings [list|test <text>...]` shows resolved config, cache
+  stats and live latency/cosine. OFF by default:
+  `forge config set retrieval.embeddings.enabled true` turns it on.
+  `test-semantic.mjs` (83 checks) proves fusion ordering across alpha, every
+  fallback path, the cache, config resolution, the client against a local mock
+  server, the async wiring — and end-to-end that the real `runAgent` calls a
+  real `/embeddings` endpoint while **default config makes zero embeddings
+  requests**.
 - **`PLAN-v23.md`** — the review of the v21 agent and the roadmap to
   best-in-class (MCP, LSP, semantic retrieval, vision, browser, sandbox,
-  benchmark), with this MCP client marked delivered.
+  benchmark), with MCP, LSP and semantic retrieval marked delivered.
+
+### Fixed (audit of the semantic-retrieval layer — each with a regression test)
+- **`forge embeddings test --json` broke the `--json` contract.** It printed
+  human progress lines before the JSON document; the repo's contract
+  (test-json.mjs) is exactly one JSON document. Now pure JSON, with the
+  embeddings status pinned in test-json.mjs.
+- **`rankDocsHybrid` index tag could collide with caller fields.** The doc
+  index traveled under the string key `__ri`; a doc carrying its own
+  `__ri`/`_i` field could corrupt the BM25↔doc mapping. Now a symbol-keyed
+  tag — collision-proof by construction.
+- **Context-engine memory slices bled across precision modes.** The cache key
+  omitted `precision`, so a precise build (limit 6) could be served a
+  normal-precision slice (limit 10) and vice versa. Latent since v21; fixed on
+  both the BM25 and the hybrid paths.
+- **Model change kept a stale cache `dim`.** Switching the embedding model
+  discarded stale vectors but not their dimension; both are reset now.
+- Audit also **proved safe** (and pinned where crash-worthy): the rerank
+  budget-timeout absorbs late embed rejections — no unhandled rejection
+  (which crashes Node ≥15); `coerce()` makes
+  `forge config set retrieval.embeddings.enabled true` a real boolean;
+  `agentview` ignores unknown events (`RETRIEVAL_MODE`); no API key ever
+  reaches CLI output or error strings; endpoint resolution stays config-only.
 
 ## v21.0.0 — "autonomous orchestration"
 

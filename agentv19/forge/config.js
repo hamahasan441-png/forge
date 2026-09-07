@@ -48,6 +48,19 @@ export function defaultConfig() {
     // a language: { command, args?, extensions:[".ts",...], languageId?, env?,
     // disabled? }. Read-only; launched from THIS config only, never model output.
     lsp: { servers: {} },
+    // v23: semantic retrieval. BM25 (retrieval.js) remains the zero-config,
+    // offline-safe default for ranking memory/learnings. When embeddings.enabled
+    // is true and an OpenAI-compatible embeddings endpoint resolves, BM25
+    // shortlists are reranked by a BM25+cosine hybrid (alpha = weight of the
+    // semantic score). Embeddings are cached under ~/.forge/cache and are only
+    // ever resolved from THIS config, never model output. OFF by default.
+    retrieval: {
+      embeddings: {
+        enabled: false, provider: "", model: "", baseUrl: "", apiKey: "",
+        alpha: 0.5, batchSize: 16, timeoutMs: 20000, rerankBudgetMs: 4000,
+        maxTexts: 64, cacheMaxEntries: 2000,
+      },
+    },
 
     retry: { attempts: 3, backoffMs: 1500, connectMs: 30000, firstByteMs: 120000, requestTimeoutMs: 180000 },
   }

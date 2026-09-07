@@ -49,6 +49,7 @@ const suites = [
   ["mcp", "node", ["test-mcp.mjs"]],
   ["lsp", "node", ["test-lsp.mjs"]],
   ["retrieval", "node", ["test-retrieval.mjs"]],
+  ["semantic", "node", ["test-semantic.mjs"]],
   ["sessions", "node", ["test-sessions.mjs"]],
   ["skills", "node", ["test-skills.mjs"]],
   ["json", "node", ["test-json.mjs"]],

@@ -60,6 +60,14 @@ console.log("== memory list --json ==")
   const j = parse(run(["memory", "list", "--json"]))
   ok("valid JSON with entries", j && Array.isArray(j.entries) && j.entries.includes("prefer tabs over spaces"))
 }
+console.log("== embeddings --json ==")
+{
+  // offline-safe: embeddings default OFF, so this reports status without network
+  const out = run(["embeddings", "--json"]).trim()
+  ok("output is a single JSON document", out.startsWith("{") && out.endsWith("}") && !!parse(out))
+  const j = parse(out)
+  ok("reports disabled state with reason", j && j.enabled === false && typeof j.reason === "string")
+}
 console.log("== --json emits nothing but JSON ==")
 {
   const out = run(["sessions", "--json"]).trim()

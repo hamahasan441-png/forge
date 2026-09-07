@@ -32,7 +32,8 @@ import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { DEFAULT_DIR } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
-import { relevantMemory, relevantLearnings } from "./memory.js"
+import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearningsAsync } from "./memory.js"
+import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap } from "./repomap.js"
 import { openRun } from "./runlog.js"
@@ -78,7 +79,7 @@ const ROLE_DIRECTIVES = {
   coder: "You are an ANALYSIS sub-agent for implementation planning: identify exact files and edits needed, but do NOT write — the main agent applies the changes.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -119,9 +120,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     } catch { }
   }
   if (task) {
-    const mem = relevantMemory(task, { cwd })
+    // v23: when semantic retrieval is enabled, runAgent precomputes the hybrid
+    // (BM25+embeddings) rerank and passes it in; null = compute BM25 here.
+    const mem = memoryBlock !== null ? memoryBlock : relevantMemory(task, { cwd })
     if (mem) lines.push("", mem)
-    const learnings = relevantLearnings(task, { cwd })
+    const learnings = learningsBlock !== null ? learningsBlock : relevantLearnings(task, { cwd })
     if (learnings) lines.push("", learnings)
   }
   if (skillsEnabled && skillsDir) {
@@ -327,8 +330,32 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { }
   }
 
+  // v23 semantic retrieval: when retrieval.embeddings is enabled, rerank the
+  // memory/learnings BM25 shortlist with provider embeddings BEFORE the prompt
+  // is assembled. Delegated read-only sub-agents stay on plain BM25 (fast, no
+  // server re-spawn per worker — same trade-off as MCP/LSP). Every failure
+  // leaves memoryBlock/learningsBlock null → the exact v20.2 BM25 path.
+  let memoryBlock = null
+  let learningsBlock = null
+  if (!isDelegatedSubAgent && task) {
+    try {
+      const embCfg = resolveEmbeddingsConfig(config)
+      if (embCfg.ok) {
+        const embedder = createEmbedder(embCfg)
+        const [mem, learn] = await Promise.all([
+          relevantMemoryAsync(task, { cwd: process.cwd(), embedder, alpha: embCfg.alpha, budgetMs: embCfg.rerankBudgetMs }),
+          relevantLearningsAsync(task, { cwd: process.cwd(), embedder, alpha: embCfg.alpha, budgetMs: embCfg.rerankBudgetMs }),
+        ])
+        memoryBlock = mem
+        learningsBlock = learn
+        embedder.close()
+        onEvent?.({ type: "info", text: `semantic retrieval: memory ranked by ${embCfg.provider}/${embCfg.model} (alpha ${embCfg.alpha})`, ...identityMeta() })
+      }
+    } catch { /* BM25 fallback — retrieval must never break a run */ }
+  }
+
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
 
