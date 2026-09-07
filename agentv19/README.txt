@@ -1,4 +1,4 @@
-forge v20 "PRODUCTION" — standalone terminal AI agent (CLI only, no web app)
+forge v21 — standalone terminal AI agent (CLI only, no web app)
 
 INSTALL (one command):
   cd agentv19/forge && bash install.sh     # or: cd agentv19/forge && npm i -g .

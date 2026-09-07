@@ -186,7 +186,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
  * runAgent MUST accept taskId, runId, segmentId, nodeId
  * Every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  */
-export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null }) {
+export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false }) {
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
@@ -285,7 +285,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     memoryPath,
     todoPath: path.join(DEFAULT_DIR, "todo.json"),
     runId,
-    readOnly: readonly,
+    readOnly: readonly || verifier,
+    mode: verifier ? "verifier" : "default",
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
     assumeYes: config.tools?.assumeYes === true,

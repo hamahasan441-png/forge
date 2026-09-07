@@ -3,7 +3,11 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v23.0.0 (in progress) — "reaching for the big agents"
+## [Unreleased] — v21.0.0 (in progress) — "correctness, verification and recovery"
+
+_The version lives in exactly one place — `package.json` — and is read at runtime
+via `version.js`. Every user-agent, banner and `--version` derives from it._
+
 
 ### Added
 - **Model Context Protocol (MCP) client** (`mcp.js`, autonomy v23 Tier 1) — the
@@ -123,6 +127,101 @@ exactly one place — `package.json` — and read at runtime via `version.js`.
   `forge config set retrieval.embeddings.enabled true` a real boolean;
   `agentview` ignores unknown events (`RETRIEVAL_MODE`); no API key ever
   reaches CLI output or error strings; endpoint resolution stays config-only.
+
+### Fixed (full-system audit — P0 correctness, verification and recovery)
+
+Every item below was reproduced first, then fixed, then pinned with a
+regression test in `agentv19/tests/` (24 new suites, all registered in
+`tests/run-all.mjs`).
+
+**Completion could be declared before the work was done**
+- **One of three DAG nodes finished ⇒ the task was reported COMPLETED.** The
+  completion test was derived ad hoc at the call site instead of asking the
+  graph. `dag.allComplete()` is now the single canonical check (works on a live
+  graph *or* a serialized one), and `completion.canCompleteTask(task)` is the
+  one authoritative gate: valid plan, valid DAG, all required nodes complete,
+  all workers settled, verification satisfied for the final risk, recovery
+  clear, no pending required actions, final state reconciled, and critical
+  persistence flushed.
+- **Execution success was treated as node completion.** A node went
+  RUNNING → COMPLETED the moment its tools ran cleanly, before anything was
+  verified — so a node could report "completed" while its own test run had just
+  failed. The state machine is now
+  `RUNNING → EXECUTION_SUCCEEDED → VERIFYING → COMPLETED | REPAIRING`, and
+  `markCompleted()` refuses to complete a node without evidence.
+- **A node was attributed to a segment by guessing.** Filename/keyword overlap
+  decided which DAG node a segment had completed. Attribution is now always the
+  explicit `nodeId` carried through Meta → Agent → Tools → Events →
+  Verification → TaskState → DAG; `attributeSegment` still runs, but only as a
+  labelled diagnostic (`applied: false`).
+- **An invalid plan fell through into execution.** A plan that failed
+  validation was "repaired", then executed anyway — and an empty plan silently
+  collapsed into one generic mutation node. Failure now follows
+  TASK → PLAN → SCHEMA → DEPENDENCIES → TARGETS → CONFLICTS → VERIFICATION PLAN
+  → DAG → EXECUTION with a real repair + re-validation; if it is still invalid
+  the task goes to WAITING with the reasons recorded, never to execution.
+
+**Verification could be satisfied by nothing**
+- **An unobserved exit status counted as success.** A command killed by a
+  signal, OOM-killed, or never reporting a code was stored as `exitCode: 0 ⇒
+  passed: true`. `UNKNOWN_EXIT_CODE` is now `null` (falsy *and* distinct from
+  0), success requires an **observed** exit status of 0, and a failure shape
+  (signal / killed / timeout / OOM / panic / build / test / …) is recorded.
+- **Final risk was the planning risk.** A task described as "add a comment"
+  was verified as `trivial` even after editing `package.json`, a migration and
+  an authentication module. `finalRiskForChange()` recalculates risk from the
+  files actually changed/created/deleted, the affected symbols, the security-
+  sensitive paths hit, and the mutating commands/tool calls — monotonically
+  upwards (`trivial → critical`).
+- **The verifier could write.** "Read-only" blocked the write tools but not
+  `bash`, and a shell redirection (`cat a.js > b.js`, `| tee out`) was allowed
+  because the allow-list matched on the command *prefix*. Redirections and
+  `tee` are now refused in read-only mode, a verification agent gets an
+  explicit `VERIFICATION_TOOLS` allow-list (VERIFY ⇒ READ_ONLY), and repair
+  agents get writes back (REPAIR ⇒ WRITE).
+
+**Timeouts, orphans and cancellation**
+- **A timed-out worker's late result could be reported as success**, and an
+  orphan that ignored cancellation vanished from the books. Workers now carry
+  `workerId/taskId/nodeId/segmentId/status/cancellationToken/startedAt/finishedAt`
+  and follow REQUEST_CANCEL → WAIT_FOR_SHUTDOWN → CONFIRM_NOT_RUNNING →
+  PERSIST → RECOVER; a result produced after the deadline is discarded and an
+  orphan stays counted as active.
+- **Settled worker records were never reaped**, so a long session grew the
+  record map without bound. Settled records beyond `maxRecords` (200) are now
+  dropped oldest-first; live records are never removed.
+
+**Durability and recovery**
+- **A segment that merely hit the safety budget was reported FAILED.** The fuse
+  is now CHECKPOINT → PERSIST → WAITING / `CONTINUE_REQUIRED`, bounded by
+  `agent.maxContinuations` (default 5) and recorded in the task
+  (`continuation_count`) — past the budget the task genuinely is FAILED.
+- **A terminal state that failed to reach disk was still reported COMPLETED.**
+  Every CRITICAL flush is accounted; if the terminal write fails the task is
+  downgraded to WAITING and says so.
+- **A resumed task re-planned from scratch**, discarding the DAG the
+  interrupted run was executing. A resume now restores the recorded DAG.
+- **DAG conflict locking** uses the canonical `file:` / `symbol:` / `dir:` /
+  `resource:` keys (an explicit `conflictKeys` declaration wins; an empty one
+  is rejected by validation rather than silently ignored), and a node that
+  conflicts conservatively blocks instead of running in parallel.
+
+**Retrieval, routing and honesty of the artifact**
+- **Model routing was decided by model names.** `modelstrategy` now records
+  what a model actually achieved (provider, task class, ok/crashed, repairs,
+  verification pass rate, latency, tokens, tool calls) and routes on that
+  history, degrading a model after failures instead of trusting its label.
+- **Outbound requests advertised the wrong version** — `forge-agent/20.0.0`
+  and `forge/19` were hardcoded while `package.json` said 21.0.0. The user
+  agent is built from the single `VERSION` source; a new suite fails the build
+  if any module advertises a different one.
+- **A lesson was a sentence, not a record.** Lessons now carry a derived
+  failure class, symptoms, root cause, solution, files, symbols, ecosystem,
+  model and strategy, with usage accounting — so a fix learned in
+  `tests/auth.spec.ts` is retrievable by that file next time. A lesson that
+  keeps failing loses confidence and is retired.
+- **A hung language server stalled an agent step for 20s.** The default LSP
+  request timeout is 12s (every caller may override it).
 
 ## v21.0.0 — "autonomous orchestration"
 

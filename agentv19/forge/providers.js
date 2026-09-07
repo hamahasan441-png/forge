@@ -1,3 +1,4 @@
+import { VERSION } from "./version.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -331,7 +332,7 @@ export async function* streamChat(opts) {
   else yield* streamOpenAI(opts, base)
 }
 
-const BASE_HEADERS = { "user-agent": "forge-agent/19.0.0" }
+const BASE_HEADERS = { "user-agent": `forge-agent/${VERSION}` }
 
 function mergeHeaders(proto, apiKey, baseUrl) {
   const h = { ...BASE_HEADERS, ...headersFor(proto, apiKey) }

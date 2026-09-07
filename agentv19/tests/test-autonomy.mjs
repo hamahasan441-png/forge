@@ -103,8 +103,22 @@ console.log("== DAG planner: dependencies, ordering, failure recompute ==")
   const batch = dag.scheduleBatch(g, { maxParallel: 4, conflictKeys: () => [] })
   eq("independent read-only nodes scheduled together", batch.map((n) => n.id).sort(), ["a", "b"])
 
+  // P0 verification gate: execution success is NOT completion
+  dag.markRunning(g, "a")
+  ok("execution success ≠ completion", dag.markExecutionSucceeded(g, "a") === true)
+  eq("node is execution_succeeded", g.nodes.get("a").status, dag.NODE_STATUS.EXECUTION_SUCCEEDED)
+  ok("unverified completion REFUSED", dag.markCompleted(g, "a") === false)
+  eq("still not completed after refused completion", g.nodes.get("a").status, dag.NODE_STATUS.EXECUTION_SUCCEEDED)
+  ok("not allComplete while a node is unverified", dag.allComplete(g) === false)
+  dag.markVerifying(g, "a")
+  eq("node enters VERIFYING", g.nodes.get("a").status, dag.NODE_STATUS.VERIFYING)
+  ok("completion with evidence succeeds", dag.markCompleted(g, "a", "ok", { verification: { verification_id: "ver-1", verificationEpoch: 3 } }))
+  eq("completed with evidence", g.nodes.get("a").status, dag.NODE_STATUS.COMPLETED)
+  eq("verification id recorded", g.nodes.get("a").verificationId, "ver-1")
+  dag.markCompleted(g, "b", null, { verification: dag.VERIFICATION_NOT_REQUIRED })
+  eq("read-only node completes as not-required", g.nodes.get("b").status, dag.NODE_STATUS.COMPLETED)
+
   // mutation serialized alone
-  dag.markCompleted(g, "a"); dag.markCompleted(g, "b")
   const mut = dag.scheduleBatch(g, { maxParallel: 4, conflictKeys: () => [] })
   eq("mutating node scheduled alone", mut.map((n) => n.id), ["c"])
 
@@ -118,9 +132,9 @@ console.log("== DAG planner: dependencies, ordering, failure recompute ==")
   // repair: retry c → completes → d ready
   dag.retryNode(g, "c")
   eq("retried node back to ready", g.nodes.get("c").status, dag.NODE_STATUS.READY)
-  dag.markCompleted(g, "c")
+  dag.markCompleted(g, "c", null, { verification: { verification_id: "ver-2" } })
   eq("d unblocked after dependency satisfied", g.nodes.get("d").status, dag.NODE_STATUS.READY)
-  dag.markCompleted(g, "d")
+  dag.markCompleted(g, "d", null, { verification: { verification_id: "ver-3" } })
   ok("all complete", dag.allComplete(g))
 
   // serialization survives crash via persistence
@@ -233,8 +247,18 @@ console.log("== structured verification: evidence, not command names ==")
   eq("exit code captured", fail.exit_code, 1)
   ok("failure has high confidence evidence", fail.confidence === "high")
 
-  const pass = verifyledger.evaluateVerification("npm test", "5 tests passed\n")
+  // P1: an exit status that was never OBSERVED is not success. A bare
+  // "5 tests passed" with no `[exit code: 0]` proves nothing — the process may
+  // have been killed after printing. Success requires real evidence.
+  const unknown = verifyledger.evaluateVerification("npm test", "5 tests passed\n")
+  eq("unobserved exit status is NOT success", unknown.passed, false)
+  eq("unobserved exit status is null (UNKNOWN), never 0", unknown.exitCode, null)
+  eq("unobserved exit status flagged", unknown.exitCodeKnown, false)
+  eq("unobserved exit status has no confidence", unknown.confidence, "none")
+
+  const pass = verifyledger.evaluateVerification("npm test", "5 tests passed\n[exit code: 0]")
   eq("passing test detected", pass.passed, true)
+  eq("observed exit status is known", pass.exitCodeKnown, true)
 
   const build = verifyledger.evaluateVerification("npm run build", "webpack compiled successfully\n")
   eq("build classified", build.type, verifyledger.VTYPE.BUILD)

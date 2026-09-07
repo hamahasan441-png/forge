@@ -1,4 +1,4 @@
-# ⬢ forge — standalone terminal AI agent (v20 "PRODUCTION")
+# ⬢ forge — standalone terminal AI agent (v21)
 
 One binary folder, zero dependencies, pure Node.js. **No web app, no server, no localhost.**
 Chat and a tool-using coding agent run directly against your AI provider from any terminal.

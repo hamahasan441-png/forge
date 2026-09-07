@@ -161,6 +161,11 @@ export function blankTask({ taskId, runId = null, objective = "", cwd = process.
     retry_count: 0,
     repair_count: 0,
     segment_count: 0,
+    // P0 segment safety fuse: how many times this task has been RESUMED after
+    // hitting the safety budget. "Continuation" is not failure — but it must be
+    // bounded, so a task that never converges eventually fails instead of
+    // looping through the fuse forever.
+    continuation_count: 0,
     next_action: null,
     waiting_reason: null,
     pid: process.pid,
@@ -382,6 +387,12 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
     },
 
     noteRepair(n = 1) { rec.repair_count = (rec.repair_count ?? 0) + n; rec.resource_usage.retries = rec.retry_count; schedule() },
+    /** Count a resume after the segment safety fuse; returns the new count. */
+    noteContinuation(n = 1) {
+      rec.continuation_count = (rec.continuation_count ?? 0) + n
+      schedule(DURABILITY.CRITICAL)
+      return rec.continuation_count
+    },
     noteRetry(n = 1) { rec.retry_count = (rec.retry_count ?? 0) + n; rec.resource_usage.retries = rec.retry_count; schedule() },
 
     noteUsage(u = {}) {
