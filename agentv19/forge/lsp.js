@@ -23,7 +23,10 @@ import fsMod from "node:fs"
 import path from "node:path"
 import { pathToFileURL, fileURLToPath } from "node:url"
 
-const DEFAULT_TIMEOUT_MS = 20000
+// A language-server request that blocks for 20s would stall an agent step that
+// is meant to feel interactive: forge budgets 12s per request by default, and
+// every caller may override it (spec.timeoutMs).
+const DEFAULT_TIMEOUT_MS = 12000
 const MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 export function pathToUri(p) {

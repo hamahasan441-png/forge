@@ -54,6 +54,7 @@
     "router.js",
     "diagnose.js",
     "verify.js",
+    "completion.js",
     "toolintel.js",
     "taskstate.js",
     "dag.js",

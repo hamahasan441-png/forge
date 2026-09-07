@@ -16,6 +16,9 @@
  * The registry is the single source for routing decisions.
  */
 
+import fs from "node:fs"
+import path from "node:path"
+import { DEFAULT_DIR } from "./config.js"
 import { buildProvider, fallbackChain, getCatalog } from "./providers.js"
 import { classifyTaskComplexity } from "./agent.js"
 
@@ -128,6 +131,154 @@ export function requiredCapabilities(task, { risk = "medium", files = 0, context
   return needs.sort((a, b) => b.weight - a.weight)
 }
 
+// ---------------------------------------------------------------------------
+// P1 — MODEL PERFORMANCE ROUTING ON REAL HISTORY
+// ---------------------------------------------------------------------------
+//
+// The registry below is a PRIOR: what the model is *believed* to be good at.
+// Routing must also use what forge actually OBSERVED — success rate, repair
+// rate, verification pass rate, token efficiency, latency percentiles and
+// reliability, recorded after every run in ~/.forge/model-performance.json.
+//
+// One bad sample must never dominate: every rate is shrunk toward its prior
+// with a pseudo-count (Bayesian/Additive smoothing), so 0/1 moves a 0.9 prior
+// to ~0.75 while 0/10 moves it to ~0.45.
+export const PERF_FILE = path.join(DEFAULT_DIR, "model-performance.json")
+const PRIOR_WEIGHT = 5 // pseudo-count: samples needed to outweigh the prior
+const MAX_MODELS_TRACKED = 200
+const MAX_SAMPLES_REMEMBERED = 50
+
+/** What a registry entry claims, expressed as the same rates we measure. */
+const PRIOR_RATES = {
+  strong: { successRate: 0.9, repairRate: 0.25, verificationPassRate: 0.85, reliability: 0.92 },
+  fast: { successRate: 0.82, repairRate: 0.35, verificationPassRate: 0.75, reliability: 0.88 },
+  unknown: { successRate: 0.6, repairRate: 0.5, verificationPassRate: 0.5, reliability: 0.6 },
+}
+
+export function loadPerformance() {
+  try {
+    const j = JSON.parse(fs.readFileSync(PERF_FILE, "utf8"))
+    return j && typeof j === "object" && !Array.isArray(j) ? j : {}
+  } catch { return {} }
+}
+
+function savePerformance(data) {
+  try {
+    fs.mkdirSync(path.dirname(PERF_FILE), { recursive: true })
+    const tmp = PERF_FILE + ".tmp"
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 1), { mode: 0o600 })
+    fs.renameSync(tmp, PERF_FILE)
+    return true
+  } catch { return false }
+}
+
+export function modelKey(model, provider = null) {
+  return provider ? `${String(provider)}:${String(model)}` : String(model)
+}
+
+/**
+ * Record what actually happened on a run. Called by the controller after every
+ * segment/task so routing improves with real evidence instead of model names.
+ *
+ * @param {object} o  { provider, model, ok, repairs, verificationPassed,
+ *                      verificationTotal, latencyMs, tokensIn, tokensOut,
+ *                      toolCalls, taskClass, crashed }
+ */
+export function recordOutcome(o = {}) {
+  const key = modelKey(o.model, o.provider)
+  if (!key || key === ":") return null
+  const all = loadPerformance()
+  const rec = all[key] ?? {
+    model: String(o.model ?? ""), provider: o.provider ?? null,
+    samples: 0, successes: 0, failures: 0, crashes: 0, repairs: 0,
+    verificationPassed: 0, verificationTotal: 0,
+    latencyMs: [], tokensIn: 0, tokensOut: 0, toolCalls: 0,
+    firstSeen: Date.now(), byClass: {},
+  }
+  const ok = o.ok === true
+  rec.samples++
+  if (ok) rec.successes++; else rec.failures++
+  if (o.crashed === true) rec.crashes++
+  rec.repairs += Number(o.repairs ?? 0) || 0
+  const vt = Number(o.verificationTotal ?? 0) || 0
+  if (vt > 0) { rec.verificationTotal += vt; rec.verificationPassed += Math.min(vt, Number(o.verificationPassed ?? 0) || 0) }
+  else if (o.verificationPassed != null) { rec.verificationTotal += 1; rec.verificationPassed += o.verificationPassed === true ? 1 : 0 }
+  if (Number.isFinite(o.latencyMs)) {
+    rec.latencyMs.push(Math.round(Number(o.latencyMs)))
+    if (rec.latencyMs.length > MAX_SAMPLES_REMEMBERED) rec.latencyMs.shift()
+  }
+  rec.tokensIn += Number(o.tokensIn ?? 0) || 0
+  rec.tokensOut += Number(o.tokensOut ?? 0) || 0
+  rec.toolCalls += Number(o.toolCalls ?? 0) || 0
+  const cls = o.taskClass ? String(o.taskClass) : "general"
+  rec.byClass[cls] = rec.byClass[cls] ?? { samples: 0, successes: 0 }
+  rec.byClass[cls].samples++
+  if (ok) rec.byClass[cls].successes++
+  rec.lastUsed = Date.now()
+  all[key] = rec
+  // bounded: never let the file grow without limit
+  const keys = Object.keys(all)
+  if (keys.length > MAX_MODELS_TRACKED) {
+    keys.sort((a, b) => (all[b].samples ?? 0) - (all[a].samples ?? 0))
+    for (const k of keys.slice(MAX_MODELS_TRACKED)) delete all[k]
+  }
+  savePerformance(all)
+  return rec
+}
+
+function percentile(sorted, p) {
+  if (!sorted.length) return null
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
+  return sorted[idx]
+}
+
+export function clearPerformance() {
+  try { fs.rmSync(PERF_FILE, { force: true }); return true } catch { return false }
+}
+
+/**
+ * Merge the registry prior with what was observed, with damping.
+ * Rates are shrunk toward the prior by PRIOR_WEIGHT pseudo-observations so a
+ * single failure (or a single lucky success) cannot flip routing.
+ */
+export function effectiveStats(model, provider = null) {
+  const reg = lookupRegistry(model)
+  const prior = PRIOR_RATES[reg?.tier] ?? PRIOR_RATES.unknown
+  const rec = loadPerformance()[modelKey(model, provider)]
+    ?? (provider ? null : loadPerformance()[modelKey(model)] ?? null)
+  const n = rec?.samples ?? 0
+  const shrink = (observedNumerator, observedDenominator, priorRate) => {
+    const num = (observedNumerator ?? 0) + PRIOR_WEIGHT * priorRate
+    const den = (observedDenominator ?? 0) + PRIOR_WEIGHT
+    return den > 0 ? num / den : priorRate
+  }
+  const successRate = shrink(rec?.successes, n, prior.successRate)
+  const repairRate = shrink(rec?.repairs, Math.max(1, n), prior.repairRate)
+  const verificationPassRate = shrink(rec?.verificationPassed, rec?.verificationTotal, prior.verificationPassRate)
+  const reliability = shrink(Math.max(0, (rec?.samples ?? 0) - (rec?.crashes ?? 0)), n, prior.reliability)
+  const lat = [...(rec?.latencyMs ?? [])].sort((a, b) => a - b)
+  const tokensTotal = (rec?.tokensIn ?? 0) + (rec?.tokensOut ?? 0)
+  return {
+    model: String(model ?? ""),
+    provider: provider ?? null,
+    samples: n,
+    recognized: !!reg,
+    contextWindow: reg?.contextWindow ?? null,
+    latencyP50: percentile(lat, 50),
+    latencyP95: percentile(lat, 95),
+    successRate: round4(successRate),
+    // mean repairs per run, clamped to a 0..1 rate for routing comparisons
+    repairRate: Math.min(1, round4(repairRate)),
+    verificationPassRate: round4(verificationPassRate),
+    reliability: round4(reliability),
+    tokenEfficiency: rec?.tokensIn ? round4((rec.tokensIn ?? 0) / Math.max(1, n)) : null,
+    tokensTotal,
+    fromHistory: n > 0,
+  }
+}
+
+function round4(x) { return Math.round(Number(x) * 10000) / 10000 }
+
 function scoreModel({ model, provider, caps, limits, catalogWindow }) {
   const reg = lookupRegistry(model)
   const tags = reg ? new Set(reg.tags) : profileFor(model)
@@ -158,7 +309,22 @@ function scoreModel({ model, provider, caps, limits, catalogWindow }) {
   if (limits.costBias === "low" && tags.has("cheap")) { score += 3; reasons.push("low cost") }
   if (!tags.size) score += 0
 
-  return { score, reasons, window, tags: [...tags], registryEntry: reg, recognized: !!reg }
+  // P1: routing on MEASURED performance, not only on the model's name.
+  // Damped (see effectiveStats) so one failure cannot blacklist a model.
+  const perf = effectiveStats(model, provider?.name ?? null)
+  if (perf.fromHistory) {
+    const delta =
+      (perf.successRate - 0.7) * 10 +
+      (perf.verificationPassRate - 0.7) * 6 -
+      (perf.repairRate - 0.3) * 6 +
+      (perf.reliability - 0.8) * 4
+    score += Math.max(-8, Math.min(8, delta))
+    const pct = (x) => `${Math.round((x ?? 0) * 100)}%`
+    if (delta >= 1) reasons.push(`measured: ${pct(perf.successRate)} success, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s)`)
+    else if (delta <= -1) reasons.push(`measured: only ${pct(perf.successRate)} success, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s) — history says avoid`)
+  }
+
+  return { score, reasons, window, tags: [...tags], registryEntry: reg, recognized: !!reg, performance: perf }
 }
 
 export function selectModel(config, opts = {}) {
@@ -185,13 +351,14 @@ export function selectModel(config, opts = {}) {
     const models = [...new Set([p.model, ...remembered, ...(cat?.models ?? [])].filter(Boolean))]
     for (const model of models.slice(0, 6)) {
       if (excludeModel && model === excludeModel && name === active?.name) continue
-      const { score, reasons, window, tags, recognized } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow })
+      const { score, reasons, window, tags, recognized, performance: performance_ } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow })
       const isActive = active?.name === name && active?.model === model
       candidates.push({
         provider: name, model, score, reasons, window, tags,
         protocol: p.protocol,
         active: isActive,
         recognized,
+        performance: performance_,
       })
     }
   }
@@ -239,8 +406,13 @@ export function selectModel(config, opts = {}) {
       confidence,
       fallback,
       score: best.score,
+      performance: best.performance ?? null,
     },
-    candidates: candidates.map((c) => ({ provider: c.provider, model: c.model, score: c.score, active: c.active })),
+    candidates: candidates.map((c) => ({
+      provider: c.provider, model: c.model, score: c.score, active: c.active,
+      reasons: c.reasons ?? [],
+      performance: c.performance ?? null,
+    })),
   }
 }
 

@@ -60,9 +60,34 @@ const suites = [
   ["ui", "node", ["test-ui.mjs"]],
   ["autonomy", "node", ["test-autonomy.mjs"]],
   ["chaos", "node", ["test-chaos.mjs"]],
+  // ---- P0/P1 audit regression suites (v24 hardening) -------------------
+  ["dag-done", "node", ["test-whole-dag-completion.mjs"]],
+  ["node-gate", "node", ["test-node-verification-gate.mjs"]],
+  ["final-risk", "node", ["test-final-risk-recalculation.mjs"]],
+  ["verif-ro", "node", ["test-verifier-readonly.mjs"]],
+  ["worker-to", "node", ["test-worker-timeout-cleanup.mjs"]],
+  ["node-id", "node", ["test-exact-node-attribution.mjs"]],
+  ["conflicts", "node", ["test-dag-conflicts.mjs"]],
+  ["readonly", "node", ["test-readonly-state.mjs"]],
+  ["bad-plan", "node", ["test-invalid-plan.mjs"]],
+  ["continuation", "node", ["test-max-segment-continuation.mjs"]],
+  ["verif-scope", "node", ["test-verification-scope.mjs"]],
+  ["exit-code", "node", ["test-unknown-exit-code.mjs"]],
+  ["cp-integrity", "node", ["test-checkpoint-integrity.mjs"]],
+  ["cp-restore", "node", ["test-checkpoint-restore.mjs"]],
+  ["crash-resume", "node", ["test-crash-resume.mjs"]],
+  ["effects", "node", ["test-effect-reconciliation.mjs"]],
+  ["git-recov", "node", ["test-git-recovery.mjs"]],
+  ["routing", "node", ["test-model-routing-history.mjs"]],
+  ["mcp-life", "node", ["test-mcp-lifecycle.mjs"]],
+  ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
+  ["leaks", "node", ["test-resource-leaks.mjs"]],
+  ["version", "node", ["test-version-consistency.mjs"]],
+  ["lessons", "node", ["test-lessons-schema.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])
+if (!skipCleanroom) suites.push(["cleanroom-pkg", "node", ["test-clean-room-package.mjs"]])
 
 function run([label, cmd, args]) {
   return new Promise((resolve) => {

@@ -175,6 +175,186 @@ export function sealCreated(checkpointId, cwd) {
   void cwd
 }
 
+/**
+ * P1 — TRANSACTIONAL RESTORE.
+ *
+ * The old restore walked the manifest and best-effort copied whatever it found,
+ * then reported success. A backup that was missing, truncated or corrupted
+ * silently produced a PARTIAL restore that was reported as a clean one.
+ *
+ * The protocol is now:
+ *   1. PREFLIGHT    — every backup in the restore set is present and readable
+ *   2. INTEGRITY    — every backup hashes to the SHA-256 recorded at snapshot
+ *   3. RESTORE SET  — compute exactly what will be written/deleted, up front
+ *   4. RESTORE      — apply it
+ *   5. VERIFY       — hash every restored file and compare with the manifest
+ *   6. PERSIST      — write the result, including any partial failure
+ *
+ * A restore that did not fully succeed is NEVER reported as successful: the
+ * caller gets status PARTIAL/FAILED and must move to RECOVERING or WAITING.
+ */
+export function restoreTransactional(checkpointId, { cwd = null } = {}) {
+  const result = {
+    id: checkpointId ?? null,
+    status: "FAILED",
+    ok: false,
+    phases: { preflight: null, integrity: null, restoreSet: null, restore: null, verify: null, persist: null },
+    restored: [],
+    failed: [],
+    skipped: [],
+    notes: [],
+    at: Date.now(),
+  }
+  try {
+    if (!checkpointId) { result.notes.push("no checkpoint id given"); return persistRestoreResult(result) }
+    const dir = path.join(CHECKPOINTS_DIR, checkpointId)
+    const mFile = path.join(dir, "manifest.json")
+    const m = JSON.parse(fs.readFileSync(mFile, "utf8"))
+
+    // ---- 1. PREFLIGHT -----------------------------------------------------
+    const preflight = { total: 0, missing: [], unreadable: [] }
+    for (const f of m.files ?? []) {
+      if (f.created || f.tooLarge) continue
+      preflight.total++
+      const src = path.join(dir, f.backup)
+      if (!fs.existsSync(src)) { preflight.missing.push(f.path); continue }
+      try { fs.accessSync(src, fs.constants.R_OK) } catch { preflight.unreadable.push(f.path) }
+    }
+    result.phases.preflight = preflight
+    if (preflight.missing.length || preflight.unreadable.length) {
+      result.notes.push(`preflight failed: ${preflight.missing.length} missing, ${preflight.unreadable.length} unreadable backup(s)`)
+      result.failed = [...preflight.missing, ...preflight.unreadable]
+      return persistRestoreResult(result)
+    }
+
+    // ---- 2. INTEGRITY -----------------------------------------------------
+    const integrity = verifyCheckpointIntegrity(checkpointId)
+    result.phases.integrity = integrity
+    if (!integrity.ok) {
+      result.notes.push(...integrity.issues)
+      result.failed = (m.files ?? []).map((f) => f.path)
+      return persistRestoreResult(result)
+    }
+
+    // ---- 3. RESTORE SET ---------------------------------------------------
+    const restoreSet = { write: [], remove: [], skip: [] }
+    for (const f of m.files ?? []) {
+      if (f.created) { restoreSet.remove.push(f); continue }
+      if (f.tooLarge) { restoreSet.skip.push({ path: f.path, reason: `larger than ${Math.round(MAX_SNAPSHOT_BYTES / 1024 / 1024)}MB — never snapshotted` }); continue }
+      restoreSet.write.push(f)
+    }
+    result.phases.restoreSet = { write: restoreSet.write.length, remove: restoreSet.remove.length, skip: restoreSet.skip.length }
+
+    // ---- 4. RESTORE -------------------------------------------------------
+    const restore = { attempted: 0, ok: 0, failed: [] }
+    for (const f of restoreSet.write) {
+      restore.attempted++
+      const src = path.join(dir, f.backup)
+      try {
+        const data = (f.gz || String(f.backup).endsWith(".gz"))
+          ? zlib.gunzipSync(fs.readFileSync(src))
+          : fs.readFileSync(src)
+        fs.mkdirSync(path.dirname(f.path), { recursive: true })
+        fs.writeFileSync(f.path, data)
+        restore.ok++
+        result.restored.push(f.path)
+      } catch (e) {
+        restore.failed.push({ path: f.path, error: String(e?.message ?? e) })
+        result.failed.push(f.path)
+      }
+    }
+    for (const f of restoreSet.remove) {
+      // A "created" file did not exist before this checkpoint, so removing it
+      // IS the undo. When the manifest recorded its hash we still compare it —
+      // if the user has since edited the file, removing it would destroy work
+      // that is not part of this checkpoint, so we keep it and say so.
+      try {
+        if (!fs.existsSync(f.path)) { result.skipped.push({ path: f.path, reason: "already gone" }); continue }
+        const cur = fullFileHash(f.path)
+        if (f.sha && cur && f.sha !== cur.sha) {
+          result.notes.push(`kept created file ${path.basename(f.path)} — it changed since the checkpoint (full SHA-256 mismatch), not removing it`)
+          continue
+        }
+        fs.unlinkSync(f.path)
+        restore.ok++
+        result.restored.push(f.path)
+      } catch (e) {
+        restore.failed.push({ path: f.path, error: String(e?.message ?? e) })
+        result.failed.push(f.path)
+      }
+    }
+    result.phases.restore = restore
+
+    // ---- 5. VERIFY --------------------------------------------------------
+    const verify = { checked: 0, matched: 0, mismatched: [] }
+    for (const f of restoreSet.write) {
+      if (!result.restored.includes(f.path)) continue
+      verify.checked++
+      if (!f.sha) continue
+      const after = fullFileHash(f.path)
+      if (after && after.sha === f.sha) verify.matched++
+      else {
+        verify.mismatched.push(f.path)
+        // roll the failure up: a file that does not match was NOT restored
+        const i = result.restored.indexOf(f.path)
+        if (i !== -1) result.restored.splice(i, 1)
+        if (!result.failed.includes(f.path)) result.failed.push(f.path)
+      }
+    }
+    result.phases.verify = verify
+
+    // ---- 6. PERSIST -------------------------------------------------------
+    const total = restoreSet.write.length + restoreSet.remove.length
+    const done = result.restored.length
+    if (result.failed.length === 0 && verify.mismatched.length === 0) {
+      result.status = "RESTORED"
+      result.ok = true
+      // only now is it safe to retire the checkpoint
+      try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+    } else if (done > 0) {
+      result.status = "PARTIAL"
+      result.ok = false
+      result.notes.push(`partial restore: ${done}/${total} file(s) — RECOVERING required, never claim success`)
+    } else {
+      result.status = "FAILED"
+      result.ok = false
+    }
+    return persistRestoreResult(result)
+  } catch (e) {
+    result.notes.push(String(e?.message ?? e))
+    return persistRestoreResult(result)
+  }
+}
+
+/** Append the restore result to a durable log so a partial restore is visible. */
+function persistRestoreResult(result) {
+  result.phases.persist = { attempted: true }
+  try {
+    fs.mkdirSync(CHECKPOINTS_DIR, { recursive: true })
+    const file = path.join(CHECKPOINTS_DIR, "restore-log.json")
+    let arr = []
+    try { arr = JSON.parse(fs.readFileSync(file, "utf8")) } catch {}
+    if (!Array.isArray(arr)) arr = []
+    arr.push({ ...result, phases: result.phases })
+    const tmp = file + ".tmp"
+    fs.writeFileSync(tmp, JSON.stringify(arr.slice(-50), null, 1), { mode: 0o600 })
+    fs.renameSync(tmp, file)
+    result.phases.persist = { ok: true, file }
+  } catch (e) {
+    result.phases.persist = { ok: false, error: String(e?.message ?? e) }
+  }
+  result.persisted = result.phases.persist?.ok === true
+  return result
+}
+
+/** Last restore result (for `forge undo` / recovery views). */
+export function lastRestoreResult() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(path.join(CHECKPOINTS_DIR, "restore-log.json"), "utf8"))
+    return Array.isArray(arr) && arr.length ? arr[arr.length - 1] : null
+  } catch { return null }
+}
+
 function restoreOne(c) {
   let restored = 0
   const notes = []

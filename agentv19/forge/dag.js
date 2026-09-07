@@ -30,11 +30,28 @@ export const NODE_STATUS = {
   PENDING: "pending",
   READY: "ready",
   RUNNING: "running",
+  // P0: execution success and node completion are NOT the same state.
+  //   RUNNING → EXECUTION_SUCCEEDED → VERIFYING → COMPLETED
+  //                                             └→ REPAIRING → VERIFYING
+  EXECUTION_SUCCEEDED: "execution_succeeded",
+  VERIFYING: "verifying",
+  REPAIRING: "repairing",
   COMPLETED: "completed",
   FAILED: "failed",
   BLOCKED: "blocked",
   CANCELLED: "cancelled",
 }
+
+/** Statuses that mean "the node is not finished yet" for the completion gate. */
+export const UNFINISHED_STATUS = new Set([
+  NODE_STATUS.PENDING,
+  NODE_STATUS.READY,
+  NODE_STATUS.RUNNING,
+  NODE_STATUS.EXECUTION_SUCCEEDED,
+  NODE_STATUS.VERIFYING,
+  NODE_STATUS.REPAIRING,
+  NODE_STATUS.BLOCKED,
+])
 
 const STATUSES = new Set(Object.values(NODE_STATUS))
 export const RISK_LEVELS = ["low", "medium", "high", "critical"]
@@ -71,7 +88,37 @@ function normalizeNode(n) {
     segmentId: n.segmentId ?? n.segment_id ?? null,
     verificationEpoch: n.verificationEpoch ?? n.verification_epoch ?? 0,
     affectedFiles: Array.isArray(n.affectedFiles) ? n.affectedFiles : [],
+    // P0 verification gate: a node is only COMPLETED when its required
+    // verification passed. `optional` nodes may be skipped from the whole-DAG
+    // completion gate by policy (see allComplete / canCompleteTask).
+    verificationSatisfied: n.verificationSatisfied ?? n.verification_satisfied ?? null,
+    verificationId: n.verificationId ?? n.verification_id ?? null,
+    optional: n.optional === true || n.optional === "true",
+    // adaptive-DAG provenance (P1): every generated node records why it exists
+    createdBy: n.createdBy ?? n.created_by ?? null,
+    createdReason: n.createdReason ?? n.created_reason ?? null,
+    createdEvidence: n.createdEvidence ?? n.created_evidence ?? null,
+    parentNode: n.parentNode ?? n.parent_node ?? null,
   }
+}
+
+/** Did this node's required verification pass? `null` = never verified. */
+export function verificationSatisfied(node) {
+  if (!node) return null
+  if (node.verificationSatisfied === true) return true
+  if (node.verificationSatisfied === false) return false
+  return node.verification_satisfied === true ? true : node.verification_satisfied === false ? false : null
+}
+
+/** Put a node back into repair after a failed verification. */
+export function markRepairing(graph, id, reason = null) {
+  const n = graph.nodes.get(id)
+  if (!n) return false
+  if (n.status === NODE_STATUS.COMPLETED || n.status === NODE_STATUS.CANCELLED) return false
+  n.status = NODE_STATUS.REPAIRING
+  n.repair_reason = reason == null ? n.repair_reason : String(reason).slice(0, 400)
+  n.verificationSatisfied = false
+  return true
 }
 
 export function buildDAG(nodeDefs = []) {
@@ -155,6 +202,11 @@ export function readyNodes(graph) {
  */
 export function canonicalConflictKeys(node) {
   if (!node || typeof node !== "object") return ["node:unknown"]
+  // an EXPLICIT lock declaration wins — but an empty one is a lie and is
+  // rejected by validatePlan (CONFLICTS), never silently ignored.
+  if (Array.isArray(node.conflictKeys) && node.conflictKeys.length) {
+    return [...new Set(node.conflictKeys.map((k) => String(k).trim()).filter(Boolean))]
+  }
   const keys = []
   const files = Array.isArray(node.targetFiles) ? node.targetFiles : []
   const symbols = Array.isArray(node.targetSymbols) ? node.targetSymbols : []
@@ -214,9 +266,74 @@ export function markRunning(graph, id) {
   return true
 }
 
-export function markCompleted(graph, id, result = null) {
+/**
+ * P0 — execution success is NOT node completion.
+ *
+ * The agent's tools all ran without error ⇒ EXECUTION_SUCCEEDED. The node is
+ * still UNFINISHED: the *requested outcome* has not been verified yet. Only
+ * markCompleted()/markVerified() below may set COMPLETED, and both require
+ * evidence (see the `requireVerification` guard).
+ */
+export function markExecutionSucceeded(graph, id, result = null) {
   const n = graph.nodes.get(id)
   if (!n) return false
+  if (![NODE_STATUS.RUNNING, NODE_STATUS.EXECUTION_SUCCEEDED, NODE_STATUS.REPAIRING].includes(n.status)) return false
+  n.status = NODE_STATUS.EXECUTION_SUCCEEDED
+  n.result = result == null ? n.result : String(result).slice(0, 2000)
+  n.execution_succeeded_at = n.execution_succeeded_at ?? Date.now()
+  n.verificationSatisfied = false
+  return true
+}
+
+/** Move a node into verification. Idempotent. */
+export function markVerifying(graph, id) {
+  const n = graph.nodes.get(id)
+  if (!n) return false
+  if (n.status === NODE_STATUS.COMPLETED || n.status === NODE_STATUS.FAILED || n.status === NODE_STATUS.CANCELLED) return false
+  n.status = NODE_STATUS.VERIFYING
+  return true
+}
+
+/**
+ * Sentinel for "this node has no verification requirement".
+ *
+ * A read-only investigation node does not mutate an artifact, so there is
+ * nothing to verify beyond the worker having settled with a result. Passing
+ * this sentinel records WHY completion was allowed (auditable) instead of
+ * silently skipping the gate.
+ */
+export const VERIFICATION_NOT_REQUIRED = "NOT_REQUIRED"
+
+/**
+ * The ONE authoritative way to finish a node.
+ *
+ * `requireVerification` (default TRUE) is the gate: a node may only reach
+ * COMPLETED when its required verification passed. Verifiers pass the evidence
+ * (a ledger record, or the VERIFICATION_NOT_REQUIRED sentinel) so every
+ * completion is auditable after the fact.
+ */
+export function markCompleted(graph, id, result = null, { requireVerification = true, verification = null, evidence = null } = {}) {
+  const n = graph.nodes.get(id)
+  if (!n) return false
+  const verified = verification != null && verification !== false
+  if (requireVerification && verificationSatisfied(n) !== true && !verified) return false
+  if (verified) {
+    n.verificationSatisfied = true
+    if (verification === VERIFICATION_NOT_REQUIRED) {
+      n.verificationId = VERIFICATION_NOT_REQUIRED
+      n.verificationMode = "not_required"
+    } else if (typeof verification === "string") {
+      n.verificationId = verification
+      n.verificationMode = "record"
+    } else {
+      n.verificationId = verification.verification_id ?? verification.id ?? null
+      n.verificationEpoch = Number(verification.verificationEpoch ?? verification.verification_epoch ?? n.verificationEpoch ?? 0) || n.verificationEpoch
+      n.verificationMode = "record"
+    }
+  } else {
+    n.verificationSatisfied = n.verificationSatisfied ?? null
+  }
+  if (evidence) n.evidence = String(evidence).slice(0, 1000)
   n.status = NODE_STATUS.COMPLETED
   n.ended_at = Date.now()
   n.result = result == null ? n.result : String(result).slice(0, 2000)
@@ -261,9 +378,10 @@ export function markCancelled(graph, id, { cascade = true } = {}) {
 export function retryNode(graph, id) {
   const n = graph.nodes.get(id)
   if (!n) return false
-  if (![NODE_STATUS.FAILED, NODE_STATUS.BLOCKED].includes(n.status)) return false
+  if (![NODE_STATUS.FAILED, NODE_STATUS.BLOCKED, NODE_STATUS.REPAIRING, NODE_STATUS.VERIFYING, NODE_STATUS.EXECUTION_SUCCEEDED].includes(n.status)) return false
   n.status = depsSatisfied(graph, n) ? NODE_STATUS.READY : NODE_STATUS.PENDING
   n.error = null
+  n.verificationSatisfied = false
   return true
 }
 
@@ -282,7 +400,10 @@ function depsSatisfied(graph, n) {
 }
 
 export function dagStats(graph) {
-  const s = { total: 0, completed: 0, failed: 0, running: 0, ready: 0, blocked: 0, pending: 0, cancelled: 0 }
+  const s = {
+    total: 0, completed: 0, failed: 0, running: 0, ready: 0, blocked: 0, pending: 0, cancelled: 0,
+    execution_succeeded: 0, verifying: 0, repairing: 0,
+  }
   for (const n of graph.nodes.values()) {
     s.total++
     s[n.status] = (s[n.status] ?? 0) + 1
@@ -325,12 +446,59 @@ export function scheduleBatch(graph, { maxParallel = 2, conflictKeys = canonical
   return batch
 }
 
-export function allComplete(graph) {
-  for (const n of graph.nodes.values()) {
+/**
+ * CANONICAL "all required nodes completed" check (P0).
+ *
+ * The completion gate and every caller must use this instead of re-deriving
+ * incompleteness locally — duplicated logic is how "1 of 3 nodes done" used to
+ * be reported as a finished task.
+ *
+ * Semantics:
+ *   - CANCELLED nodes are skipped (a cancelled node cannot block the task).
+ *   - Optional nodes are policy-dependent: `optionalPolicy: "ignore"` (default)
+ *     skips them, "block" requires them, "allow" treats them as satisfied.
+ *   - Every other status — including RUNNING, EXECUTION_SUCCEEDED, VERIFYING
+ *     and REPAIRING — is NOT complete. Execution success is not completion.
+ *
+ * Works with both a live graph ({ nodes: Map, order: [] }) and a serialized
+ * one ({ nodes: [ …nodeObjects ] }), so the gate can judge a task record it
+ * just loaded from disk without rehydrating it.
+ */
+export function allComplete(graph, { optionalPolicy = "ignore" } = {}) {
+  const nodes = graphNodes(graph)
+  if (!nodes.length) return false
+  for (const n of nodes) {
     if (n.status === NODE_STATUS.CANCELLED) continue
-    if (n.status !== NODE_STATUS.COMPLETED) return false
+    if (n.status === NODE_STATUS.COMPLETED) continue
+    if (isOptional(n)) {
+      if (optionalPolicy === "ignore" || optionalPolicy === "allow") continue
+    }
+    return false
   }
-  return graph.nodes.size > 0
+  return true
+}
+
+/** Nodes that are required (not optional, not cancelled) and not completed. */
+export function incompleteRequiredNodes(graph, { optionalPolicy = "ignore" } = {}) {
+  return graphNodes(graph).filter((n) => {
+    if (n.status === NODE_STATUS.CANCELLED) return false
+    if (n.status === NODE_STATUS.COMPLETED) return false
+    if (isOptional(n) && optionalPolicy !== "block") return false
+    return true
+  })
+}
+
+function isOptional(n) {
+  return n?.optional === true || n?.optional === "true"
+}
+
+/** Accept a live graph, a serialized graph, or a plain array of nodes. */
+export function graphNodes(graph) {
+  if (!graph) return []
+  if (Array.isArray(graph.nodes)) return graph.nodes
+  if (graph.nodes instanceof Map) return [...graph.nodes.values()]
+  if (Array.isArray(graph)) return graph
+  return []
 }
 
 export function isStalled(graph) {
@@ -349,93 +517,289 @@ export function isStalled(graph) {
   return false
 }
 
+/** Conflict-key prefixes that are canonical. */
+const CONFLICT_PREFIXES = new Set(["file:", "symbol:", "dir:", "resource:", "node:"])
+
+/** Paths a plan is never allowed to target. */
+const FORBIDDEN_TARGET = /(^|\/)(etc|usr|bin|sbin|boot|sys|proc|dev)(\/|$)|\0/
+
+function canonicalConflicts(n) {
+  return canonicalConflictKeys({
+    id: n?.id,
+    conflictKeys: n?.conflictKeys ?? null,
+    targetFiles: n?.targetFiles ?? n?.target_files ?? [],
+    targetSymbols: n?.targetSymbols ?? n?.target_symbols ?? [],
+    targetDirs: n?.targetDirs ?? n?.target_dirs ?? [],
+    resourceLocks: n?.resourceLocks ?? n?.resource_locks ?? [],
+  })
+}
+
 /**
  * Plan validation pipeline (P0):
- * USER TASK → INTENT → PLAN → SCHEMA VALIDATION → DEPENDENCY VALIDATION
- * → TARGET VALIDATION → CONFLICT VALIDATION → VERIFICATION PLAN → DAG → EXECUTION
- * If validation fails: REPAIR or WAITING depending on recoverability.
+ * USER TASK → INTENT → PLAN → SCHEMA → DEPENDENCIES → TARGETS → CONFLICTS
+ * → VERIFICATION PLAN → DAG → EXECUTION
+ *
+ * Failure ⇒ REPAIR (repairPlan) or WAITING. It must never be possible for an
+ * invalid plan to reach execution by falling through — which is what used to
+ * happen: the controller logged "plan validation failed" and then executed the
+ * same unrepaired plan.
+ *
+ * `stage` says which stage rejected the plan; `recoverable` says whether
+ * repairPlan() can plausibly fix it (a cycle is repairable by dropping the
+ * offending edge; a plan that is not an object is not).
  */
 export function validatePlan(planDefs = []) {
   const errors = []
-  if (!Array.isArray(planDefs)) {
-    return { ok: false, errors: ["plan must be an array"], recoverable: false }
-  }
-  if (!planDefs.length) {
-    return { ok: false, errors: ["plan is empty"], recoverable: true, code: "EMPTY_PLAN" }
-  }
-  // Schema validation
-  for (let i = 0; i < planDefs.length; i++) {
-    const n = planDefs[i]
-    if (!n || typeof n !== "object") {
-      errors.push(`node ${i} must be an object`)
-      continue
-    }
-    if (!n.id && !n.objective && !n.title && !n.task) {
-      errors.push(`node ${i} missing id/objective`)
-    }
-    if (n.id && typeof n.id !== "string") errors.push(`node ${i} id must be string`)
-    if (n.dependencies && !Array.isArray(n.dependencies)) errors.push(`node ${n.id ?? i} dependencies must be array`)
-  }
-  if (errors.length) {
-    return { ok: false, errors, recoverable: errors.some(e => /missing|empty/i.test(e)), code: "SCHEMA_FAILED" }
+  // per-stage observability: which stage failed is as important as the fact
+  // that it failed — the controller logs it and the operator can see it.
+  const stages = { SCHEMA: "skipped", DEPENDENCIES: "skipped", TARGETS: "skipped", CONFLICTS: "skipped", VERIFICATION: "skipped" }
+  const pass = (stage) => { if (stages[stage] === "skipped") stages[stage] = "passed" }
+  const fail = (stage, code, recoverable, list) => {
+    stages[stage] = "failed"
+    return { ok: false, stage, code, recoverable, errors: list, stages: { ...stages } }
   }
 
-  // Dependency validation
-  try {
-    const nodes = new Map()
-    for (const def of planDefs) {
-      const id = String(def.id ?? "")
-      if (!id) continue
-      if (nodes.has(id)) {
-        errors.push(`duplicate node id: ${id}`)
-      }
-      nodes.set(id, def)
+  if (!Array.isArray(planDefs)) return fail("SCHEMA", "SCHEMA_FAILED", false, ["plan must be an array"])
+  if (!planDefs.length) return fail("SCHEMA", "EMPTY_PLAN", true, ["plan is empty"])
+
+  // ---- 1. SCHEMA ---------------------------------------------------------
+  const schemaErrors = []
+  for (let i = 0; i < planDefs.length; i++) {
+    const n = planDefs[i]
+    if (!n || typeof n !== "object") { schemaErrors.push(`node ${i} must be an object`); continue }
+    if (!n.id && !n.objective && !n.title && !n.task) schemaErrors.push(`node ${i} missing id/objective`)
+    if (n.id != null && typeof n.id !== "string") schemaErrors.push(`node ${i} id must be a string`)
+    for (const k of ["dependencies", "deps"]) {
+      if (n[k] != null && !Array.isArray(n[k])) schemaErrors.push(`node ${n.id ?? i} ${k} must be an array`)
     }
-    for (const n of nodes.values()) {
-      const deps = n.dependencies ?? n.deps ?? []
-      for (const d of deps) {
-        if (!nodes.has(String(d))) {
-          errors.push(`node ${n.id} depends on unknown node ${d}`)
+    if (n.risk != null && !RISK_LEVELS.includes(n.risk)) schemaErrors.push(`node ${n.id ?? i} has invalid risk "${n.risk}"`)
+  }
+  if (schemaErrors.length) return fail("SCHEMA", "SCHEMA_FAILED", true, schemaErrors)
+  pass("SCHEMA")
+
+  // ---- 2. DEPENDENCIES ---------------------------------------------------
+  const depErrors = []
+  const ids = new Set()
+  for (const def of planDefs) {
+    const id = String(def.id ?? "")
+    if (!id) { depErrors.push("a node has no id"); continue }
+    if (ids.has(id)) depErrors.push(`duplicate node id: ${id}`)
+    ids.add(id)
+  }
+  for (const n of planDefs) {
+    const id = String(n.id ?? "")
+    for (const d of n.dependencies ?? n.deps ?? []) {
+      const dep = String(d)
+      if (dep === id) { depErrors.push(`node ${id} depends on itself`); continue }
+      if (!ids.has(dep)) depErrors.push(`node ${id} depends on unknown node ${dep}`)
+    }
+  }
+  if (!depErrors.length) {
+    try { buildDAG(planDefs) } catch (e) { depErrors.push(String(e.message)) }
+  }
+  if (depErrors.length) {
+    const cyclic = depErrors.some((e) => /cycle/i.test(e))
+    return fail("DEPENDENCIES", cyclic ? "CYCLE_DETECTED" : "DEPENDENCY_FAILED", true, depErrors)
+  }
+  pass("SCHEMA"); pass("DEPENDENCIES")
+
+  // ---- 3. TARGETS --------------------------------------------------------
+  const targetErrors = []
+  for (const n of planDefs) {
+    for (const key of ["targetFiles", "target_files", "targetSymbols", "target_symbols", "targetDirs", "target_dirs", "resourceLocks", "resource_locks"]) {
+      const list = n[key]
+      if (list == null) continue
+      if (!Array.isArray(list)) { targetErrors.push(`node ${n.id} ${key} must be an array`); continue }
+      for (const v of list) {
+        if (typeof v !== "string" || !v.trim()) { targetErrors.push(`node ${n.id} has an empty/non-string entry in ${key}`); continue }
+        if (key.startsWith("target")) {
+          if (v.includes("\0")) targetErrors.push(`node ${n.id} target ${key} contains NUL`)
+          if (FORBIDDEN_TARGET.test(v)) targetErrors.push(`node ${n.id} targets a system path: ${v}`)
+          if (/(^|\/)\.\.(\/|$)/.test(v)) targetErrors.push(`node ${n.id} target escapes the project: ${v}`)
+          if (pathIsAbsolute(v)) targetErrors.push(`node ${n.id} target is an absolute path: ${v}`)
         }
       }
     }
-    // Cycle check via topoSort
-    if (!errors.length) {
-      const graph = buildDAG(planDefs)
-      void graph
-    }
-  } catch (e) {
-    errors.push(String(e.message))
   }
-  if (errors.length) {
-    const recoverable = !errors.some(e => /cycle/i.test(e))
-    return { ok: false, errors, recoverable, code: recoverable ? "DEPENDENCY_FAILED" : "CYCLE_DETECTED" }
-  }
+  if (targetErrors.length) return fail("TARGETS", "TARGET_FAILED", true, targetErrors)
+  pass("SCHEMA"); pass("DEPENDENCIES"); pass("TARGETS")
 
-  // Target validation (files/symbols/dirs must be plausible)
+  // ---- 4. CONFLICTS ------------------------------------------------------
+  const conflictErrors = []
   for (const n of planDefs) {
-    const files = n.targetFiles ?? n.target_files ?? []
-    for (const f of files) {
-      if (typeof f !== "string" || !f.trim()) errors.push(`node ${n.id} has invalid targetFile`)
-      if (String(f).includes("..") && String(f).includes("/etc/")) errors.push(`node ${n.id} has suspicious targetFile: ${f}`)
+    for (const key of canonicalConflicts(n)) {
+      const [prefix] = String(key).split(":")
+      if (!CONFLICT_PREFIXES.has(prefix + ":")) conflictErrors.push(`node ${n.id} has an unrecognised conflict key "${key}"`)
+    }
+    // a mutating node whose only lock is the conservative node lock is fine,
+    // but an explicit empty-key declaration is a lie we must not accept
+    if (n.conflictKeys !== undefined && Array.isArray(n.conflictKeys) && n.conflictKeys.length === 0) {
+      conflictErrors.push(`node ${n.id} declares empty conflictKeys — conflict detection would be disabled`)
     }
   }
+  if (conflictErrors.length) return fail("CONFLICTS", "CONFLICT_FAILED", true, conflictErrors)
+  pass("SCHEMA"); pass("DEPENDENCIES"); pass("TARGETS"); pass("CONFLICTS")
 
-  // Conflict validation: check for duplicate conflict keys that would deadlock
-  // (not fatal, but warn)
-
-  // Verification plan: ensure nodes with risk high/critical have verificationRequirements
+  // ---- 5. VERIFICATION PLAN ---------------------------------------------
+  const verifyErrors = []
   for (const n of planDefs) {
-    const risk = n.risk ?? "low"
-    if ((risk === "high" || risk === "critical") && (!n.verificationRequirements || !n.verificationRequirements.length)) {
-      // not blocking, but note
+    const mutating = n.read_only !== true
+    const reqs = n.verificationRequirements ?? n.verification_requirements ?? []
+    if (mutating && (!Array.isArray(reqs) || reqs.length === 0)) {
+      verifyErrors.push(`node ${n.id} mutates but declares no verification requirement`)
+    }
+    if (Array.isArray(reqs) && reqs.some((r) => typeof r !== "string" || !String(r).trim())) {
+      verifyErrors.push(`node ${n.id} has an empty/non-string verification requirement`)
     }
   }
+  if (verifyErrors.length) return fail("VERIFICATION", "VERIFICATION_PLAN_FAILED", true, verifyErrors)
+  for (const k of Object.keys(stages)) pass(k)
 
-  if (errors.length) {
-    return { ok: false, errors, recoverable: true, code: "TARGET_FAILED" }
+  return { ok: true, errors: [], stage: "OK", code: "OK", recoverable: true, stages: { ...stages } }
+}
+
+function pathIsAbsolute(p) {
+  const s = String(p ?? "")
+  return s.startsWith("/") || /^[A-Za-z]:[\\/]/.test(s)
+}
+
+/** Default verification requirement for a node that mutates but declared none. */
+export function defaultVerificationFor(node) {
+  const risk = RISK_LEVELS.includes(node?.risk) ? node.risk : "medium"
+  if (node?.read_only === true) return ["acceptance"]
+  if (risk === "critical") return ["syntax", "focused_test", "regression_test", "build", "security"]
+  if (risk === "high") return ["syntax", "focused_test", "regression_test", "build"]
+  if (risk === "medium") return ["syntax", "focused_test"]
+  return ["syntax"]
+}
+
+/**
+ * Repair an invalid plan deterministically (P0).
+ *
+ * Repairs: synthesise missing ids, coerce dependencies, drop unknown/self
+ * dependencies, break cycles by removing the back-edge, sanitise or drop
+ * invalid targets, restore conflict keys, and inject the default verification
+ * requirement for mutating nodes.
+ *
+ * Every change is reported so the controller can audit the repair. If the plan
+ * cannot be made valid (e.g. there are no nodes left to work with) it returns
+ * ok:false — the controller must then WAIT, never execute.
+ */
+export function repairPlan(planDefs = [], objective = "", validation = null) {
+  const changes = []
+  const src = Array.isArray(planDefs) ? planDefs : []
+  let nodes = src
+    .map((n, i) => (n && typeof n === "object" ? { ...n } : { objective: String(n ?? "") }))
+    .filter((n) => n && typeof n === "object")
+
+  // synthesise ids
+  const seen = new Set()
+  nodes = nodes.map((n, i) => {
+    let id = typeof n.id === "string" && n.id.trim() ? n.id.trim() : null
+    if (!id) {
+      id = `n${i + 1}`
+      changes.push(`node ${i + 1} had no id — assigned ${id}`)
+    }
+    if (seen.has(id)) {
+      const next = `${id}-${i + 1}`
+      changes.push(`duplicate id ${id} renamed to ${next}`)
+      id = next
+    }
+    seen.add(id)
+    n.id = id
+    if (!n.objective && !n.title && !n.task) {
+      n.objective = String(objective ?? "").slice(0, 300)
+      changes.push(`node ${id} had no objective — inherited the task objective`)
+    }
+    return n
+  })
+
+  if (!nodes.length) {
+    // No plan at all. This is the ONLY explicitly-proven-safe fallback: one
+    // node carrying the objective verbatim, with a verification requirement.
+    // It is never used for a plan that existed and was rejected.
+    if (!String(objective ?? "").trim()) return { ok: false, nodes: [], changes }
+    changes.push("plan was empty — created a single explicit objective node (proven-safe fallback)")
+    nodes = [{
+      id: "n1", objective: String(objective).slice(0, 600), dependencies: [], priority: 100,
+      role: "coder", read_only: false, risk: "medium",
+      targetFiles: [], targetSymbols: [], targetDirs: [], resourceLocks: [],
+      verificationRequirements: defaultVerificationFor({ read_only: false, risk: "medium" }),
+    }]
   }
-  return { ok: true, errors: [], recoverable: true }
+
+  // coerce + sanitise dependencies
+  const idSet = new Set(nodes.map((n) => n.id))
+  for (const n of nodes) {
+    const raw = Array.isArray(n.dependencies) ? n.dependencies : Array.isArray(n.deps) ? n.deps : []
+    const clean = []
+    for (const d of raw) {
+      const dep = String(d ?? "").trim()
+      if (!dep) continue
+      if (dep === n.id) { changes.push(`node ${n.id} self-dependency removed`); continue }
+      if (!idSet.has(dep)) { changes.push(`node ${n.id} unknown dependency "${dep}" dropped`); continue }
+      clean.push(dep)
+    }
+    n.dependencies = [...new Set(clean)]
+    delete n.deps
+  }
+
+  // sanitise targets / conflicts
+  for (const n of nodes) {
+    for (const key of ["targetFiles", "targetSymbols", "targetDirs", "resourceLocks"]) {
+      const alt = key === "targetFiles" ? "target_files" : key === "targetSymbols" ? "target_symbols" : key === "targetDirs" ? "target_dirs" : "resource_locks"
+      const raw = n[key] ?? n[alt]
+      if (raw == null) { n[key] = []; delete n[alt]; continue }
+      if (!Array.isArray(raw)) { changes.push(`node ${n.id} ${key} was not an array — emptied`); n[key] = []; delete n[alt]; continue }
+      const clean = []
+      for (const v of raw) {
+        const s = typeof v === "string" ? v.trim() : ""
+        if (!s) { changes.push(`node ${n.id} empty ${key} entry dropped`); continue }
+        if (key !== "resourceLocks" && (pathIsAbsolute(s) || /(^|\/)\.\.(\/|$)/.test(s) || FORBIDDEN_TARGET.test(s))) {
+          changes.push(`node ${n.id} unsafe ${key} target "${s}" dropped`)
+          continue
+        }
+        clean.push(s)
+      }
+      n[key] = [...new Set(clean)]
+      delete n[alt]
+    }
+    // verification requirements
+    const reqs = Array.isArray(n.verificationRequirements) ? n.verificationRequirements : Array.isArray(n.verification_requirements) ? n.verification_requirements : null
+    const cleanReqs = (reqs ?? []).map((r) => String(r ?? "").trim()).filter(Boolean)
+    if (n.read_only !== true && !cleanReqs.length) {
+      const def = defaultVerificationFor(n)
+      changes.push(`node ${n.id} had no verification requirement — added [${def.join(", ")}]`)
+      n.verificationRequirements = def
+    } else {
+      n.verificationRequirements = cleanReqs
+    }
+    delete n.verification_requirements
+    if (!RISK_LEVELS.includes(n.risk)) { if (n.risk != null) changes.push(`node ${n.id} invalid risk reset`); n.risk = "medium" }
+  }
+
+  // break cycles: drop the back-edge that closes the loop
+  for (let guard = 0; guard < nodes.length + 1; guard++) {
+    const v = validatePlan(nodes)
+    if (v.ok || v.code !== "CYCLE_DETECTED") break
+    const cyc = /cycle involving: (.*)$/.exec(v.errors.find((e) => /cycle involving/.test(e)) ?? "")?.[1] ?? ""
+    const members = cyc.split(",").map((s) => s.trim()).filter(Boolean)
+    let broke = false
+    for (const n of nodes) {
+      if (!members.includes(n.id)) continue
+      const back = n.dependencies.find((d) => members.includes(d))
+      if (back) {
+        n.dependencies = n.dependencies.filter((d) => d !== back)
+        changes.push(`cycle broken: dropped dependency ${n.id} → ${back}`)
+        broke = true
+        break
+      }
+    }
+    if (!broke) break
+  }
+
+  const final = validatePlan(nodes)
+  return { ok: final.ok, nodes, changes, validation: final }
 }
 
 /**
@@ -444,21 +808,81 @@ export function validatePlan(planDefs = []) {
  * All updates must remain validated, deterministic, auditable, checkpointed.
  * Never allow uncontrolled infinite DAG growth.
  */
-export function updateDAG(graph, newDefs = [], { maxNodes = 100 } = {}) {
-  if (!graph) return buildDAG(newDefs)
+/**
+ * Adaptive DAG (P1): new requirements discovered during execution may add
+ * nodes — but every addition is bounded, validated and AUDITED.
+ *
+ * Every generated node records: parent, reason, evidence, risk, verification,
+ * creator and timestamp. Without that provenance an adaptive DAG is
+ * unfalsifiable: nobody can tell why node n17 exists.
+ *
+ * Bounds (no infinite growth):
+ *   maxNodes      hard cap on graph size
+ *   maxExpansion  how many nodes one expansion may add
+ *   maxDepth      how deep a discovery chain may go (parent → child → …)
+ */
+export const ADAPTIVE_LIMITS = { maxNodes: 100, maxExpansion: 8, maxDepth: 6 }
+
+export function updateDAG(graph, newDefs = [], opts = {}) {
+  const {
+    maxNodes = ADAPTIVE_LIMITS.maxNodes,
+    maxExpansion = ADAPTIVE_LIMITS.maxExpansion,
+    maxDepth = ADAPTIVE_LIMITS.maxDepth,
+    // provenance of this expansion
+    parent = null, reason = null, evidence = null, creator = null,
+  } = opts
+  if (!graph) return buildDAG(stampProvenance(newDefs, { parent, reason, evidence, creator }))
+  if (newDefs.length > maxExpansion) {
+    throw new Error(`DAG expansion limit exceeded: ${newDefs.length} new node(s) > ${maxExpansion}`)
+  }
   if (graph.nodes.size + newDefs.length > maxNodes) {
     throw new Error(`DAG growth limit exceeded: ${graph.nodes.size} + ${newDefs.length} > ${maxNodes}`)
   }
+  if (parent) {
+    const depth = nodeDepth(graph, parent)
+    if (depth + 1 > maxDepth) {
+      throw new Error(`DAG depth limit exceeded: ${depth + 1} > ${maxDepth}`)
+    }
+  }
   const existing = [...graph.nodes.values()]
   const combined = [...existing]
-  for (const def of newDefs) {
+  for (const def of stampProvenance(newDefs, { parent, reason, evidence, creator })) {
     if (!graph.nodes.has(def.id)) combined.push(def)
   }
   const validation = validatePlan(combined)
-  if (!validation.ok && !validation.recoverable) {
-    throw new Error(`DAG update validation failed: ${validation.errors.join("; ")}`)
+  if (!validation.ok) {
+    // an adaptive update must land on a VALID graph; repair it deterministically
+    const repair = repairPlan(combined, "", validation)
+    if (!repair.ok) throw new Error(`DAG update validation failed: ${validation.errors.join("; ")}`)
+    return buildDAG(repair.nodes)
   }
   return buildDAG(combined)
+}
+
+function stampProvenance(defs, { parent, reason, evidence, creator }) {
+  const at = Date.now()
+  return (defs ?? []).map((d) => (d && typeof d === "object" ? {
+    ...d,
+    parentNode: d.parentNode ?? d.parent_node ?? parent ?? null,
+    createdReason: d.createdReason ?? d.created_reason ?? reason ?? null,
+    createdEvidence: d.createdEvidence ?? d.created_evidence ?? (evidence == null ? null : String(evidence).slice(0, 600)),
+    createdBy: d.createdBy ?? d.created_by ?? creator ?? "adaptive",
+    createdAt: d.createdAt ?? d.created_at ?? at,
+  } : d))
+}
+
+/** Depth of a node in the discovery chain (0 = an original planned node). */
+export function nodeDepth(graph, id) {
+  let depth = 0
+  let cur = graph?.nodes?.get?.(String(id)) ?? null
+  const seen = new Set()
+  while (cur?.parentNode && depth < 64) {
+    if (seen.has(cur.parentNode)) break
+    seen.add(cur.parentNode)
+    depth++
+    cur = graph.nodes.get(String(cur.parentNode)) ?? null
+  }
+  return depth
 }
 
 export function parsePlanToDAG(text) {
@@ -483,6 +907,7 @@ export function parsePlanToDAG(text) {
           targetDirs: n.targetDirs ?? n.target_dirs ?? [],
           resourceLocks: n.resourceLocks ?? n.resource_locks ?? [],
           verificationRequirements: n.verificationRequirements ?? n.verification_requirements ?? [],
+          conflictKeys: n.conflictKeys ?? null,
         }))
         const v = validatePlan(defs)
         if (!v.ok && !v.recoverable) throw new Error(`plan validation failed: ${v.errors.join("; ")}`)

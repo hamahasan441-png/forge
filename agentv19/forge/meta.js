@@ -26,9 +26,10 @@
  *  - effect-aware recovery
  */
 import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, finalizeStatus } from "./taskstate.js"
-import { createLedger, riskForChange, VERIFICATION_STATUS } from "./verifyledger.js"
+import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS } from "./verifyledger.js"
+import { canCompleteTask, CHECK as GATE_CHECK } from "./completion.js"
 import { createResourceManager, ADAPT } from "./resources.js"
-import { selectModel, reconsiderModel } from "./modelstrategy.js"
+import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
@@ -92,7 +93,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
   const manager = createAgentManager({
     maxWorkers: resources.state.maxWorkers,
-    onEvent: emit,
+    // worker events are stamped with the task identity like every other event
+    onEvent: (ev) => emit({ taskId, runId: taskRunId, ...ev }),
     signal,
   })
   const provRef = { prov: provider }
@@ -114,10 +116,31 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       }).then((r) => r.text),
   })
 
+  // --- critical-persistence accounting (completion gate check #9) ----------
+  // Every CRITICAL flush is recorded. A failure is surfaced, never swallowed:
+  // the gate refuses COMPLETED when the terminal state did not reach disk.
+  let criticalPersistenceSucceeded = true
+  const persistCritical = () => {
+    try {
+      ts.flush(DURABILITY.CRITICAL)
+    } catch (e) {
+      criticalPersistenceSucceeded = false
+      emit({ type: "CRITICAL_PERSISTENCE_FAILED", taskId, runId: taskRunId, error: String(e?.message ?? e) })
+      return false
+    }
+    return true
+  }
+
   const segSteps = segmentSteps ?? config?.agent?.segmentSteps ?? SEGMENT_STEPS
   const maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
+  // P0 segment safety fuse: a continuation is a RESUME, not a failure. The
+  // continuation budget bounds it so "resume later" cannot loop forever.
+  const maxContinuations = config?.agent?.maxContinuations ?? 5
+  // how many times this task has already been resumed after a safety fuse
+  let continuationCount = Number(resumeRec?.continuation_count ?? 0) || 0
 
   const sel = selectModel(config, { task: state.objective, provider })
+  const requiredCaps = sel?.capabilities ?? null
   let prov = provider
   if (sel?.decision && config?.agent?.modelStrategy !== false) {
     emit({ type: "MODEL_SELECTED", model: sel.decision.model, provider: sel.decision.provider, reason: sel.decision.reason, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
@@ -149,8 +172,20 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let planText = ""
   let planDefs = []
   let planValidation = null
+  let planRepaired = false
+  // RESUME: the task already has a validated DAG on disk. Re-planning would
+  // throw away the graph the interrupted run was executing (and pay for a
+  // model call that can contradict it), so we restore instead.
+  const restoredDAG = Boolean(resumeRec && state.dag)
   try {
-    const planRes = await agent({
+    if (restoredDAG) {
+      planDefs = []
+      planValidation = { ok: true, errors: [], stage: "RESTORED", code: "RESTORED", recoverable: true }
+      emit({ type: "PLAN_RESTORED", taskId, runId: taskRunId, nodes: state.dag?.nodes?.length ?? 0, reason: "resuming an interrupted task — the recorded DAG is authoritative" })
+      ts.setPlan((state.plan ?? []).map((p) => (typeof p === "string" ? p : p?.objective ?? p?.title ?? p?.id)), "resumed")
+      ts.transition(TASK_STATUS.PLANNING, { reason: "plan restored from the task record" })
+    }
+    const planRes = restoredDAG ? null : await agent({
       config, provider: prov, signal,
       task: `${state.objective}\n\nProduce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
@@ -158,41 +193,69 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
     })
     planText = planRes?.text ?? ""
-    planDefs = dagLib.parsePlanToDAG(planText)
-    planValidation = dagLib.validatePlan(planDefs)
+    if (!restoredDAG) {
+      planDefs = dagLib.parsePlanToDAG(planText)
+      planValidation = dagLib.validatePlan(planDefs)
+    }
+
+    // P0 — an invalid plan must NEVER fall through into execution.
+    // TASK → PLAN → SCHEMA → DEPENDENCIES → TARGETS → CONFLICTS →
+    // VERIFICATION PLAN → DAG → EXECUTION.  Failure ⇒ REPAIR, or WAITING.
+    // The old code transitioned to REPAIRING and then executed the *unrepaired*
+    // plan anyway; and an EMPTY_PLAN silently became a generic single-node
+    // mutation, which is exactly how a complex task got collapsed into "edit
+    // one file". Now we actually repair, re-validate, and only continue on a
+    // plan that passes.
     if (!planValidation.ok) {
-      if (planValidation.recoverable) {
-        ts.transition(TASK_STATUS.REPAIRING, { reason: `plan validation failed: ${planValidation.errors.join("; ")}` })
-        emit({ type: "PLAN_VALIDATION_FAILED", taskId, runId: taskRunId, errors: planValidation.errors, recoverable: true })
-        ts.setNextAction(`repair: fix plan validation errors: ${planValidation.errors.join(", ")}`)
-        // continue to execution with repaired plan if possible, else WAITING
-        if (planValidation.code === "EMPTY_PLAN") {
-          // fallback to single node plan
-          planDefs = [{ id: "n1", objective: state.objective, dependencies: [], priority: 100, role: "coder", read_only: false }]
-          planValidation = { ok: true, errors: [] }
-        }
-      } else {
-        ts.transition(TASK_STATUS.WAITING, { reason: `unrecoverable plan validation: ${planValidation.errors.join("; ")}` })
-        emit({ type: "PLAN_VALIDATION_FAILED", taskId, runId: taskRunId, errors: planValidation.errors, recoverable: false })
-        ts.setNextAction(`wait: plan invalid and unrecoverable: ${planValidation.errors.join(", ")}`)
-        // persist WAITING with critical durability
-        try { ts.flush(DURABILITY.CRITICAL) } catch {}
-        return {
-          taskId,
-          status: FINAL.WAITING,
-          text: `plan validation failed and unrecoverable: ${planValidation.errors.join("; ")}`,
-          segments: 0,
-          repairs: 0,
-          toolCalls: 0,
-          filesChanged: [],
-          verification: { ok: false, missing: [], reason: "plan invalid" },
-          task: state,
-        }
+      emit({ type: "PLAN_VALIDATION_FAILED", taskId, runId: taskRunId, errors: planValidation.errors, recoverable: planValidation.recoverable })
+      const repair = dagLib.repairPlan(planDefs, state.objective, planValidation)
+      if (repair.ok) {
+        planDefs = repair.nodes
+        planValidation = dagLib.validatePlan(planDefs)
+        planRepaired = true
+        ts.transition(TASK_STATUS.REPAIRING, { reason: `plan repaired: ${repair.changes.join("; ").slice(0, 300)}` })
+        emit({ type: "PLAN_REPAIRED", taskId, runId: taskRunId, changes: repair.changes, nodes: planDefs.length })
+        ts.setNextAction(null)
       }
     }
+    // still invalid after repair (or unrecoverable by construction) → WAITING
+    if (!planValidation.ok) {
+      ts.transition(TASK_STATUS.WAITING, { reason: `plan invalid: ${planValidation.errors.join("; ").slice(0, 300)}` })
+      ts.setNextAction(`wait: plan invalid — ${planValidation.errors.slice(0, 3).join(", ")}`)
+      ts.setPlan(planDefs, "invalid")
+      persistCritical()
+      return {
+        taskId,
+        runId: taskRunId,
+        status: FINAL.WAITING,
+        text: `plan validation failed: ${planValidation.errors.join("; ")}`,
+        segments: 0,
+        repairs: 0,
+        toolCalls: 0,
+        filesChanged: [],
+        verification: { ok: false, missing: [], reason: "plan invalid" },
+        planValidation,
+        task: state,
+      }
+    }
+    if (!restoredDAG) ts.setPlan(planDefs.map((n) => n.objective ?? n.title ?? n.id), planRepaired ? "model+repaired" : "model")
   } catch (e) {
     ts.noteError("PLAN_FAILED", e?.message ?? String(e))
     planValidation = { ok: false, errors: [String(e?.message ?? e)], recoverable: true, code: "PLAN_EXCEPTION" }
+    ts.transition(TASK_STATUS.WAITING, { reason: `planning failed: ${String(e?.message ?? e).slice(0, 200)}` })
+    persistCritical()
+    return {
+      taskId,
+      runId: taskRunId,
+      status: FINAL.WAITING,
+      text: `planning failed: ${String(e?.message ?? e)}`,
+      segments: 0,
+      repairs: 0,
+      toolCalls: 0,
+      filesChanged: [],
+      verification: { ok: false, missing: [], reason: "planning failed" },
+      task: state,
+    }
   }
 
   let dag = null
@@ -212,7 +275,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (planValidation && !planValidation.recoverable) {
       ts.transition(TASK_STATUS.WAITING, { reason: `DAG build failed: ${e?.message}` })
       emit({ type: "DAG_BUILD_FAILED", taskId, runId: taskRunId, error: e?.message, recoverable: false })
-      try { ts.flush(DURABILITY.CRITICAL) } catch {}
+      persistCritical()
       return {
         taskId,
         status: FINAL.WAITING,
@@ -238,11 +301,212 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let segment = 0
   let finalStatus = FINAL.FAILED
   let finalText = ""
+  let finalState = null
   let consecutiveFailures = 0
   let repairCount = 0
   let evidenceRequests = 0
   let totalToolCalls = 0
   const changedFiles = new Set()
+  const seenExisting = new Set()
+  const deletedFiles = new Set()
+  const mutatingCommands = new Set()
+  const affectedSymbols = []
+  const requiredActions = new Set()
+  const maxRepairs = config?.agent?.maxRepairs ?? 6
+  /** Last completion-gate verdict (for the audit trail / return value). */
+  let lastGate = null
+
+  const addRequiredAction = (a) => { if (a) requiredActions.add(String(a).slice(0, 400)) }
+  const clearRequiredActions = () => requiredActions.clear()
+
+  /** P0: no mutation boundary may be crossed while a worker is still alive. */
+  const settleWorkers = async (graceMs = 4000) => {
+    try {
+      const res = await manager.settle({ graceMs })
+      if (!res.settled) {
+        emit({ type: "WORKER_ORPHANED", taskId, runId: taskRunId, stillRunning: res.stillRunning, reason: "workers still alive at a mutation boundary" })
+      }
+      return res
+    } catch (e) {
+      ts.noteError("WORKER_SETTLE_FAILED", String(e?.message ?? e))
+      return { settled: false, stillRunning: [], error: String(e?.message ?? e) }
+    }
+  }
+
+  /** Drift between expected and observed effects (crash-resume reconciliation). */
+  /**
+   * Recovery drift = something is genuinely UNRESOLVED from the interrupted
+   * run: a file the task said it changed is gone, an operation ended with an
+   * unknown status, or git was left mid-operation. Those need an operator.
+   *
+   * "inspect" alone is NOT drift: it is also recommended when there is simply
+   * nothing to prove (no checkpoints, a task paused in WAITING). Blocking
+   * completion on that would freeze an otherwise healthy resume forever.
+   */
+  const recoveryDrift = () => {
+    const fx = resumeRecon?.effects
+    if (fx && ((fx.missing?.length ?? 0) > 0 || (fx.unknown?.length ?? 0) > 0)) return true
+    const git = fx?.git
+    if (git?.operation && ["merge", "rebase", "cherry-pick", "revert", "bisect"].includes(git.operation)) return true
+    return false
+  }
+  const recoveryGateState = () => {
+    if (!resumeRecon) return null
+    return {
+      recommended: resumeRecon.recommended,
+      unverified: resumeRecon.unverified ?? 0,
+      clear: !recoveryDrift() && !/ask_user|abort|compensate/.test(String(resumeRecon.recommended ?? "")),
+    }
+  }
+  if (resumeRecon && recoveryDrift()) addRequiredAction(`reconcile: ${resumeRecon.recommended}`)
+
+  /**
+   * Complete a node ONLY when the ledger proves its verification passed for the
+   * current risk. Used after execution, after an explicit verification pass and
+   * after a repair — one rule, one place.
+   */
+  const completeNodeIfVerified = (nodeId, { risk, segmentId = null, phase = "post-segment" } = {}) => {
+    if (!dag || !nodeId) return false
+    try {
+      const rel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
+      const st = ledger.status(risk, rel, { nodeId })
+      if (!st.ok || st.anyFailure) return false
+      const last = (st.evidence ?? []).filter((e) => e.passed).slice(-1)[0] ?? null
+      const okDone = dagLib.markCompleted(dag, nodeId, `verified (${risk})`, {
+        verification: { verification_id: last?.verificationId ?? `ver-${phase}-${nodeId}` },
+      })
+      if (okDone) {
+        emit({ type: "DAG_NODE_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId, verified: true, risk, phase })
+        persistDAG()
+      }
+      return okDone
+    } catch { return false }
+  }
+
+  /** Recompute the final risk from what actually changed (never lowers it). */
+  const recomputeFinalRisk = () => finalRiskForChange({
+    task: state.objective,
+    initialRisk: riskLevel,
+    changedFiles: [...changedFiles].map((f) => path.relative(process.cwd(), f)),
+    createdFiles: (state.files_created ?? []).map((f) => path.relative(process.cwd(), f)),
+    deletedFiles: [...deletedFiles].map((f) => path.relative(process.cwd(), f)),
+    affectedSymbols,
+    commands: [...mutatingCommands],
+  })
+
+  /**
+   * THE completion gate (P0). Nothing else may declare COMPLETED.
+   * @returns {{done: boolean, gate: object}}
+   */
+  const attemptCompletion = async ({ text, segment = 0, segmentId = null, nodeId = null } = {}) => {
+    // 1. never complete while a worker is alive
+    await settleWorkers()
+    const fr = recomputeFinalRisk()
+    const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
+    const vv = ledger.status(fr.risk, changedRel)
+    const gate = canCompleteTask({
+      planValid: planValidation ? planValidation.ok !== false : true,
+      planErrors: planValidation?.errors ?? [],
+      dag,
+      dagValid: Boolean(dag),
+      workersSettled: manager.stats().active === 0,
+      activeWorkers: manager.stats().active,
+      verification: vv,
+      verificationRequired: !(changedFiles.size === 0 || fr.risk === "trivial"),
+      recovery: recoveryGateState(),
+      pendingRequiredActions: [...requiredActions],
+      finalStateReconciled: !recoveryDrift(),
+      criticalPersistenceSucceeded,
+      cancelled: Boolean(signal?.aborted),
+      repairBudgetRemaining: repairCount < maxRepairs,
+      optionalPolicy: config?.agent?.optionalNodePolicy ?? "ignore",
+    })
+    lastGate = gate
+    emit({
+      type: "COMPLETION_GATE", taskId, runId: taskRunId, segmentId, nodeId,
+      ok: gate.ok, status: gate.status, checks: gate.checks, blockers: gate.blockers,
+      finalRisk: fr.risk, initialRisk: fr.initialRisk,
+    })
+    if (!gate.ok) return { done: false, gate }
+    finalStatus = explicitFinalization(FINAL.COMPLETED)
+    finalState = TASK_STATUS.COMPLETED
+    finalText = text ?? "task completed"
+    clearRequiredActions()
+    ts.setNextAction(null)
+    ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
+    emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, text: String(finalText).slice(0, 400), verification: vv.status, finalRisk: fr.risk, gate: gate.checks })
+    return { done: true, gate }
+  }
+
+  /** The gate refused completion: move to the safe state it recommended. */
+  const refuseCompletion = async ({ v, segment = 0, segmentId = null, nodeId = null, finalRiskLevel = "medium", text = "" } = {}) => {
+    const gate = lastGate ?? { status: "WAITING", blockers: [], reasons: [] }
+    const status = gate.status
+    emit({
+      type: "TASK_BLOCKED", taskId, runId: taskRunId, segment, segmentId, nodeId,
+      status, missing: v?.missing ?? [], risk: finalRiskLevel, blockers: gate.blockers,
+    })
+
+    // The gate exists to prevent a FALSE COMPLETED, not to stop useful work.
+    // When the only thing missing is "more nodes to finish / more evidence"
+    // and the DAG can still make progress, keep executing the next node.
+    // Anything structural (live workers, invalid plan/DAG, uncleared recovery,
+    // failed persistence, a failed node) never continues — it settles safely.
+    const progressBlockers = new Set([
+      GATE_CHECK.ALL_REQUIRED_NODES_COMPLETE,
+      GATE_CHECK.VERIFICATION_SATISFIED,
+      GATE_CHECK.NO_PENDING_REQUIRED_ACTIONS,
+    ])
+    const onlyProgressBlockers = gate.blockers.every((b) => progressBlockers.has(b.check))
+    let canProgress = false
+    if (dag) {
+      try { canProgress = dagLib.readyNodes(dag).length > 0 && !dagLib.isStalled(dag) } catch { canProgress = false }
+    }
+    if (onlyProgressBlockers && canProgress && segment < maxSeg) {
+      ts.transition(TASK_STATUS.EXECUTING, { reason: `continuing: ${gate.reasons.slice(0, 2).join("; ").slice(0, 200)}` })
+      return { done: false, gate }
+    }
+
+    // REPAIRING: there is still repair budget — try once, then keep looping.
+    if (status === "REPAIRING" && repairCount < maxRepairs) {
+      ts.transition(TASK_STATUS.REPAIRING, { reason: gate.reasons.join("; ").slice(0, 300) })
+      const recovered = await repairSegment({
+        agent, config, provider: prov, signal, emit, state,
+        error: gate.reasons.join("; ") || v?.reason || "completion gate refused",
+        segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
+        finalRisk: finalRiskLevel,
+      })
+      repairCount += recovered ? 1 : 0
+      ts.noteRepair(recovered ? 1 : 0)
+      ts.transition(TASK_STATUS.EXECUTING, { reason: "after completion-gate repair" })
+      return { done: false, gate }
+    }
+
+    // RECOVERING: drift or unresolved recovery — go through RECOVERING state.
+    if (status === "RECOVERING") {
+      ts.transition(TASK_STATUS.RECOVERING, { reason: gate.reasons.join("; ").slice(0, 300) })
+      addRequiredAction(`recover: ${gate.reasons.slice(0, 2).join("; ")}`)
+    }
+
+    const mapped = status === "FAILED" ? FINAL.FAILED
+      : status === "CANCELLED" ? FINAL.CANCELLED
+        : FINAL.WAITING
+    finalStatus = explicitFinalization(mapped)
+    finalState = (status === "RECOVERING" || status === "REPAIRING") ? TASK_STATUS.WAITING : (TASK_STATUS[status] ?? TASK_STATUS.WAITING)
+    finalText = text
+      ? `${text}`
+      : `not completed — ${gate.reasons.slice(0, 3).join("; ")}`
+    if (mapped === FINAL.WAITING) {
+      ts.setNextAction(`wait: ${gate.reasons.slice(0, 2).join("; ").slice(0, 300)}`)
+      ts.transition(TASK_STATUS.WAITING, { reason: gate.reasons.join("; ").slice(0, 300) })
+    } else if (mapped === FINAL.FAILED) {
+      ts.transition(TASK_STATUS.FAILED, { reason: gate.reasons.join("; ").slice(0, 300) })
+    } else {
+      ts.transition(TASK_STATUS.CANCELLED, { reason: "user cancel" })
+    }
+    persistCritical()
+    return { done: true, gate }
+  }
 
   ts.transition(TASK_STATUS.EXECUTING, { reason: "starting segments" })
 
@@ -253,19 +517,48 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const segmentId = `seg-${segment}`
     const segStart = Date.now()
 
-    // Exact DAG node identity: select next READY mutating node for main execution
-    // Read-only nodes are handled via worker fan-out, not main execution
+    // Exact DAG node identity (P0): the node executed by this segment is chosen
+    // explicitly and carried in taskId/runId/segmentId/nodeId through Meta →
+    // Agent → Tools → Events → Verification → TaskState → DAG. Nothing is
+    // inferred from filenames, keywords or tool names.
+    const changedBefore = changedFiles.size
+
+    // --- close out any in-flight node whose verification has since landed ---
+    // A node left in VERIFYING / EXECUTION_SUCCEEDED / REPAIRING by an earlier
+    // segment is finished the moment its evidence holds — it must not linger
+    // unfinished and block the whole-DAG gate forever.
+    if (dag) {
+      try {
+        const relNow = [...changedFiles].map((f) => path.relative(process.cwd(), f))
+        for (const n of [...dag.nodes.values()]) {
+          if (![dagLib.NODE_STATUS.EXECUTION_SUCCEEDED, dagLib.NODE_STATUS.VERIFYING, dagLib.NODE_STATUS.REPAIRING].includes(n.status)) continue
+          const st = ledger.status(riskNow, relNow, { nodeId: n.id })
+          if (st.ok && !st.anyFailure) {
+            dagLib.markCompleted(dag, n.id, "verification satisfied after repair", { verification: { verification_id: `ver-after-repair-${n.id}-${segment}` } })
+            emit({ type: "DAG_NODE_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: n.id, verified: true, phase: "post-repair" })
+          }
+        }
+        persistDAG()
+      } catch { }
+    }
+
     let currentNodeId = null
     let currentNode = null
     if (dag) {
       try {
         const ready = dagLib.readyNodes(dag)
-        const candidates = ready.filter(n => !n.read_only)
+        // Mutating nodes first: they advance the objective. Read-only nodes are
+        // normally fanned out to workers below; if none could be dispatched the
+        // main agent takes one itself so the graph can never stall owner-less.
+        const candidates = ready.filter((n) => !n.read_only)
         const pick = candidates.length ? candidates[0] : null
         if (pick) {
           currentNodeId = pick.id
           currentNode = dagLib.executeNode(dag, currentNodeId, { taskId, runId: taskRunId, segmentId })
           if (currentNode) {
+            currentNode.taskId = taskId
+            currentNode.runId = taskRunId
+            currentNode.segmentId = segmentId
             ts.setNodeId(currentNodeId)
             emit({ type: "DAG_NODE_STARTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, objective: currentNode.objective })
             persistDAG()
@@ -319,29 +612,90 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             dagLib.markRunning(dag, n.id)
             const job = manager.spawn({
               role: n.role,
+              // P0 worker identity: every worker carries taskId/nodeId/segmentId
+              // so nothing downstream has to guess which node it belongs to.
+              taskId, runId: taskRunId, segmentId, nodeId: n.id,
               task: `${n.objective}\n\nThis is a read-only investigation subtask of: ${state.objective}. Do NOT modify files. Report concise findings (file paths, symbols, facts) the implementer will need.`,
               context: contextBlock.slice(0, 3500),
               dagNode: n.id,
               timeoutMs: 1000 * 60 * 2,
+              // canonical conflict keys, straight from the node definition
+              targetFiles: n.targetFiles ?? null,
+              targetSymbols: n.targetSymbols ?? null,
+              targetDirs: n.targetDirs ?? null,
+              resourceLocks: n.resourceLocks ?? null,
             })
             resources.record({ workers: 1 })
           return job.promise.then((r) => {
-            if (r.status === "completed") {
-              dagLib.markCompleted(dag, n.id, String(r.result ?? "").slice(0, 2000))
+            if (r.status === "completed" && String(r.result ?? "").trim()) {
+              // A read-only node's outcome is its findings: record that as
+              // scoped ACCEPTANCE evidence, then complete the node WITH it.
+              const rec = ledger.add({
+                verification_id: `ver-worker-${n.id}-${job.id}`,
+                taskId, nodeId: n.id, segmentId,
+                verificationEpoch: state.verification_epoch ?? 0,
+                affectedFiles: [], scope: "node", type: "acceptance",
+                passed: true, exitCode: 0, exitCodeKnown: true,
+                evidence: String(r.result ?? "").slice(0, 300),
+                timestamp: Date.now(), command: `worker:${n.role}`, output: String(r.result ?? "").slice(0, 500),
+              })
+              ts.noteVerification(rec)
+              dagLib.markCompleted(dag, n.id, String(r.result ?? "").slice(0, 2000), { verification: rec })
               dagFindings += `\n\n--- finding from ${n.role} (${n.id}) ---\n${String(r.result ?? "").slice(0, 1200)}`
+            } else if (r.status === "completed") {
+              // worker settled but produced nothing: unverifiable, not complete
+              dagLib.markFailed(dag, n.id, "worker produced no findings — cannot verify the node outcome")
             } else {
               dagLib.markFailed(dag, n.id, r.error ?? r.status)
             }
             persistDAG()
           }).catch((e) => { try { dagLib.markFailed(dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} })
           })
-          await Promise.race([
-            Promise.allSettled(jobs),
-            new Promise((resolve) => setTimeout(resolve, 4000)),
-          ])
+          // Bounded wait: the deadline must be cleared (and unref'd) or it keeps
+          // a timer alive long after the workers have settled.
+          let fanoutTimer = null
+          const fanoutDeadline = new Promise((resolve) => {
+            fanoutTimer = setTimeout(resolve, 4000)
+            if (fanoutTimer && typeof fanoutTimer.unref === "function") fanoutTimer.unref()
+          })
+          await Promise.race([Promise.allSettled(jobs), fanoutDeadline])
+          clearTimeout(fanoutTimer)
         }
       } catch (e) { ts.noteError("DAG_FANOUT_FAILED", e?.message ?? String(e)) }
     }
+
+    // If no mutating node was ready, everything that is still READY now is a
+    // read-only node the fan-out could not dispatch — execute one here so the
+    // DAG always has an owner and the completion gate can eventually pass.
+    if (dag && !currentNodeId && !signal?.aborted) {
+      try {
+        let pick = null
+        // (a) a node left mid-flight whose verification never landed: retry it
+        //     while there is repair budget, so the graph can never deadlock.
+        const inflight = [...dag.nodes.values()].filter((n) => [
+          dagLib.NODE_STATUS.EXECUTION_SUCCEEDED, dagLib.NODE_STATUS.VERIFYING, dagLib.NODE_STATUS.REPAIRING,
+        ].includes(n.status))
+        if (inflight.length && repairCount < maxRepairs) {
+          const n = inflight[0]
+          if (dagLib.retryNode(dag, n.id)) pick = n
+        }
+        // (b) otherwise take any read-only node the fan-out could not dispatch
+        if (!pick) pick = dagLib.readyNodes(dag)[0] ?? null
+        if (pick) {
+          currentNodeId = pick.id
+          currentNode = dagLib.executeNode(dag, currentNodeId, { taskId, runId: taskRunId, segmentId })
+          if (currentNode) {
+            currentNode.taskId = taskId
+            currentNode.runId = taskRunId
+            currentNode.segmentId = segmentId
+            ts.setNodeId(currentNodeId)
+            emit({ type: "DAG_NODE_STARTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, objective: currentNode.objective, owner: "main" })
+            persistDAG()
+          }
+        }
+      } catch { }
+    }
+
 
     const segTask = resumeRec && segment === 1
       ? resumePrompt(resumeRec, resumeRecon ?? reconcileTask(resumeRec, { cwd: process.cwd() }), process.cwd())
@@ -382,26 +736,56 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       }
       if (r.checkpoint) ts.noteCheckpoint(r.checkpoint)
     }
-    if (changedFiles.size) ctxEngine.invalidateFor([...changedFiles])
+    // A file that no longer exists was DELETED — but only if we have SEEN it
+    // exist. A file the agent intends to create has not been observed yet, so
+    // counting it as a deletion would fabricate risk (and mark it gone).
+    for (const f of changedFiles) {
+      const exists = (() => { try { return fs.existsSync(f) } catch { return false } })()
+      if (exists) { seenExisting.add(f); continue }
+      if (seenExisting.has(f)) {
+        deletedFiles.add(f)
+        changedFiles.delete(f)
+        seenExisting.delete(f)
+      }
+    }
+    if (changedFiles.size) {
+      ctxEngine.invalidateFor([...changedFiles])
+      // affected symbols feed the risk escalation rules (auth/crypto/exec …)
+      try {
+        const syms = detectAffectedSymbols([...changedFiles], process.cwd())
+        for (const s of syms) if (!affectedSymbols.includes(s)) affectedSymbols.push(s)
+      } catch { }
+    }
 
-    // Exact node identity: deterministic completion
+    // Exact node identity + P0 verification gate.
+    // Execution success ⇒ EXECUTION_SUCCEEDED only. The node reaches COMPLETED
+    // further down, and only when its verification passed. It is NEVER
+    // completed here, before verification — that was the bug that let a node
+    // report "completed" while its own test run had just failed.
     if (dag && currentNodeId) {
       try {
-        if (res.error) dagLib.markFailed(dag, currentNodeId, String(res.error).slice(0, 200))
-        else dagLib.markCompleted(dag, currentNodeId, `segment ${segment}: ${changedFiles.size} file(s), ${segToolCalls} tool call(s)`)
+        if (res.error) {
+          dagLib.markFailed(dag, currentNodeId, String(res.error).slice(0, 200))
+        } else {
+          dagLib.markExecutionSucceeded(dag, currentNodeId, `segment ${segment}: ${changedFiles.size} file(s), ${segToolCalls} tool call(s)`)
+          emit({ type: "DAG_NODE_EXECUTION_SUCCEEDED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, note: "execution succeeded — not completed until verification passes" })
+        }
         persistDAG()
         ts.setLastOperation(`node:${currentNodeId} segment:${segment} files:${changedFiles.size} tools:${segToolCalls}`)
       } catch { }
     } else if (dag) {
-      // Diagnostic fallback: attributeSegment only as diagnostic fallback (P0)
+      // DIAGNOSTIC ONLY (P0): attributeSegment may annotate what a segment
+      // LOOKED like, but it must never determine authoritative DAG state —
+      // no markCompleted / markFailed / markExecutionSucceeded here.
       try {
         const progress = { files: changedFiles.size, toolCalls: segToolCalls, text: String(res.text ?? "").slice(0, 800), segment }
         const segNode = attributeSegment(dag, progress)
         if (segNode) {
-          emit({ type: "DAG_DIAGNOSTIC_ATTRIBUTION", taskId, runId: taskRunId, segmentId, nodeId: segNode.id, reason: "fallback heuristic used — primary is explicit nodeId" })
-          if (res.error) dagLib.markFailed(dag, segNode.id, String(res.error).slice(0, 200))
-          else dagLib.markCompleted(dag, segNode.id, `segment ${segment}: ${changedFiles.size} file(s), ${segToolCalls} tool call(s)`)
-          persistDAG()
+          emit({
+            type: "DAG_DIAGNOSTIC_ATTRIBUTION", taskId, runId: taskRunId, segmentId,
+            nodeId: segNode.id, guessed: true, applied: false,
+            reason: "diagnostic only — heuristic attribution never mutates DAG state",
+          })
         }
       } catch { }
     }
@@ -428,7 +812,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const segStatus = res.error ? "failed" : res.budgetHit ? "continued" : "completed"
     ts.addSegment({ segment_id: segmentId, node_id: currentNodeId, objective: state.objective, status: segStatus, steps: res.steps ?? 0, tool_calls: segToolCalls, continued: !!res.budgetHit })
     ts.noteUsage({ tokens_in: tokIn, tokens_out: tokOut, tool_calls: segToolCalls, ms: segMs, workers: manager.stats().active })
-    try { ts.flush(DURABILITY.CRITICAL) } catch {}
+    persistCritical()
 
     if (!res.aborted && config?.agent?.modelStrategy !== false) {
       const rad = resources.evaluate()
@@ -477,6 +861,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           applicableContext: state.objective,
           task: state.objective,
           confidence: 0.5,
+          // P1 structured schema: where it happened, what it looked like and
+          // which model/strategy produced it — so the lesson is retrievable by
+          // failure class, file, symbol and ecosystem instead of fuzzy text.
+          symptoms: String(res.error).slice(0, 400),
+          rootCause: "segment failed repeatedly",
+          files: [...changedFiles].map((f) => path.relative(process.cwd(), f)).slice(0, 12),
+          symbols: affectedSymbols.slice(0, 12),
+          model: prov?.model ?? null,
+          strategy: "repeat same approach",
         }, process.cwd())
         if (consecutiveFailures >= 3) {
           finalStatus = explicitFinalization(FINAL.FAILED)
@@ -490,20 +883,72 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     consecutiveFailures = 0
 
-    // --- VERIFICATION HARD GATE (P0) ---
+    // --- VERIFICATION HARD GATE (P0) ---------------------------------------
     ts.transition(TASK_STATUS.VERIFYING, { reason: "post-segment verification" })
-    const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
-    const v = ledger.status(riskNow, changedRel, { nodeId: currentNodeId })
-    emit({ type: "VERIFICATION_STATUS", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: v.ok, missing: v.missing, reason: v.reason, risk: riskNow, status: v.status })
 
-    // VERIFICATION FAILED → REPAIRING (hard gate)
+    // P0: FINAL RISK IS RECALCULATED FROM WHAT ACTUALLY CHANGED.
+    // riskLevel is the PLANNING risk (from the objective). riskNow (below the
+    // loop) only counted files. Neither inspects paths. A task that said "add a
+    // comment" (trivial) but went on to edit package.json, a migration and an
+    // authentication module must be verified as CRITICAL, not as trivial.
+    for (const c of res.commandChecks ?? []) if (c?.command) mutatingCommands.add(String(c.command))
+    for (const r of recs) for (const c of (r.commands ?? [])) if (c) mutatingCommands.add(String(c))
+    const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
+    const finalRisk = finalRiskForChange({
+      task: state.objective,
+      initialRisk: riskLevel,
+      changedFiles: changedRel,
+      createdFiles: (state.files_created ?? []).map((f) => path.relative(process.cwd(), f)),
+      deletedFiles: [...deletedFiles].map((f) => path.relative(process.cwd(), f)),
+      affectedSymbols: affectedSymbols,
+      commands: [...mutatingCommands],
+    })
+    const finalRiskLevel = finalRisk.risk
+    if (finalRisk.escalated) {
+      ts.setNextAction(`verify: risk recalculated ${finalRisk.initialRisk} → ${finalRiskLevel} (${finalRisk.signals.slice(0, 3).join(", ")})`)
+      emit({
+        type: "FINAL_RISK_RECALCULATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+        initialRisk: finalRisk.initialRisk, finalRisk: finalRiskLevel,
+        signals: finalRisk.signals, reasons: finalRisk.reasons, counts: finalRisk.counts,
+      })
+    }
+    // The node itself is now officially under verification (not completed).
+    if (dag && currentNodeId && !res.error) dagLib.markVerifying(dag, currentNodeId)
+
+    const v = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
+    emit({ type: "VERIFICATION_STATUS", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: v.ok, missing: v.missing, reason: v.reason, risk: finalRiskLevel, initialRisk: riskLevel, status: v.status })
+
+    // VERIFICATION FAILED → REPAIRING (hard gate). The node goes back to
+    // REPAIRING too: execution succeeded, the OUTCOME did not.
     if (v.anyFailure) {
+      if (dag && currentNodeId) { try { dagLib.markRepairing(dag, currentNodeId, v.reason); persistDAG() } catch { } }
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: repairCount + 1, error: v.reason })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0
+
+      // REPAIR → VERIFYING → (PASS) COMPLETED. The repair agent records its
+      // own evidence in the ledger, so re-judge the node here: if the evidence
+      // now holds, the node is DONE — otherwise it goes back to VERIFYING and
+      // the next segment retries it.
+      if (dag && currentNodeId) {
+        try {
+          const vAfter = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
+          if (vAfter.ok && !vAfter.anyFailure) {
+            completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-repair" })
+            // if that was the last node, the gate can decide immediately
+            if (dagLib.allComplete(dag)) {
+              const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
+              if (outcome.done) break
+            }
+          } else {
+            dagLib.markVerifying(dag, currentNodeId)
+            persistDAG()
+          }
+        } catch { }
+      }
       ts.transition(TASK_STATUS.EXECUTING, { reason: "after verification repair" })
       continue
     }
@@ -512,106 +957,127 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const needsMore = res.budgetHit
 
     const noMutation = changedFiles.size === 0
-    // NO VERIFICATION REQUIRED → COMPLETED (trivial/low with no mutation)
-    const noVerificationRequired = noMutation || riskLevel === "trivial" || (riskLevel === "low" && changedFiles.size <= 1)
+    // Verification is required unless nothing was mutated, or the FINAL
+    // (recalculated) risk is trivial. Note this uses finalRiskLevel, not the
+    // planning-time riskLevel — this is the single most important consumer of
+    // the recalculation.
+    const verificationRequired = !(noMutation || finalRiskLevel === "trivial")
 
-    let evidenceAdequate
-    if (noVerificationRequired) evidenceAdequate = true
-    else evidenceAdequate = v.ok
-
-    const evidenceRequestedAlready = evidenceRequests >= 1
-
-    // VERIFICATION PASSED → COMPLETED
-    if (finished && evidenceAdequate) {
-      finalStatus = explicitFinalization(FINAL.COMPLETED)
-      finalText = res.text ?? "task completed"
-      ts.transition(TASK_STATUS.COMPLETED, { reason: "objective satisfied and verified" })
-      emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, text: String(finalText).slice(0, 400), verification: v.status })
-      break
+    // --- NODE COMPLETION REQUIRES NODE VERIFICATION (P0) -------------------
+    // Execution already succeeded above; the node may now be marked COMPLETED
+    // only if its verification passed (or it has nothing to verify: a read-only
+    // node, or a node that did not actually mutate anything at trivial risk).
+    if (dag && currentNodeId && !res.error) {
+      try {
+        const nodeObj = dag.nodes.get(currentNodeId)
+        const segMutation = changedFiles.size > changedBefore
+        const nodeNeedsVerification = nodeObj
+          ? (nodeObj.read_only !== true && (segMutation || finalRiskLevel !== "trivial"))
+          : true
+        if (!nodeNeedsVerification) {
+          dagLib.markCompleted(dag, currentNodeId, `segment ${segment}: read-only node, no artifact to verify`, { verification: dagLib.VERIFICATION_NOT_REQUIRED })
+          persistDAG()
+        } else if (!completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "post-segment" })) {
+          dagLib.markVerifying(dag, currentNodeId)
+          emit({ type: "DAG_NODE_AWAITING_VERIFICATION", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, missing: v.missing, risk: finalRiskLevel })
+          persistDAG()
+        }
+      } catch { }
     }
 
-    if (finished && !evidenceAdequate && !evidenceRequestedAlready) {
+    // If the segment merely spent its budget, continue to the next one.
+    if (!finished) {
+      evidenceRequests = 0
+      ts.setNextAction("continue: segment budget spent, work remains")
+      ts.transition(TASK_STATUS.EXECUTING, { reason: "continuing to next segment" })
+      continue
+    }
+
+    // --- the ONE authoritative whole-task completion decision (P0) ---------
+    // Nothing above may declare COMPLETED. The gate asks the global question:
+    // is the whole DAG finished, are all workers settled, is the evidence
+    // sufficient for the FINAL risk, is recovery clear, and did the terminal
+    // state actually reach disk?
+    if (!verificationRequired || v.ok) {
+      const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
+      if (outcome.done) break
+    } else if (evidenceRequests < 1) {
+      // Evidence is thin for the final risk: ask the READ-ONLY verifier for it.
       evidenceRequests++
       ts.setNextAction(`verify: run ${v.missing.join(" / ")} before declaring success`)
       ts.transition(TASK_STATUS.VERIFYING, { reason: "requesting risk-proportional evidence" })
-      emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `objective met but evidence is thin for risk=${riskNow} — run ${v.missing.join(", ")} to verify`, missing: v.missing })
-      const verified = await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId })
-      if (verified) {
-        finalStatus = explicitFinalization(FINAL.COMPLETED)
-        finalText = res.text ?? "task completed (verified)"
-        ts.transition(TASK_STATUS.COMPLETED, { reason: "objective satisfied after explicit verification" })
-        emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, text: String(finalText).slice(0, 400), verification: VERIFICATION_STATUS.PASSED })
-        break
-      }
-      // HARD GATE: verification required but missing → WAITING (including medium, high, critical)
-      // VERIFICATION UNAVAILABLE → WAITING, never bypass
-      const requiresVerification = !noVerificationRequired
-      if (requiresVerification && v.missing.length > 0) {
-        finalStatus = explicitFinalization(FINAL.WAITING)
-        finalText = `verification evidence missing for risk=${riskLevel}: ${v.missing.join(", ")}. Not completing until verified (hard gate).`
-        ts.transition(TASK_STATUS.WAITING, { reason: `hard gate: required verification missing for risk=${riskLevel}` })
-        emit({ type: "TASK_BLOCKED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, missing: v.missing, risk: riskNow, status: VERIFICATION_STATUS.PENDING })
-        ts.setNextAction(`wait: provide ${v.missing.join(", ")} before declaring success (risk=${riskLevel})`)
-        try { ts.flush(DURABILITY.CRITICAL) } catch {}
-        break
-      }
-      // If not requiresVerification but still missing, we already handled above, but fallback to WAITING not COMPLETED
-      finalStatus = explicitFinalization(FINAL.WAITING)
-      finalText = `verification pending: ${v.missing.join(", ")}`
-      ts.transition(TASK_STATUS.WAITING, { reason: "verification pending" })
-      emit({ type: "TASK_BLOCKED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, missing: v.missing, risk: riskNow })
-      try { ts.flush(DURABILITY.CRITICAL) } catch {}
-      break
+      emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `objective met but evidence is thin for risk=${finalRiskLevel} — run ${v.missing.join(", ")} to verify`, missing: v.missing })
+      await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel })
+      // the verifier produced new evidence: the node may now be completed
+      completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-verification" })
+      const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
+      if (outcome.done) break
     }
 
-    if (finished && !evidenceAdequate && evidenceRequestedAlready) {
-      // Already asked for verification, still missing → WAITING (hard gate, never COMPLETED)
-      finalStatus = explicitFinalization(FINAL.WAITING)
-      finalText = `verification required but missing after explicit request: ${v.missing.join(", ")} for risk=${riskLevel} — waiting for evidence`
-      ts.transition(TASK_STATUS.WAITING, { reason: `hard gate: verification still missing after request: ${v.missing.join(", ")}` })
-      emit({ type: "TASK_BLOCKED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, missing: v.missing, risk: riskNow, status: VERIFICATION_STATUS.PENDING })
-      ts.setNextAction(`wait: verification still missing: ${v.missing.join(", ")}`)
-      try { ts.flush(DURABILITY.CRITICAL) } catch {}
-      break
-    }
-
-    if (!needsMore) {
-      // P0: NEVER allow "agent ended its turn → COMPLETED" without verification
-      // If we reach here, it means budget not hit but we didn't complete via verified path
-      // This should be WAITING, not COMPLETED
-      finalStatus = explicitFinalization(FINAL.WAITING)
-      finalText = `agent ended its turn without verified completion — waiting (risk=${riskNow}, missing=${v.missing.join(", ")})`
-      ts.transition(TASK_STATUS.WAITING, { reason: "agent ended turn without verification — hard gate blocks COMPLETED" })
-      emit({ type: "TASK_BLOCKED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, reason: "agent ended its turn without verified completion", risk: riskNow, missing: v.missing })
-      try { ts.flush(DURABILITY.CRITICAL) } catch {}
-      break
-    }
+    // The gate refused completion: fall back to the safe state it recommended.
+    const outcome = await refuseCompletion({ v, segment, segmentId, nodeId: currentNodeId, finalRiskLevel, text: res.text })
+    if (outcome.done) break
 
     evidenceRequests = 0
     ts.setNextAction("continue: segment budget spent, work remains")
     ts.transition(TASK_STATUS.EXECUTING, { reason: "continuing to next segment" })
   }
 
-  // P0 segment safety fuse: maxSegments is safety, not failure definition
-  // When segment budget is reached: CHECKPOINT → PERSIST → WAITING / CONTINUE_REQUIRED → RESUME LATER
-  // Do not automatically mark FAILED merely because safety budget exhausted
+  // P0 segment safety fuse: maxSegments is a SAFETY LIMIT, not a task failure.
+  //   CHECKPOINT → PERSIST → WAITING / CONTINUE_REQUIRED → RESUME
+  // It is persisted with everything resume needs: taskId, runId, nodeId,
+  // segmentId, checkpointId, DAG state, verification epoch and next action.
+  // The continuation budget keeps "resume later" from looping forever: past it
+  // the task genuinely is FAILED (it had N chances and did not converge).
   if (finalStatus !== FINAL.COMPLETED && finalStatus !== FINAL.CANCELLED && segment >= maxSeg) {
-    // Checkpoint before going to WAITING
+    await settleWorkers()
+    let cpId = null
     try {
       const cwd = process.cwd()
       const touched = [...changedFiles].filter((f) => { try { return fs.existsSync(f) } catch { return false } })
-      const cpId = touched.length
+      cpId = touched.length
         ? snapshotBefore(touched, cwd, [], taskRunId)
         : boundaryCheckpoint(cwd, { runId: taskRunId, label: `safety-fuse-${segment}`, objective: state.objective })
       if (cpId) ts.noteCheckpoint(cpId)
       emit({ type: "CHECKPOINT_CREATED", taskId, runId: taskRunId, boundary: "safety-fuse", segment, checkpointId: cpId })
     } catch {}
-    finalStatus = explicitFinalization(FINAL.WAITING)
-    finalText = `segment safety budget (${maxSeg}) reached — checkpointed and waiting for resume (CONTINUE_REQUIRED), not FAILED`
-    ts.transition(TASK_STATUS.WAITING, { reason: `safety fuse: ${maxSeg} segments reached — CONTINUE_REQUIRED` })
-    ts.setNextAction(`continue_required: safety budget ${maxSeg} reached — resume later`)
-    try { ts.flush(DURABILITY.CRITICAL) } catch {}
-    ts.noteError("SEGMENT_BUDGET_CONTINUE", finalText)
+    continuationCount++
+    ts.noteContinuation?.()
+    persistDAG()
+    emit({
+      type: "SEGMENT_SAFETY_FUSE",
+      taskId, runId: taskRunId, segment, nodeId: state.node_id ?? null,
+      maxSegments: maxSeg,
+      continuation: continuationCount,
+      maxContinuations,
+      checkpointId: cpId,
+      continuationRequired: true,
+      reason: `segment safety budget (${maxSeg}) reached — checkpointed and waiting for resume (CONTINUE_REQUIRED), not FAILED`,
+    })
+    if (continuationCount > maxContinuations) {
+      finalStatus = explicitFinalization(FINAL.FAILED)
+      finalState = TASK_STATUS.FAILED
+      finalText = `continuation budget exhausted after ${continuationCount} resume(s) — not converging`
+      ts.transition(TASK_STATUS.FAILED, { reason: finalText })
+      ts.setNextAction(null)
+      persistCritical()
+      ts.noteError("CONTINUATION_BUDGET_EXHAUSTED", finalText)
+    } else {
+      finalStatus = explicitFinalization(FINAL.WAITING)
+      finalState = TASK_STATUS.WAITING
+      finalText = `segment safety budget (${maxSeg}) reached — checkpointed and waiting for resume (CONTINUE_REQUIRED), not FAILED (continuation ${continuationCount}/${maxContinuations})`
+      ts.transition(TASK_STATUS.WAITING, { reason: `safety fuse: ${maxSeg} segments reached — CONTINUE_REQUIRED` })
+      ts.setNextAction(`continue_required: safety budget ${maxSeg} reached — resume later`)
+      persistCritical()
+      ts.noteError("SEGMENT_BUDGET_CONTINUE", finalText)
+    }
+  }
+
+  // A cancelled run must never be reported as anything else.
+  if (signal?.aborted && finalStatus !== FINAL.CANCELLED) {
+    finalStatus = explicitFinalization(FINAL.CANCELLED)
+    finalState = TASK_STATUS.CANCELLED
+    finalText = finalText || "cancelled by user"
   }
 
   // P0 explicit finalization: preserve actual terminal state
@@ -623,23 +1089,60 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   else if (finalStatus === FINAL.CANCELLED) ts.transition(TASK_STATUS.CANCELLED, { reason: "user cancel", durability: DURABILITY.CRITICAL })
   else ts.transition(TASK_STATUS.FAILED, { reason: finalText, durability: DURABILITY.CRITICAL })
 
-  try { ts.flush(DURABILITY.CRITICAL) } catch (e) {
-    // Critical persistence failure must be reported, not swallowed
-    emit({ type: "CRITICAL_PERSISTENCE_FAILED", taskId, runId: taskRunId, error: String(e?.message ?? e) })
+  // P1 critical durability: the terminal state MUST reach disk. If it does not,
+  // say so and refuse to report COMPLETED — never pretend it was persisted.
+  if (!persistCritical()) {
+    emit({ type: "CRITICAL_PERSISTENCE_FAILED", taskId, runId: taskRunId, error: "terminal state could not be written — completion is not durable" })
+    if (finalStatus === FINAL.COMPLETED) {
+      finalStatus = explicitFinalization(FINAL.WAITING)
+      finalState = TASK_STATUS.WAITING
+      finalText = `completed but NOT durably persisted — waiting instead of claiming success`
+      ts.transition(TASK_STATUS.WAITING, { reason: finalText })
+      try { ts.flush(DURABILITY.CRITICAL) } catch {}
+    }
   }
 
-  emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
+  // P1 model routing on REAL history: record what this run actually achieved
+  // so the next routing decision is evidence-based, not name-based.
+  try {
+    const vAll = ledger.all()
+    recordOutcome({
+      provider: prov?.name ?? null,
+      model: prov?.model ?? null,
+      taskClass: (requiredCaps?.[0]?.class) ?? (sel?.decision?.capabilities?.[0]) ?? "general",
+      ok: finalStatus === FINAL.COMPLETED,
+      crashed: state.errors?.some((e) => /PROVIDER|CRASH|PROCESS/i.test(String(e.code ?? ""))) === true,
+      repairs: repairCount,
+      verificationPassed: vAll.filter((r) => r.passed).length,
+      verificationTotal: vAll.length,
+      latencyMs: state.resource_usage?.ms ?? null,
+      tokensIn: state.resource_usage?.tokens_in ?? 0,
+      tokensOut: state.resource_usage?.tokens_out ?? 0,
+      toolCalls: totalToolCalls,
+    })
+  } catch { }
 
+  emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, state: finalState, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
+
+  const finalRisk = recomputeFinalRisk()
   return {
     taskId,
     runId: taskRunId,
     status: finalStatus,
+    state: finalState,
     text: finalText,
     segments: segment,
     repairs: repairCount,
     toolCalls: totalToolCalls,
     filesChanged: [...changedFiles],
-    verification: ledger.status(riskForChange({ filesChanged: changedFiles.size, task: state.objective }), [...changedFiles].map((f) => path.relative(process.cwd(), f))),
+    filesDeleted: [...deletedFiles],
+    // FINAL risk (recalculated from what actually changed), not the planning risk
+    risk: finalRisk.risk,
+    initialRisk: finalRisk.initialRisk,
+    riskEscalated: finalRisk.escalated,
+    riskSignals: finalRisk.signals,
+    completionGate: lastGate ? { ok: lastGate.ok, status: lastGate.status, checks: lastGate.checks, blockers: lastGate.blockers } : null,
+    verification: ledger.status(finalRisk.risk, [...changedFiles].map((f) => path.relative(process.cwd(), f))),
     task: state,
   }
 }
@@ -672,6 +1175,14 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       applicableContext: state.objective,
       task: state.objective,
       confidence: fixed ? 0.7 : 0.4,
+      // P1 structured schema (see above)
+      symptoms: String(error ?? verification?.reason ?? "").slice(0, 400),
+      rootCause: String(r.text ?? "").slice(0, 400),
+      solution: fixed ? String(r.text ?? "").slice(0, 400) : "",
+      files: [...(state.files_changed ?? [])].map((f) => path.relative(process.cwd(), f)).slice(0, 12),
+      symbols: (verification?.missing ?? []).slice(0, 12),
+      model: provider?.model ?? null,
+      strategy: "repair: diagnose root cause, minimal fix, verify",
     }, process.cwd())
     const changedForScope = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
     for (const chk of r.commandChecks ?? []) {
@@ -688,20 +1199,44 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
   }
 }
 
-async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId, taskId = null, segmentId = null, nodeId = null }) {
+/**
+ * P0 — VERIFY ⇒ READ_ONLY, REPAIR ⇒ WRITE.
+ *
+ * A verifier must never be able to change the artifact it is verifying: a
+ * write-capable "verifier" can make a failing test pass by editing it. The
+ * verification agent therefore runs with `readOnly: true`, which (via
+ * tools.js isReadOnlyViolation) denies write_file / edit_file / multi_edit /
+ * apply_patch / mutating bash / memory / todo / plugin / config mutation, and
+ * allows ONLY the approved verification commands (test / build / lint /
+ * typecheck / read-only git and shell inspection).
+ */
+async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId, taskId = null, segmentId = null, nodeId = null, risk = "medium" }) {
   const ctxBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1200 })
   const verifyContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBuilt === "string" ? ctxBuilt : ctxBuilt?.text ?? ""}`
-  const ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level: ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.`
+  const ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level (${risk}): ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.\n\nYou are the VERIFIER: you may read, search, inspect and run approved test/build/lint/static-analysis commands, but you may NOT modify the project. If you find a defect, report it — do not fix it.`
   try {
-    const r = await agent({ config, provider, signal, task: ask, taskId, runId: taskRunId, segmentId, nodeId, extraContext: verifyContext, maxStepsOverride: 6, deep: false, onEvent: emit, journal: true, readOnly: false, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    emit({ type: "VERIFIER_STARTED", taskId, runId: taskRunId, segmentId, nodeId, mode: "READ_ONLY", missing, risk })
+    const r = await agent({ config, provider, signal, task: ask, taskId, runId: taskRunId, segmentId, nodeId, extraContext: verifyContext, maxStepsOverride: 6, deep: false, onEvent: emit, journal: true, readOnly: true, verifier: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    emit({ type: "VERIFIER_FINISHED", taskId, runId: taskRunId, segmentId, nodeId, mode: "READ_ONLY", checks: (r.commandChecks ?? []).length })
     for (const chk of r.commandChecks ?? []) {
-      const rec = ledger.recordCommand(chk.command, chk.tail, { exitCode: chk.exitCode, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0 })
+      const rec = ledger.recordCommand(
+        chk.command,
+        chk.tail + (chk.exitCode === 0 || chk.exitCode == null ? "" : ` [exit code: ${chk.exitCode}]`),
+        {
+          exitCode: chk.exitCode,
+          taskId, nodeId, segmentId,
+          affectedFiles: (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f)),
+          verificationEpoch: state.verification_epoch ?? 0,
+          scope: "verification",
+        },
+      )
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id, verifier: "READ_ONLY" })
     }
     const changedRel = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
-    const st = ledger.status(riskForChange({ filesChanged: changedRel.length, task: state.objective }), changedRel, { nodeId })
+    // judged against the FINAL risk, not the planning risk
+    const st = ledger.status(risk, changedRel, { nodeId })
     return st.ok && !st.anyFailure
   } catch (e) {
     ts.noteError("VERIFY_FAILED", e?.message ?? String(e))

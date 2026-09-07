@@ -25,6 +25,7 @@
 import { execFile } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
 import fs from "node:fs"
+import { VERSION } from "./version.js"
 import os from "node:os"
 import path from "node:path"
 import { snapshotBefore, sealCreated } from "./checkpoint.js"
@@ -300,11 +301,78 @@ const READONLY_ALLOWED_BASH_PATTERNS = [
   /\b(git\s+status|git\s+log|git\s+diff|ls|cat|pwd|echo|which|env|date)\b/i,
 ]
 
+/**
+ * P0 — "read-only" means NO artifact mutation, and a shell redirection IS an
+ * artifact mutation.
+ *
+ * Before this, `echo hi > stolen.txt` and `cat a.js > b.js` were allowed in
+ * read-only mode: the allow-list matched on the command PREFIX (`echo`, `cat`)
+ * and never looked at what the command wrote to. A verifier could therefore
+ * overwrite the very file it was supposed to be verifying.
+ *
+ * Quoted text is stripped first so `node -e "console.log(2>1)"` and
+ * `grep "a > b"` are not misread as writes; `2>&1` (an fd duplication, not a
+ * file write) and `> /dev/null` are explicitly not writes.
+ */
+export function hasWriteRedirection(command) {
+  let s = String(command ?? "")
+  s = s.replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''")
+  s = s.replace(/\d*>&\d*/g, " ")
+  const re = />>?\s*([^\s;&|]+)/g
+  let m
+  while ((m = re.exec(s))) {
+    const target = m[1] ?? ""
+    if (target.startsWith("&")) continue
+    if (target === "/dev/null") continue
+    return true
+  }
+  // `… | tee out.txt` writes a file even though the prefix looks harmless
+  if (/(^|[\s|;&(])tee\s+/i.test(s)) return true
+  return false
+}
+
 function isReadOnlyAllowedBash(command) {
   const cmd = String(command ?? "")
+  // redirections are never allowed, whatever the command prefix says
+  if (hasWriteRedirection(cmd)) return false
   if (/^\s*(ls|cat|head|tail|wc|pwd|echo|which|env|date|git\s+(status|log|diff|show|branch)|node\s+-v|npm\s+(ls|view|outdated))\b/i.test(cmd)) return true
   for (const re of READONLY_ALLOWED_BASH_PATTERNS) if (re.test(cmd)) return true
   return false
+}
+
+// ---------------------------------------------------------------------------
+// P0 — VERIFY ⇒ READ_ONLY, REPAIR ⇒ WRITE
+// ---------------------------------------------------------------------------
+//
+// Verification must not be able to change the artifact it verifies. `readOnly`
+// alone already blocks the write tools and persistent-state tools; the
+// verifier additionally gets a WHITELIST of tools it may even see, so it
+// cannot stumble into a mutating plugin either.
+
+export const VERIFICATION_TOOLS = {
+  allowed: [
+    "read_file", "list_dir", "glob_files", "grep_files", "git_status",
+    "bash",            // approved verification commands only (test/build/lint)
+    "think",           // reasoning never mutates
+    "load_skill",      // read-only skill docs
+  ],
+  forbidden: [
+    "write_file", "edit_file", "multi_edit", "apply_patch",
+    "memory", "todo",               // persistent Forge state
+    "delegate",                     // no recursive write-capable sub-agent
+  ],
+}
+
+/** Is this tool permitted for a verification (READ_ONLY) agent? */
+export function verificationAllows(name, args) {
+  const n = String(name ?? "")
+  if (VERIFICATION_TOOLS.forbidden.includes(n)) return { ok: false, reason: `${n} is forbidden for a verification agent` }
+  if (n === "bash") {
+    if (isReadOnlyAllowedBash(String(args?.command ?? ""))) return { ok: true }
+    return { ok: false, reason: `bash command is not an approved verification command: ${String(args?.command ?? "").slice(0, 80)}` }
+  }
+  if (!VERIFICATION_TOOLS.allowed.includes(n)) return { ok: false, reason: `${n} is not in the verification tool set` }
+  return { ok: true }
 }
 
 function getMutationClass(name, args) {
@@ -350,6 +418,8 @@ export function isReadOnlyViolation(name, args, readOnly) {
 export function makeToolContext(opts = {}) {
   const {
     cwd,
+    /** "default" | "verifier" — a verifier sees only verificationTools. */
+    mode = "default",
     timeoutSec = 45,
     maxToolOutput = 12000,
     skillsDir,
@@ -383,6 +453,7 @@ export function makeToolContext(opts = {}) {
     root: path.resolve(root || cwd || process.cwd()),
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
+    mode,
     allowOutsideProject, allowSudo, assumeYes, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
@@ -391,7 +462,10 @@ export function makeToolContext(opts = {}) {
   }
   const allDefs = plugins.length ? [...TOOL_DEFS, ...plugins.map((p) => p.def)] : TOOL_DEFS
   let filteredDefs = allDefs
-  if (readOnly) {
+  if (mode === "verifier") {
+    // whitelist: the verifier never even sees a mutating tool
+    filteredDefs = allDefs.filter((t) => VERIFICATION_TOOLS.allowed.includes(t.function.name))
+  } else if (readOnly) {
     filteredDefs = allDefs.filter((t) => {
       const n = t.function.name
       if (WRITE_TOOLS.has(n)) {
@@ -861,7 +935,7 @@ async function fetch_url(ctx, args) {
   if (!verdict.ok) return `BLOCKED (SSRF guard): ${verdict.reason}. If this is an intentional local fetch, set tools.fetchPrivateUrls: true or FORGE_ALLOW_PRIVATE_URLS=1.`
   try {
     const res = await fetch(url, {
-      headers: { "user-agent": "forge-agent/20.0.0", accept: "text/*,application/json;q=0.9,*/*;q=0.5" },
+      headers: { "user-agent": `forge-agent/${VERSION}`, accept: "text/*,application/json;q=0.9,*/*;q=0.5" },
       redirect: "follow",
       signal: AbortSignal.timeout(15000),
     })
@@ -960,7 +1034,7 @@ async function web_search(ctx, args) {
     const url = ctx.searchUrl + (ctx.searchUrl.includes("?") ? "&" : "?") + "q=" + encodeURIComponent(q)
     tried.push(url)
     try {
-      const res = await fetch(url, { headers: { "user-agent": "forge-agent/20.0.0", accept: "application/json,text/html;q=0.8" }, signal: AbortSignal.timeout(12000) })
+      const res = await fetch(url, { headers: { "user-agent": `forge-agent/${VERSION}`, accept: "application/json,text/html;q=0.8" }, signal: AbortSignal.timeout(12000) })
       if (res.ok) {
         const ct = res.headers.get("content-type") || ""
         const body = await res.text()
@@ -985,7 +1059,7 @@ async function web_search(ctx, args) {
   try {
     const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(q)
     tried.push(url)
-    const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 (X11; Linux x86_64) forge/20" }, signal: AbortSignal.timeout(12000) })
+    const res = await fetch(url, { headers: { "user-agent": `Mozilla/5.0 (X11; Linux x86_64) forge/${VERSION}` }, signal: AbortSignal.timeout(12000) })
     if (!res.ok) throw new Error("HTTP " + res.status)
     const body = await res.text()
     const results = []
@@ -1347,6 +1421,12 @@ const REDACTED_TOOLS = new Set(["bash", "read_file", "fetch_url", "web_search", 
 
 export async function execTool(ctx, name, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) args = {}
+  // VERIFY ⇒ READ_ONLY: enforce the whitelist even if a tool definition leaks
+  // through (a plugin, a direct call, or a future refactor).
+  if (ctx.mode === "verifier") {
+    const allowed = verificationAllows(name, args)
+    if (!allowed.ok) return `BLOCKED: ${allowed.reason} — verification is read-only (VERIFY ⇒ READ_ONLY, REPAIR ⇒ WRITE)`
+  }
   if (ctx.readOnly) {
     const violation = isReadOnlyViolation(name, args, true)
     if (violation) return violation
