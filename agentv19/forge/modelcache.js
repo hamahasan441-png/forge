@@ -8,6 +8,7 @@
  * Best-effort by design: a broken/unreadable cache can never break the CLI.
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 
@@ -32,8 +33,7 @@ export function writeModelCache(providerName, entries) {
     try { root = JSON.parse(fs.readFileSync(MODEL_CACHE_PATH, "utf8")) || {} } catch {}
     if (typeof root !== "object" || Array.isArray(root)) root = {}
     root[providerName] = { entries: entries.slice(0, 400), ts: Date.now() }
-    fs.mkdirSync(path.dirname(MODEL_CACHE_PATH), { recursive: true })
-    fs.writeFileSync(MODEL_CACHE_PATH, JSON.stringify(root, null, 2) + "\n")
+    writeStateFile(MODEL_CACHE_PATH, JSON.stringify(root, null, 2) + "\n")
     return true
   } catch {
     return false

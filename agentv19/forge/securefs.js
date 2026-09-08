@@ -295,3 +295,43 @@ export function secureReadFile(root, target, encoding = "utf8") {
 export const DESCRIPTOR_RELATIVE = HAS_PROC_FD
 
 void O_TRUNC
+
+/**
+ * v21.1 — the ONE writer for forge's own state files under ~/.forge (sessions,
+ * health, model cache, plans, profiles, run logs, task state, lessons, todo,
+ * history, config). These paths are never model-controlled, so no root
+ * anchoring is needed — what they need is crash safety: a reader must see
+ * either the previous complete file or the new complete file, never a torn
+ * one, and a failure must not leave temp files behind. Temp is created with
+ * O_EXCL in the same directory, fsynced, renamed over the target, then the
+ * directory is fsynced. Mode defaults to 0600 (state may hold personal data).
+ * Existing symlinks are honoured (written through to their real target) so
+ * users who relocate ~/.forge/sessions keep working.
+ */
+export function writeStateFile(file, data, { mode = 0o600, fsyncDir = true } = {}) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data ?? ""), "utf8")
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  let target = file
+  try { target = fs.realpathSync(file) } catch { /* absent — create in place */ }
+  let existing = null
+  try { existing = fs.lstatSync(target) } catch {}
+  if (existing && !existing.isFile()) throw new SecureFsError(`state path is not a regular file: ${target}`, "ENOTFILE")
+  const dir = path.dirname(target)
+  const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`)
+  let fd = null
+  try {
+    fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL, mode)
+    let off = 0
+    while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off)
+    fs.fsyncSync(fd)
+    fs.closeSync(fd); fd = null
+    fs.renameSync(tmp, target)
+    if (existing) { try { fs.chmodSync(target, mode) } catch {} }
+    if (fsyncDir) { try { const dfd = fs.openSync(dir, "r"); try { fs.fsyncSync(dfd) } finally { fs.closeSync(dfd) } } catch {} }
+    return { file: target, bytes: buf.length, replaced: Boolean(existing) }
+  } catch (e) {
+    if (fd !== null) { try { fs.closeSync(fd) } catch {} }
+    try { fs.unlinkSync(tmp) } catch {}
+    throw e
+  }
+}

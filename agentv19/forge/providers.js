@@ -1,4 +1,5 @@
 import { VERSION } from "./version.js"
+import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -63,7 +64,8 @@ export function buildProvider(config, name) {
   if (!apiKey && name !== "ollama") return null
   return {
     name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model,
-    contextWindow: c.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "",
+    contextWindow: c.contextWindow ?? lookupRegistry(model)?.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "",
+    configuredContextWindow: c.contextWindow ?? null, // v21.1: what the USER declared (null = derived)
   }
 }
 
@@ -110,10 +112,13 @@ export function fallbackChain(config, activeName, { health = {} } = {}) {
  * @param need { promptTokens, tools, capabilities? } — what the request needs
  * @param registry optional model→{capabilities,contextWindow} map (modelstrategy)
  */
-export function providerCompatible(candidate, need = {}, { registry = null } = {}) {
+export function providerCompatible(candidate, need = {}, { registry = MODEL_CAPABILITY_REGISTRY } = {}) {
   if (!candidate) return { ok: false, reason: "no provider" }
   const reg = registry ? (registry[candidate.model] ?? registry[String(candidate.model ?? "").split("/").pop()] ?? null) : null
-  const window = reg?.contextWindow ?? candidate.contextWindow ?? 128000
+  // an explicit per-provider window (user config) wins over the registry —
+  // self-hosted / proxied deployments often serve a model with a different
+  // window than the vendor default; the registry fills in what the config omits.
+  const window = candidate.configuredContextWindow ?? reg?.contextWindow ?? candidate.contextWindow ?? 128000
   const promptTokens = Number(need.promptTokens ?? 0)
   // leave headroom for the reply: ≥ 12.5 % of the window or 2k tokens
   const headroom = Math.max(2048, Math.floor(window / 8))

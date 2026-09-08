@@ -14,6 +14,7 @@
  *   - listing is ordered by timestamp (not by filename).
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { SESSIONS_DIR } from "./config.js"
 
@@ -37,7 +38,7 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
     try { prev = JSON.parse(fs.readFileSync(file, "utf8")) } catch {}
     const firstUser = (messages || []).find((m) => m.role === "user" && typeof m.content === "string" && !String(m.content).startsWith("AUTO-COMPACTED"))
     const derivedTitle = title ?? prev?.title ?? (firstUser ? String(firstUser.content).replace(/\s+/g, " ").slice(0, 60) : null)
-    fs.writeFileSync(file, JSON.stringify({
+    writeStateFile(file, JSON.stringify({
       id: sid,
       createdAt: prev?.createdAt ?? Date.now(),
       ts: Date.now(),
@@ -49,10 +50,8 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
       title: derivedTitle,
       summary: summary ?? prev?.summary ?? null,
       messages,
-    }, null, 1), { mode: 0o600 })
-    fs.chmodSync(file, 0o600)
-    fs.writeFileSync(path.join(SESSIONS_DIR, "last.json"), JSON.stringify({ id: sid, file }), { mode: 0o600 })
-    fs.chmodSync(path.join(SESSIONS_DIR, "last.json"), 0o600)
+    }, null, 1))
+    writeStateFile(path.join(SESSIONS_DIR, "last.json"), JSON.stringify({ id: sid, file }))
     // v20.2 (P1-6): cap the store when a NEW conversation is created (not on
     // every auto-save of an existing one, which reuses its id)
     if (!id) pruneSessions()

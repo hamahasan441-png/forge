@@ -43,6 +43,8 @@ const suites = [
   ["compaction", "node", ["test-context-compaction.mjs"]],
   ["chat-compact", "node", ["test-chat-compaction.mjs"]],
   ["parser-fuzz", "node", ["test-parser-fuzz.mjs"]],
+  ["state-writes", "node", ["test-state-writes.mjs"]],
+  ["cp-crash", "node", ["test-checkpoint-crash-matrix.mjs"]],
   ["mem-pipeline", "node", ["test-memory-pipeline.mjs"]],
   ["chat", "node", ["test-chat.mjs"]],
   ["walk", "node", ["test-walk.mjs"]],

@@ -20,7 +20,7 @@ import crypto from "node:crypto"
 import zlib from "node:zlib"
 import { execFileSync } from "node:child_process"
 import { DEFAULT_DIR } from "./config.js"
-import { secureWriteFile } from "./securefs.js"
+import { secureWriteFile, writeStateFile } from "./securefs.js"
 
 /**
  * v21.1 P0: write a restored file WITHOUT following symlinks. Between the
@@ -44,10 +44,7 @@ function restoreWrite(target, data, cwd) {
 
 /** Internal state files under ~/.forge: atomic (temp + rename) so a crash never leaves a half-written manifest. */
 function writeStateAtomic(file, text) {
-  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`
-  fs.writeFileSync(tmp, text, { mode: 0o600 })
-  try { const fd = fs.openSync(tmp, "r"); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) } } catch {}
-  fs.renameSync(tmp, file)
+  writeStateFile(file, text) // v21.1: shared O_EXCL temp + fsync + rename + dir fsync
 }
 
 export const CHECKPOINTS_DIR = path.join(DEFAULT_DIR, "checkpoints")
@@ -364,9 +361,7 @@ function persistRestoreResult(result) {
     try { arr = JSON.parse(fs.readFileSync(file, "utf8")) } catch {}
     if (!Array.isArray(arr)) arr = []
     arr.push({ ...result, phases: result.phases })
-    const tmp = file + ".tmp"
-    fs.writeFileSync(tmp, JSON.stringify(arr.slice(-50), null, 1), { mode: 0o600 })
-    fs.renameSync(tmp, file)
+    writeStateFile(file, JSON.stringify(arr.slice(-50), null, 1))
     result.phases.persist = { ok: true, file }
   } catch (e) {
     result.phases.persist = { ok: false, error: String(e?.message ?? e) }

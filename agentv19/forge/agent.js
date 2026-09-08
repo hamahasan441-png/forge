@@ -418,7 +418,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // v21.1 P1: only switch to a provider that can carry THIS request
           // (context fits, tools supported). If none can, stop with a clear
           // error instead of failing again on an incompatible model.
-          const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: !noTools && tools.defs.length > 0 }
+          // v21.1: window + tool protocol always; a deep-effort (complex/critical)
+          // task additionally needs a reasoning-capable model when the registry
+          // knows the candidate (unknown models are not rejected on capability).
+          const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: !noTools && tools.defs.length > 0, capabilities: deepEffort ? ["reasoning"] : [] }
           const pick = nextCompatibleFallback(chain, chainIdx, need)
           chainIdx = pick.idx
           recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })

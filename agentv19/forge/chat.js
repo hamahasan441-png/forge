@@ -22,6 +22,7 @@
  * v15: INLINE AUTO-TOOLS in chat (streaming tool-calls both wires).
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
@@ -517,8 +518,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     try {
       const live = ui ? ui.term.editor.history : [...shellState.history, ...chatLineLog]
       const all = dedupe([...readHist(), ...live].filter(historyWorthy))
-      fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true })
-      fs.writeFileSync(HISTORY_PATH, serializeHistory(all.slice(-Math.max(50, config.chat?.historySize ?? 300))), { mode: 0o600 })
+      writeStateFile(HISTORY_PATH, serializeHistory(all.slice(-Math.max(50, config.chat?.historySize ?? 300))))
     } catch {}
   }
 
@@ -903,7 +903,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           // mid-stream switch would duplicate output). Switch provider, retry.
           if (failoverOn && !streamedPartial && isFailoverWorthy(e) && foIdx < foChain.length) {
             // v21.1 P1: only a provider that can carry this conversation
-            const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: chatToolsEnabled() }
+            const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: chatToolsEnabled(), capabilities: eff.deep ? ["reasoning"] : [] }
             const pick = nextCompatibleFallback(foChain, foIdx, need)
             foIdx = pick.idx
             recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })

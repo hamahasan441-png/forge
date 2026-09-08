@@ -33,6 +33,7 @@
     "netguard.js",
     "securefs.js",
     "compaction.js",
+    "modelregistry.js",
     "childenv.js",
     "plugin-host.js",
     "secrets.js",

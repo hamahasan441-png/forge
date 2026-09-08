@@ -9,6 +9,7 @@
  *   5. Built-in defaults
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import os from "node:os"
 
@@ -165,10 +166,7 @@ export function loadConfig(explicitPath) {
 /** Persist config with 0600 perms — it may hold API keys. */
 export function saveConfig(cfg, explicitPath) {
   const p = explicitPath || USER_CONFIG_PATH
-  fs.mkdirSync(path.dirname(p), { recursive: true })
-  if (fs.existsSync(p)) fs.chmodSync(p, 0o600)
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 })
-  fs.chmodSync(p, 0o600)
+  writeStateFile(p, JSON.stringify(cfg, null, 2) + "\n") // v21.1: atomic, 0600 — a crash mid-write cannot lose the API keys
   return p
 }
 

@@ -35,7 +35,7 @@ import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
 import { DEFAULT_DIR } from "./config.js"
 import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
-import { secureWriteFile, secureUnlink, SecureFsError } from "./securefs.js"
+import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -1383,7 +1383,7 @@ function todo(ctx, args) {
   if (action === "set") {
     const items = (Array.isArray(args.items) ? args.items : []).slice(0, 100).map((it, i) => ({ id: i + 1, content: String(it.content ?? "").slice(0, 200), status: ["todo", "doing", "done"].includes(it.status) ? it.status : "todo" }))
     if (!items.length) return "ERROR: no items provided for action=set"
-    try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify({ items }, null, 1)) } catch (e) { return `ERROR: ${e.message}` }
+    try { writeStateFile(p, JSON.stringify({ items }, null, 1)) } catch (e) { return `ERROR: ${e.message}` }
     return "TODO list saved:\n" + renderTodo(items)
   }
   if (action === "update") {
@@ -1392,7 +1392,7 @@ function todo(ctx, args) {
     if (!it) return `ERROR: no todo item #${args.id} — use action=list to see ids`
     if (args.status && ["todo", "doing", "done"].includes(args.status)) it.status = args.status
     if (args.content) it.content = String(args.content).slice(0, 200)
-    try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(state, null, 1)) } catch (e) { return `ERROR: ${e.message}` }
+    try { writeStateFile(p, JSON.stringify(state, null, 1)) } catch (e) { return `ERROR: ${e.message}` }
     return "TODO updated:\n" + renderTodo(state.items)
   }
   return `ERROR: unknown action "${action}" (set|list|update)`

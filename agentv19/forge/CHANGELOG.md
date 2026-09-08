@@ -78,7 +78,28 @@ via `version.js`. Every user-agent, banner and `--version` derives from it._
   injected into prompts. Legacy files read unchanged; `forge memory list
   --json` gains a parallel `provenance` array.
 
+- **Failover consults the model capability registry.** `MODEL_CAPABILITY_REGISTRY`
+  moved to the import-free `modelregistry.js` (re-exported from
+  `modelstrategy.js`), so `providers.js`/`agent.js`/`chat.js` can use it without
+  an import cycle. `providerCompatible` now defaults to it: a deep-effort
+  (complex/critical) run only fails over to a `reasoning`-capable model; an
+  unknown model is never rejected on capability, only on window/protocol.
+  `buildProvider` derives `contextWindow` from the registry when the config
+  omits it; an explicit config window always wins.
+- **One crash-safe writer for `~/.forge` state** (`securefs.writeStateFile`):
+  sessions, config, health, model cache, plans, profiles, run logs, task
+  state, lessons, embeddings cache, todo, chat history and checkpoint
+  manifests all go through O_EXCL temp → fsync → rename → dir fsync, mode
+  0600, temp removed on failure. Before: several of these were plain
+  `writeFileSync` (a crash could truncate `config.json` with the API keys).
+
 ### Added (tests)
+- `test-state-writes.mjs` — fault-injection over the state writer (rename /
+  fsync / ENOSPC / EACCES faults, real SIGKILL between temp and rename, 4
+  concurrent writers with a torn-read detector, task-state critical flush).
+- `test-checkpoint-crash-matrix.mjs` — restore of an M-file checkpoint killed
+  after N = 1..M writes and during retirement: no torn file, manifest kept
+  until a complete verified restore, resumed restore reaches RESTORED.
 - `test-parser-fuzz.mjs` — 20 properties × 2500 random inputs over the plan
   parser, DAG repair, unified-diff parser, shell classifier, address parsing,
   provenance lines, compaction and verification evaluation.

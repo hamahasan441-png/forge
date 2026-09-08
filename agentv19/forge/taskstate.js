@@ -22,6 +22,7 @@
  *    verificationEpoch, last completed operation, recovery state, DAG state
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 
@@ -96,27 +97,13 @@ export function taskFile(taskId) {
 }
 
 function writeAtomic(file, obj, { durability = DURABILITY.NORMAL, syncDir = false } = {}) {
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = file + ".tmp-" + Math.random().toString(36).slice(2, 6)
+  // v21.1: shared writer — O_EXCL temp, fsync(file) ALWAYS (a torn task file
+  // after a crash is exactly what resume must never see), rename, and the
+  // directory fsync for critical transitions.
   try {
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 1), { mode: 0o600 })
-    if (durability === DURABILITY.CRITICAL) {
-      // durable flush: fsync file then rename then fsync dir where supported
-      try {
-        const fd = fs.openSync(tmp, "r+")
-        try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
-      } catch {}
-    }
-    fs.renameSync(tmp, file)
-    if (durability === DURABILITY.CRITICAL && syncDir) {
-      try {
-        const dirFd = fs.openSync(path.dirname(file), "r")
-        try { fs.fsyncSync(dirFd) } finally { fs.closeSync(dirFd) }
-      } catch {}
-    }
+    writeStateFile(file, JSON.stringify(obj, null, 1), { fsyncDir: durability === DURABILITY.CRITICAL && syncDir })
     return { ok: true }
   } catch (e) {
-    try { fs.rmSync(tmp, { force: true }) } catch {}
     if (durability === DURABILITY.CRITICAL) {
       // explicit failure reporting for critical events
       throw e

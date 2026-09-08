@@ -12,6 +12,7 @@
  * every consumer treats a failed embedding step as "fall back to BM25".
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import crypto from "node:crypto"
 import { DEFAULT_DIR } from "./config.js"
@@ -130,10 +131,7 @@ export function pruneEmbeddingCache(doc, maxEntries) {
 export function saveEmbeddingCache(cachePath, doc, maxEntries) {
   try {
     pruneEmbeddingCache(doc, maxEntries)
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true })
-    const tmp = cachePath + ".tmp." + process.pid
-    fs.writeFileSync(tmp, JSON.stringify(doc))
-    fs.renameSync(tmp, cachePath)
+    writeStateFile(cachePath, JSON.stringify(doc))
     return true
   } catch {
     return false
