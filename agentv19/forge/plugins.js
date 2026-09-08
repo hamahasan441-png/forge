@@ -22,11 +22,17 @@
  * process: a plugin (or anything that could write ~/.forge/tools/, e.g. a
  * shell command the model ran) had the agent's full authority — API keys in
  * process.env, every file the user can reach, child processes, network.
- * Each plugin file now runs in its own worker_threads Worker started with
- * Node's permission model (`--permission`), an empty environment, a heap
- * limit, and a per-call timeout. plugin-host.js closes the network and the
- * escape hatches inside the worker. By default a plugin may only READ its own
- * directory and the project it is invoked in. Everything else is a capability
+ * Each plugin file now runs in its own CHILD PROCESS (`node plugin-host.js`)
+ * started with Node's permission model (`--permission`; `--experimental-
+ * permission` on Node 20), an empty environment, a heap limit, and a per-call
+ * timeout. A separate process — not a worker thread — because a worker shares
+ * the agent's pid and file descriptors (it could write into MCP servers'
+ * stdin pipes, tamper with files the agent holds open, or signal the agent).
+ * plugin-host.js closes the network and the escape hatches inside the child.
+ * Messages travel over a dedicated pipe (fd 3) as newline-delimited JSON, never
+ * Node's IPC channel (a malformed IPC frame crashes the RECEIVER, i.e. the
+ * agent). By default a plugin may only READ its own directory and the project
+ * it is invoked in. Everything else is a capability
  * the plugin must DECLARE (`capabilities`) AND the user must GRANT in
  * ~/.forge/config.json:
  *
@@ -36,6 +42,13 @@
  * Effective capability = declared ∩ granted. Nothing is granted implicitly.
  * Grants can never cover ~/.forge itself (config.json holds the API keys).
  *
+ * KNOWN LIMITATION (documented by Node for the permission model): symbolic
+ * links inside a granted path are followed. A symlink placed in the PROJECT
+ * that points at ~/.forge/config.json is therefore readable by a plugin through
+ * the implicit project read grant. The project is already the model's write
+ * surface, so treat plugins as PROJECT-trusted, not merely read-only; the
+ * isolation suite prints the observed behaviour on every run.
+ *
  * Loading is best-effort: a bad plugin is skipped with a recorded reason, never
  * crashing the agent.
  */
@@ -43,7 +56,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Worker } from "node:worker_threads"
+import { spawn } from "node:child_process"
+import nodeModule from "node:module"
 import { DEFAULT_DIR } from "./config.js"
 
 export const PLUGINS_DIR = path.join(DEFAULT_DIR, "tools")
@@ -53,10 +67,25 @@ const NAME_RE = /^[a-z][a-z0-9_]{1,40}$/i
 const PROBE_TIMEOUT_MS = 8000
 const DEFAULT_CALL_TIMEOUT_MS = 30000
 const MAX_HEAP_MB = 256
-const MAX_STACK_MB = 4
+const MAX_OUTBOUND = 4 * 1024 * 1024 // plugin → host frame bound (1 MB result + envelope, with margin)
 
+/**
+ * The flag that turns the permission model on for THIS runtime: `--permission`
+ * (Node ≥ 22.13 / 23.5, stable) or `--experimental-permission` (Node 20.x,
+ * same enforcement, different spelling). null → this Node cannot enforce the
+ * boundary and plugins are refused rather than run unprotected.
+ */
+export const PERMISSION_FLAG = (() => {
+  const flags = process.allowedNodeEnvironmentFlags
+  if (typeof flags?.has !== "function") return null
+  if (flags.has("--permission")) return "--permission"
+  if (flags.has("--experimental-permission")) return "--experimental-permission"
+  return null
+})()
 /** True when this Node can enforce the boundary (v20+/v22+ permission model). */
-export const PLUGIN_ISOLATION_AVAILABLE = typeof process.allowedNodeEnvironmentFlags?.has === "function" && process.allowedNodeEnvironmentFlags.has("--permission")
+export const PLUGIN_ISOLATION_AVAILABLE = PERMISSION_FLAG !== null
+/** Node < 22.15 has no `module.registerHooks`; the child is the same binary. */
+const NEEDS_ASYNC_MODULE_HOOKS = typeof nodeModule.registerHooks !== "function"
 
 function validateTool(t, reserved, seen) {
   if (!t || typeof t !== "object") return "export is not a tool object"
@@ -143,14 +172,21 @@ class PluginWorker {
     this.full = full
     this.grants = grants
     this.cwd = cwd
-    this.worker = null
+    this.child = null
+    this.chan = null
     this.pending = new Map()
     this.nextId = 1
     this.ready = null
+    this.inbuf = ""
   }
 
   execArgv() {
-    const argv = ["--permission", "--no-warnings", `--allow-fs-read=${HOST_FILE}`]
+    const argv = [PERMISSION_FLAG, "--no-warnings", `--max-old-space-size=${MAX_HEAP_MB}`, `--allow-fs-read=${HOST_FILE}`]
+    // Runtimes without synchronous module hooks (Node 20) gate ESM imports with
+    // `module.register` hooks, which run on a loader thread → need the worker
+    // permission. The plugin itself still cannot obtain `worker_threads`
+    // (plugin-host.js refuses it on import/require/getBuiltinModule).
+    if (NEEDS_ASYNC_MODULE_HOOKS) argv.push("--allow-worker")
     for (const r of this.grants.read) argv.push(`--allow-fs-read=${r}`)
     for (const w of this.grants.write) argv.push(`--allow-fs-write=${w}`)
     if (this.grants.childProcess) argv.push("--allow-child-process")
@@ -163,44 +199,65 @@ class PluginWorker {
     return e
   }
 
-  /** Start (or restart) the worker; resolves when plugin-host says "ready". */
+  /** Start (or restart) the plugin process; resolves when plugin-host says "ready". */
   start() {
     if (this.ready) return this.ready
     this.ready = new Promise((resolve, reject) => {
-      let w
+      let c
       try {
-        w = new Worker(HOST_FILE, {
-          workerData: { pluginFile: this.full, grants: { network: this.grants.network, childProcess: this.grants.childProcess } },
-          execArgv: this.execArgv(),
-          env: this.env(),
-          resourceLimits: { maxOldGenerationSizeMb: MAX_HEAP_MB, stackSizeMb: MAX_STACK_MB },
-          stdout: true, stderr: true, // plugin console output never reaches the user's terminal
+        c = spawn(process.execPath, [...this.execArgv(), HOST_FILE, JSON.stringify({ pluginFile: this.full, grants: { network: this.grants.network, childProcess: this.grants.childProcess } })], {
+          cwd: this.cwd,
+          env: this.env(), // NOT process.env — no NODE_OPTIONS, no API keys, nothing undeclared
+          stdio: ["ignore", "pipe", "pipe", "pipe"], // plugin console output never reaches the user's terminal; fd 3 = protocol channel
+          windowsHide: true,
         })
       } catch (e) { this.ready = null; return reject(e) }
-      this.worker = w
-      w.unref()
-      w.stdout?.on("data", () => {})
-      w.stderr?.on("data", () => {})
-      const t = setTimeout(() => { this.ready = null; this.kill(); reject(new Error("plugin worker did not start in time")) }, PROBE_TIMEOUT_MS)
-      w.once("message", (m) => {
-        if (m?.op === "ready") { clearTimeout(t); w.on("message", (msg) => this._onMessage(msg)); resolve(w) }
+      this.child = c
+      this.chan = c.stdio[3]
+      c.unref(); this.chan.unref?.()
+      c.stdout?.on("data", () => {})
+      c.stderr?.on("data", () => {})
+      const t = setTimeout(() => { this.ready = null; this.kill(); reject(new Error("plugin process did not start in time")) }, PROBE_TIMEOUT_MS)
+      let started = false
+      this.chan.setEncoding("utf8")
+      this.chan.on("data", (d) => {
+        this.inbuf += d
+        if (this.inbuf.length > MAX_OUTBOUND) { this._failAll(new Error(`plugin ${this.file} sent an oversized frame — process terminated`)); return this.kill() }
+        let i
+        while ((i = this.inbuf.indexOf("\n")) >= 0) {
+          const line = this.inbuf.slice(0, i)
+          this.inbuf = this.inbuf.slice(i + 1)
+          let msg
+          try { msg = JSON.parse(line) } catch { this._failAll(new Error(`plugin ${this.file} sent a malformed frame — process terminated`)); return this.kill() }
+          if (!started) {
+            if (msg?.op === "ready") { started = true; clearTimeout(t); resolve(c) }
+            continue // nothing before "ready" is a reply
+          }
+          this._onMessage(msg)
+        }
       })
-      w.on("error", (e) => { clearTimeout(t); this._failAll(e); this.ready = null; reject(e) })
-      w.on("exit", (code) => { this._failAll(new Error(`plugin worker exited (code ${code})`)); this.ready = null; this.worker = null })
+      this.chan.on("error", () => {})
+      c.on("error", (e) => { clearTimeout(t); this._failAll(e); this.ready = null; this.child = null; reject(e) })
+      c.on("exit", (code, signal) => {
+        clearTimeout(t)
+        const err = new Error(`plugin process exited (${signal ? `signal ${signal}` : `code ${code}`})`)
+        this._failAll(err); this.ready = null; this.child = null; this.chan = null
+        if (!started) reject(err)
+      })
     })
     return this.ready
   }
 
   _onMessage(msg) {
-    if (!msg || msg.op === "ready") return
+    if (!msg || typeof msg !== "object" || msg.op === "ready") return
     const key = msg.op === "probe" ? "probe" : msg.id
     const p = this.pending.get(key)
     if (!p) return
     this.pending.delete(key)
     clearTimeout(p.timer)
-    if (msg.op === "probe") return msg.ok ? p.resolve(msg.tools) : p.reject(new Error(msg.error))
-    if (msg.error !== undefined) return p.reject(new Error(msg.error))
-    p.resolve(msg.result)
+    if (msg.op === "probe") return msg.ok ? p.resolve(Array.isArray(msg.tools) ? msg.tools : []) : p.reject(new Error(String(msg.error ?? "probe failed")))
+    if (msg.error !== undefined) return p.reject(new Error(String(msg.error)))
+    p.resolve(typeof msg.result === "string" ? msg.result : String(msg.result ?? ""))
   }
 
   _failAll(err) {
@@ -210,13 +267,14 @@ class PluginWorker {
 
   _send(key, payload, timeoutMs, onTimeout) {
     return new Promise((resolve, reject) => {
+      if (!this.chan) return reject(new Error(`plugin ${this.file} is not running`))
       const timer = setTimeout(() => {
         this.pending.delete(key)
         onTimeout?.()
-        reject(new Error(`plugin ${this.file} timed out after ${timeoutMs}ms — worker terminated`))
+        reject(new Error(`plugin ${this.file} timed out after ${timeoutMs}ms — process terminated`))
       }, timeoutMs)
       this.pending.set(key, { resolve, reject, timer })
-      this.worker.postMessage(payload)
+      try { this.chan.write(JSON.stringify(payload) + "\n") } catch (e) { clearTimeout(timer); this.pending.delete(key); reject(e) }
     })
   }
 
@@ -228,17 +286,19 @@ class PluginWorker {
   async call(name, args, ctx, timeoutMs) {
     await this.start()
     const id = this.nextId++
-    // a timeout terminates the worker: a plugin stuck in a loop cannot keep
+    // a timeout terminates the process: a plugin stuck in a loop cannot keep
     // running (and cannot keep the CPU) after the agent gave up on it. The next
-    // call starts a fresh worker.
+    // call starts a fresh process.
     return this._send(id, { op: "call", id, name, args, ctx }, timeoutMs, () => this.kill())
   }
 
   kill() {
-    const w = this.worker
-    this.worker = null
+    const c = this.child
+    this.child = null
+    this.chan = null
     this.ready = null
-    if (w) { try { w.terminate() } catch {} }
+    this.inbuf = ""
+    if (c) { try { c.kill("SIGKILL") } catch {} }
   }
 }
 
@@ -265,7 +325,7 @@ export async function loadToolPlugins(dir = PLUGINS_DIR, { reserved = [], grants
   if (!PLUGIN_ISOLATION_AVAILABLE) {
     // No fake sandbox: without the permission model there is no boundary, and
     // running the plugins in-process would silently hand them the agent's keys.
-    result.errors.push(`plugins disabled: this Node (${process.version}) has no permission model (--permission); upgrade to Node ≥ 20.16 / 22 to run plugins`)
+    result.errors.push(`plugins disabled: this Node (${process.version}) has no permission model (--permission / --experimental-permission); upgrade to Node ≥ 20.16 / 22 to run plugins`)
     return result
   }
   const reservedSet = new Set(reserved)

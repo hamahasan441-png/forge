@@ -27,12 +27,27 @@ via `version.js`. Every user-agent, banner and `--version` derives from it._
   swaps between validation and write, and concurrent writers are all refused
   or serialised; a permission failure leaves the original file intact.
 - **Plugin isolation** (`plugins.js` rewritten, `plugin-host.js` new;
-  `tests/test-plugin-isolation.mjs`, 51 checks). Each `~/.forge/tools/*.mjs`
-  plugin runs in its own `--permission` Worker with a timeout, memory cap,
-  scrubbed environment and no filesystem/network/child-process access unless
-  the plugin declares the capability AND the user grants it in
-  `tools.pluginGrants`. Malicious plugins (reading `~/.ssh`, spawning shells,
-  reaching the network, exhausting memory, blocking forever) are contained.
+  `tests/test-plugin-isolation.mjs`, 80 checks). Each `~/.forge/tools/*.mjs`
+  plugin runs in its own **child process** under Node's permission model
+  (`--permission`, or `--experimental-permission` on Node 20 — same
+  enforcement) with a timeout, heap cap, scrubbed environment and no
+  filesystem/network/child-process access unless the plugin declares the
+  capability AND the user grants it in `tools.pluginGrants`. A child process
+  rather than a worker thread because a worker shares the agent's pid and
+  file descriptors: a worker-hosted plugin could write into MCP servers'
+  stdin pipes, tamper with files the agent held open, or signal the agent.
+  Messages travel over a dedicated fd-3 pipe as newline-delimited JSON (Node's
+  IPC deserializer crashes the *receiver* on a malformed frame); a garbage or
+  oversized frame only kills that plugin. Network is closed at three layers
+  (builtin allow-list incl. `_http_*`/`_tls_*` internals, throwing stubs on
+  `Socket#connect` / `Server#listen` / dgram / dns / tls / http2, no global
+  `fetch`); file writers that bypass the permission model (`process.report`,
+  `trace_events`, V8 heap snapshots / flags, `node:sqlite`) are refused;
+  `Module._load` is frozen. Malicious plugins (reading `~/.ssh`, spawning
+  shells, reaching the network via internal modules, spoofing protocol frames,
+  exhausting memory, blocking forever, signalling the agent) are contained on
+  Node 20 and 22. Known limitation (Node): symlinks inside a granted path are
+  followed — a symlink planted in the project can expose files to a plugin.
 - **Shell guard**: writes/deletes aimed at protected destinations are refused
   regardless of the program; uploads carrying data (`curl -d/-T/-F`, `wget
   --post-file`, `scp`, `rsync` to a remote) need `tools.allowNetworkUpload`;
