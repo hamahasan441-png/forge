@@ -147,10 +147,12 @@ console.log("== fuzz: random histories never become malformed or larger ==")
     for (const [window, force, summarize] of [[Math.max(600, Math.floor(before / 0.5)), false, null], [Math.max(600, Math.floor(before / 0.9)), true, async () => "sum"], [Math.max(600, Math.floor(before / 0.9)), true, async () => { throw new Error("x") }]]) {
       const r = await compactHistory(msgs, { window, force, summarize })
       const after = estimateTokens(JSON.stringify(r.messages))
-      if (!historyIsWellFormed(r.messages) || after > before || r.messages[0] !== msgs[0] || r.messages[1] !== msgs[1]) { bad++; if (bad < 4) console.log("   counterexample", iter, window, force, JSON.stringify(r.messages.map((m) => m.role)), before, after) }
+      // automatic mode: never larger. forced mode: never larger UNLESS old turns were actually folded into a summary (the caller asked for that)
+      const sizeOk = after <= before || (force && r.stats.folded > 0)
+      if (!historyIsWellFormed(r.messages) || !sizeOk || r.messages[0] !== msgs[0] || r.messages[1] !== msgs[1]) { bad++; if (bad < 4) console.log("   counterexample", iter, window, force, JSON.stringify(r.messages.map((m) => m.role)), before, after, r.stats.stage) }
     }
   }
-  ok("200 random histories × 3 modes: always well-formed, never larger, head intact", bad === 0, `${bad} bad`)
+  ok("200 random histories × 3 modes: always well-formed, never larger (auto) / only larger when forced AND folded, head intact", bad === 0, `${bad} bad`)
 }
 
 console.log(`\n== context-compaction suite: ${PASS} passed, ${FAIL} failed ==`)

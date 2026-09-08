@@ -55,6 +55,10 @@ export const BLOCKED_HOSTNAMES = [/^metadata(\.google)?\.internal$/i, /^instance
 export function parseIPv4(ip) {
   const m = String(ip ?? "").match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
   if (!m) return null
+  // v21.1: canonical decimal octets ONLY. "010.0.0.1" is octal to inet_aton
+  // (= 8.0.0.1) but decimal to a naive parser — an ambiguity SSRF filters
+  // have been bypassed with. Anything with a leading zero is not an address.
+  if (m.slice(1).some((o) => o.length > 1 && o[0] === "0")) return null
   const parts = m.slice(1).map(Number)
   if (parts.some((p) => p > 255)) return null
   return parts

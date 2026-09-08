@@ -232,10 +232,20 @@ export async function compactHistory(messages, opts = {}) {
 
   // stage 2 — fold everything before the tail into ledger (+ narrative)
   if (turns.length <= keepTurns) {
-    // nothing old enough to fold; shrink the tail too rather than give up
-    const tight = out.map((m, i) => i >= head.length && m.role === "tool" && typeof m.content === "string" && m.content.length > 600 ? { ...m, content: shrinkToolOutput(m.content, 600) } : m)
-    const estTight = estimateTokens(JSON.stringify(tight))
-    if (estTight >= stats.estTokBefore) { stats.estTokAfter = stats.estTokBefore; return { messages, changed: false, stats } }
+    // nothing old enough to fold; shrink the tail too rather than give up.
+    // Older tail turns go to 600 chars; the LAST turn (the result the model
+    // has not reacted to yet) is only touched if that was not enough.
+    const lastTurnStart = out.length - turns[turns.length - 1].msgs.length
+    const tighten = (msgs, from, to, limit) => msgs.map((m, i) => {
+      if (i < from || i >= to || m.role !== "tool" || typeof m.content !== "string" || m.content.length <= limit) return m
+      const c = shrinkToolOutput(m.content, limit)
+      stats.shrunk += m.content.length - c.length
+      return { ...m, content: c }
+    })
+    let tight = tighten(out, head.length, lastTurnStart, 600)
+    let estTight = estimateTokens(JSON.stringify(tight))
+    if (estTight >= foldBudget) { tight = tighten(tight, lastTurnStart, tight.length, 1200); estTight = estimateTokens(JSON.stringify(tight)) }
+    if (estTight >= stats.estTokBefore) { stats.estTokAfter = stats.estTokBefore; stats.shrunk = 0; return { messages, changed: false, stats } }
     stats.after = tight.length; stats.estTokAfter = estTight; stats.stage = "shrink-tail"
     return { messages: tight, changed: true, stats }
   }
@@ -264,18 +274,28 @@ export async function compactHistory(messages, opts = {}) {
   est = estimateTokens(JSON.stringify(out))
   // stage 3 — still too large (huge tail outputs): tighten the tail's tool outputs
   if (est >= foldBudget) {
-    out = out.map((m, i) => i > head.length && m.role === "tool" && typeof m.content === "string" && m.content.length > 800 ? { ...m, content: shrinkToolOutput(m.content, 800) } : m)
+    out = out.map((m, i) => {
+      if (i <= head.length || m.role !== "tool" || typeof m.content !== "string" || m.content.length <= 800) return m
+      const c = shrinkToolOutput(m.content, 800)
+      stats.shrunk += m.content.length - c.length
+      return { ...m, content: c }
+    })
     est = estimateTokens(JSON.stringify(out))
     stats.stage += "+tight"
   }
-  // invariant: compaction never returns a LARGER history. On a tiny history
-  // the ledger/summary framing can outweigh what folding saved — then the
-  // shrink-only form wins, and if even that is not smaller, the input is
-  // returned untouched (the overflow was not caused by the history).
-  const shrunkOnly = [...head, ...shrunkTurns.flatMap((t) => t.msgs)]
-  const estShrunk = estimateTokens(JSON.stringify(shrunkOnly))
-  if (estShrunk < est) { out = shrunkOnly; est = estShrunk; stats.folded = 0; stats.summarized = false; stats.stage = "shrink" }
-  if (est >= stats.estTokBefore) { stats.after = messages.length; stats.estTokAfter = stats.estTokBefore; stats.stage = "none"; return { messages, changed: false, stats } }
+  // Automatic mode invariant: compaction never returns a LARGER history. On a
+  // tiny history the ledger/summary framing can outweigh what folding saved —
+  // then the shrink-only form wins, and if even that is not smaller, the
+  // input is returned untouched (the pressure was not caused by the history).
+  // `force` (the user's /compact, a configured char cap, an overflow retry)
+  // asks for the fold itself: older turns are replaced by the ledger+summary
+  // even when that is not a byte win — the caller wants fewer, denser turns.
+  if (!force) {
+    const shrunkOnly = [...head, ...shrunkTurns.flatMap((t) => t.msgs)]
+    const estShrunk = estimateTokens(JSON.stringify(shrunkOnly))
+    if (estShrunk < est) { out = shrunkOnly; est = estShrunk; stats.folded = 0; stats.summarized = false; stats.stage = "shrink" }
+    if (est >= stats.estTokBefore) { stats.after = messages.length; stats.estTokAfter = stats.estTokBefore; stats.stage = "none"; return { messages, changed: false, stats } }
+  }
   stats.after = out.length; stats.estTokAfter = est
   return { messages: out, changed: true, stats }
 }

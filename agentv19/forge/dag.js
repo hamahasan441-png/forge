@@ -891,10 +891,15 @@ export function parsePlanToDAG(text) {
     try {
       const arr = JSON.parse(json)
       if (Array.isArray(arr)) {
-        const defs = arr.map((n, i) => ({
-          id: String(n.id ?? `n${i + 1}`),
-          objective: n.objective ?? n.title ?? n.task ?? "",
-          dependencies: n.dependencies ?? n.deps ?? [],
+        // v21.1: model JSON is untrusted — non-object entries are skipped and
+        // dependency lists are normalised to string ids (null/number/garbage
+        // entries used to survive into the graph and crash later stages).
+        const depList = (d) => (Array.isArray(d) ? d : typeof d === "string" && d.trim() ? d.split(/[,\s]+/) : [])
+          .filter((x) => x != null && x !== "" && (typeof x === "string" || typeof x === "number")).map((x) => String(x).trim()).filter(Boolean)
+        const defs = arr.filter((n) => n && typeof n === "object" && !Array.isArray(n)).map((n, i) => ({
+          id: (typeof n.id === "string" || typeof n.id === "number") && String(n.id).trim() ? String(n.id).trim() : `n${i + 1}`,
+          objective: String(n.objective ?? n.title ?? n.task ?? ""),
+          dependencies: depList(n.dependencies ?? n.deps),
           priority: n.priority ?? (arr.length - i),
           risk: n.risk,
           role: n.role ?? inferRole(n.objective ?? n.task ?? ""),

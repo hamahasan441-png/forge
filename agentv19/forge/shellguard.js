@@ -375,6 +375,34 @@ function egressUploadReason(prog, rest, ctx) {
   return null
 }
 
+/**
+ * v21.1: shell grouping must never hide a payload. `( rm -rf / )`,
+ * `{ rm -rf /; }` and `((…))` used to tokenize with "(" / "{" as the program
+ * and classified as SAFE. Peel grouping delimiters (any depth) and classify
+ * what is inside; splitSubcommands already broke `;`/`&&`/`|` apart, so a
+ * group body is one simple command (possibly with a trailing `;`).
+ */
+function unwrapGrouping(sub) {
+  let s = String(sub ?? "").trim()
+  for (let guard = 0; guard < 8; guard++) {
+    let m = /^\(\s*([\s\S]*?)\s*\)\s*$/.exec(s) || /^\{\s*([\s\S]*?)\s*;?\s*\}\s*$/.exec(s)
+    if (!m) {
+      // unbalanced leading "(" / "{" (the closer went to a later sub-command):
+      // strip the opener, keep the payload
+      m = /^[({]\s*([\s\S]*)$/.exec(s)
+      if (!m) break
+    }
+    const inner = m[1].replace(/\s*[;)}]+\s*$/, "").trim()
+    if (!inner || inner === s) break
+    s = inner
+  }
+  // trailing unbalanced closers (`rm -rf /)` after `(git status; rm -rf /)`
+  // was split on `;`) — drop them so the last operand is seen as written
+  const count = (re) => (s.match(re) ?? []).length
+  while (/[)}]\s*$/.test(s) && (count(/\)/g) > count(/\(/g) || count(/\}/g) > count(/\{/g))) s = s.replace(/\s*[)}];?\s*$/, "").trim()
+  return s
+}
+
 function classifySub(sub, ctx, depth = 0) {
   const reasons = []
   let level = "safe"
@@ -382,7 +410,7 @@ function classifySub(sub, ctx, depth = 0) {
     if (LEVEL_RANK[lv] > LEVEL_RANK[level]) level = lv
     if (why) reasons.push(why)
   }
-  const toks = tokenize(sub)
+  const toks = tokenize(unwrapGrouping(sub))
   if (!toks.length) return { level: "safe", reasons: [], program: "", targets: [] }
 
   // strip leading env assignments (FOO=bar BAZ=qux cmd …)

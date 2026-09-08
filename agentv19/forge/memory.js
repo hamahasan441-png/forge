@@ -60,7 +60,8 @@ export const MEMORY_SOURCES = new Set(["cli", "tool", "agent", "subagent", "repa
 
 export function formatProvenance(p = {}) {
   const source = MEMORY_SOURCES.has(p.source) ? p.source : "unknown"
-  const at = p.at ? new Date(p.at).toISOString() : new Date().toISOString()
+  const ts = p.at != null && !Number.isNaN(new Date(p.at).getTime()) ? new Date(p.at) : new Date()
+  const at = ts.toISOString()
   const parts = [`source=${source}`, `at=${at}`]
   if (p.runId) parts.push(`run=${String(p.runId).replace(/[\s>]/g, "_").slice(0, 40)}`)
   if (p.model) parts.push(`model=${String(p.model).replace(/[\s>]/g, "_").slice(0, 40)}`)
