@@ -9,6 +9,84 @@ _The version lives in exactly one place — `package.json` — and is read at ru
 via `version.js`. Every user-agent, banner and `--version` derives from it._
 
 
+### Security (P0 audit — each item has a BEFORE/AFTER regression test)
+- **Real DNS pinning for outbound fetches** (`netguard.js` rewritten;
+  `tests/test-ssrf-pinning.mjs`, 166 checks). `fetch_url`, `web_search` and the
+  doctor probe go through `pinnedFetch`: every A/AAAA record is resolved, any
+  private / loopback / link-local / multicast / reserved / metadata address
+  (IPv4, IPv6, v4-mapped, NAT64) rejects the whole request, the socket is
+  pinned to the validated address (Host header and TLS SNI preserved), every
+  redirect is re-validated, and a resolver that answers differently on the
+  second lookup (DNS rebinding) can no longer reach the private address.
+  Non-canonical IPv4 literals (`010.0.0.1`) are not addresses.
+- **Secure filesystem pipeline** (`securefs.js` new; `tests/test-fs-toctou.mjs`,
+  86 checks). Tool writes and checkpoint restores anchor on the project root's
+  real path, walk components with `O_NOFOLLOW` / descriptor-relative opens,
+  and write temp → fsync → rename. Traversal, encoded and absolute paths,
+  symlinks and hardlinks pointing outside, nested symlinks, symlink/directory
+  swaps between validation and write, and concurrent writers are all refused
+  or serialised; a permission failure leaves the original file intact.
+- **Plugin isolation** (`plugins.js` rewritten, `plugin-host.js` new;
+  `tests/test-plugin-isolation.mjs`, 51 checks). Each `~/.forge/tools/*.mjs`
+  plugin runs in its own `--permission` Worker with a timeout, memory cap,
+  scrubbed environment and no filesystem/network/child-process access unless
+  the plugin declares the capability AND the user grants it in
+  `tools.pluginGrants`. Malicious plugins (reading `~/.ssh`, spawning shells,
+  reaching the network, exhausting memory, blocking forever) are contained.
+- **Shell guard**: writes/deletes aimed at protected destinations are refused
+  regardless of the program; uploads carrying data (`curl -d/-T/-F`, `wget
+  --post-file`, `scp`, `rsync` to a remote) need `tools.allowNetworkUpload`;
+  `( cmd )` / `{ cmd; }` grouping cannot hide a payload; `runBash` runs in its
+  own process group and kills the whole group on timeout or abort.
+- **Secrets**: prefixed credential names (`DB_PASS`, `REDIS_PASSWORD`,
+  `DATABASE_URL`, …) and URL userinfo are redacted; MCP/LSP children get a
+  scrubbed environment (`childenv.js`); project-level `.forge.json` can no
+  longer set privileged keys (`allowSudo`, `assumeYes`, `allowOutsideProject`,
+  `fetchPrivateUrls`, `allowNetworkUpload`, `mcp`, `lsp`, `plugins`, …) — they
+  are dropped and reported (`loadConfig().ignored`, warned at startup).
+
+### Changed (P1 autonomous correctness — behaviour changes, intentional)
+- **DAG cycles are never "repaired" by dropping dependencies.** `repairPlan`
+  reports `cycle{members,edges}` / `needsReplan`; `meta.js` re-plans once
+  (`PLAN_CYCLE_DETECTED`, `PLAN_REPLANNED`) and WAITs for the user if the plan
+  is still cyclic. Before: the back-edge was silently removed and the node ran
+  before its dependency.
+- **Failover checks compatibility and stops safely.** A fallback provider is
+  skipped (`failover_skipped` event / warning) when its context window cannot
+  carry the current prompt or its protocol cannot carry tool calls; when no
+  compatible fallback exists the run fails with an explicit `ProviderError`
+  instead of switching blindly in config order.
+- **Context compaction is structure-preserving** (`compaction.js` new, used
+  by both the agent loop and chat `/compact`). Turns are never split (a
+  `tool_calls` message and its results move together), old tool outputs keep
+  their first lines, error/exit-code lines and tail instead of being replaced
+  by a stub, and a deterministic ledger (files changed, commands + exit codes,
+  blocked actions, decisions) is folded in even when the summary model fails.
+  Automatic compaction never returns a larger history. Before: index `slice()`
+  + 400-character heads; a failed summary left the history unchanged so the
+  overflow retry overflowed again.
+- **Verification evidence is stale once the artifact changes.** Records carry
+  cwd, env, repo state, stdout tail, timestamp and the writes that followed
+  them; a passing check followed by writes to a file it covered — in the same
+  segment or a later one — is invalidated (`VERIFICATION_INVALIDATED`) and no
+  longer completes the task. Before: "tests passed, then edited the file"
+  completed as verified.
+- **Memory has one storage pipeline with provenance.** Every append / learn /
+  forget / prune / replace goes through lock + temp + fsync + rename (mode
+  0600), and each entry records who stored it (`cli` / `tool` / `subagent` /
+  `agent` / `repair`), when and from which run on a comment line that is never
+  injected into prompts. Legacy files read unchanged; `forge memory list
+  --json` gains a parallel `provenance` array.
+
+### Added (tests)
+- `test-parser-fuzz.mjs` — 20 properties × 2500 random inputs over the plan
+  parser, DAG repair, unified-diff parser, shell classifier, address parsing,
+  provenance lines, compaction and verification evaluation.
+- `test-hardening-v21.mjs`, `test-context-compaction.mjs`,
+  `test-chat-compaction.mjs`, `test-verification-staleness.mjs`,
+  `test-memory-pipeline.mjs`; extended failover / invalid-plan / checkpoint /
+  version-consistency suites. `run-all.mjs` now drives 61 suites.
+
 ### Added
 - **Model Context Protocol (MCP) client** (`mcp.js`, autonomy v23 Tier 1) — the
   industry-standard way to extend an agent with tools and data from an external
