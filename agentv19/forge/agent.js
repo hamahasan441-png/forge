@@ -21,9 +21,9 @@
  *   - every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  *   - deterministic node execution via executeNode/markCompleted
  */
-import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy } from "./providers.js"
+import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
-import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { createLspSession } from "./lsp.js"
@@ -38,8 +38,10 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints } from "./checkpoint.js"
+import { compactHistory, shrinkToolOutput } from "./compaction.js"
 import path from "node:path"
 import fs from "node:fs"
+import { execFileSync } from "node:child_process"
 
 export function classifyTaskComplexity(task) {
   const t = String(task ?? "").toLowerCase()
@@ -137,45 +139,26 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   return lines.join("\n")
 }
 
+/**
+ * v21.1 P1: structure- and meaning-preserving compaction (see context.js).
+ * The model narrative is optional; the deterministic ledger (files changed,
+ * commands + exit codes, errors, blocked actions) is always produced, so a
+ * context-overflow retry always gets a SMALLER, well-formed history.
+ */
 async function compactAgentHistory(messages, p, { onEvent, force = false }) {
   try {
-    const estTok0 = estimateTokens(JSON.stringify(messages))
-    const window = p.contextWindow ?? 128000
-    const shrinkBudget = Math.floor((window * 40) / 100)
-    const budgetTok = Math.floor((window * 55) / 100)
-    if (!force && estTok0 < shrinkBudget) return messages
-    const tail = 4
-    let next = messages
-    let shrunk = 0
-    if (messages.length > tail + 2) {
-      next = messages.map((m, i) => {
-        if (m?.role === "tool" && typeof m.content === "string" && m.content.length > 2400 && i < messages.length - tail) {
-          shrunk += m.content.length
-          return { ...m, content: `[tool output shrunk: ${m.content.length} chars]` }
-        }
-        return m
+    const summarize = async (digest) => {
+      const s = await chatOnce({
+        protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name,
+        system: "Summarize this agent work-log for an AI agent continuing the same task. In <=200 words capture: what was done, key findings, what was tried and failed, and what remains. Do not list files or commands (they are recorded separately). Output only the summary.",
+        messages: [{ role: "user", content: digest }],
+        maxTokens: 500,
       })
+      return s?.content ?? null
     }
-    const estTok = estimateTokens(JSON.stringify(next))
-    if (!force && estTok < budgetTok) {
-      if (shrunk > 0) onEvent?.({ type: "compacted", before: messages.length, after: next.length, estTok: estTok0, budgetTok, shrunk })
-      return next
-    }
-    if (next.length < 2 + tail + 2) return next
-    const middle = next.slice(2, next.length - tail)
-    const digest = middle
-      .map((m) => `[${m.role}] ${String(typeof m.content === "string" ? m.content : "(tool activity)").slice(0, 400)}`)
-      .join("\n")
-      .slice(0, 20000)
-    const s = await chatOnce({
-      protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name,
-      system: "Summarize this agent work-log for an AI agent continuing the same task. In <=200 words capture: what was done, files created or changed, key findings, and what remains. Output only the summary.",
-      messages: [{ role: "user", content: digest }],
-      maxTokens: 500,
-    })
-    const summarized = [...next.slice(0, 2), { role: "user", content: `(work-log summary of steps so far)\n${(s.content || "(no summary)").trim()}` }, ...next.slice(next.length - tail)]
-    onEvent?.({ type: "compacted", before: messages.length, after: summarized.length, estTok: estTok0, budgetTok, shrunk })
-    return summarized
+    const r = await compactHistory(messages, { window: p.contextWindow ?? 128000, force, summarize })
+    if (r.changed) onEvent?.({ type: "compacted", before: r.stats.before, after: r.stats.after, estTok: r.stats.estTokBefore, estTokAfter: r.stats.estTokAfter, budgetTok: Math.floor((p.contextWindow ?? 128000) * 0.55), shrunk: r.stats.shrunk, folded: r.stats.folded, stage: r.stats.stage })
+    return r.messages
   } catch {
     return messages
   }
@@ -243,10 +226,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
 
   const isDelegatedSubAgent = readonly && !planOnly
   let plugins = []
+  let pluginHost = null // v21.1: isolated plugin workers, closed in `finally`
   if (config.tools?.plugins !== false) {
     try {
-      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES, grants: config.tools?.pluginGrants ?? {}, cwd: process.cwd() })
       plugins = loaded.tools
+      pluginHost = loaded
       if (!isDelegatedSubAgent) {
         for (const pp of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${pp.name}${pp.readOnly ? " (read-only)" : ""} — ${pp.source}`, ...identityMeta() })
         for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}`, ...identityMeta() })
@@ -289,6 +274,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     mode: verifier ? "verifier" : "default",
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
+    allowNetworkUpload: config.tools?.allowNetworkUpload === true,
     assumeYes: config.tools?.assumeYes === true,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? 180,
@@ -368,6 +354,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   let toolCallCount = 0
   const toolLog = []
   const commandChecks = []
+  // v21.1 P1 — verification integrity: every check records WHAT it covered.
+  // `writesSoFar` is the ordered list of files this run wrote; a check remembers
+  // how many writes preceded it, so meta.js can tell "tests passed, THEN the
+  // agent edited src/x.js" apart from "edited, then tests passed". The former
+  // is stale evidence for src/x.js and must not verify it.
+  const writesSoFar = []
+  const repoState = (() => {
+    try {
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).toString().trim()
+      const dirty = execFileSync("git", ["status", "--porcelain"], { cwd: process.cwd(), stdio: ["ignore", "pipe", "ignore"], timeout: 3000 }).toString().trim().split("\n").filter(Boolean).length
+      return { head, dirty }
+    } catch { return null }
+  })()
   const tokenUsage = { prompt: 0, completion: 0, total: 0, estimated: false }
   let ended = false
   const endRun = (status, extra = {}) => {
@@ -416,8 +415,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           continue
         }
         if (isFailworthy(e) && chainIdx < chain.length) {
-          const next = chain[chainIdx++]
+          // v21.1 P1: only switch to a provider that can carry THIS request
+          // (context fits, tools supported). If none can, stop with a clear
+          // error instead of failing again on an incompatible model.
+          const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: !noTools && tools.defs.length > 0 }
+          const pick = nextCompatibleFallback(chain, chainIdx, need)
+          chainIdx = pick.idx
           recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
+          for (const sk of pick.skipped) onEvent?.({ type: "failover_skipped", from: `${p.name}/${p.model}`, to: `${sk.name}/${sk.model}`, reason: sk.reason, ...identityMeta() })
+          if (!pick.next) {
+            const why = pick.skipped.map((s) => `${s.name}: ${s.reason}`).join("; ")
+            throw new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: false })
+          }
+          const next = pick.next
           onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message, ...identityMeta() })
           p = next
           retryBudget = 3
@@ -476,16 +486,28 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
                 const timedOut = /timed out after/i.test(rstr)
                 const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
                 const tail = rstr.split("\n").filter(Boolean).slice(-6).join(" ").slice(0, 500)
-                commandChecks.push({ command: command.slice(0, 300), exitCode, timedOut, passed: exitCode === 0 && !timedOut, tail })
+                commandChecks.push({
+                  command: command.slice(0, 300), exitCode, timedOut, passed: exitCode === 0 && !timedOut, tail,
+                  // verification record context (P1): when/where it ran and what it covered
+                  step: steps, at: Date.now(), cwd: process.cwd(), repoState,
+                  env: { NODE_ENV: process.env.NODE_ENV ?? null, CI: process.env.CI ?? null },
+                  stdoutTail: rstr.slice(-2000),
+                  writesBefore: writesSoFar.slice(),
+                  writeIndex: writesSoFar.length,
+                })
                 onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
               }
             } catch { }
           }
-          if (log) {
+          {
             const r = String(result)
             const okRes = !(r.startsWith("ERROR") || r.startsWith("BLOCKED"))
-            log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
-            if (okRes && WRITE_TOOLS.has(tc.name) && tc.name !== "bash") for (const [fp, action] of journalFiles(tc.name, tc.args, r)) log.touched(fp, action)
+            if (okRes && WRITE_TOOLS.has(tc.name) && tc.name !== "bash") {
+              for (const [fp, action] of journalFiles(tc.name, tc.args, r)) { writesSoFar.push(fp); if (log) log.touched(fp, action) }
+            } else if (okRes && tc.name === "bash" && hasWriteRedirection(String(safeJson(tc.args)?.command ?? ""))) {
+              writesSoFar.push("(shell write)") // unknown target: conservatively counts as a write after any earlier check
+            }
+            if (log) log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
           }
           messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) })
         }
@@ -497,6 +519,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       break
     }
 
+    for (const chk of commandChecks) chk.filesWrittenAfter = writesSoFar.slice(chk.writeIndex)
     const budgetHit = steps >= maxSteps
     if (budgetHit && !finalText) {
       finalText = "(reached the per-segment step budget without a final answer)"
@@ -513,6 +536,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   } finally {
     for (const c of mcpClients) { try { c.close() } catch {} }
     if (lspSession) { try { lspSession.close() } catch {} }
+    if (pluginHost) { try { pluginHost.close() } catch {} }
   }
 }
 
@@ -550,7 +574,7 @@ function hardShrink(messages) {
     const key = m.content.slice(0, 120)
     if (seen.has(key)) return { ...m, content: "[duplicate tool output removed]" }
     seen.set(key, true)
-    if (m.content.length > 600) return { ...m, content: `[tool output shrunk: ${m.content.length} chars]` }
+    if (m.content.length > 600) return { ...m, content: shrinkToolOutput(m.content, 600) } // v21.1: keep head/tail/errors, not a bare stub
     return m
   })
 }

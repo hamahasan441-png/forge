@@ -98,6 +98,53 @@ export function fallbackChain(config, activeName, { health = {} } = {}) {
   return [...tested, ...rest]
 }
 
+/**
+ * v21.1 P1 — is `candidate` able to take over the CURRENT request?
+ * Failover used to switch to whatever provider came next in config order. A
+ * request in flight has hard requirements: the conversation must fit the
+ * model's context window, and if the run uses tools the target protocol must
+ * support tool calls. Switching to an incompatible model does not "fail
+ * over", it fails differently — with a context-overflow or a model that
+ * silently ignores tools and answers in prose. Returns { ok, reason }.
+ *
+ * @param need { promptTokens, tools, capabilities? } — what the request needs
+ * @param registry optional model→{capabilities,contextWindow} map (modelstrategy)
+ */
+export function providerCompatible(candidate, need = {}, { registry = null } = {}) {
+  if (!candidate) return { ok: false, reason: "no provider" }
+  const reg = registry ? (registry[candidate.model] ?? registry[String(candidate.model ?? "").split("/").pop()] ?? null) : null
+  const window = reg?.contextWindow ?? candidate.contextWindow ?? 128000
+  const promptTokens = Number(need.promptTokens ?? 0)
+  // leave headroom for the reply: ≥ 12.5 % of the window or 2k tokens
+  const headroom = Math.max(2048, Math.floor(window / 8))
+  if (promptTokens && promptTokens + headroom > window) {
+    return { ok: false, reason: `context ${promptTokens} tokens does not fit ${candidate.name}/${candidate.model} (window ${window})` }
+  }
+  if (need.tools && !["openai", "anthropic"].includes(candidate.protocol)) {
+    return { ok: false, reason: `${candidate.name} (${candidate.protocol}) cannot carry tool calls` }
+  }
+  if (Array.isArray(need.capabilities) && need.capabilities.length && reg?.capabilities) {
+    const missing = need.capabilities.filter((c) => !reg.capabilities.includes(c))
+    if (missing.length) return { ok: false, reason: `${candidate.name}/${candidate.model} lacks required capability ${missing.join(", ")}` }
+  }
+  return { ok: true, reason: null }
+}
+
+/**
+ * Pick the first compatible fallback from `chain` starting at `fromIdx`.
+ * Returns { next, idx, skipped:[{name,model,reason}] } — `next` is null when
+ * NO remaining provider is compatible (the caller must stop, not guess).
+ */
+export function nextCompatibleFallback(chain, fromIdx, need, opts = {}) {
+  const skipped = []
+  for (let i = fromIdx; i < chain.length; i++) {
+    const c = providerCompatible(chain[i], need, opts)
+    if (c.ok) return { next: chain[i], idx: i + 1, skipped }
+    skipped.push({ name: chain[i].name, model: chain[i].model, reason: c.reason })
+  }
+  return { next: null, idx: chain.length, skipped }
+}
+
 export class ProviderError extends Error {
   constructor(message, { status, retryable, contextOverflow, retryAfterMs } = {}) {
     super(message)

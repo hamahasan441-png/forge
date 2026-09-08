@@ -28,6 +28,8 @@
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
 import { spawn } from "node:child_process"
+import { childEnv } from "./childenv.js"
+import { VERSION } from "./version.js"
 
 export const PROTOCOL_VERSION = "2024-11-05"
 const DEFAULT_TIMEOUT_MS = 20000
@@ -140,7 +142,7 @@ class McpClient {
     if (!this.command || typeof this.command !== "string") throw new Error(`MCP server "${this.name}" has no command`)
     this.child = spawn(this.command, this.args, {
       cwd: this.cwd,
-      env: { ...process.env, ...this.env },
+      env: childEnv(this.env),
       stdio: ["pipe", "pipe", "pipe"],
     })
     this.child.stdout.setEncoding("utf8")
@@ -153,7 +155,7 @@ class McpClient {
     const init = await this._request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {}, // a minimal client: we consume tools, advertise nothing
-      clientInfo: { name: "forge", version: "23" },
+      clientInfo: { name: "forge", version: VERSION },
     })
     this.serverInfo = init?.serverInfo ?? null
     this.capabilities = init?.capabilities ?? null

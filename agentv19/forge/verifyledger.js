@@ -175,6 +175,14 @@ export function evaluateVerification(command, result, opts = {}) {
     timed_out: timedOut,
     command: String(command).slice(0, 300),
     duration: opts.duration ?? null,
+    // v21.1 P1 — provenance: where/when the check ran and what it covered.
+    // `stale` is set at record time when the producing run ALREADY wrote files
+    // after the check: such evidence never verified those files.
+    cwd: opts.cwd ?? null,
+    env: opts.env ?? null,
+    repoState: opts.repoState ?? null,
+    stdoutTail: opts.stdoutTail != null ? String(opts.stdoutTail).slice(-2000) : null,
+    filesWrittenAfter: (opts.filesWrittenAfter ?? []).map(String).slice(0, 50),
   })
 }
 
@@ -240,6 +248,18 @@ export function createLedger() {
       ...opts,
       verificationEpoch: opts.verificationEpoch ?? ++epoch,
     })
+    // Evidence produced BEFORE later writes in the same run is stale for the
+    // files those writes touched. A passing record whose scope intersects the
+    // later writes (or a shell write with unknown target) is invalidated at
+    // once — it was true of an artifact that no longer exists. Failures are
+    // kept: a failure is a fact until a later PASS supersedes it.
+    if (rec.passed && rec.filesWrittenAfter?.length) {
+      const later = new Set(rec.filesWrittenAfter.map(norm2))
+      const unknownTarget = rec.filesWrittenAfter.some((f) => /^\(shell write\)$/.test(f))
+      const scope = (rec.affectedFiles ?? []).map(norm2)
+      const hit = unknownTarget || !scope.length || scope.some((f) => later.has(f) || [...later].some((l) => l.endsWith("/" + f) || f.endsWith("/" + l)))
+      if (hit) { rec.invalidated = true; rec.invalidatedAt = Date.now(); rec.invalidatedBy = "writes-after-check"; rec.staleReason = "files were written after this check ran" }
+    }
     return add(rec, { invalidate: false })
   }
 
@@ -254,6 +274,25 @@ export function createLedger() {
         r.invalidatedAt = Date.now()
         n++
       }
+    }
+    return n
+  }
+
+  /**
+   * Files changed AFTER existing evidence: bump the epoch and invalidate the
+   * PASSING records whose scope covers them (or that have no scope at all —
+   * project-wide evidence is stale once anything changes). Returns the count.
+   */
+  const touch = (files = []) => {
+    const set = new Set(files.map(String).map(norm2))
+    if (!set.size) return 0
+    epoch++
+    let n = 0
+    for (const r of records) {
+      if (r.invalidated || !r.passed) continue
+      const affected = (r.affectedFiles ?? r.affected_files ?? []).map(norm2)
+      const covers = !affected.length || affected.some((f) => set.has(f) || [...set].some((c) => c.endsWith("/" + f) || f.endsWith("/" + c)))
+      if (covers) { r.invalidated = true; r.invalidatedAt = Date.now(); r.invalidatedBy = "touch"; r.staleReason = "covered file changed after this check"; n++ }
     }
     return n
   }
@@ -347,7 +386,7 @@ export function createLedger() {
   const serialize = () => records.slice(-100)
   const load = (arr) => { if (Array.isArray(arr)) { records.push(...arr.slice(-100)); epoch = Math.max(epoch, ...arr.map(r => r.verificationEpoch ?? r.verification_epoch ?? 0)) } }
 
-  return { add, recordCommand, invalidate, status, records: validRecords, all: () => records.slice(), serialize, load, get epoch() { return epoch } }
+  return { add, recordCommand, invalidate, touch, status, records: validRecords, all: () => records.slice(), serialize, load, get epoch() { return epoch } }
 }
 
 // ---------------------------------------------------------------------------

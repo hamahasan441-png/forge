@@ -1,5 +1,5 @@
 /**
- * forge — secret redaction (v20, hardened v20.1): keeps credentials out of
+ * forge — secret redaction (v20, hardened v20.1 / v21.1): keeps credentials out of
  * model context, logs, sessions, memory, and exports.
  *
  * Applied to every tool RESULT before it enters conversation history (bash
@@ -52,8 +52,11 @@ const MIN_LEN_LOW = 8 // everything else needs a real-looking value
 const JSON_ASSIGN = new RegExp(`"((?:${NAME_ALT}))"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, "gi")
 
 // env-style / kv-style credential assignments: NAME = value / NAME: "value"
+// v21.1: the credential keyword may sit AFTER a prefix (DB_PASS, REDIS_PASSWORD,
+// MYSQL_ROOT_PASSWORD, STRIPE_SECRET, GITHUB_TOKEN). v20 anchored the keyword
+// at the word boundary, so every prefixed name went to the model verbatim.
 const ASSIGN_RE = new RegExp(
-  "\\b((?:API|SECRET|TOKEN|PASS|KEY|CRED|AUTH|PRIVATE)[A-Z0-9_]{0,24}" +
+  "\\b((?:(?:[A-Z0-9]+_){0,4}(?:API|SECRET|TOKEN|PASS|KEY|CRED|AUTH|PRIVATE)|[A-Z0-9]{1,8}(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY))[A-Z0-9_]{0,24}" +
   `|(?:${NAME_ALT})[a-z0-9_]*)` +
   "(\\s*(?:=|:=|=>|:)\\s*)(\"((?:[^\"\\\\]|\\\\.)*)\"|'((?:[^'\\\\]|\\\\.)*)'|([^\\s\"'`,;)][^`\\n,;]{0,200}))",
   "gi",
@@ -61,6 +64,12 @@ const ASSIGN_RE = new RegExp(
 
 // Authorization: Bearer|Basic|Token <credential> (not only JWTs)
 const BEARER_RE = /\b(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{8,})/gi
+
+// v21.1: credentials embedded in connection URLs — postgres://user:PASS@host,
+// redis://:PASS@host, https://token@github.com, amqp://u:p@… The password (and
+// a bare userinfo token) is masked; scheme, user, host and path are kept so
+// error messages stay debuggable.
+const URL_CRED_RE = /\b([a-z][a-z0-9+.-]{1,30}:\/\/)(?:([^\s\/:@'"`]*):([^\s\/@'"`]+)|([^\s\/:@'"`]{8,}))@/gi
 
 // Unprefixed high-entropy blobs: 32+ chars mixing lower/upper/digits/symbols.
 // Git SHAs and hex digests stay untouched (only two character classes); UUIDs
@@ -100,6 +109,19 @@ export function redactSecrets(input) {
     }
     re.lastIndex = 0
   }
+  // pass 0: credentials inside connection URLs (before assignment rules so
+  // `DATABASE_URL=postgres://u:p@h` keeps its readable host)
+  text = text.replace(URL_CRED_RE, (full, scheme, user, pass, bareTok) => {
+    if (pass !== undefined) {
+      if (isPlaceholderText(pass)) return full
+      found++
+      return `${scheme}${user}:[redacted]@`
+    }
+    if (isPlaceholder(bareTok)) return full
+    found++
+    return `${scheme}[redacted]@`
+  })
+  URL_CRED_RE.lastIndex = 0
   // pass 1: JSON-style quoted assignments
   text = text.replace(JSON_ASSIGN, (full, name, value) => {
     if (!shouldMask(name, value)) return full

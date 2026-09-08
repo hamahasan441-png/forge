@@ -36,7 +36,10 @@ export function defaultConfig() {
     chat: { stream: true, system: "", showReasoning: true, maxHistoryMessages: 40, tools: true, compact: true, compactAtChars: 48000, profile: "auto", restoreCwd: true, historySize: 300 },
     // v20.5: `intelligence` is the master switch for the capability/router/
     // verification layer; everything below it only matters while it is on.
-    tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, fetchPrivateUrls: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true },
+    // v21.1: `pluginGrants` maps a plugin FILE in ~/.forge/tools to the
+    // capabilities the user grants it ({ network, childProcess, read:[], write:[],
+    // env:[] }); plugins run isolated and get declared ∩ granted, nothing else.
+    tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {} },
     // v23: Model Context Protocol servers. OFF by default (no servers). Each
     // entry: { command, args?, env?, disabled?, timeoutMs? }. A server's tools
     // become agent tools namespaced mcp__<name>__<tool>, behind the same safety
@@ -87,8 +90,51 @@ function deepMerge(base, over) {
   return out
 }
 
+// ---------------------------------------------------------------------------
+// v21.1 P0 — project-local config is UNTRUSTED input.
+//
+// ./forge.config.json is committed to the repository the user just cloned:
+// whoever wrote it is not the user. v20 deep-merged it with full authority,
+// so a checked-in file could set tools.allowSudo / assumeYes /
+// allowOutsideProject / fetchPrivateUrls (turning every guard off before the
+// first prompt) and register mcp/lsp `servers` — arbitrary commands spawned on
+// start-up. Project config may still tune the agent (models, steps, skills,
+// retrieval knobs); it may never WIDEN a security boundary or launch processes.
+// ---------------------------------------------------------------------------
+
+/** tools.* switches that only the user-level config (or env) may set. */
+const PRIVILEGED_TOOL_KEYS = ["allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify"]
+/** top-level sections a project file may not touch at all. */
+const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval"]
+
+/**
+ * Strip everything a project-local config is not allowed to set.
+ * Returns { cfg, dropped } — `dropped` lists the ignored dotted keys so the
+ * user is told, instead of silently getting a different configuration.
+ */
+export function sanitizeProjectConfig(proj) {
+  const dropped = []
+  if (!proj || typeof proj !== "object" || Array.isArray(proj)) return { cfg: null, dropped }
+  const out = { ...proj }
+  for (const k of PRIVILEGED_SECTIONS) if (k in out) { dropped.push(k); delete out[k] }
+  if (out.tools && typeof out.tools === "object" && !Array.isArray(out.tools)) {
+    out.tools = { ...out.tools }
+    for (const k of PRIVILEGED_TOOL_KEYS) if (k in out.tools) { dropped.push(`tools.${k}`); delete out.tools[k] }
+    // a project may DISABLE tools (narrowing) but may not un-deprecate or
+    // re-enable experimental ones for everyone who clones it
+    if ("experimental" in out.tools && out.tools.experimental === true) { dropped.push("tools.experimental"); delete out.tools.experimental }
+  } else if ("tools" in out && out.tools !== undefined) {
+    dropped.push("tools"); delete out.tools
+  }
+  // a project may not point the search tool at an arbitrary URL that then
+  // receives the model's queries (exfil channel)
+  if (out.tools && "searchUrl" in out.tools) { dropped.push("tools.searchUrl"); delete out.tools.searchUrl }
+  return { cfg: out, dropped }
+}
+
 export function loadConfig(explicitPath) {
   const sources = []
+  const ignored = []
   let cfg = defaultConfig()
 
   const userPath = explicitPath || USER_CONFIG_PATH
@@ -99,17 +145,21 @@ export function loadConfig(explicitPath) {
   }
 
   const projPath = path.join(process.cwd(), PROJECT_CONFIG_NAME)
-  const projCfg = readJson(projPath)
-  if (projCfg) {
-    cfg = deepMerge(cfg, projCfg)
-    sources.push(projPath)
+  const projRaw = readJson(projPath)
+  if (projRaw) {
+    const { cfg: projCfg, dropped } = sanitizeProjectConfig(projRaw)
+    if (projCfg) {
+      cfg = deepMerge(cfg, projCfg)
+      sources.push(projPath)
+    }
+    for (const k of dropped) ignored.push(`${PROJECT_CONFIG_NAME}: "${k}" ignored — only ~/.forge/config.json may set it`)
   }
 
   if (process.env.FORGE_PROVIDER && !cfg.activeProvider) {
     cfg.activeProvider = process.env.FORGE_PROVIDER
     sources.push("env:FORGE_PROVIDER")
   }
-  return { config: cfg, sources }
+  return { config: cfg, sources, ignored }
 }
 
 /** Persist config with 0600 perms — it may hold API keys. */

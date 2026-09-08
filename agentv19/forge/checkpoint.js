@@ -20,6 +20,35 @@ import crypto from "node:crypto"
 import zlib from "node:zlib"
 import { execFileSync } from "node:child_process"
 import { DEFAULT_DIR } from "./config.js"
+import { secureWriteFile } from "./securefs.js"
+
+/**
+ * v21.1 P0: write a restored file WITHOUT following symlinks. Between the
+ * snapshot and the restore the model may have run arbitrary shell commands,
+ * so `f.path` can meanwhile have become a symlink pointing anywhere — a plain
+ * writeFileSync would follow it and drop the checkpoint's content outside the
+ * project. Anchored at the checkpoint's cwd when the target lives inside it,
+ * otherwise at the target's own real parent; the final component is never
+ * followed (securefs).
+ */
+function restoreWrite(target, data, cwd) {
+  const abs = path.resolve(target)
+  const anchor = (() => {
+    const root = path.resolve(cwd || process.cwd())
+    const rel = path.relative(root, abs)
+    return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? root : path.dirname(abs)
+  })()
+  fs.mkdirSync(path.dirname(abs), { recursive: true })
+  return secureWriteFile(anchor, abs, data)
+}
+
+/** Internal state files under ~/.forge: atomic (temp + rename) so a crash never leaves a half-written manifest. */
+function writeStateAtomic(file, text) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`
+  fs.writeFileSync(tmp, text, { mode: 0o600 })
+  try { const fd = fs.openSync(tmp, "r"); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) } } catch {}
+  fs.renameSync(tmp, file)
+}
 
 export const CHECKPOINTS_DIR = path.join(DEFAULT_DIR, "checkpoints")
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -123,7 +152,7 @@ export function snapshotBefore(files, cwd, created = [], runId = null) {
       const info = fileInfo(f)
       manifest.files.push({ path: f, backup: null, tooLarge: true, ...(info ? { size: info.size, sha: info.sha, mtime: info.mtime } : {}) })
     })
-    fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 1))
+    writeStateAtomic(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 1))
     prune()
     return id
   } catch {
@@ -144,7 +173,7 @@ export function boundaryCheckpoint(cwd = process.cwd(), { runId = null, label = 
       ...(head ? { gitHead: head } : {}),
       files: [],
     }
-    fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 1))
+    writeStateAtomic(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 1))
     prune()
     return id
   } catch {
@@ -170,7 +199,7 @@ export function sealCreated(checkpointId, cwd) {
         }
       }
     }
-    if (changed) fs.writeFileSync(mFile, JSON.stringify(m, null, 1))
+    if (changed) writeStateAtomic(mFile, JSON.stringify(m, null, 1))
   } catch {}
   void cwd
 }
@@ -254,8 +283,7 @@ export function restoreTransactional(checkpointId, { cwd = null } = {}) {
         const data = (f.gz || String(f.backup).endsWith(".gz"))
           ? zlib.gunzipSync(fs.readFileSync(src))
           : fs.readFileSync(src)
-        fs.mkdirSync(path.dirname(f.path), { recursive: true })
-        fs.writeFileSync(f.path, data)
+        restoreWrite(f.path, data, m.cwd)
         restore.ok++
         result.restored.push(f.path)
       } catch (e) {
@@ -380,12 +408,8 @@ function restoreOne(c) {
       }
       const src = path.join(CHECKPOINTS_DIR, c.id, f.backup)
       if (fs.existsSync(src)) {
-        fs.mkdirSync(path.dirname(f.path), { recursive: true })
-        if (f.gz || f.backup.endsWith(".gz")) {
-          fs.writeFileSync(f.path, zlib.gunzipSync(fs.readFileSync(src)))
-        } else {
-          fs.copyFileSync(src, f.path)
-        }
+        const data = (f.gz || f.backup.endsWith(".gz")) ? zlib.gunzipSync(fs.readFileSync(src)) : fs.readFileSync(src)
+        restoreWrite(f.path, data, c.cwd)
         restored++
       }
     }

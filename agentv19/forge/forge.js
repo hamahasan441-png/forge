@@ -198,7 +198,10 @@ async function onboardIfMissing(config) {
 const cmd = (positional[0] || "").toLowerCase()
 
 async function main() {
-  const { config } = loadConfig(flags.config ? String(flags.config) : undefined)
+  const { config, ignored: ignoredConfig } = loadConfig(flags.config ? String(flags.config) : undefined)
+  // v21.1: say so when a project's forge.config.json tried to widen a security
+  // boundary or launch servers — never silently, never honoured
+  for (const line of ignoredConfig || []) console.error(`\x1b[33m⚠ ${line}\x1b[0m`)
 
   if (flags.version || flags.v || cmd === "version") {
     console.log(`forge v${VERSION} (node ${process.version})`)
@@ -819,13 +822,16 @@ async function main() {
         if (!entries.length) { console.log(dim("  (empty)")); return }
         entries.forEach((e, i) => {
           const text = e.text.replace(/\n\s*/g, " ⏎ ")
-          console.log(`  ${bold(String(i + 1).padStart(3))}. ${text.slice(0, 100)}${text.length > 100 ? dim("…") : ""}`)
+          const prov = e.provenance ? dim(`  [${e.provenance.source}${e.provenance.at ? " " + e.provenance.at.slice(0, 10) : ""}]`) : ""
+          console.log(`  ${bold(String(i + 1).padStart(3))}. ${text.slice(0, 100)}${text.length > 100 ? dim("…") : ""}${prov}`)
         })
       }
       if (sub === "list") {
         if (JSON_OUT) {
+          // entries stay plain strings (v20 contract); provenance is a parallel array
           const dump = (t) => memoryEntries(t, cwd).map((e) => e.text)
-          emitJson(flags.all ? { global: dump("global"), project: dump("project") } : { tier, entries: dump(tier) })
+          const prov = (t) => memoryEntries(t, cwd).map((e) => e.provenance ?? null)
+          emitJson(flags.all ? { global: dump("global"), project: dump("project"), provenance: { global: prov("global"), project: prov("project") } } : { tier, entries: dump(tier), provenance: prov(tier) })
           return
         }
         if (flags.all) { showTier("global"); console.log(); showTier("project") }
@@ -836,7 +842,7 @@ async function main() {
       if (sub === "add") {
         const text = positional.slice(2).join(" ").trim() || (typeof flags.text === "string" ? flags.text : "")
         if (!text) { err('nothing to add — forge memory add "your note" [--project]'); process.exit(1); return }
-        const r = appendMemory(tier, text, cwd)
+        const r = appendMemory(tier, text, cwd, { source: "cli" })
         if (!r.ok) { err(`could not save: ${r.error}`); process.exit(1); return }
         ok(r.deduped ? `already in ${tier} memory (no duplicate added)` : `saved to ${tier} memory`)
         return

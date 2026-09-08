@@ -19,6 +19,8 @@
  * language server observes code, it never mutates it.
  */
 import { spawn } from "node:child_process"
+import { childEnv } from "./childenv.js"
+import { VERSION } from "./version.js"
 import fsMod from "node:fs"
 import path from "node:path"
 import { pathToFileURL, fileURLToPath } from "node:url"
@@ -138,7 +140,7 @@ class LspClient {
 
   async start() {
     if (!this.command || typeof this.command !== "string") throw new Error(`LSP server "${this.name}" has no command`)
-    this.child = spawn(this.command, this.args, { cwd: this.cwd, env: { ...process.env, ...this.env }, stdio: ["pipe", "pipe", "pipe"] })
+    this.child = spawn(this.command, this.args, { cwd: this.cwd, env: childEnv(this.env), stdio: ["pipe", "pipe", "pipe"] })
     this.child.stdout.on("data", (d) => this._onData(d))
     this.child.on("error", (e) => this._fail(`could not launch (${e.message})`))
     this.child.on("exit", (code, sig) => this._fail(`exited (${sig || "code " + code})`))
@@ -148,7 +150,7 @@ class LspClient {
       processId: process.pid,
       rootUri: this.rootUri,
       workspaceFolders: [{ uri: this.rootUri, name: "root" }],
-      clientInfo: { name: "forge", version: "23" },
+      clientInfo: { name: "forge", version: VERSION },
       capabilities: {
         textDocument: {
           synchronization: { didSave: false, dynamicRegistration: false },

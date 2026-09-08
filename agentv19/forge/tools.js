@@ -22,19 +22,20 @@
  *   - memory: hierarchical (global + project) with relevance retrieval and
  *     structured failure learning
  */
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
 import fs from "node:fs"
 import { VERSION } from "./version.js"
 import os from "node:os"
 import path from "node:path"
-import { snapshotBefore, sealCreated } from "./checkpoint.js"
+import { snapshotBefore, sealCreated, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun } from "./shellguard.js"
-import { assertFetchableUrl } from "./netguard.js"
+import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
 import { DEFAULT_DIR } from "./config.js"
-import { appendMemory, recordLearning, projectMemoryPath } from "./memory.js"
+import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
+import { secureWriteFile, secureUnlink, SecureFsError } from "./securefs.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -134,6 +135,63 @@ export function safePath(ctx, p, { write = false } = {}) {
     }
   }
   return { ok: true, abs, real }
+}
+
+// ---------------------------------------------------------------------------
+// v21.1 P0 — secure project writes (TOCTOU / symlink-race resistant)
+// ---------------------------------------------------------------------------
+//
+// safePath() is the POLICY check (boundary, sensitive files, opt-outs). It is
+// not, by itself, a safe write: it computes realpath at validation time and a
+// later writeFileSync() follows whatever the path resolves to at WRITE time.
+// projectWrite()/projectUnlink() close that window by anchoring the parent
+// directory with O_NOFOLLOW component-by-component, verifying the anchored
+// directory is still inside the project, and committing through a
+// descriptor-relative temp → fsync → rename (see securefs.js).
+//
+// In-project symlinks are still honoured the way the old code honoured them:
+// a link whose target is INSIDE the project is followed once (via realpath,
+// then re-verified) — a link that points outside is refused.
+
+function resolveWriteAnchor(ctx, abs) {
+  const root = ctx.root ?? ctx.cwd
+  let rootReal
+  try { rootReal = fs.realpathSync(root) } catch { rootReal = path.resolve(root) }
+  const real = realPathOf(abs)
+  if (insideDir(real, rootReal)) return { root: rootReal, target: real }
+  if (insideDir(path.resolve(abs), rootReal) && !fs.existsSync(abs)) return { root: rootReal, target: path.resolve(abs) }
+  if (!ctx.allowOutsideProject) {
+    throw new SecureFsError(`write target escapes the project directory (${path.relative(rootReal, real).slice(0, 60)})`, "EESCAPE")
+  }
+  // user opted out of the project boundary: still no symlink-following on the
+  // final component, still atomic — anchored at the target's real parent
+  return { root: path.dirname(real), target: real }
+}
+
+/** Secure, atomic write of `abs` (already policy-checked by safePath). Returns the physical path written. */
+function projectWrite(ctx, abs, content) {
+  const { root, target } = resolveWriteAnchor(ctx, abs)
+  return secureWriteFile(root, target, content).real
+}
+
+/** Secure unlink of `abs` (already policy-checked). Returns true when removed. */
+function projectUnlink(ctx, abs) {
+  const { root, target } = resolveWriteAnchor(ctx, abs)
+  return secureUnlink(root, target)
+}
+
+function writeErrorText(e, p) {
+  if (e instanceof SecureFsError) {
+    if (e.code === "EESCAPE") return `ERROR: write target escapes the project directory — ${e.message}`
+    if (e.code === "ESYMLINK") return `ERROR: refusing to write through a symbolic link (${e.component ?? path.basename(p)}) — the path changed underneath the tool`
+    if (e.code === "ENOTDIR") return `ERROR: a path component is not a directory (${e.component ?? p})`
+    if (e.code === "EISDIR") return `ERROR: is a directory: ${p}`
+    return `ERROR: ${e.message}`
+  }
+  if (e?.code === "EACCES" || e?.code === "EPERM") return `ERROR: permission denied writing ${p}`
+  if (e?.code === "ENOSPC") return `ERROR: no space left on device writing ${p}`
+  if (e?.code === "ELOOP") return `ERROR: refusing to write through a symbolic link (${p})`
+  return `ERROR: write failed (${e?.code ?? "?"}): ${String(e?.message ?? e).slice(0, 160)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +490,7 @@ export function makeToolContext(opts = {}) {
     allowOutsideProject = false,
     allowSudo = false,
     assumeYes = false,
+    allowNetworkUpload = false, // v21.1: curl -d / wget --post-file / scp … from the model
     fetchPrivateUrls = process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec = 180,
     maxParallelDelegates = 2,
@@ -454,7 +513,7 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     mode,
-    allowOutsideProject, allowSudo, assumeYes, fetchPrivateUrls,
+    allowOutsideProject, allowSudo, assumeYes, allowNetworkUpload, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,
@@ -494,6 +553,31 @@ function cap(s, limit) {
 // bash — structural risk classification (v20 shellguard)
 // ---------------------------------------------------------------------------
 
+/**
+ * Truncate a command's output while KEEPING its trailing status marker.
+ * v20 appended `[exit code: N]` and then ran the whole string through cap():
+ * once the output exceeded maxToolOutput the marker was cut off, agent.js
+ * (`/\[exit code: (-?\d+)\]/`) saw none, recorded exitCode 0 / passed:true and
+ * a failing test-suite counted as verified. The marker now travels outside the
+ * truncation window.
+ */
+function capWithMarker(body, marker, limit) {
+  const capped = cap(body || "(no output)", limit)
+  return marker ? `${capped}\n${marker}` : capped
+}
+
+/**
+ * Terminate a child AND everything it spawned. The command runs via
+ * /bin/sh -c inside its own process group (detached:true), so a single
+ * negative-PID signal reaches `sleep 300 &`-style grandchildren that used to
+ * survive the parent's SIGKILL and leak after a timeout.
+ */
+function killTree(child, signal = "SIGKILL") {
+  if (!child || child.pid == null) return
+  try { process.kill(-child.pid, signal); return } catch {}
+  try { child.kill(signal) } catch {}
+}
+
 async function runBash(ctx, command, timeoutSec) {
   if (ctx.readOnly) {
     const mutationCheck = getMutationClass("bash", { command })
@@ -501,25 +585,46 @@ async function runBash(ctx, command, timeoutSec) {
       return `BLOCKED: write tools are disabled in this read-only agent — bash command "${String(command).slice(0, 80)}" is a filesystem mutation. Read-only workers may run approved verification commands (test/build/lint) but not arbitrary mutations.`
     }
   }
-  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes })
+  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload })
   if (!verdict.ok) return verdict.reason
   const t = Math.min(300, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
   if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"
   return new Promise((resolve) => {
-    // v20.4: the user's Ctrl+C (ctx.signal) terminates the child immediately —
-    // honest cancellation instead of "waiting for the timeout"
-    const opts = { cwd: ctx.cwd, timeout: t, maxBuffer: 4 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, TERM: "dumb" } }
-    if (ctx.signal) opts.signal = ctx.signal
-    execFile("/bin/sh", ["-c", command], opts, (error, stdout, stderr) => {
+    const MAX_BUF = 4 * 1024 * 1024
+    let stdout = "", stderr = "", bytes = 0, overflow = false, done = false
+    let timedOut = false, aborted = false
+    // detached → own process group, so killTree() can reach grandchildren
+    const child = spawn("/bin/sh", ["-c", command], { cwd: ctx.cwd, env: { ...process.env, TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
+    const timer = setTimeout(() => { timedOut = true; killTree(child) }, t)
+    const onAbort = () => { aborted = true; killTree(child) }
+    if (ctx.signal) ctx.signal.addEventListener("abort", onAbort, { once: true })
+    const collect = (which) => (chunk) => {
+      if (overflow) return
+      bytes += chunk.length
+      if (bytes > MAX_BUF) { overflow = true; killTree(child); return }
+      if (which === "out") stdout += chunk; else stderr += chunk
+    }
+    child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8")
+    child.stdout.on("data", collect("out")); child.stderr.on("data", collect("err"))
+    const finish = (code, sig, spawnErr) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      if (ctx.signal) ctx.signal.removeEventListener("abort", onAbort)
       let out = ""
       if (stdout) out += stdout
       if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr
-      if (error && (error.name === "AbortError" || error.code === "ABORT_ERR")) return resolve(`ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`)
-      if (error && !out) out = String(error.message)
-      else if (error && error.killed) out += `\n[command timed out after ${t / 1000}s]`
-      else if (error && typeof error.code === "number") out += `\n[exit code: ${error.code}]`
-      resolve(cap(out || "(no output)", ctx.maxToolOutput))
-    })
+      if (aborted) return resolve(`ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`)
+      if (spawnErr) return resolve(`ERROR: ${spawnErr.message}\n[exit code: 127]`)
+      let marker = ""
+      if (timedOut) marker = `[command timed out after ${t / 1000}s]\n[exit code: 124]`
+      else if (overflow) marker = `[output exceeded ${MAX_BUF} bytes — process killed]\n[exit code: 1]`
+      else if (typeof code === "number" && code !== 0) marker = `[exit code: ${code}]`
+      else if (code == null && sig) marker = `[killed by ${sig}]\n[exit code: 137]`
+      resolve(capWithMarker(out, marker, ctx.maxToolOutput))
+    }
+    child.on("error", (e) => finish(null, null, e))
+    child.on("close", (code, sig) => finish(code, sig, null))
   })
 }
 
@@ -743,10 +848,14 @@ function write_file(ctx, args) {
   // v20: one checkpoint covers the whole mutation — existing files get
   // backups, newly created files get tracked for undo-removal
   const id = snapshotBefore([p], ctx.cwd, existed ? [] : [p], ctx.runId)
-  fs.mkdirSync(path.dirname(p), { recursive: true })
-  fs.writeFileSync(p, args.content ?? "")
+  try {
+    projectWrite(ctx, p, args.content ?? "")
+  } catch (e) {
+    return writeErrorText(e, p)
+  }
   if (id) sealCreated(id, ctx.cwd)
-  return `OK wrote ${p} (${(args.content ?? "").length} bytes${existed ? "" : ", created"})`
+  const cpNote = !id && existed ? " — ⚠ checkpoint failed: this change cannot be undone" : ""
+  return `OK wrote ${p} (${(args.content ?? "").length} bytes${existed ? "" : ", created"})${cpNote}`
 }
 
 function edit_file(ctx, args) {
@@ -761,10 +870,14 @@ function edit_file(ctx, args) {
   if (!args.replace_all && src.indexOf(oldS) !== src.lastIndexOf(oldS)) {
     return "ERROR: old string appears multiple times — add more surrounding context to make it unique, or set replace_all=true"
   }
-  snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
+  const cpId = snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
   const out = args.replace_all ? src.split(oldS).join(newS) : src.replace(oldS, newS)
-  fs.writeFileSync(p, out)
-  return `OK edited ${p}`
+  try {
+    projectWrite(ctx, p, out)
+  } catch (e) {
+    return writeErrorText(e, p)
+  }
+  return `OK edited ${p}${cpId ? "" : " — ⚠ checkpoint failed: this change cannot be undone"}`
 }
 
 // --- shared walk policy (v20.2 P1-2) ---------------------------------------
@@ -926,25 +1039,28 @@ async function fetch_url(ctx, args) {
   if (!/^https?:\/\//i.test(url)) return "ERROR: only absolute http(s) URLs are supported"
   let host = ""
   try { host = new URL(url).hostname } catch { return "ERROR: malformed URL" }
-  // v20 SSRF guard: resolve the host, then validate EVERY address (private,
-  // loopback, link-local, CGNAT, IPv6 ULA/link-local, IPv4-mapped) — hostname
-  // strings alone are not trusted. DNS rebinding is covered because all
-  // resolved records must pass. Local stacks (Ollama, SearXNG) can opt in
-  // via tools.fetchPrivateUrls / FORGE_ALLOW_PRIVATE_URLS=1.
-  const verdict = await assertFetchableUrl(url, { allowPrivate: !!ctx.fetchPrivateUrls })
-  if (!verdict.ok) return `BLOCKED (SSRF guard): ${verdict.reason}. If this is an intentional local fetch, set tools.fetchPrivateUrls: true or FORGE_ALLOW_PRIVATE_URLS=1.`
+  // v21.1 SSRF guard with DNS PINNING (netguard.pinnedFetch): the host is
+  // resolved ONCE, every record is validated (private, loopback, link-local,
+  // CGNAT, multicast, IPv6 ULA/link-local, IPv4-mapped/NAT64/6to4/Teredo…),
+  // and the socket is pinned to exactly those addresses — the fetch never
+  // performs a second, uncontrolled DNS lookup (no rebinding window). Every
+  // redirect hop is resolved, validated and pinned again. Local stacks
+  // (Ollama, SearXNG) can opt in via tools.fetchPrivateUrls /
+  // FORGE_ALLOW_PRIVATE_URLS=1.
   try {
-    const res = await fetch(url, {
+    const res = await pinnedFetch(url, {
       headers: { "user-agent": `forge-agent/${VERSION}`, accept: "text/*,application/json;q=0.9,*/*;q=0.5" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(15000),
+      allowPrivate: !!ctx.fetchPrivateUrls,
+      timeoutMs: 15000,
+      totalTimeoutMs: 30000,
+      maxRedirects: 5,
+      maxBytes: 2 * 1024 * 1024,
+      signal: ctx.signal ?? undefined,
     })
-    if (!res.ok) return `ERROR: HTTP ${res.status} for ${url}`
-    const ct = res.headers.get("content-type") || ""
+    if (!res.ok) return `ERROR: HTTP ${res.status} for ${res.url}`
+    const ct = String(res.headers["content-type"] || "")
     if (!/text|json|xml|javascript|csv|markdown|html|yaml/i.test(ct)) return `ERROR: non-text content-type (${ct}) — binary not supported`
-    const buf = await res.arrayBuffer()
-    if (buf.byteLength > 2 * 1024 * 1024) return `ERROR: response too large (${Math.round(buf.byteLength / 1024)}KB, limit 2MB)`
-    let text = new TextDecoder().decode(buf)
+    let text = new TextDecoder().decode(res.body)
     if (/html/i.test(ct) || /^\s*<(!doctype|html)/i.test(text)) {
       text = text
         .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -955,8 +1071,15 @@ async function fetch_url(ctx, args) {
         .replace(/\n\s*\n+/g, "\n")
         .trim()
     }
-    return cap(`URL: ${url}\nContent-Type: ${ct}\n\n${text}`, ctx.maxToolOutput)
+    const via = res.hops.length > 1 ? `\n(redirected ${res.hops.length - 1}× → ${res.url})` : ""
+    return cap(`URL: ${url}${via}\nContent-Type: ${ct}\n\n${text}`, ctx.maxToolOutput)
   } catch (e) {
+    if (e instanceof PinnedFetchError && e.blocked) {
+      const hop = e.hop ? ` (redirect hop ${e.hop} → ${String(e.url).slice(0, 120)})` : ""
+      return `BLOCKED (SSRF guard): ${e.message}${hop}. If this is an intentional local fetch, set tools.fetchPrivateUrls: true or FORGE_ALLOW_PRIVATE_URLS=1.`
+    }
+    if (e instanceof PinnedFetchError && e.code === "ETOOLARGE") return `ERROR: ${e.message} (limit 2MB)`
+    if (e instanceof PinnedFetchError && e.code === "ABORT_ERR") return "ERROR: cancelled — fetch stopped by user interrupt"
     return `ERROR: fetch failed: ${String(e?.message ?? e).slice(0, 200)}`
   }
 }
@@ -1028,16 +1151,22 @@ async function web_search(ctx, args) {
   if (!q) return "ERROR: empty query"
   const max = Math.min(10, args.max || 6)
   const tried = []
-  // backend 1: configured endpoint (SearXNG JSON/HTML or mock in tests)
-  // (user-configured URL — trusted, no SSRF guard here)
+  // v21.1: both backends go through pinnedFetch — same DNS pinning, redirect
+  // validation and size/time bounds as fetch_url. The configured endpoint is
+  // the USER's (config-level, never model-controlled) so a private/loopback
+  // SearXNG on the LAN is allowed for it; the query string is model-controlled
+  // but cannot change the host. Redirects from either backend are validated
+  // like any other hop (a public search endpoint may not bounce us to a
+  // metadata address).
+  const searchFetch = (url, headers, allowPrivate) => pinnedFetch(url, { headers, timeoutMs: 12000, totalTimeoutMs: 15000, maxBytes: 1024 * 1024, maxRedirects: 3, allowPrivate, signal: ctx.signal ?? undefined })
   if (ctx.searchUrl) {
     const url = ctx.searchUrl + (ctx.searchUrl.includes("?") ? "&" : "?") + "q=" + encodeURIComponent(q)
     tried.push(url)
     try {
-      const res = await fetch(url, { headers: { "user-agent": `forge-agent/${VERSION}`, accept: "application/json,text/html;q=0.8" }, signal: AbortSignal.timeout(12000) })
+      const res = await searchFetch(url, { "user-agent": `forge-agent/${VERSION}`, accept: "application/json,text/html;q=0.8" }, ctx.fetchPrivateUrls === true ? true : "first-hop")
       if (res.ok) {
-        const ct = res.headers.get("content-type") || ""
-        const body = await res.text()
+        const ct = String(res.headers["content-type"] || "")
+        const body = res.body.toString("utf8")
         const results = []
         if (/json/i.test(ct)) {
           const j = JSON.parse(body)
@@ -1059,9 +1188,9 @@ async function web_search(ctx, args) {
   try {
     const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(q)
     tried.push(url)
-    const res = await fetch(url, { headers: { "user-agent": `Mozilla/5.0 (X11; Linux x86_64) forge/${VERSION}` }, signal: AbortSignal.timeout(12000) })
+    const res = await searchFetch(url, { "user-agent": `Mozilla/5.0 (X11; Linux x86_64) forge/${VERSION}` }, ctx.fetchPrivateUrls === true)
     if (!res.ok) throw new Error("HTTP " + res.status)
-    const body = await res.text()
+    const body = res.body.toString("utf8")
     const results = []
     const re = /<a[^>]+href="([^"]+)"[^>]*class="result-link"[^>]*>([\s\S]*?)<\/a>/gi
     let m
@@ -1108,9 +1237,13 @@ function multi_edit(ctx, args) {
     if (e.replace_all) { applied += out.split(e.old).length - 1; out = out.split(e.old).join(e.new ?? "") }
     else { out = out.replace(e.old, e.new ?? ""); applied++ }
   }
-  snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
-  fs.writeFileSync(p, out)
-  return `OK multi_edit ${p}: ${applied} replacement(s), ${edits.length} edit(s), atomic`
+  const cpId = snapshotBefore([p], ctx.cwd, [], ctx.runId) // v16: auto-checkpoint
+  try {
+    projectWrite(ctx, p, out)
+  } catch (e) {
+    return writeErrorText(e, p)
+  }
+  return `OK multi_edit ${p}: ${applied} replacement(s), ${edits.length} edit(s), atomic${cpId ? "" : " — ⚠ checkpoint failed: this change cannot be undone"}`
 }
 
 // --- v16 apply_patch -----------------------------------------------------------
@@ -1166,15 +1299,33 @@ function apply_patch(ctx, args) {
     applied.created.map((t) => safePath(ctx, t).abs),
     ctx.runId, // v20.4 fix: patch checkpoints were the only ones missing the run tag (→ /undo --run skipped them)
   )
+  // Per-file writes are atomic (temp → fsync → rename, symlink-safe). If one
+  // file cannot be written the already-written files are rolled back from
+  // the checkpoint so the patch stays all-or-nothing on disk too.
+  const written = []
   for (const [t, content] of applied.results) {
     const p = safePath(ctx, t, { write: true }).abs
-    fs.mkdirSync(path.dirname(p), { recursive: true })
-    fs.writeFileSync(p, content)
+    try {
+      projectWrite(ctx, p, content)
+      written.push(p)
+    } catch (e) {
+      let rolled = ""
+      if (checkpointId) {
+        try {
+          const r = restoreTransactional(checkpointId, { cwd: ctx.cwd })
+          rolled = r?.ok ? " — earlier files of this patch were rolled back" : ` — ROLLBACK ${r?.status ?? "FAILED"}: ${written.length} file(s) may be partially patched, run forge undo`
+        } catch { rolled = ` — ROLLBACK FAILED: ${written.length} file(s) may be partially patched, run forge undo` }
+      }
+      return `${writeErrorText(e, p)}${rolled}`
+    }
   }
+  const unlinkFailed = []
   for (const t of applied.deleted) {
-    try { fs.unlinkSync(safePath(ctx, t, { write: true }).abs) } catch {}
+    const p = safePath(ctx, t, { write: true }).abs
+    try { projectUnlink(ctx, p) } catch (e) { unlinkFailed.push(`${t} (${e?.code ?? e?.message})`) }
   }
   if (checkpointId) sealCreated(checkpointId, ctx.cwd)
+  if (unlinkFailed.length) return `ERROR: patch applied but could not delete ${unlinkFailed.join(", ")} — files were written; run forge undo to revert`
   const parts = []
   if (applied.created.length) parts.push(`created ${applied.created.join(", ")}`)
   if (applied.deleted.length) parts.push(`deleted ${applied.deleted.join(", ")}`)
@@ -1255,6 +1406,11 @@ function think(_ctx, args) {
 
 // --- memory (v20: hierarchical + learning) ----------------------------------------
 
+/** Who is writing memory: the model via a tool (sub-agent or not), tagged with the run. */
+function memoryProvenance(ctx) {
+  return { source: ctx.subAgent ? "subagent" : "tool", runId: ctx.runId ?? null }
+}
+
 function memory(ctx, args) {
   const action = args.action || "read"
   if (ctx.readOnly && action !== "read") {
@@ -1276,19 +1432,19 @@ function memory(ctx, args) {
   if (action === "append") {
     const text = String(args.text ?? "").trim().slice(0, 2000)
     if (!text) return "ERROR: no text to append"
-    const r = appendMemory(scope, text, ctx.cwd)
+    const r = appendMemory(scope, text, ctx.cwd, memoryProvenance(ctx))
     return r.ok ? `OK ${scope} memory appended: "${text.slice(0, 80)}"` : `ERROR: ${r.error}`
   }
   if (action === "replace") {
-    const text = redact(String(args.text ?? "").slice(0, 4000))
-    try { fs.mkdirSync(path.dirname(globalPath), { recursive: true }); fs.writeFileSync(globalPath, text + (text ? "\n" : "")) } catch (e) { return `ERROR: ${e.message}` }
-    return `OK memory replaced (${text.length} chars)`
+    const text = String(args.text ?? "").slice(0, 4000)
+    const r = replaceMemory(globalPath, text, ctx.cwd, memoryProvenance(ctx)) // v21.1: atomic + provenance, same pipeline as append
+    return r.ok ? `OK memory replaced (${r.chars} chars)` : `ERROR: ${r.error}`
   }
   if (action === "learn") {
     const problem = String(args.problem ?? "").trim()
     const fix = String(args.fix ?? "").trim()
     if (!problem || !fix) return "ERROR: learn needs problem + fix (root_cause recommended)"
-    const r = recordLearning({ problem, rootCause: args.root_cause ?? args.rootCause ?? "", fix }, ctx.cwd)
+    const r = recordLearning({ problem, rootCause: args.root_cause ?? args.rootCause ?? "", fix }, ctx.cwd, memoryProvenance(ctx))
     return r.ok ? `OK recorded learning to project memory (${r.file}) — future tasks can retrieve it` : `ERROR: ${r.error}`
   }
   return `ERROR: unknown action "${action}" (read|append|replace|learn)`
@@ -1392,7 +1548,7 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
   results.push({ name: "load_skill", ok: null, ms: 0, note: "needs skills dir" })
   // network tools: SKIP cleanly when offline
   try {
-    await fetch("https://example.com", { signal: AbortSignal.timeout(4000) })
+    await pinnedFetch("https://example.com", { timeoutMs: 4000, totalTimeoutMs: 4000, maxBytes: 65536 })
     results.push(await t("fetch_url", () => execTool(ctx, "fetch_url", { url: "https://example.com" })))
     if (searchUrl) {
       results.push(await t("web_search", () => execTool(ctx, "web_search", { query: "forge cli", max: 2 })))

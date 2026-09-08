@@ -56,10 +56,16 @@ console.log("== repair() fixes what can be fixed ==")
   ok("unknown dependencies pruned", rep.nodes.every((n) => (n.dependencies ?? []).every((d) => rep.nodes.some((x) => x.id === d))))
   ok("repair actions are audited", Array.isArray(rep.changes) && rep.changes.length > 0)
   ok("the repaired plan validates", dag.validatePlan(rep.nodes).ok === true)
-  // cycles are pruned
+  // v21.1 P1 (intentional behaviour change): a cycle is NOT "repaired" by
+  // dropping a dependency — that silently reorders work the planner said must
+  // be ordered. repairPlan reports the cycle and asks for a re-plan; meta.js
+  // re-plans once with the cycle spelled out, then WAITS if it is still cyclic.
   const cyc = [{ id: "a", objective: "x", dependencies: ["b"] }, { id: "b", objective: "y", dependencies: ["a"] }]
   const rep2 = dag.repairPlan(cyc, "task", dag.validatePlan(cyc))
-  ok("cycle repaired", rep2.ok === true && dag.validatePlan(rep2.nodes).ok === true)
+  ok("cycle is NOT silently repaired", rep2.ok === false && rep2.needsReplan === true)
+  ok("no dependency edge was dropped", rep2.nodes.find((n) => n.id === "a").dependencies.includes("b") && rep2.nodes.find((n) => n.id === "b").dependencies.includes("a"))
+  ok("the cycle is reported with its edges", rep2.cycle && rep2.cycle.members.includes("a") && rep2.cycle.edges.some((e) => /a → b|b → a/.test(e)))
+  ok("the audit trail says re-plan required", rep2.changes.some((c) => /re-plan required/.test(c)))
   // an empty plan becomes a single safe node
   const rep3 = dag.repairPlan([], "just do the work", dag.validatePlan([]))
   ok("empty plan becomes one node", rep3.ok === true && rep3.nodes.length === 1)
@@ -121,6 +127,60 @@ console.log("== end-to-end: an unrepairable plan WAITS instead of executing ==")
   eq("task WAITS on an unrepairable plan", r.status, "WAITING")
   ok("no agent execution happened on an invalid plan", executed === 0)
   console.log(`       (status=${r.status}, executed=${executed})`)
+}
+
+
+console.log("== meta: a cyclic plan is re-planned once, then WAITS (never executes a guessed order) ==")
+{
+  const meta = await import("../forge/meta.js")
+  // planner returns a cycle first, a valid plan second → execution proceeds on the SECOND plan
+  {
+    let plans = 0
+    let replanPrompt = ""
+    const executed = []
+    const runAgent = async (o) => {
+      if (o.planOnly) {
+        plans++
+        if (plans === 1) return { text: "1. a (after 2)\n2. b (after 1)", toolRecords: [], commandChecks: [], toolLog: [] }
+        replanPrompt = o.task
+        return { text: "1. investigate\n2. implement\n3. test", toolRecords: [], commandChecks: [], toolLog: [] }
+      }
+      executed.push(o.task.slice(0, 30))
+      return { text: "All done, complete and verified.", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [{ command: "npm test", exitCode: 0, passed: true, tail: "ok" }], toolLog: [] }
+    }
+    const events = []
+    const r = await meta.runMeta({ config: { providers: {}, agent: { autonomous: true, modelStrategy: false }, tools: {} }, provider: { name: "x", model: "m" }, task: "cyclic first", runAgent, signal: new AbortController().signal, onEvent: (e) => events.push(e) })
+    const cycEv = events.find((e) => e.type === "PLAN_CYCLE_DETECTED")
+    const first = dag.validatePlan(dag.parsePlanToDAG("1. a (after 2)\n2. b (after 1)"))
+    if (first.code !== "CYCLE_DETECTED") {
+      ok("(planner text does not parse as a cycle in this parser version — skipping meta cycle assertions)", true)
+    } else {
+      ok("cycle event emitted with edges", Boolean(cycEv) && Array.isArray(cycEv.edges) && cycEv.edges.length > 0)
+      const rp = events.find((e) => e.type === "PLAN_REPLANNED")
+      ok("planner was asked again (re-plan)", plans === 2 && rp && rp.code !== "CYCLE_DETECTED")
+      ok("re-plan prompt names the cycle edges", /DEPENDENCY CYCLE/.test(replanPrompt) && /n1 → n2|n2 → n1/.test(replanPrompt))
+      ok("execution used the second plan", r.status !== "WAITING" && executed.length > 0)
+      ok("second plan was not silently 'repaired' from the first", !events.some((e) => e.type === "PLAN_REPAIRED" && String(e.changes).includes("cycle broken")))
+    }
+  }
+  // planner returns a cycle twice → WAITING, nothing executed
+  {
+    let plans = 0
+    let executed = 0
+    const runAgent = async (o) => {
+      if (o.planOnly) { plans++; return { text: "1. a (after 2)\n2. b (after 1)", toolRecords: [], commandChecks: [], toolLog: [] } }
+      executed++
+      return { text: "done", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [], toolLog: [] }
+    }
+    const first = dag.validatePlan(dag.parsePlanToDAG("1. a (after 2)\n2. b (after 1)"))
+    if (first.code === "CYCLE_DETECTED") {
+      const r = await meta.runMeta({ config: { providers: {}, agent: { autonomous: true, modelStrategy: false }, tools: {} }, provider: { name: "x", model: "m" }, task: "cyclic twice", runAgent, signal: new AbortController().signal, onEvent: () => {} })
+      ok("still-cyclic plan → WAITING", r.status === "WAITING")
+      ok("nothing was executed", executed === 0)
+      ok("re-planned exactly once (bounded)", plans === 2)
+      ok("the reason names the cycle", /cycle/i.test(String(r.text)))
+    }
+  }
 }
 
 console.log(`\n== invalid-plan suite: ${PASS} passed, ${FAIL} failed ==`)

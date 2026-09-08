@@ -208,7 +208,38 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // plan that passes.
     if (!planValidation.ok) {
       emit({ type: "PLAN_VALIDATION_FAILED", taskId, runId: taskRunId, errors: planValidation.errors, recoverable: planValidation.recoverable })
-      const repair = dagLib.repairPlan(planDefs, state.objective, planValidation)
+      let repair = dagLib.repairPlan(planDefs, state.objective, planValidation)
+      // v21.1 P1 — a dependency CYCLE is a planning error, not something the
+      // repair pass may "fix" by deleting an edge (that silently reorders
+      // work the planner said must be ordered). Re-plan ONCE with the cycle
+      // spelled out to the planner; if the second plan is still cyclic, stop
+      // and wait for the user instead of executing a guessed order.
+      if (!repair.ok && repair.needsReplan && !restoredDAG) {
+        const cyc = repair.cycle
+        emit({ type: "PLAN_CYCLE_DETECTED", taskId, runId: taskRunId, members: cyc.members, edges: cyc.edges, action: "re-plan" })
+        ts.transition(TASK_STATUS.REPAIRING, { reason: `plan has a dependency cycle (${cyc.edges.join(", ").slice(0, 200)}) — re-planning` })
+        const replanRes = await agent({
+          config, provider: prov, signal,
+          task: `${state.objective}\n\nYour previous plan contained a DEPENDENCY CYCLE: ${cyc.edges.join(", ")} (steps ${cyc.members.join(", ")} depend on each other). A step may only depend on steps that come strictly before it. Produce a corrected, concise dependency-aware plan as a numbered list (one action per line, 4-8 steps, mark read-only investigation steps and implementation steps). Do NOT execute.`,
+          taskId, runId: taskRunId, segmentId: "seg-replan", nodeId: null,
+          planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep,
+          onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
+        })
+        const replanText = replanRes?.text ?? ""
+        const replanDefs = dagLib.parsePlanToDAG(replanText)
+        const replanValidation = dagLib.validatePlan(replanDefs)
+        emit({ type: "PLAN_REPLANNED", taskId, runId: taskRunId, ok: replanValidation.ok, code: replanValidation.code ?? null, nodes: replanDefs.length })
+        if (replanValidation.ok || replanValidation.code !== "CYCLE_DETECTED") {
+          planText = replanText
+          planDefs = replanDefs
+          planValidation = replanValidation
+          repair = planValidation.ok ? { ok: false } : dagLib.repairPlan(planDefs, state.objective, planValidation)
+          if (repair.needsReplan) repair = { ok: false } // still cyclic after non-cycle repair: stop below
+        } else {
+          repair = { ok: false }
+          planValidation = replanValidation
+        }
+      }
       if (repair.ok) {
         planDefs = repair.nodes
         planValidation = dagLib.validatePlan(planDefs)
@@ -727,10 +758,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (res.aborted || signal?.aborted) { finalStatus = explicitFinalization(FINAL.CANCELLED); finalText = "cancelled by user"; break }
 
     const recs = res.toolRecords ?? []
+    const segChanged = new Set()
     for (const r of recs) {
       for (const f of r.files_changed ?? []) {
         const abs = path.resolve(process.cwd(), f)
         changedFiles.add(abs)
+        segChanged.add(abs)
         if (r.tool === "write_file") state.files_created.includes(abs) || ts.noteFiles([], [abs])
         else ts.noteFiles([abs], [])
       }
@@ -790,6 +823,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       } catch { }
     }
 
+    // Files written in THIS segment change the artifact: evidence recorded in
+    // EARLIER segments that covered them is stale now (epoch bump + invalidate).
+    if (segChanged.size) {
+      const n = ledger.touch([...segChanged].map((f) => path.relative(process.cwd(), f)))
+      ts.setVerificationEpoch(Math.max(state.verification_epoch ?? 0, ledger.epoch))
+      if (n) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: n, reason: "files changed after evidence", files: [...segChanged].map((f) => path.relative(process.cwd(), f)).slice(0, 20) })
+    }
     for (const chk of res.commandChecks ?? []) {
       const rec = ledger.recordCommand(chk.command, chk.tail + (chk.passed ? "" : ` [exit code: ${chk.exitCode}]`), {
         exitCode: chk.exitCode,
@@ -799,7 +839,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         nodeId: currentNodeId,
         segmentId,
         verificationEpoch: state.verification_epoch ?? 0,
+        cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
+        filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
       })
+      if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
       emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
@@ -1186,7 +1229,12 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
     }, process.cwd())
     const changedForScope = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
     for (const chk of r.commandChecks ?? []) {
-      const rec = ledger.recordCommand(chk.command, chk.tail, { exitCode: chk.exitCode, affectedFiles: changedForScope, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0 })
+      const rec = ledger.recordCommand(chk.command, chk.tail, {
+        exitCode: chk.exitCode, affectedFiles: changedForScope, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0,
+        cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
+        filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+      })
+      if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
       emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })

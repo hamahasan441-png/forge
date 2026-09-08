@@ -13,7 +13,7 @@ import path from "node:path"
 
 process.env.FORGE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-fo-"))
 
-const { buildProvider, fallbackChain, isFailoverWorthy, ProviderError } = await import("../forge/providers.js")
+const { buildProvider, fallbackChain, isFailoverWorthy, ProviderError, providerCompatible, nextCompatibleFallback } = await import("../forge/providers.js")
 const { runAgent } = await import("../forge/agent.js")
 const { runChat } = await import("../forge/chat.js")
 
@@ -119,6 +119,45 @@ console.log("== runChat failover OFF ==")
   }
   const out = chunks.join("")
   ok("without opt-in, chat does not switch providers", !/switching to good/.test(out) && !/FAILOVER-ANSWER-OK/.test(out))
+}
+
+console.log("== v21.1 P1: failover only to a COMPATIBLE provider ==")
+{
+  const big = { name: "big", model: "m", protocol: "openai", contextWindow: 200000 }
+  const small = { name: "small", model: "tiny", protocol: "openai", contextWindow: 8000 }
+  const notool = { name: "raw", model: "x", protocol: "completions", contextWindow: 128000 }
+  ok("fits: small prompt on a small window", providerCompatible(small, { promptTokens: 1000, tools: false }).ok)
+  ok("does not fit: prompt larger than window", !providerCompatible(small, { promptTokens: 9000 }).ok)
+  ok("headroom respected (prompt = window - 100 is refused)", !providerCompatible(small, { promptTokens: 7900 }).ok)
+  ok("fits on the big window", providerCompatible(big, { promptTokens: 9000 }).ok)
+  ok("tools required → protocol without tool calls is refused", !providerCompatible(notool, { promptTokens: 10, tools: true }).ok)
+  ok("no tools needed → any protocol", providerCompatible(notool, { promptTokens: 10, tools: false }).ok)
+  const registry = { m: { capabilities: ["coding"], contextWindow: 200000 }, tiny: { capabilities: ["fast"], contextWindow: 8000 } }
+  ok("registry capability requirement enforced", !providerCompatible(small, { promptTokens: 10, capabilities: ["coding"] }, { registry }).ok && providerCompatible(big, { promptTokens: 10, capabilities: ["coding"] }, { registry }).ok)
+  ok("registry window overrides provider window", !providerCompatible({ ...big, model: "tiny" }, { promptTokens: 9000 }, { registry }).ok)
+  const pick = nextCompatibleFallback([small, notool, big], 0, { promptTokens: 9000, tools: true })
+  ok("skips incompatible candidates and names why", pick.next === big && pick.skipped.length === 2 && /does not fit/.test(pick.skipped[0].reason) && /tool calls/.test(pick.skipped[1].reason))
+  ok("index advances past the chosen one", pick.idx === 3)
+  const none = nextCompatibleFallback([small, notool], 0, { promptTokens: 9000, tools: true })
+  ok("no compatible fallback → next is null (caller must STOP)", none.next === null && none.skipped.length === 2)
+  ok("empty chain → null", nextCompatibleFallback([], 0, {}).next === null)
+}
+
+console.log("== runAgent: incompatible fallback is skipped / stops safely ==")
+{
+  // "good" would answer but its window is tiny → agent must NOT switch to it
+  const cfgSmall = { ...cfg(true), providers: { bad: { ...cfg(true).providers.bad }, good: { ...cfg(true).providers.good, contextWindow: 64 } } }
+  const events = []
+  let threw = null
+  try { await runAgent({ config: cfgSmall, provider: buildProvider(cfgSmall, "bad"), task: "say hi", onEvent: (e) => events.push(e) }) } catch (e) { threw = e }
+  ok("did not switch to a model that cannot hold the context", !events.some((e) => e.type === "failover"))
+  ok("the skip is observable", events.some((e) => e.type === "failover_skipped" && /does not fit/.test(e.reason)))
+  ok("stops with an explicit error naming the reason", threw && /no compatible fallback/.test(threw.message) && /does not fit/.test(threw.message))
+  // with a compatible third provider it still recovers
+  const cfg3 = { ...cfgSmall, providers: { ...cfgSmall.providers, good2: { protocol: "openai", baseUrl: goodBase, apiKey: "k3", model: "good-model" } } }
+  const ev2 = []
+  const r = await runAgent({ config: cfg3, provider: buildProvider(cfg3, "bad"), task: "say hi", onEvent: (e) => ev2.push(e) })
+  ok("skips the incompatible one and lands on the compatible one", /FAILOVER-ANSWER-OK/.test(r.text) && ev2.some((e) => e.type === "failover" && /good2/.test(e.to)) && ev2.some((e) => e.type === "failover_skipped"))
 }
 
 bad.close(); good.close()

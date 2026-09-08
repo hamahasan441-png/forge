@@ -40,6 +40,9 @@ const suites = [
   ["diffpatch", "node", ["test-diffpatch.mjs"]],
   ["memory", "node", ["test-memory.mjs"]],
   ["failover", "node", ["test-failover.mjs"]],
+  ["compaction", "node", ["test-context-compaction.mjs"]],
+  ["chat-compact", "node", ["test-chat-compaction.mjs"]],
+  ["mem-pipeline", "node", ["test-memory-pipeline.mjs"]],
   ["chat", "node", ["test-chat.mjs"]],
   ["walk", "node", ["test-walk.mjs"]],
   ["plans", "node", ["test-plans.mjs"]],
@@ -72,6 +75,7 @@ const suites = [
   ["bad-plan", "node", ["test-invalid-plan.mjs"]],
   ["continuation", "node", ["test-max-segment-continuation.mjs"]],
   ["verif-scope", "node", ["test-verification-scope.mjs"]],
+  ["verif-stale", "node", ["test-verification-staleness.mjs"]],
   ["exit-code", "node", ["test-unknown-exit-code.mjs"]],
   ["cp-integrity", "node", ["test-checkpoint-integrity.mjs"]],
   ["cp-restore", "node", ["test-checkpoint-restore.mjs"]],
@@ -85,6 +89,11 @@ const suites = [
   ["version", "node", ["test-version-consistency.mjs"]],
   ["lessons", "node", ["test-lessons-schema.mjs"]],
   ["hygiene", "node", ["test-path-hygiene.mjs"]],
+  // ---- v21.1 security audit: adversarial P0 suites ----------------------
+  ["ssrf-pin", "node", ["test-ssrf-pinning.mjs"]],
+  ["fs-toctou", "node", ["test-fs-toctou.mjs"]],
+  ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
+  ["hardening", "node", ["test-hardening-v21.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

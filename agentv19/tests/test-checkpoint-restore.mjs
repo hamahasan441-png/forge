@@ -75,18 +75,18 @@ console.log("== a partial restore is reported as PARTIAL, never as success ==")
   const id = cp.snapshotBefore([a, b], WORK, [], "run-3")
   fs.writeFileSync(a, "e changed")
   fs.writeFileSync(b, "f changed")
-  // make one restore fail at write time by making the target directory unwritable
+  // make one restore fail at write time. v21.1: restores go through securefs
+  // (O_NOFOLLOW temp file + rename onto the target), so the commit syscall for
+  // the target path is renameSync — that is where the fault is injected.
   const m = JSON.parse(fs.readFileSync(path.join(cp.CHECKPOINTS_DIR, id, "manifest.json"), "utf8"))
-  const realWrite = fs.writeFileSync
-  const origMkdir = fs.mkdirSync
+  const realRename = fs.renameSync
   let blocked = false
-  fs.writeFileSync = (p, ...rest) => {
-    if (!blocked && String(p) === m.files[1].path) { blocked = true; throw new Error("EIO: simulated write failure") }
-    return realWrite(p, ...rest)
+  fs.renameSync = (from, to, ...rest) => {
+    if (!blocked && path.basename(String(to)) === path.basename(m.files[1].path)) { blocked = true; throw new Error("EIO: simulated write failure") }
+    return realRename(from, to, ...rest)
   }
-  fs.mkdirSync = origMkdir
   let r
-  try { r = cp.restoreTransactional(id) } finally { fs.writeFileSync = realWrite }
+  try { r = cp.restoreTransactional(id) } finally { fs.renameSync = realRename }
   ok("status is PARTIAL or FAILED, never RESTORED", ["PARTIAL", "FAILED"].includes(r.status))
   ok("ok is false", r.ok === false)
   ok("the failed file is named", r.failed.some((f) => String(f).includes("f.txt")) || r.phases.restore.failed.some((f) => String(f.path).includes("f.txt")))
