@@ -53,7 +53,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v21.2.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v22.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
@@ -377,7 +377,7 @@ check "config menu probe ok" "$out" "connection OK"
 
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
-check "autopick banner" "$out" "forge v21"
+check "autopick banner" "$out" "forge v22"
 check "autopick provider" "$out" "provider: custom"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"

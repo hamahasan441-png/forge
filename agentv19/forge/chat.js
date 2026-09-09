@@ -48,7 +48,7 @@ import { createTerminal } from "./terminal.js"
 import { createUIStore, parseCheckOutput } from "./uistate.js"
 import { createAgentView } from "./agentview.js"
 import { createMarkdownStream } from "./markdown.js"
-import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify } from "./render.js"
+import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, renderOmegaPanel, renderTaskPanel, renderOptions, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify } from "./render.js"
 import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
 import { unifiedDiff } from "./textdiff.js"
 import { interruptedRuns, verifyRun, markRun, listRuns, resolveRunId } from "./runlog.js"
@@ -1697,6 +1697,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         const ctx = estimateTokens(JSON.stringify(messages))
         const pct = Math.min(100, Math.round((ctx / window) * 100))
         const mem = (await import("./memory.js")).memoryStats(process.cwd())
+        const ro = o ?? renderOptions({})
+        if (store.state.task) {
+          outLines(renderOmegaPanel(store.state, termWidth(), ro))
+        } else {
+          outLines(renderTaskPanel(store.state, termWidth(), ro))
+        }
         console.log(bold("forge status"))
         console.log(`  provider:   ${cyan(p.name)} / ${bold(p.model)}  ${dim(`context ~${Math.round(window / 1000)}k tok`)}`)
         console.log(`  session:    ${sessionId ? dim(sessionId) : dim("(unsaved)")}`)

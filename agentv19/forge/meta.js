@@ -38,6 +38,8 @@ import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { redact } from "./secrets.js"
+import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
+import { createKernel } from "./omega.js"
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -135,7 +137,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   const segSteps = segmentSteps ?? config?.agent?.segmentSteps ?? SEGMENT_STEPS
-  const maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
+  let maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
   // P0 segment safety fuse: a continuation is a RESUME, not a failure. The
   // continuation budget bounds it so "resume later" cannot loop forever.
   const maxContinuations = config?.agent?.maxContinuations ?? 5
@@ -169,8 +171,25 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   const riskLevel = riskForChange({ task: state.objective })
+  const classified = classifyTask(state.objective)
+  const omega = createKernel({ cwd: process.cwd() })
+  omega.classify(state.objective)
   ts.transition(TASK_STATUS.PLANNING, { reason: "building plan" })
-  emit({ type: "TASK_STARTED", taskId, runId: taskRunId, objective: state.objective, risk: riskLevel })
+  emit({ type: "TASK_STARTED", taskId, runId: taskRunId, objective: state.objective, risk: riskLevel, taskClass: classified.class, strategy: classified.strategy.class })
+  emit({
+    type: "TASK_CLASSIFIED",
+    taskId, runId: taskRunId,
+    class: classified.class,
+    legacy: classified.legacy,
+    confidence: classified.confidence,
+    workflow: classified.strategy.workflow,
+    plan: classified.strategy.plan,
+    workers: classified.strategy.workers,
+    verification: classified.strategy.verification,
+  })
+  if (maxSegments == null && config?.agent?.maxSegments == null && classified.strategy.maxSegments) {
+    maxSeg = classified.strategy.maxSegments
+  }
 
   let planText = ""
   let planDefs = []
@@ -188,15 +207,31 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.setPlan((state.plan ?? []).map((p) => (typeof p === "string" ? p : p?.objective ?? p?.title ?? p?.id)), "resumed")
       ts.transition(TASK_STATUS.PLANNING, { reason: "plan restored from the task record" })
     }
-    const planRes = restoredDAG ? null : await agent({
+    const fastPath = !restoredDAG && classified.strategy.plan === "synthesize" && classified.class === TASK_CLASS.MICRO
+    const planRes = restoredDAG || fastPath ? null : await agent({
       config, provider: prov, signal,
       task: `${state.objective}\n\nProduce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
-      planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep,
+      planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
     })
     planText = planRes?.text ?? ""
-    if (!restoredDAG) {
+    if (fastPath) {
+      planDefs = synthesizePlan(state.objective, classified.class)
+      planValidation = dagLib.validatePlan(planDefs)
+      if (!planValidation.ok) {
+        const repaired = dagLib.repairPlan(planDefs, state.objective, planValidation)
+        if (repaired.ok) { planDefs = repaired.nodes; planValidation = dagLib.validatePlan(planDefs); planRepaired = true }
+      }
+      emit({
+        type: "PLAN_SYNTHESIZED",
+        taskId, runId: taskRunId,
+        class: classified.class,
+        nodes: planDefs.length,
+        reason: `${classified.class} task — skip model planner`,
+        items: planDefs.map((n, i) => ({ n: i + 1, text: n.title || n.objective || n.id, status: "todo" })),
+      })
+    } else if (!restoredDAG) {
       planDefs = dagLib.parsePlanToDAG(planText)
       planValidation = dagLib.validatePlan(planDefs)
     }
@@ -636,9 +671,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (knownBad.length) emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `avoiding ${knownBad.length} previously-ineffective approach(es)`, avoided: knownBad.slice(0, 2).map((l) => l.failed_strategy || l.failed_action) })
 
     let dagFindings = ""
-    if (dag && workersEnabled && !signal?.aborted) {
+    if (dag && workersEnabled && (workers != null || classified.strategy.workers > 0) && !signal?.aborted) {
       try {
-        const batch = dagLib.scheduleBatch(dag, { maxParallel: Math.max(1, resources.state.maxWorkers), conflictKeys: dagLib.canonicalConflictKeys })
+        const parallelN = workers != null
+          ? Math.max(1, resources.state.maxWorkers)
+          : Math.max(1, Math.min(resources.state.maxWorkers, classified.strategy.workers))
+        const batch = dagLib.scheduleBatch(dag, { maxParallel: parallelN, conflictKeys: dagLib.canonicalConflictKeys })
           .filter((n) => n.read_only && n.role && n.role !== "coder" && n.id !== currentNodeId)
         if (batch.length) {
           emit({ type: "DAG_DISPATCH", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, nodes: batch.map((n) => n.id), parallel: batch.length })
@@ -919,7 +957,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
       ts.noteError("SEGMENT_FAILED", res.error)
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles] })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       if (consecutiveFailures >= 3 || !recovered) {
@@ -964,6 +1002,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     for (const c of res.commandChecks ?? []) if (c?.command) mutatingCommands.add(String(c.command))
     for (const r of recs) for (const c of (r.commands ?? [])) if (c) mutatingCommands.add(String(c))
     const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
+    let impact = null
+    if (changedRel.length) {
+      try {
+        impact = omega.impact(changedRel.map((f) => path.resolve(process.cwd(), f)))
+        emit({
+          type: "IMPACT_ANALYZED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+          radius: impact.radius, scope: impact.scope, importers: impact.importers.length,
+          tests: impact.tests.slice(0, 8), unknown: impact.unknown,
+        })
+        for (const f of changedRel) omega.noteWrite(f)
+      } catch { /* impact is advisory; never block verification */ }
+    }
     const finalRisk = finalRiskForChange({
       task: state.objective,
       initialRisk: riskLevel,
@@ -994,7 +1044,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (dag && currentNodeId) { try { dagLib.markRepairing(dag, currentNodeId, v.reason); persistDAG() } catch { } }
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: repairCount + 1, error: v.reason })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles] })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0
@@ -1077,7 +1127,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.setNextAction(`verify: run ${v.missing.join(" / ")} before declaring success`)
       ts.transition(TASK_STATUS.VERIFYING, { reason: "requesting risk-proportional evidence" })
       emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `objective met but evidence is thin for risk=${finalRiskLevel} — run ${v.missing.join(", ")} to verify`, missing: v.missing })
-      await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel })
+      await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel, impact })
       // the verifier produced new evidence: the node may now be completed
       completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-verification" })
       const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
@@ -1229,14 +1279,41 @@ function segmentEvents(emit, segment, ids = {}) {
   }
 }
 
-async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null }) {
+async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [] }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
   const ctxBlock = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1600 })
-  const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${String(error ?? verification?.reason ?? "").slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}\n\nInspect the relevant files first, then make a minimal surgical fix, then run verification.`
+  const failText = String(error ?? verification?.reason ?? "")
+  let hypoHint = ""
+  let observed = null
+  if (omega) {
+    observed = omega.observeCommand(failText, { tool: "segment", files: changedFiles })
+    const next = omega.nextRepair()
+    if (observed.diagnosis?.failed) {
+      hypoHint += `\n\nFailure class: ${observed.diagnosis.code}. Evidence: ${String(observed.diagnosis.evidence ?? "").slice(0, 240)}.`
+    }
+    if (next.hypothesis) {
+      hypoHint += `\nCurrent hypothesis (${next.hypothesis.id}, ${next.hypothesis.status}, conf=${Number(next.hypothesis.confidence).toFixed(2)}): ${next.hypothesis.description}`
+      if (next.action === "escalate") {
+        hypoHint += `\nThis hypothesis has already been tested twice — do NOT retry it. Pick a different cause.`
+      }
+    }
+    const rejected = omega.hypotheses.snapshot().filter((h) => h.status === "REJECTED")
+    if (rejected.length) {
+      hypoHint += `\nRejected causes (do not retry): ${rejected.map((h) => h.description).slice(0, 4).join("; ")}`
+    }
+  }
+  const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${failText.slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}${hypoHint}\n\nInspect the relevant files first, then make a minimal surgical fix, then run verification.`
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
     const r = await agent({ config, provider, signal, task: diag, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
     const fixed = !r.error && !r.budgetHit
+    if (omega && observed?.hypothesis) {
+      omega.hypotheses.recordTest(observed.hypothesis.id, { name: "repair-pass", result: fixed ? "pass" : "fail" })
+      if (fixed) omega.confirmRootCause(observed.hypothesis.id)
+      else if (omega.hypotheses.looping(observed.hypothesis.id, "repair-pass")) {
+        omega.rejectCause(observed.hypothesis.id, "same repair already failed twice")
+      }
+    }
     recordLesson({
       failure: String(error ?? verification?.reason ?? "").slice(0, 200),
       cause: String(r.text ?? "").slice(0, 200),
@@ -1285,10 +1362,12 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
  * allows ONLY the approved verification commands (test / build / lint /
  * typecheck / read-only git and shell inspection).
  */
-async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId, taskId = null, segmentId = null, nodeId = null, risk = "medium" }) {
+async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId, taskId = null, segmentId = null, nodeId = null, risk = "medium", impact = null }) {
   const ctxBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1200 })
   const verifyContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBuilt === "string" ? ctxBuilt : ctxBuilt?.text ?? ""}`
-  const ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level (${risk}): ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.\n\nYou are the VERIFIER: you may read, search, inspect and run approved test/build/lint/static-analysis commands, but you may NOT modify the project. If you find a defect, report it — do not fix it.`
+  let ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level (${risk}): ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.\n\nYou are the VERIFIER: you may read, search, inspect and run approved test/build/lint/static-analysis commands, but you may NOT modify the project. If you find a defect, report it — do not fix it.`
+  if (impact?.scope?.length) ask += `\n\nImpact-based verification ladder: ${impact.scope.join(" → ")}.`
+  if (impact?.tests?.length) ask += `\nTests that import the changed files: ${impact.tests.slice(0, 8).join(", ")}.`
   try {
     emit({ type: "VERIFIER_STARTED", taskId, runId: taskRunId, segmentId, nodeId, mode: "READ_ONLY", missing, risk })
     const r = await agent({ config, provider, signal, task: ask, taskId, runId: taskRunId, segmentId, nodeId, extraContext: verifyContext, maxStepsOverride: 6, deep: false, onEvent: emit, journal: true, readOnly: true, verifier: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })

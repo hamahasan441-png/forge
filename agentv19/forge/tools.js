@@ -36,6 +36,7 @@ import { redact } from "./secrets.js"
 import { DEFAULT_DIR } from "./config.js"
 import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
 import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
+import { createCommandResult, formatCommandResult } from "./cmdout.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -594,6 +595,7 @@ async function runBash(ctx, command, timeoutSec) {
     const MAX_BUF = 4 * 1024 * 1024
     let stdout = "", stderr = "", bytes = 0, overflow = false, done = false
     let timedOut = false, aborted = false
+    const startedAt = Date.now()
     // detached → own process group, so killTree() can reach grandchildren
     const child = spawn("/bin/sh", ["-c", command], { cwd: ctx.cwd, env: { ...process.env, TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
     const timer = setTimeout(() => { timedOut = true; killTree(child) }, t)
@@ -612,17 +614,32 @@ async function runBash(ctx, command, timeoutSec) {
       done = true
       clearTimeout(timer)
       if (ctx.signal) ctx.signal.removeEventListener("abort", onAbort)
+      const finishedAt = Date.now()
       let out = ""
       if (stdout) out += stdout
       if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr
       if (aborted) return resolve(`ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`)
       if (spawnErr) return resolve(`ERROR: ${spawnErr.message}\n[exit code: 127]`)
-      let marker = ""
-      if (timedOut) marker = `[command timed out after ${t / 1000}s]\n[exit code: 124]`
-      else if (overflow) marker = `[output exceeded ${MAX_BUF} bytes — process killed]\n[exit code: 1]`
-      else if (typeof code === "number" && code !== 0) marker = `[exit code: ${code}]`
-      else if (code == null && sig) marker = `[killed by ${sig}]\n[exit code: 137]`
-      resolve(capWithMarker(out, marker, ctx.maxToolOutput))
+      const rec = createCommandResult({
+        command,
+        exitCode: typeof code === "number" ? code : null,
+        signal: sig || null,
+        timedOut,
+        killed: timedOut || overflow || !!sig,
+        stdout,
+        stderr,
+        durationMs: finishedAt - startedAt,
+        truncated: false,
+        processId: child.pid ?? null,
+        processGroupId: child.pid ?? null,
+        startedAt,
+        finishedAt,
+        overflow,
+        aborted: false,
+        timeoutSec: t / 1000,
+        maxBuf: MAX_BUF,
+      })
+      resolve(formatCommandResult(rec, { max: ctx.maxToolOutput }))
     }
     child.on("error", (e) => finish(null, null, e))
     child.on("close", (code, sig) => finish(code, sig, null))
