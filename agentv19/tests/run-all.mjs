@@ -98,6 +98,7 @@ const suites = [
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
   ["hardening", "node", ["test-hardening-v21.mjs"]],
   ["v21-2", "node", ["test-v21-2.mjs"]],
+  ["omega", "node", ["test-omega.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

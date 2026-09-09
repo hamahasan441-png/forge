@@ -3,7 +3,22 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v21.2.0 — "close the loops"
+## [Unreleased] — v22.0.0 — "Forge Ω"
+
+### Added (v22.0 — autonomous software engineering system)
+- **Task classifier** (`classify.js`): MICRO / SMALL / MEDIUM / LARGE / ARCHITECTURAL. The meta controller picks the smallest sufficient workflow. MICRO skips the model planner and synthesises a one-node DAG (inspect→patch→verify). `classifyTaskComplexity()` (trivial…critical) is unchanged — effort and model-strategy tests stay green.
+- **Hypothesis engine** (`hypothesis.js`): OPEN → SUPPORTED / REJECTED / CONFIRMED / STALE. A rejected cause is never the next repair. Repeating the same (hypothesis, test) pair is a loop and is escalated, not retried.
+- **Evidence log** (`evidence.js`): FACT / INFERENCE / HYPOTHESIS / UNKNOWN / VERIFIED / STALE, with provenance. A fact covering a file is stale the moment that file is written after `asOf`.
+- **Impact radius** (`impact.js`): bounded import/test walk over changed files; testing scope grows from syntax → focused → module → integration → regression.
+- **Structured command results** (`cmdout.js`): exitCode, signal, timedOut, killed, stdout/stderr, durationMs, truncated, pid/pgid. Success is the process result, never inferred from truncated stdout. The `[exit code: N]` marker still travels *outside* the truncation window. Long output is summarised (counts, first failure, duration) for the HUD; full text stays for diagnosis.
+- **Ω kernel** (`omega.js`) + **HUD** (`renderOmegaPanel`): boxed, width-safe panel (FORGE Ω / Task / PLAN / ACTIVE / footer). Narrow terminals drop the box. `/status` renders the HUD. Meaning is never carried by color alone.
+- **Failure taxonomy** expanded: TYPE, STATE, CONCURRENCY, ENVIRONMENT, PERFORMANCE, RESOURCE, TOOL — each has a specialised recovery plan. Existing codes keep their patterns.
+- **Repair loop** feeds the hypothesis engine: a rejected cause is injected as "do not retry"; a looping (hypothesis, test) pair escalates. Impact radius of changed files is emitted as `IMPACT_ANALYZED` and passed to the read-only verifier as the testing ladder.
+- **Worker cap by class**: MICRO/SMALL spawn no parallel workers unless the caller explicitly requested them.
+
+v21.2.0 (MCP in chat, LSP SYNTAX ledger, eval consent, plugin quarantine) ships in this bump.
+
+## v21.2.0 — "close the loops"
 
 ### Added (v21.2)
 - **MCP in the interactive chat loop.** `chat.js` loads configured MCP servers through the same `loadMcpTools` path as `runAgent`, joins them to the plugin list, and closes every client on `/exit`, Ctrl+C, EOF and `process.exit` (stdin-close + SIGKILL fallback). Autonomous runs were already covered; the REPL no longer leaks MCP children.

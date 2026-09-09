@@ -26,6 +26,13 @@ export const FAILURE = {
   BUILD_FAILURE: "BUILD_FAILURE",
   SAFETY_BLOCK: "SAFETY_BLOCK",
   CANCELLED: "CANCELLED",
+  TYPE_FAILURE: "TYPE_FAILURE",
+  STATE_FAILURE: "STATE_FAILURE",
+  CONCURRENCY_FAILURE: "CONCURRENCY_FAILURE",
+  ENVIRONMENT_FAILURE: "ENVIRONMENT_FAILURE",
+  PERFORMANCE_FAILURE: "PERFORMANCE_FAILURE",
+  RESOURCE_FAILURE: "RESOURCE_FAILURE",
+  TOOL_FAILURE: "TOOL_FAILURE",
   UNKNOWN: "UNKNOWN",
 }
 export const FAILURE_CODES = Object.values(FAILURE)
@@ -52,6 +59,13 @@ const PATTERNS = [
   [FAILURE.SYNTAX_FAILURE, /SyntaxError|Unexpected token|Unexpected end of (input|JSON)|IndentationError|parse error|invalid syntax|unterminated string/i],
   [FAILURE.TEST_FAILURE, /\d+ (test|spec|assertion)s? failed|tests? failed|FAIL(ED)?\s|✗|AssertionError|expect\(.*\)\.to|assert\.|\bfailing tests?\b|\d+ failed,/i],
   [FAILURE.BUILD_FAILURE, /build failed|compilation (failed|error)|error TS\d+|rustc: error|cannot compile|webpack.*ERROR|tsc .*error/i],
+  [FAILURE.TYPE_FAILURE, /TypeError\b|incompatible types|type mismatch|cannot assign.*(type|to parameter)/i],
+  [FAILURE.STATE_FAILURE, /EBUSY|resource busy|stale (lock|state)|already locked|ELOCKED/i],
+  [FAILURE.CONCURRENCY_FAILURE, /deadlock|race condition|EAGAIN|resource temporarily unavailable|concurrent modification/i],
+  [FAILURE.ENVIRONMENT_FAILURE, /missing env|environment variable|ENOSPC|no space left|EIO\b/i],
+  [FAILURE.PERFORMANCE_FAILURE, /heap out of memory|JavaScript heap|ENOMEM|killed \(oom\)/i],
+  [FAILURE.RESOURCE_FAILURE, /EMFILE|too many open files|ENFILE|thread.*exhausted/i],
+  [FAILURE.TOOL_FAILURE, /plugin (crashed|timed out)|tool host (exited|died)|plugin process (exited|died|terminated)/i],
   [FAILURE.NOT_FOUND, /ENOENT|no such file|not found|does not exist|404|no matches|nothing matched|old string not found|string not found|unknown skill|no file matched/i],
   [FAILURE.INVALID_ARGUMENT, /invalid|malformed|missing required|expected .* argument|bad pattern|unknown tool|empty path|must be a|required parameter|no task provided/i],
 ]
@@ -189,6 +203,39 @@ export function recoveryPlan(code, opts = {}) {
     case FAILURE.BUILD_FAILURE:
       add(STRATEGY.INSPECT_FIRST, "read the first compiler error only — later ones are usually cascades", true)
       add(STRATEGY.REDUCE_SCOPE, "build the affected package/target alone", true)
+      break
+    case FAILURE.TYPE_FAILURE:
+      add(STRATEGY.INSPECT_FIRST, "read the type error and the declared types at the call site", true)
+      add(STRATEGY.FIX_ARGUMENTS, "correct the type/shape, then re-check", true)
+      add(STRATEGY.REDUCE_SCOPE, "fix the one mismatched site, not the whole module", true)
+      break
+    case FAILURE.STATE_FAILURE:
+      add(STRATEGY.INSPECT_FIRST, "the resource is busy or locked — inspect who holds it", true)
+      add(STRATEGY.REDUCE_SCOPE, "retry only after the lock/state is released", true)
+      add(STRATEGY.ESCALATE, "a stuck lock often needs a human", true)
+      break
+    case FAILURE.CONCURRENCY_FAILURE:
+      add(STRATEGY.INSPECT_FIRST, "identify the shared state and the racing accessors", true)
+      add(STRATEGY.REDUCE_SCOPE, "serialize the critical section or add a lock", true)
+      add(STRATEGY.ESCALATE, "concurrency bugs are easy to mis-fix — confirm the diagnosis", true)
+      break
+    case FAILURE.ENVIRONMENT_FAILURE:
+      add(STRATEGY.INSPECT_FIRST, "check env vars, disk space, and the runtime environment", true)
+      add(STRATEGY.ESCALATE, "environment (disk, env, I/O) is not something the agent should invent", true)
+      break
+    case FAILURE.PERFORMANCE_FAILURE:
+      add(STRATEGY.REDUCE_SCOPE, "the process ran out of memory — shrink the work", true)
+      add(STRATEGY.INSPECT_FIRST, "find the allocation that blew the heap", true)
+      add(STRATEGY.ESCALATE, "raising heap limits is a human decision", true)
+      break
+    case FAILURE.RESOURCE_FAILURE:
+      add(STRATEGY.REDUCE_SCOPE, "too many files/threads — close what you opened and do less in parallel", true)
+      add(STRATEGY.ESCALATE, "resource exhaustion may need a process restart", true)
+      break
+    case FAILURE.TOOL_FAILURE:
+      add(STRATEGY.ALTERNATE_TOOL, "the tool/plugin itself failed — use a builtin", true)
+      add(STRATEGY.INSPECT_FIRST, "confirm the tool is still alive before retrying it", true)
+      add(STRATEGY.ABORT, "do not keep restarting a crashed plugin", true)
       break
     case FAILURE.CANCELLED:
       add(STRATEGY.ABORT, "the user interrupted — do not restart without being asked", true)

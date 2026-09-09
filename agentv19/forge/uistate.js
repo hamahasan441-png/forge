@@ -42,7 +42,7 @@ import { parsePatch } from "./diffpatch.js"
 import { diffStats } from "./textdiff.js"
 import { redact } from "./secrets.js"
 
-export const STATES = ["READY", "THINKING", "PLANNING", "EXECUTING", "VERIFYING", "RECOVERING", "WAITING", "COMPLETED", "FAILED", "CANCELLED"]
+export const STATES = ["READY", "THINKING", "INSPECTING", "PLANNING", "EXECUTING", "TESTING", "DIAGNOSING", "REPAIRING", "REVIEWING", "VERIFYING", "RECOVERING", "WAITING", "COMPLETED", "FAILED", "CANCELLED"]
 export const MODES = ["chat", "agent", "plan", "recovery"]
 
 export const EVENTS = [
@@ -57,7 +57,7 @@ export const EVENTS = [
   // console view toggles (pure presentation, never task truth)
   "VIEW_CHANGED",
   // authoritative task metadata from the v21 controller
-  "SEGMENT_UPDATED", "DAG_UPDATED", "META_UPDATE",
+  "SEGMENT_UPDATED", "DAG_UPDATED", "META_UPDATE", "TASK_CLASSIFIED",
 ]
 
 export const VIEWS = ["tools", "plan", "diff", "verification"]
@@ -108,6 +108,7 @@ export function initialState(over = {}) {
     segment: null,
     dag: null,
     risk: null,
+    omega: null,
     seq: 0,
     ...over,
   }
@@ -163,6 +164,19 @@ export function reduce(s, ev) {
       if (ev.model) next.model = String(ev.model)
       if (ev.provider) next.provider = String(ev.provider)
       return next
+    }
+    case "TASK_CLASSIFIED": {
+      return {
+        ...s,
+        state: s.task && s.state === "THINKING" ? "PLANNING" : s.state,
+        omega: {
+          class: String(ev.class || ""),
+          legacy: ev.legacy || null,
+          confidence: ev.confidence ?? null,
+          workflow: Array.isArray(ev.workflow) ? ev.workflow : [],
+          plan: ev.plan || null,
+        },
+      }
     }
 
     case "TASK_STARTED": {
@@ -290,7 +304,7 @@ export function reduce(s, ev) {
       return { ...s, errors: [...s.errors, e].slice(-ERRORS_CAP), lastError: e }
     }
     case "REPAIR_ATTEMPT":
-      return { ...s, repair: trackRepair(s.repair, { kind: ev.kind || "tests", ok: ev.ok, summary: ev.summary || "", at: now }) }
+      return { ...s, state: s.task ? "REPAIRING" : s.state, repair: trackRepair(s.repair, { kind: ev.kind || "tests", ok: ev.ok, summary: ev.summary || "", at: now }) }
 
     case "TASK_COMPLETED": {
       if (!s.task) return s
@@ -692,13 +706,33 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
         emit({ type: "NOTICE", level: "info", text: `autonomous task • risk=${ev.risk}` })
       }
       break
+    case "TASK_CLASSIFIED":
+      emit({ type: "TASK_CLASSIFIED", class: ev.class, legacy: ev.legacy, confidence: ev.confidence, workflow: ev.workflow, plan: ev.plan })
+      emit({ type: "NOTICE", level: "info", text: `Ω ${ev.class}${ev.legacy ? ` (${ev.legacy})` : ""} • ${Array.isArray(ev.workflow) ? ev.workflow.join(" → ") : "workflow"}` })
+      break
     case "MODEL_SELECTED":
       emit({ type: "NOTICE", level: "info", text: `model ${ev.provider}/${ev.model} (${ev.confidence}) — ${String(ev.reason ?? "").slice(0, 100)}` })
       if (ev.provider) emit({ type: "PROVIDER_CHANGED", provider: ev.provider, model: ev.model })
       break
     case "DAG_BUILT":
       emit({ type: "NOTICE", level: "info", text: `planned dependency graph: ${ev.nodes} node(s)` })
-      if (ev.graph?.order?.length) emit({ type: "DAG_UPDATED", dag: { order: ev.graph.order, nodes: ev.graph.nodes, ts: now } })
+      if (ev.graph?.order?.length) {
+        emit({ type: "DAG_UPDATED", dag: { order: ev.graph.order, nodes: ev.graph.nodes, ts: now } })
+        const items = (ev.graph.nodes || []).map((n, i) => ({
+          n: i + 1,
+          text: n.title || n.objective || n.id,
+          status: n.status === "completed" ? "done" : (n.status === "failed" || n.status === "cancelled" ? "failed" : (["running", "verifying", "execution_succeeded", "repairing"].includes(n.status) ? "doing" : "todo")),
+        }))
+        if (items.length) emit({ type: "PLAN_UPDATED", items })
+      }
+      break
+    case "PLAN_SYNTHESIZED":
+      emit({ type: "STATE_CHANGED", state: "PLANNING" })
+      if (Array.isArray(ev.items) && ev.items.length) emit({ type: "PLAN_UPDATED", items: ev.items })
+      emit({ type: "NOTICE", level: "info", text: `Ω synthesised ${ev.nodes || ev.items?.length || 0}-node plan (${ev.class})` })
+      break
+    case "IMPACT_ANALYZED":
+      emit({ type: "NOTICE", level: "info", text: `impact radius ${ev.radius ?? "?"} • ${(ev.scope || []).join(" → ") || "syntax"}` })
       break
     case "SEGMENT_STARTED":
       emit({ type: "SEGMENT_UPDATED", n: ev.segment, max: ev.maxSteps })

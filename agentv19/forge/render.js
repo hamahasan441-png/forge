@@ -297,7 +297,9 @@ export function renderOptions({ ascii = false, a11y = false, now } = {}) {
 }
 
 const STATE_KIND = {
-  READY: "muted", THINKING: "active", PLANNING: "active", EXECUTING: "active", VERIFYING: "active",
+  READY: "muted", THINKING: "active", INSPECTING: "active", PLANNING: "active",
+  EXECUTING: "active", TESTING: "active", DIAGNOSING: "warn", REPAIRING: "warn",
+  REVIEWING: "active", VERIFYING: "active",
   RECOVERING: "warn", WAITING: "warn", COMPLETED: "ok", FAILED: "fail", CANCELLED: "warn",
 }
 export function stateSymbol(state, o) {
@@ -507,7 +509,12 @@ export function currentStepText(state, o) {
   }
   switch (state.state) {
     case "THINKING": return "Thinking"
+    case "INSPECTING": return "Inspecting"
     case "PLANNING": return "Planning"
+    case "TESTING": return "Testing"
+    case "DIAGNOSING": return "Diagnosing"
+    case "REPAIRING": return state.repair?.reason || "Repairing"
+    case "REVIEWING": return "Reviewing"
     case "VERIFYING": return "Verifying"
     case "RECOVERING": return state.recoveryNote || "Recovering"
     case "WAITING": return state.waitingFor || "Waiting for input"
@@ -588,7 +595,10 @@ export function renderDock(state, width, rows, o) {
   }
   const body = []
   const label = (s) => o.th.muted(s.padEnd(9))
-  if (state.task?.title) body.push(fitS(label("TASK") + state.task.title, width - 1, o))
+  if (state.task?.title) {
+    const klass = state.omega?.class ? `  ${o.th.muted(state.omega.class)}` : ""
+    body.push(fitS(label("TASK") + state.task.title + klass, width - 1, o))
+  }
   const plan = state.plan ?? []
   if (plan.length) body.push(fitS(label("PLAN") + inlinePlan(plan, width - 10, o), width - 1, o))
   const prog = progressOf(state)
@@ -917,6 +927,7 @@ export function renderTaskPanel(state, width, o) {
   const out = section("TASK", width, o)
   const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fitS(`  ${padRight(k, 11)} ${v}`, width - 1, o)) }
   row("Objective", state.task?.title || o.th.muted("(none)"))
+  if (state.omega?.class) row("Class", `${state.omega.class}${state.omega.legacy ? ` (${state.omega.legacy})` : ""}`)
   const prog = progressOf(state)
   if (prog) row("Progress", `${progressBar(prog.pct, 18, o)} ${prog.pct}%  ${o.th.muted(`${prog.done}/${prog.total} steps`)}`)
   else if (state.task?.step) row("Progress", `step ${state.task.step}`)
@@ -940,4 +951,63 @@ export function renderColumns(items, width, o) {
   const out = []
   for (let i = 0; i < items.length; i += per) out.push(fitS(items.slice(i, i + per).map((s) => padRight(s, w)).join(""), width - 1, o))
   return out
+}
+
+/**
+ * Ω boxed HUD. Never wider than `width`. Narrow terminals drop the box and
+ * keep TASK / PLAN / ACTIVE / footer as fitted lines. Color is optional;
+ * symbols carry meaning without it.
+ */
+export function renderOmegaPanel(state, width, o) {
+  const w = Math.max(20, Number(width) || 80)
+  const boxed = w >= 48 && !o.ascii && !o.a11y
+  const inner = boxed ? Math.max(8, w - 2) : Math.max(8, w - 1)
+  const project = state.cwd ? tildify(state.cwd).split(/[\\/]/).filter(Boolean).pop() : ""
+  const title = `FORGE Ω${project ? `  project: ${project}` : ""}`
+  const task = state.task?.title || ""
+  const klass = state.omega?.class ? String(state.omega.class) : ""
+  const plan = Array.isArray(state.plan) ? state.plan : []
+  const active = currentStepText(state, o)
+  const st = state.state || "READY"
+  const tests = testsText(state, o)
+  const elapsed = state.task?.startedAt ? fmtClock((state.task.endedAt ?? o.now) - state.task.startedAt) : ""
+  const warns = (state.errors || []).length
+
+  const body = []
+  body.push(fitS(o.th.bold(title), inner, o))
+  if (task) {
+    body.push(fitS("Task", inner, o))
+    body.push(fitS(`> ${task}`, inner, o))
+  }
+  if (klass) body.push(fitS(o.th.muted(`class ${klass}${state.omega?.legacy ? ` (${state.omega.legacy})` : ""}`), inner, o))
+  if (plan.length) {
+    body.push(fitS("PLAN", inner, o))
+    for (const item of plan.slice(0, 8)) {
+      const mark2 = mark(item.status === "done" ? "ok" : item.status === "doing" ? "active" : item.status === "failed" ? "fail" : "todo", o)
+      body.push(fitS(`${mark2} ${item.text || item.title || ""}`, inner, o))
+    }
+  }
+  if (active && !["READY", "COMPLETED", "FAILED", "CANCELLED"].includes(st)) {
+    body.push(fitS("ACTIVE", inner, o))
+    body.push(fitS(`${o.sym.active} ${active}`, inner, o))
+  }
+  const footerBits = [
+    tests ? `${tests}` : "",
+    warns ? `${o.sym.warn} ${warns}` : "",
+    elapsed ? `${elapsed}` : "",
+    stateLabel({ state: st }, o),
+  ].filter(Boolean)
+  body.push(fitS(footerBits.join(`  ${o.sym.dot}  `), inner, o))
+
+  if (!boxed) return body.map((l) => fitS(l, w - 1, o))
+  const bar = o.sym.rule.repeat(Math.max(1, w - 2))
+  const lines = []
+  lines.push(fitS(`╭${bar}╮`, w, o))
+  for (const l of body) {
+    const vis = displayWidth(l)
+    const pad = Math.max(0, (w - 2) - vis)
+    lines.push(fitS(`│${l}${" ".repeat(pad)}│`, w, o))
+  }
+  lines.push(fitS(`╰${bar}╯`, w, o))
+  return lines.map((l) => fitS(l, w, o))
 }

@@ -1,7 +1,7 @@
 {
   "name": "forge-agent-cli",
-  "version": "21.2.0",
-  "description": "forge — standalone terminal AI agent. Zero dependencies, pure Node, direct-to-provider. Terminal-in-chat with risk-classified shell execution, deep think + effort profiles, AutoPick start, streaming chat, coding agent with checkpoints/undo + plan mode + 17 hardened tools, hierarchical memory, sessions with resume, project profiles, SSRF-guarded fetches, secret redaction.",
+  "version": "22.0.0",
+  "description": "forge Ω — autonomous software engineering system. Zero dependencies, pure Node, direct-to-provider. Adaptive task classification, hypothesis-driven repair, impact-aware testing, premium terminal HUD, coding agent with checkpoints/undo + plan mode + 17 hardened tools, hierarchical memory, sessions with resume, SSRF-guarded fetches, secret redaction.",
   "type": "module",
   "bin": {
     "forge": "./forge.js"
@@ -71,6 +71,12 @@
     "context.js",
     "recovery.js",
     "meta.js",
+    "classify.js",
+    "hypothesis.js",
+    "evidence.js",
+    "impact.js",
+    "cmdout.js",
+    "omega.js",
     "README.md",
     "CHANGELOG.md",
     "install.sh",

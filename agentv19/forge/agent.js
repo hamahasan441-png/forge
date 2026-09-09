@@ -42,36 +42,9 @@ import { compactHistory, shrinkToolOutput } from "./compaction.js"
 import path from "node:path"
 import fs from "node:fs"
 import { execFileSync } from "node:child_process"
+import { classifyTaskComplexity, resolveEffort } from "./classify.js"
 
-export function classifyTaskComplexity(task) {
-  const t = String(task ?? "").toLowerCase()
-  const words = t.split(/\s+/).length
-  let score = 0
-  if (words > 12) score++
-  if (words > 30) score++
-  const complexSignals = ["architect", "refactor", "migrat", "security", "vulnerab", "production", "deploy", "database", "schema", "performance", "optimize", "race condition", "concurrency", "multi-file", "across files", "redesign", "rewrite", "debug", "not working", "failing", "broken", "regression", "test suite", "fix all", "end to end", "e2e"]
-  const trivialSignals = ["what is", "explain", "summar", "rename", "one line", "typo", "comment", "docs for", "read me", "list "]
-  for (const s of complexSignals) if (t.includes(s)) score += 2
-  for (const s of trivialSignals) if (t.includes(s)) score -= 2
-  if (score <= -1) return "trivial"
-  if (score <= 0) return "simple"
-  if (score <= 1) return "moderate"
-  if (score <= 3) return "complex"
-  return "critical"
-}
-
-export function resolveEffort(profile, task) {
-  switch (profile) {
-    case "fast": return { deep: false, why: "profile=fast" }
-    case "deep": return { deep: true, why: "profile=deep" }
-    case "auto": {
-      const level = classifyTaskComplexity(task)
-      const deep = level === "complex" || level === "critical"
-      return { deep, why: `profile=auto → ${level} task → ${deep ? "deep" : "standard"} effort` }
-    }
-    default: return { deep: false, why: "profile=balanced" }
-  }
-}
+export { classifyTaskComplexity, resolveEffort }
 
 const ROLE_DIRECTIVES = {
   researcher: "You are a RESEARCH sub-agent: investigate quickly, read code/docs, and report findings. Zero writes. Keep the report dense and under 400 words.",
