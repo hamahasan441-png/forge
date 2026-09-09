@@ -32,6 +32,7 @@ import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { createToolIntel } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
+import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
@@ -413,6 +414,48 @@ function metaEventPrinter(agentPrinter) {
   }
 }
 
+/**
+ * Load user plugins + configured MCP servers for the interactive chat loop.
+ * Same trust model as runAgent: plugins from ~/.forge/tools, MCP from USER
+ * config only, never model output. Caller owns closeChatPlugins().
+ */
+export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt = null } = {}) {
+  const out = { plugins: [], errors: [], mcpClients: [], pluginHost: null }
+  if (config?.tools?.plugins !== false) {
+    try {
+      const loaded = await loadToolPlugins(undefined, {
+        reserved: BUILTIN_TOOL_NAMES,
+        grants: config.tools?.pluginGrants ?? {},
+        cwd,
+        startedAt,
+        allowNewPlugins: config.tools?.allowNewPlugins === true,
+      })
+      out.plugins = loaded.tools
+      out.pluginHost = loaded
+      out.errors.push(...(loaded.errors || []))
+    } catch { /* best-effort */ }
+  }
+  if (config?.tools?.mcp !== false) {
+    try {
+      const mcp = await loadMcpTools(config)
+      if (mcp.tools.length) {
+        out.plugins = [...out.plugins, ...mcp.tools]
+        out.mcpClients = mcp.clients
+      }
+      out.errors.push(...(mcp.errors || []))
+    } catch { /* best-effort */ }
+  }
+  return out
+}
+
+/** Close MCP children (stdin-close + SIGKILL fallback) and plugin host. Idempotent. */
+export function closeChatPlugins(loaded) {
+  if (!loaded || loaded._closed) return
+  loaded._closed = true
+  for (const c of loaded.mcpClients || []) { try { c.close() } catch {} }
+  if (loaded.pluginHost) { try { loaded.pluginHost.close() } catch {} }
+}
+
 export async function runChat({ config, provider, oneShot, resumeFile, deep: deepFlag }) {
   let p = provider
   // v20.2: provider failover (opt-in) for the interactive loop — when the active
@@ -429,16 +472,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const resolvedSkillsDir = resolveSkillsDir(config.skills?.dir)
   const res = resourceProfile()
   const assumeYes = config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
-  // v20.2 P3-5: user tool plugins from ~/.forge/tools (empty by default)
-  let plugins = []
-  if (config.tools?.plugins !== false) {
-    try {
-      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES, grants: config.tools?.pluginGrants ?? {}, cwd: process.cwd() })
-      plugins = loaded.tools
-      for (const e of loaded.errors) warn(`tool plugin skipped: ${e}`)
-      process.once("exit", () => { try { loaded.close() } catch {} })
-    } catch { /* best-effort */ }
-  }
+  const pluginStartedAt = Date.now()
+  // v21.2: plugins + MCP for the interactive loop (same path as runAgent).
+  // pluginStartedAt is task-scoped so /agent segments cannot import() a plugin
+  // the model just wrote. Isolation tests call loadToolPlugins directly.
+  const chatExternals = await loadChatPlugins(config, { cwd: process.cwd(), startedAt: pluginStartedAt })
+  const plugins = chatExternals.plugins
+  for (const e of chatExternals.errors) warn(`tool plugin skipped: ${e}`)
+  const shutdownExternals = () => closeChatPlugins(chatExternals)
+  process.once("exit", shutdownExternals)
   const tools = makeToolContext({
     plugins,
     cwd: process.cwd(),
@@ -453,13 +495,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
     allowNetworkUpload: config.tools?.allowNetworkUpload === true,
+    allowInterpreterEval: config.tools?.allowInterpreterEval === true,
     assumeYes,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? 180,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : 2),
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
-        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole }).then((r) => r.text)
+        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
       ),
   })
 
@@ -473,7 +516,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let chatUIEvent = null // set once the terminal UI exists (declared below)
   const chatIntel = createToolIntel({
     exec: tools.exec,
-    ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: config.tools?.allowSudo === true, assumeYes },
+    ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: config.tools?.allowSudo === true, allowInterpreterEval: config.tools?.allowInterpreterEval === true, assumeYes },
     config,
     onEvent: (ev) => chatUIEvent?.(ev),
     taskId: "chat",
@@ -594,7 +637,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (!cmd) { warn("usage: !<command> — or just type a Linux command"); return }
     const force = raw.startsWith("!")
     const interactive = process.stdin.isTTY === true
-    const verdict = userMayRun(cmd, { cwd: shellState.cwd, root: process.cwd() }, { interactive, assumeYes })
+    const verdict = userMayRun(cmd, { cwd: shellState.cwd, root: process.cwd(), allowInterpreterEval: config.tools?.allowInterpreterEval === true }, { interactive, assumeYes })
     if (!verdict.ok) {
       err(verdict.reason)
       noteTerminal(cmd, `BLOCKED for safety: ${verdict.reason}`)
@@ -742,6 +785,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     saveHistory()
     persist()
     if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} }
+    shutdownExternals()
     process.exit(code)
   }
   process.on("SIGINT", () => {
@@ -755,6 +799,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       console.log(dim("\nbye"))
       saveHistory()
       persist()
+      shutdownExternals()
       process.exit(0)
     }
   })
@@ -967,7 +1012,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   if (oneShot) {
-    await turn(oneShot)
+    try {
+      await turn(oneShot)
+    } finally {
+      shutdownExternals()
+    }
     return
   }
 
@@ -1083,6 +1132,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       console.log(dim("bye"))
       saveHistory()
       persist()
+      shutdownExternals()
       setTimeout(() => process.exit(0), 30)
     })
   })
@@ -1294,7 +1344,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (useMeta) {
         // v21 autonomous lifecycle through the meta controller.
         const { runMeta } = await import("./meta.js")
-        const m = await runMeta({ config, provider: p, task, onEvent, signal: abort.signal, deep: eff.deep, resumeTaskId })
+        const m = await runMeta({ config, provider: p, task, onEvent, signal: abort.signal, deep: eff.deep, resumeTaskId, pluginStartedAt })
         // adapt the task result to the shape the UI/result renderer expects.
         res = {
           text: m.text || `Task ${m.status.toLowerCase()}.`,
@@ -1310,7 +1360,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
         if (m.status === "WAITING") res.waiting = true
       } else {
-        res = await runAgent({ config, provider: p, task, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal })
+        res = await runAgent({ config, provider: p, task, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
         if (ui) {
           lastAgentState = store.state
           ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
@@ -1367,6 +1417,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         out(dim("bye"))
         saveHistory()
         if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} }
+        shutdownExternals()
         setTimeout(() => process.exit(0), 30) // let buffered stdout flush
         break
       }
@@ -1442,7 +1493,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           try { command = loadProfile(process.cwd()).scripts?.test || "" } catch { command = "" }
         }
         if (!command) { warn("no test command detected for this project — /verify <command> to run one explicitly"); break }
-        const verdict = userMayRun(command, { cwd: process.cwd(), root: process.cwd() }, { interactive: !!ui, assumeYes })
+        const verdict = userMayRun(command, { cwd: process.cwd(), root: process.cwd(), allowInterpreterEval: config.tools?.allowInterpreterEval === true }, { interactive: !!ui, assumeYes })
         if (!verdict.ok) { err(verdict.reason); break }
         if (verdict.needsConfirm && !(await confirmPrompt(verdict.reason ?? verdict.level))) { warn("skipped"); break }
         info(`verify: ${bold(command)}`)
@@ -1699,7 +1750,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         abort = new AbortController()
         let res
         try {
-          res = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), planOnly: true, deep: undefined, signal: abort.signal })
+          res = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), planOnly: true, deep: undefined, signal: abort.signal, pluginStartedAt })
         } finally { abort = null }
         console.log()
         console.log(renderMarkdown(res.text))
@@ -1713,7 +1764,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           abort = new AbortController()
           let full
           try {
-            full = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), deep: undefined, signal: abort.signal })
+            full = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), deep: undefined, signal: abort.signal, pluginStartedAt })
           } finally { abort = null }
           console.log()
           console.log(renderMarkdown(full.text))

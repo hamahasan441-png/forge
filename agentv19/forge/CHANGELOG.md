@@ -3,7 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v21.0.0 (in progress) — "correctness, verification and recovery"
+## [Unreleased] — v21.2.0 — "close the loops"
+
+### Added (v21.2)
+- **MCP in the interactive chat loop.** `chat.js` loads configured MCP servers through the same `loadMcpTools` path as `runAgent`, joins them to the plugin list, and closes every client on `/exit`, Ctrl+C, EOF and `process.exit` (stdin-close + SIGKILL fallback). Autonomous runs were already covered; the REPL no longer leaks MCP children.
+- **LSP diagnostics feed the verification ledger.** After a mutating segment, `collectDiagnosticsForFiles` runs `lsp_diagnostics` on each changed file that has a configured language server and records the result as `SYNTAX` evidence. Error-severity diagnostics fail the hard gate for HIGH/CRITICAL the same way a failed `node --check` does. Off when `lsp.servers` is empty.
+- **Inline interpreter eval defaults to `danger`.** `node -e` / `python -c` / `perl -e` / `ruby -e` need `tools.allowInterpreterEval` (user config only — stripped from project `forge.config.json`). Script-file execution (`node ./scripts/build.js`) stays `low`. The CODE_DANGER text scan remains an extra `block` layer, not the primary gate.
+- **Same-run plugin quarantine.** `loadToolPlugins({ startedAt })` skips a `*.mjs` whose mtime is newer than the task/chat start, so a model that writes `~/.forge/tools/pwn.mjs` in segment 1 cannot have it `import()`ed in segment 2. `runMeta` stamps `pluginStartedAt` once and every segment inherits it.
+- **Plugin grant symlink refusal.** A `read`/`write` grant that is a symlink whose realpath leaves the project (or plugin dir) is dropped. Plugin files that are symlinks escaping `~/.forge/tools` are skipped.
+
+## v21.1.0 — "security perimeter + autonomous correctness"
+
 
 _The version lives in exactly one place — `package.json` — and is read at runtime
 via `version.js`. Every user-agent, banner and `--version` derives from it._

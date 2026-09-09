@@ -26,7 +26,7 @@
  *  - effect-aware recovery
  */
 import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, finalizeStatus } from "./taskstate.js"
-import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS } from "./verifyledger.js"
+import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
 import { canCompleteTask, CHECK as GATE_CHECK } from "./completion.js"
 import { createResourceManager, ADAPT } from "./resources.js"
 import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
@@ -36,6 +36,7 @@ import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
+import { collectDiagnosticsForFiles } from "./lsp.js"
 import { redact } from "./secrets.js"
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
@@ -59,7 +60,7 @@ function explicitFinalization(desired) {
   return FINAL.FAILED
 }
 
-export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null } = {}) {
+export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null } = {}) {
   const emit = (ev) => { try { onEvent?.(ev) } catch { } }
 
   let taskId = resumeTaskId
@@ -99,7 +100,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   })
   const provRef = { prov: provider }
 
-  const agent = runAgent ?? (await import("./agent.js")).runAgent
+  const pluginStartedAtMs = pluginStartedAt ?? Date.now()
+  const rawAgent = runAgent ?? (await import("./agent.js")).runAgent
+  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs })
   const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
 
   manager.configure({
@@ -846,6 +849,30 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
       emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+    }
+
+    // v21.2: LSP diagnostics on files this segment mutated feed the SYNTAX
+    // gate. Error-severity diagnostics fail HIGH/CRITICAL the same way a
+    // failed `node --check` does. Off when lsp.servers is empty; a missing
+    // server is skipped, not a gate failure.
+    if (segChanged.size && config?.tools?.lsp !== false && Object.keys(config?.lsp?.servers || {}).length) {
+      try {
+        const diags = await collectDiagnosticsForFiles(config, [...segChanged], { cwd: process.cwd() })
+        for (const d of diags) {
+          const relFile = path.relative(process.cwd(), d.file)
+          const rec = ledger.recordCommand(`lsp_diagnostics ${relFile}`, d.text, {
+            type: VTYPE.SYNTAX,
+            exitCode: d.passed ? 0 : 1,
+            affectedFiles: [relFile],
+            taskId,
+            nodeId: currentNodeId,
+            segmentId,
+            verificationEpoch: state.verification_epoch ?? 0,
+          })
+          ts.noteVerification(rec)
+          emit({ type: d.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+        }
+      } catch { /* best-effort: a broken language server must not crash the gate */ }
     }
 
     const u = res.usage ?? {}
