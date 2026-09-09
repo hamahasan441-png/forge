@@ -57,22 +57,27 @@ console.log("== every runtime user-agent uses that version ==")
 
 console.log("== the real HTTP header carries the real version ==")
 {
+  // v21.1: fetch_url / web_search no longer go through globalThis.fetch (they
+  // use DNS-pinned sockets, netguard.pinnedFetch), so the header is observed
+  // on a REAL local server instead of a mocked global.
   const tools = await import("../forge/tools.js")
+  const http = await import("node:http")
   const seen = []
-  const origFetch = globalThis.fetch
-  globalThis.fetch = async (url, init = {}) => {
-    seen.push({ url: String(url), ua: init?.headers?.["user-agent"] ?? null })
-    return { ok: true, status: 200, headers: { get: () => "text/plain" }, text: async () => "body text" }
-  }
+  const srv = http.createServer((req, res) => {
+    seen.push({ url: req.url, ua: req.headers["user-agent"] ?? null })
+    res.writeHead(200, { "content-type": "text/plain" }); res.end("body text")
+  })
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+  const base = `http://127.0.0.1:${srv.address().port}`
   try {
     const ctx = tools.makeToolContext({
       cwd: HOME, root: HOME, readOnly: true, timeoutSec: 3, maxToolOutput: 500,
-      signal: null, searchUrl: "", skillsDir: null,
+      signal: null, searchUrl: `${base}/search`, skillsDir: null, fetchPrivateUrls: true,
     })
-    await ctx.exec("fetch_url", { url: "https://example.com/x" })
+    await ctx.exec("fetch_url", { url: `${base}/x` })
     await ctx.exec("web_search", { query: "forge agent" })
   } catch { }
-  globalThis.fetch = origFetch
+  srv.close()
   const withUa = seen.filter((s) => s.ua)
   ok("an outbound request was made", withUa.length > 0)
   ok("every request advertised a user-agent", seen.every((s) => s.ua))

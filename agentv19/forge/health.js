@@ -7,6 +7,7 @@
  * not break the CLI.
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 
@@ -27,8 +28,7 @@ export function recordHealth(name, entry) {
     if (!name || !entry) return
     const h = readHealth()
     h[name] = { ...(h[name] || {}), ...entry, ts: Date.now() }
-    fs.mkdirSync(path.dirname(HEALTH_PATH), { recursive: true })
-    fs.writeFileSync(HEALTH_PATH, JSON.stringify(h, null, 2) + "\n")
+    writeStateFile(HEALTH_PATH, JSON.stringify(h, null, 2) + "\n")
   } catch {
     /* health cache is best-effort */
   }

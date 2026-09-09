@@ -677,9 +677,9 @@ export function defaultVerificationFor(node) {
  * Repair an invalid plan deterministically (P0).
  *
  * Repairs: synthesise missing ids, coerce dependencies, drop unknown/self
- * dependencies, break cycles by removing the back-edge, sanitise or drop
- * invalid targets, restore conflict keys, and inject the default verification
- * requirement for mutating nodes.
+ * dependencies, sanitise or drop invalid targets, restore conflict keys, and
+ * inject the default verification requirement for mutating nodes. Cycles are
+ * reported (`cycle`, `needsReplan`) and never "fixed" by dropping an edge.
  *
  * Every change is reported so the controller can audit the repair. If the plan
  * cannot be made valid (e.g. there are no nodes left to work with) it returns
@@ -778,28 +778,26 @@ export function repairPlan(planDefs = [], objective = "", validation = null) {
     if (!RISK_LEVELS.includes(n.risk)) { if (n.risk != null) changes.push(`node ${n.id} invalid risk reset`); n.risk = "medium" }
   }
 
-  // break cycles: drop the back-edge that closes the loop
-  for (let guard = 0; guard < nodes.length + 1; guard++) {
-    const v = validatePlan(nodes)
-    if (v.ok || v.code !== "CYCLE_DETECTED") break
-    const cyc = /cycle involving: (.*)$/.exec(v.errors.find((e) => /cycle involving/.test(e)) ?? "")?.[1] ?? ""
-    const members = cyc.split(",").map((s) => s.trim()).filter(Boolean)
-    let broke = false
-    for (const n of nodes) {
-      if (!members.includes(n.id)) continue
-      const back = n.dependencies.find((d) => members.includes(d))
-      if (back) {
-        n.dependencies = n.dependencies.filter((d) => d !== back)
-        changes.push(`cycle broken: dropped dependency ${n.id} → ${back}`)
-        broke = true
-        break
-      }
-    }
-    if (!broke) break
-  }
-
+  // v21.1 P1 — cycles are NOT repaired here. The old code dropped whichever
+  // dependency edge it met first inside the cycle. A dependency is an ordering
+  // constraint the planner asserted ("migrate schema BEFORE running the
+  // tests"); removing one at random lets the executor run a node before the
+  // work it depends on, and it did so silently under the label "repaired". A
+  // cycle is a PLANNING error: the plan must be re-made by the planner with
+  // the cycle spelled out, or the task must stop. We report the cycle
+  // (members + the offending edges) so the controller can re-plan with that
+  // feedback, and leave every edge exactly as the planner wrote it.
   const final = validatePlan(nodes)
-  return { ok: final.ok, nodes, changes, validation: final }
+  let cycle = null
+  if (!final.ok && final.code === "CYCLE_DETECTED") {
+    const cyc = /cycle involving: (.*)$/.exec(final.errors.find((e) => /cycle involving/.test(e)) ?? "")?.[1] ?? ""
+    const members = cyc.split(",").map((s) => s.trim()).filter(Boolean)
+    const edges = []
+    for (const n of nodes) if (members.includes(n.id)) for (const d of n.dependencies ?? []) if (members.includes(d)) edges.push(`${n.id} → ${d}`)
+    cycle = { members, edges }
+    changes.push(`cycle NOT repaired (dependencies are never dropped): ${edges.join(", ") || members.join(", ")} — re-plan required`)
+  }
+  return { ok: final.ok, nodes, changes, validation: final, ...(cycle ? { cycle, needsReplan: true } : {}) }
 }
 
 /**
@@ -893,10 +891,15 @@ export function parsePlanToDAG(text) {
     try {
       const arr = JSON.parse(json)
       if (Array.isArray(arr)) {
-        const defs = arr.map((n, i) => ({
-          id: String(n.id ?? `n${i + 1}`),
-          objective: n.objective ?? n.title ?? n.task ?? "",
-          dependencies: n.dependencies ?? n.deps ?? [],
+        // v21.1: model JSON is untrusted — non-object entries are skipped and
+        // dependency lists are normalised to string ids (null/number/garbage
+        // entries used to survive into the graph and crash later stages).
+        const depList = (d) => (Array.isArray(d) ? d : typeof d === "string" && d.trim() ? d.split(/[,\s]+/) : [])
+          .filter((x) => x != null && x !== "" && (typeof x === "string" || typeof x === "number")).map((x) => String(x).trim()).filter(Boolean)
+        const defs = arr.filter((n) => n && typeof n === "object" && !Array.isArray(n)).map((n, i) => ({
+          id: (typeof n.id === "string" || typeof n.id === "number") && String(n.id).trim() ? String(n.id).trim() : `n${i + 1}`,
+          objective: String(n.objective ?? n.title ?? n.task ?? ""),
+          dependencies: depList(n.dependencies ?? n.deps),
           priority: n.priority ?? (arr.length - i),
           risk: n.risk,
           role: n.role ?? inferRole(n.objective ?? n.task ?? ""),

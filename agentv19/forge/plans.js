@@ -14,6 +14,7 @@
  * Zero dependencies; best-effort (a plan write must never break the agent run).
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 
 export function plansDir(cwd = process.cwd()) {
@@ -39,7 +40,7 @@ export function savePlan(task, text, cwd = process.cwd()) {
     const slug = slugify(task)
     const file = path.join(dir, slug + ".md")
     const header = `# Plan: ${String(task ?? "").trim()}\n\n_generated ${new Date().toISOString()}_\n\n`
-    fs.writeFileSync(file, header + String(text ?? "").trim() + "\n")
+    writeStateFile(file, header + String(text ?? "").trim() + "\n", { mode: 0o644 }) // plans are user-readable documents
     return { ok: true, file, slug }
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }

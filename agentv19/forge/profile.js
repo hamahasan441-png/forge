@@ -15,6 +15,7 @@
  * Zero dependencies; every call is best-effort and never throws.
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import os from "node:os"
 import { execFileSync } from "node:child_process"
@@ -183,8 +184,7 @@ export function loadProfile(cwd = process.cwd(), { maxAgeMs = 7 * 24 * 3600 * 10
   } catch {}
   const p = detectProfile(cwd)
   try {
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(file, JSON.stringify(p, null, 1))
+    writeStateFile(file, JSON.stringify(p, null, 1))
   } catch {}
   return { ...p, cached: false }
 }

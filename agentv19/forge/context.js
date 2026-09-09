@@ -194,8 +194,8 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
   }
 
   /** Persist a durable note through the EXISTING memory layer (redacted). */
-  function remember(text, tier = "project") {
-    return appendMemory(tier, text, cwd)
+  function remember(text, tier = "project", provenance = { source: "agent" }) {
+    return appendMemory(tier, text, cwd, provenance)
   }
 
   function repoTags() {

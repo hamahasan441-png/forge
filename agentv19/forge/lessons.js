@@ -18,6 +18,7 @@
  * used. Everything is redacted and best-effort.
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { projectDir } from "./memory.js"
 import { rankDocs } from "./retrieval.js"
@@ -39,10 +40,7 @@ export function loadLessons(cwd = process.cwd()) {
 function save(cwd, lessons) {
   try {
     const file = lessonsPath(cwd)
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    const tmp = file + ".tmp"
-    fs.writeFileSync(tmp, JSON.stringify(lessons.slice(-MAX_LESSONS), null, 1), { mode: 0o600 })
-    fs.renameSync(tmp, file)
+    writeStateFile(file, JSON.stringify(lessons.slice(-MAX_LESSONS), null, 1))
     return true
   } catch { return false }
 }

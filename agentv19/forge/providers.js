@@ -1,4 +1,5 @@
 import { VERSION } from "./version.js"
+import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -63,7 +64,8 @@ export function buildProvider(config, name) {
   if (!apiKey && name !== "ollama") return null
   return {
     name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model,
-    contextWindow: c.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "",
+    contextWindow: c.contextWindow ?? lookupRegistry(model)?.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "",
+    configuredContextWindow: c.contextWindow ?? null, // v21.1: what the USER declared (null = derived)
   }
 }
 
@@ -96,6 +98,56 @@ export function fallbackChain(config, activeName, { health = {} } = {}) {
   const tested = built.filter((p) => health[p.name]?.ok)
   const rest = built.filter((p) => !health[p.name]?.ok)
   return [...tested, ...rest]
+}
+
+/**
+ * v21.1 P1 — is `candidate` able to take over the CURRENT request?
+ * Failover used to switch to whatever provider came next in config order. A
+ * request in flight has hard requirements: the conversation must fit the
+ * model's context window, and if the run uses tools the target protocol must
+ * support tool calls. Switching to an incompatible model does not "fail
+ * over", it fails differently — with a context-overflow or a model that
+ * silently ignores tools and answers in prose. Returns { ok, reason }.
+ *
+ * @param need { promptTokens, tools, capabilities? } — what the request needs
+ * @param registry optional model→{capabilities,contextWindow} map (modelstrategy)
+ */
+export function providerCompatible(candidate, need = {}, { registry = MODEL_CAPABILITY_REGISTRY } = {}) {
+  if (!candidate) return { ok: false, reason: "no provider" }
+  const reg = registry ? (registry[candidate.model] ?? registry[String(candidate.model ?? "").split("/").pop()] ?? null) : null
+  // an explicit per-provider window (user config) wins over the registry —
+  // self-hosted / proxied deployments often serve a model with a different
+  // window than the vendor default; the registry fills in what the config omits.
+  const window = candidate.configuredContextWindow ?? reg?.contextWindow ?? candidate.contextWindow ?? 128000
+  const promptTokens = Number(need.promptTokens ?? 0)
+  // leave headroom for the reply: ≥ 12.5 % of the window or 2k tokens
+  const headroom = Math.max(2048, Math.floor(window / 8))
+  if (promptTokens && promptTokens + headroom > window) {
+    return { ok: false, reason: `context ${promptTokens} tokens does not fit ${candidate.name}/${candidate.model} (window ${window})` }
+  }
+  if (need.tools && !["openai", "anthropic"].includes(candidate.protocol)) {
+    return { ok: false, reason: `${candidate.name} (${candidate.protocol}) cannot carry tool calls` }
+  }
+  if (Array.isArray(need.capabilities) && need.capabilities.length && reg?.capabilities) {
+    const missing = need.capabilities.filter((c) => !reg.capabilities.includes(c))
+    if (missing.length) return { ok: false, reason: `${candidate.name}/${candidate.model} lacks required capability ${missing.join(", ")}` }
+  }
+  return { ok: true, reason: null }
+}
+
+/**
+ * Pick the first compatible fallback from `chain` starting at `fromIdx`.
+ * Returns { next, idx, skipped:[{name,model,reason}] } — `next` is null when
+ * NO remaining provider is compatible (the caller must stop, not guess).
+ */
+export function nextCompatibleFallback(chain, fromIdx, need, opts = {}) {
+  const skipped = []
+  for (let i = fromIdx; i < chain.length; i++) {
+    const c = providerCompatible(chain[i], need, opts)
+    if (c.ok) return { next: chain[i], idx: i + 1, skipped }
+    skipped.push({ name: chain[i].name, model: chain[i].model, reason: c.reason })
+  }
+  return { next: null, idx: chain.length, skipped }
 }
 
 export class ProviderError extends Error {

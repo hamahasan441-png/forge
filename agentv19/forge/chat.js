@@ -22,10 +22,11 @@
  * v15: INLINE AUTO-TOOLS in chat (streaming tool-calls both wires).
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy } from "./providers.js"
+import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
@@ -40,6 +41,7 @@ import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
 import { classifyTaskComplexity } from "./agent.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
+import { compactHistory, shrinkToolOutput } from "./compaction.js"
 import { VERSION } from "./version.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore, parseCheckOutput } from "./uistate.js"
@@ -234,21 +236,6 @@ export function isShellLine(t) {
   return chatWordScore(tokens) < 2
 }
 
-/** v19 tiered context reduction, stage 1: replace BIG tool outputs outside the
- *  recent tail with stubs — real history is kept, only the bulk is dropped.
- *  Often removes the need for a lossy summary entirely. */
-function shrinkToolOutputs(msgs, { tail = 4, maxKeep = 2400 } = {}) {
-  let bytes = 0
-  const out = msgs.map((m, i) => {
-    if (m?.role === "tool" && typeof m.content === "string" && m.content.length > maxKeep && i < msgs.length - tail) {
-      bytes += m.content.length
-      return { ...m, content: `[tool output shrunk: ${m.content.length} chars]` }
-    }
-    return m
-  })
-  return { messages: out, bytes }
-}
-
 /** Overflow-recovery shrink (v20): stub ALL old tool outputs + dedupe. */
 function hardShrink(msgs) {
   const seen = new Map()
@@ -257,7 +244,7 @@ function hardShrink(msgs) {
     const key = m.content.slice(0, 120)
     if (seen.has(key)) return { ...m, content: "[duplicate tool output removed]" }
     seen.set(key, true)
-    if (m.content.length > 600) return { ...m, content: `[tool output shrunk: ${m.content.length} chars]` }
+    if (m.content.length > 600) return { ...m, content: shrinkToolOutput(m.content, 600) } // v21.1: keep head/tail/errors
     return m
   })
 }
@@ -446,9 +433,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let plugins = []
   if (config.tools?.plugins !== false) {
     try {
-      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES, grants: config.tools?.pluginGrants ?? {}, cwd: process.cwd() })
       plugins = loaded.tools
       for (const e of loaded.errors) warn(`tool plugin skipped: ${e}`)
+      process.once("exit", () => { try { loaded.close() } catch {} })
     } catch { /* best-effort */ }
   }
   const tools = makeToolContext({
@@ -464,6 +452,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     readOnly: false,
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
+    allowNetworkUpload: config.tools?.allowNetworkUpload === true,
     assumeYes,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? 180,
@@ -529,8 +518,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     try {
       const live = ui ? ui.term.editor.history : [...shellState.history, ...chatLineLog]
       const all = dedupe([...readHist(), ...live].filter(historyWorthy))
-      fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true })
-      fs.writeFileSync(HISTORY_PATH, serializeHistory(all.slice(-Math.max(50, config.chat?.historySize ?? 300))), { mode: 0o600 })
+      writeStateFile(HISTORY_PATH, serializeHistory(all.slice(-Math.max(50, config.chat?.historySize ?? 300))))
     } catch {}
   }
 
@@ -688,44 +676,44 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       return false
     }
     const window = p.contextWindow ?? 128000
-    const budgetTok = Math.floor((window * 55) / 100)
-    const shrinkTok = Math.floor((window * 40) / 100)
     const chars = JSON.stringify(messages).length
-    let estTok = estimateTokens(JSON.stringify(messages))
-    if (!force && chars < (config.chat?.compactAtChars ?? 48000) && estTok < shrinkTok) return false
-    // stage 1 — shrink (keeps the real history, drops the bulk)
-    const sh = shrinkToolOutputs(messages)
-    if (sh.bytes > 0) {
-      messages = sh.messages
-      estTok = estimateTokens(JSON.stringify(messages))
-      ok(`tool outputs shrunk: ~${Math.round(sh.bytes / 1024)}KB of old tool results stubbed (full history kept) ${dim(`~${estTok.toLocaleString()} tok now`)}`)
-      if (!force && estTok < budgetTok) return true
-    }
-    if (messages.length < 6) return false
-    // stage 2 — summarize when over the CHAR cap (v16) or the TOKEN budget (v17)
-    if (!force && chars < (config.chat?.compactAtChars ?? 48000) && estTok < budgetTok) return false
-    const keep = Math.min(6, messages.length - 1)
-    const old = messages.slice(0, messages.length - keep)
-    const recent = messages.slice(messages.length - keep).filter((m) => m.role === "user" || (m.role === "assistant" && !m.tool_calls && typeof m.content === "string"))
-    try {
-      const digest = old.map((m) => `[${m.role}] ${String(typeof m.content === "string" ? m.content : "(tool activity)").slice(0, 500)}`).join("\n").slice(0, 24000)
-      const s = await chatOnce({
-        protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name,
-        system: "Summarize this conversation for an AI assistant that will continue it. In <=250 words capture: the user's goals, decisions made, files created or changed, facts to remember, and open tasks. Output only the summary.",
-        messages: [{ role: "user", content: digest }],
-        maxTokens: 600,
-      })
-      const before = messages.length
-      const summaryText = (s.content || "(no summary produced)").trim()
-      sessionSummary = summaryText.slice(0, 600) // v20: remembered for resume
-      messages = [{ role: "user", content: `AUTO-COMPACTED SUMMARY of earlier conversation:\n${summaryText}` }, ...recent.filter((m) => m.role === "user")]
-      if (!messages.length) { messages = [{ role: "user", content: `AUTO-COMPACTED SUMMARY of earlier conversation:\n${summaryText}` }] }
-      ok(`context compacted: ${before} → ${messages.length} messages (${chars} → ${JSON.stringify(messages).length} chars)`)
+    const estTokBefore = estimateTokens(JSON.stringify(messages))
+    // v16 char cap still counts as pressure (users configure it); the token
+    // thresholds (40 % shrink / 55 % fold) live in compaction.js.
+    const charPressure = chars >= (config.chat?.compactAtChars ?? 48000)
+    // v21.1: structure-preserving compaction shared with the agent loop
+    // (compaction.js) — turns are never split, old tool outputs keep their
+    // head/tail/error lines, and a deterministic ledger (files, commands,
+    // exit codes, blocked actions) survives even when the summary model fails.
+    const r = await compactHistory(messages, {
+      window,
+      force: force || charPressure,
+      summarize: async (digest) => {
+        const s = await chatOnce({
+          protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name,
+          system: "Summarize this conversation for an AI assistant that will continue it. In <=250 words capture: the user's goals, decisions made, files created or changed, facts to remember, and open tasks. Output only the summary.",
+          messages: [{ role: "user", content: digest }],
+          maxTokens: 600,
+        })
+        return s.content || ""
+      },
+    })
+    if (!r.changed) { if (force) err("compaction failed: history could not be reduced further"); return false }
+    messages = r.messages
+    const st = r.stats
+    if (st.stage === "shrink" || st.stage === "shrink-tail") {
+      ok(`tool outputs shrunk: ~${Math.round(st.shrunk / 1024)}KB of old tool results trimmed (full history kept) ${dim(`~${st.estTokAfter.toLocaleString()} tok now`)}`)
       return true
-    } catch (e) {
-      if (force) err(`compaction failed: ${e?.message ?? e}`)
-      return false // graceful: keep full history
     }
+    // folded: the summary message is the first non-system message
+    const summaryMsg = messages.find((m) => m.role === "user" && /CONTEXT COMPACTED/.test(String(m.content)))
+    if (summaryMsg) {
+      const narrative = /NARRATIVE SUMMARY:\n([\s\S]*)$/.exec(String(summaryMsg.content))?.[1] ?? String(summaryMsg.content)
+      sessionSummary = narrative.trim().slice(0, 600) // v20: remembered for resume
+      summaryMsg.content = `AUTO-COMPACTED SUMMARY of earlier conversation:\n${summaryMsg.content}` // sessions.js title heuristic
+    }
+    ok(`context compacted: ${st.before} → ${st.after} messages (${chars} → ${JSON.stringify(messages).length} chars)${st.summarized ? "" : dim(" • ledger only, summary model unavailable")}`)
+    return true
   }
 
   /** Persist the conversation — one file per conversation, updated in place. */
@@ -914,8 +902,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           // v20.2 chat failover: only before any text was shown this turn (a
           // mid-stream switch would duplicate output). Switch provider, retry.
           if (failoverOn && !streamedPartial && isFailoverWorthy(e) && foIdx < foChain.length) {
-            const next = foChain[foIdx++]
+            // v21.1 P1: only a provider that can carry this conversation
+            const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: chatToolsEnabled(), capabilities: eff.deep ? ["reasoning"] : [] }
+            const pick = nextCompatibleFallback(foChain, foIdx, need)
+            foIdx = pick.idx
             recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
+            for (const sk of pick.skipped) warn(`failover skipped ${sk.name}/${sk.model}: ${sk.reason}`)
+            if (!pick.next) throw new ProviderError(`${e.message} — failover stopped: no compatible fallback provider`, { status: e.status, retryable: false })
+            const next = pick.next
             warn(`provider ${p.name} failed (${String(e.message).slice(0, 80)}) — switching to ${next.name}/${next.model}`)
             p = next
             round--

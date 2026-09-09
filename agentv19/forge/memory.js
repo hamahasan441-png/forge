@@ -1,5 +1,5 @@
 /**
- * forge — hierarchical memory (v20).
+ * forge — hierarchical memory (v20 tiers, v21.1 storage pipeline + provenance).
  *
  *   GLOBAL  ~/.forge/memory.md                     user preferences, durable facts
  *   PROJECT ~/.forge/projects/<hash>/memory.md     per-project notes + learned fixes
@@ -10,6 +10,22 @@
  * query (task / user message) and only the top matches are injected, from
  * BOTH tiers, deduplicated, capped. Writes go through secret redaction so
  * credentials never land in long-term memory.
+ *
+ * v21.1: ONE storage pipeline. Every mutation (append / learn / forget / prune
+ * / replace) goes through `writeMemoryFile`: the file's real path is resolved
+ * (a user's symlinked memory.md keeps working), the new content is written to
+ * a temp file next to it, fsynced and renamed into place, mode 0600. A crash
+ * or a concurrent writer can no longer leave a half-written or interleaved
+ * memory file; the last complete write wins as a unit. Every entry also
+ * carries PROVENANCE — who stored it (cli / tool / agent / …), when, and from
+ * which run — on a comment line directly above it:
+ *
+ *   <!-- forge: source=tool at=2026-09-07T10:00:00.000Z run=r-abc -->
+ *   - prefer tabs
+ *
+ * Comment lines are never injected into prompts and never scored; they travel
+ * with their entry through forget / prune, and files written by older
+ * versions (no comments) read exactly as before.
  *
  * Everything here is best-effort: a broken memory can never break the CLI.
  */
@@ -38,12 +54,117 @@ export function projectMemoryPath(cwd) {
 
 // --- reading ----------------------------------------------------------------
 
+/** Provenance comment line: `<!-- forge: k=v k=v -->` (never injected/scored). */
+const PROVENANCE_RE = /^\s*<!--\s*forge:\s*(.*?)\s*-->\s*$/
+export const MEMORY_SOURCES = new Set(["cli", "tool", "agent", "subagent", "repair", "import", "unknown"])
+
+export function formatProvenance(p = {}) {
+  const source = MEMORY_SOURCES.has(p.source) ? p.source : "unknown"
+  const ts = p.at != null && !Number.isNaN(new Date(p.at).getTime()) ? new Date(p.at) : new Date()
+  const at = ts.toISOString()
+  const parts = [`source=${source}`, `at=${at}`]
+  if (p.runId) parts.push(`run=${String(p.runId).replace(/[\s>]/g, "_").slice(0, 40)}`)
+  if (p.model) parts.push(`model=${String(p.model).replace(/[\s>]/g, "_").slice(0, 40)}`)
+  return `<!-- forge: ${parts.join(" ")} -->`
+}
+
+export function parseProvenance(line) {
+  const m = PROVENANCE_RE.exec(String(line ?? ""))
+  if (!m) return null
+  const out = { source: "unknown", at: null, runId: null, model: null }
+  for (const kv of m[1].split(/\s+/)) {
+    const i = kv.indexOf("=")
+    if (i < 1) continue
+    const k = kv.slice(0, i), v = kv.slice(i + 1)
+    if (k === "source" && MEMORY_SOURCES.has(v)) out.source = v
+    else if (k === "at" && !Number.isNaN(Date.parse(v))) out.at = v
+    else if (k === "run") out.runId = v
+    else if (k === "model") out.model = v
+  }
+  return out
+}
+
 function readLines(p) {
   try {
     const raw = fs.readFileSync(p, "utf8")
-    return raw.split("\n").map((l) => l.replace(/^[-•*]\s+/, "").trim()).filter(Boolean)
+    return raw.split("\n").filter((l) => !PROVENANCE_RE.test(l)).map((l) => l.replace(/^[-•*]\s+/, "").trim()).filter(Boolean)
   } catch {
     return []
+  }
+}
+
+/**
+ * v21.1 — the ONE write path for memory files: resolve the real target (so a
+ * symlinked memory.md is honoured, but never a symlink swapped in at write
+ * time), write to a temp file in the same directory, fsync, rename over the
+ * target, fsync the directory. Mode 0600: memory may hold personal notes.
+ */
+/**
+ * Advisory lock around a memory file's read-modify-write. Created with
+ * O_EXCL (atomic on every platform), holds the owner pid + time; a lock older
+ * than LOCK_STALE_MS whose owner is gone is broken. Waits synchronously
+ * (Atomics.wait) up to LOCK_WAIT_MS — the memory layer is sync by contract.
+ */
+const LOCK_WAIT_MS = 3000
+const LOCK_STALE_MS = 10_000
+const sleepSync = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) } catch {} }
+function pidAlive(pid) { try { process.kill(pid, 0); return true } catch (e) { return e?.code === "EPERM" } }
+
+const HELD_LOCKS = new Set()
+export function withMemoryLock(file, fn) {
+  if (HELD_LOCKS.has(file)) return fn() // re-entrant within this process (appendMemory → appendEntry)
+  const dir = path.dirname(file)
+  fs.mkdirSync(dir, { recursive: true })
+  const lock = path.join(dir, `.${path.basename(file)}.lock`)
+  const deadline = Date.now() + LOCK_WAIT_MS
+  let fd = null
+  for (;;) {
+    try { fd = fs.openSync(lock, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600); break } catch (e) {
+      if (e?.code !== "EEXIST") throw e
+      // stale? (owner dead, or lock much older than any legitimate hold)
+      try {
+        const st = fs.statSync(lock)
+        const owner = Number((() => { try { return fs.readFileSync(lock, "utf8").split(" ")[0] } catch { return "" } })())
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS || (owner && owner !== process.pid && !pidAlive(owner))) { try { fs.unlinkSync(lock) } catch {}; continue }
+      } catch { continue }
+      if (Date.now() > deadline) throw new Error(`memory file is locked by another writer: ${lock}`)
+      sleepSync(5 + Math.floor(Math.random() * 10))
+    }
+  }
+  try { fs.writeSync(fd, `${process.pid} ${Date.now()}`) } catch {}
+  HELD_LOCKS.add(file)
+  try { return fn() } finally {
+    HELD_LOCKS.delete(file)
+    try { fs.closeSync(fd) } catch {}
+    try { fs.unlinkSync(lock) } catch {}
+  }
+}
+
+export function writeMemoryFile(file, text) {
+  const dir = path.dirname(file)
+  fs.mkdirSync(dir, { recursive: true })
+  let target = file
+  try { target = fs.realpathSync(file) } catch { /* absent: create in place */ }
+  const tdir = path.dirname(target)
+  let st = null
+  try { st = fs.lstatSync(target) } catch {}
+  if (st && !st.isFile()) throw new Error(`memory path is not a regular file: ${target}`)
+  const tmp = path.join(tdir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`)
+  let fd = null
+  try {
+    fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600)
+    const buf = Buffer.from(String(text ?? ""), "utf8")
+    let off = 0
+    while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off)
+    fs.fsyncSync(fd)
+    fs.closeSync(fd); fd = null
+    fs.renameSync(tmp, target)
+    try { const dfd = fs.openSync(tdir, "r"); try { fs.fsyncSync(dfd) } finally { fs.closeSync(dfd) } } catch {}
+    return target
+  } catch (e) {
+    if (fd !== null) { try { fs.closeSync(fd) } catch {} }
+    try { fs.unlinkSync(tmp) } catch {}
+    throw e
   }
 }
 
@@ -173,15 +294,21 @@ export function memoryEntries(tier, cwd = process.cwd()) {
   try { raw = fs.readFileSync(memoryFileFor(tier, cwd), "utf8") } catch { return [] }
   const src = raw.split("\n")
   const entries = []
+  let pending = null // provenance comment waiting for its entry
   for (let i = 0; i < src.length; i++) {
     const line = src[i]
     if (!line.trim()) continue
+    const prov = parseProvenance(line)
+    if (prov) { pending = { line, prov }; continue }
+    const lines = pending ? [pending.line] : []
+    const provenance = pending?.prov ?? null
+    pending = null
     if (/^\s*LEARNING:/i.test(line)) {
       const block = [line]
       while (i + 1 < src.length && /^\s*(root-cause|fix):/i.test(src[i + 1])) block.push(src[++i])
-      entries.push({ text: block.join("\n"), lines: block })
+      entries.push({ text: block.join("\n"), lines: [...lines, ...block], provenance })
     } else {
-      entries.push({ text: line.replace(/^[-•*]\s+/, "").trim(), lines: [line] })
+      entries.push({ text: line.replace(/^[-•*]\s+/, "").trim(), lines: [...lines, line], provenance })
     }
   }
   return entries
@@ -190,24 +317,48 @@ export function memoryEntries(tier, cwd = process.cwd()) {
 function writeEntries(tier, entries, cwd) {
   const file = memoryFileFor(tier, cwd)
   const body = entries.map((e) => e.lines.join("\n")).join("\n")
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, body ? body + "\n" : "")
+  writeMemoryFile(file, body ? body + "\n" : "")
   return file
 }
 
-/** Append one note to a tier ("global" | "project"). Redacted, deduped, capped. */
-export function appendMemory(tier, text, cwd = process.cwd()) {
+/** Append entry lines (with provenance) through the single pipeline; prunes to the cap. */
+function appendEntry(tier, lines, cwd, provenance, max = MEMORY_MAX_ENTRIES) {
+  return withMemoryLock(memoryFileFor(tier, cwd), () => {
+    const entries = memoryEntries(tier, cwd)
+    entries.push({ text: "", lines: [formatProvenance(provenance), ...lines], provenance })
+    const kept = entries.length > max ? entries.slice(entries.length - max) : entries
+    return writeEntries(tier, kept, cwd)
+  })
+}
+
+/**
+ * Append one note to a tier ("global" | "project"). Redacted, deduped, capped.
+ * `provenance` = { source, runId?, model?, at? } — who is storing this and why.
+ */
+export function appendMemory(tier, text, cwd = process.cwd(), provenance = {}) {
   const file = memoryFileFor(tier, cwd)
   const line = redact(String(text ?? "").trim()).slice(0, 400)
   if (!line) return { ok: false, error: "empty text" }
   try {
-    // dedup: an identical bullet already present is a no-op (best-effort)
-    const existing = memoryEntries(tier, cwd)
-    if (existing.some((e) => e.text === line)) return { ok: true, file, deduped: true }
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.appendFileSync(file, `- ${line}\n`)
-    pruneMemory(tier, cwd)
-    return { ok: true, file }
+    return withMemoryLock(file, () => {
+      // dedup: an identical bullet already present is a no-op — checked under the lock
+      const existing = memoryEntries(tier, cwd)
+      if (existing.some((e) => e.text === line)) return { ok: true, file, deduped: true }
+      appendEntry(tier, [`- ${line}`], cwd, provenance)
+      return { ok: true, file }
+    })
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Replace a whole tier (or an explicit file) with `text` — redacted, one pipeline. */
+export function replaceMemory(tierOrFile, text, cwd = process.cwd(), provenance = {}) {
+  try {
+    const file = tierOrFile === "global" || tierOrFile === "project" ? memoryFileFor(tierOrFile, cwd) : String(tierOrFile)
+    const body = redact(String(text ?? "")).trimEnd()
+    withMemoryLock(file, () => writeMemoryFile(file, body ? `${formatProvenance(provenance)}\n${body}\n` : ""))
+    return { ok: true, file, chars: body.length }
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }
   }
@@ -216,11 +367,13 @@ export function appendMemory(tier, text, cwd = process.cwd()) {
 /** Trim a tier to the newest MEMORY_MAX_ENTRIES entries. Returns count removed. */
 export function pruneMemory(tier, cwd = process.cwd(), max = MEMORY_MAX_ENTRIES) {
   try {
-    const entries = memoryEntries(tier, cwd)
-    if (entries.length <= max) return { ok: true, removed: 0 }
-    const kept = entries.slice(entries.length - max)
-    writeEntries(tier, kept, cwd)
-    return { ok: true, removed: entries.length - kept.length }
+    return withMemoryLock(memoryFileFor(tier, cwd), () => {
+      const entries = memoryEntries(tier, cwd)
+      if (entries.length <= max) return { ok: true, removed: 0 }
+      const kept = entries.slice(entries.length - max)
+      writeEntries(tier, kept, cwd)
+      return { ok: true, removed: entries.length - kept.length }
+    })
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }
   }
@@ -229,14 +382,16 @@ export function pruneMemory(tier, cwd = process.cwd(), max = MEMORY_MAX_ENTRIES)
 /** Remove entry N (1-based, as shown by `memory list`) from a tier. */
 export function forgetMemory(tier, n, cwd = process.cwd()) {
   try {
-    const entries = memoryEntries(tier, cwd)
-    const idx = Number(n) - 1
-    if (!Number.isInteger(idx) || idx < 0 || idx >= entries.length) {
-      return { ok: false, error: `no entry ${n} (${entries.length} in ${tier} memory)` }
-    }
-    const [removed] = entries.splice(idx, 1)
-    writeEntries(tier, entries, cwd)
-    return { ok: true, removed: removed.text }
+    return withMemoryLock(memoryFileFor(tier, cwd), () => {
+      const entries = memoryEntries(tier, cwd)
+      const idx = Number(n) - 1
+      if (!Number.isInteger(idx) || idx < 0 || idx >= entries.length) {
+        return { ok: false, error: `no entry ${n} (${entries.length} in ${tier} memory)` }
+      }
+      const [removed] = entries.splice(idx, 1)
+      writeEntries(tier, entries, cwd)
+      return { ok: true, removed: removed.text }
+    })
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }
   }
@@ -255,17 +410,14 @@ export function clearMemory(tier, cwd = process.cwd()) {
 }
 
 /** Structured failure learning: { problem, rootCause, fix } → project memory. */
-export function recordLearning({ problem, rootCause, fix } = {}, cwd = process.cwd()) {
+export function recordLearning({ problem, rootCause, fix } = {}, cwd = process.cwd(), provenance = {}) {
   const block = [
     `LEARNING: ${redact(String(problem ?? "").slice(0, 200))}`,
     `  root-cause: ${redact(String(rootCause ?? "").slice(0, 200))}`,
     `  fix: ${redact(String(fix ?? "").slice(0, 240))}`,
   ]
-  const line = block.join("\n")
   try {
-    const file = projectMemoryPath(cwd)
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.appendFileSync(file, line + "\n")
+    const file = appendEntry("project", block, cwd, provenance)
     return { ok: true, file }
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }

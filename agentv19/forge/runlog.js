@@ -18,6 +18,7 @@
  * outputs. Bounded: 200 files, ~60 touched paths per run.
  */
 import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { listCheckpoints } from "./checkpoint.js"
@@ -27,10 +28,7 @@ const MAX_RUNS = 200
 const MAX_FILES = 60
 
 function writeAtomic(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = file + ".tmp"
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 1), { mode: 0o600 })
-  fs.renameSync(tmp, file)
+  writeStateFile(file, JSON.stringify(obj, null, 1)) // v21.1: O_EXCL temp + fsync + rename, tmp cleaned on failure
 }
 
 export function runFile(runId) {
