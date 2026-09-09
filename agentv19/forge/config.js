@@ -18,21 +18,53 @@ export const USER_CONFIG_PATH = process.env.FORGE_CONFIG || path.join(DEFAULT_DI
 export const PROJECT_CONFIG_NAME = "forge.config.json"
 export const SESSIONS_DIR = path.join(DEFAULT_DIR, "sessions")
 
+/**
+ * v25 operational budgets. These are SAFETY FUSES, not the definition of
+ * completion (verified objective satisfaction is). Raised so a real coding
+ * agent can run tests, builds, and multi-file work without the v24 25-step /
+ * 45-second / 12-step-segment stall. Catastrophic shellguard / SSRF /
+ * project-write / plugin isolation boundaries are independent of these numbers
+ * and are not relaxed here.
+ *
+ * `assumeYes`, `allowSudo`, `allowInterpreterEval`, `allowOutsideProject`,
+ * `fetchPrivateUrls` stay FALSE in defaultConfig — project forge.config.json
+ * still cannot set them. Autonomous runs opt into interpreter-eval and
+ * in-project git danger at the agent/tool-context layer, never by flipping
+ * those privileged keys.
+ */
+export const AGENT_BUDGETS = Object.freeze({
+  maxSteps: 80,
+  timeoutSec: 180,
+  maxToolOutput: 32000,
+  maxToolCalls: 250,
+  delegateTimeoutSec: 300,
+  maxParallelSubAgents: 2,
+  segmentSteps: 32,
+  maxSegments: 80,
+  maxContinuations: 12,
+  bashTimeoutCapSec: 900,
+  maxStepsHardCap: 1000,
+  maxToolCallsHardCap: 500,
+})
+
 export function defaultConfig() {
+  const b = AGENT_BUDGETS
   return {
     version: 1,
     activeProvider: "",
     providers: {}, // name -> { apiKey, baseUrl, model }
     skills: { enabled: true, dir: "" },
     agent: {
-      maxSteps: 25, timeoutSec: 45, maxToolOutput: 12000, maxToolCalls: 80,
-      delegateTimeoutSec: 180, maxParallelSubAgents: 2,
+      maxSteps: b.maxSteps, timeoutSec: b.timeoutSec, maxToolOutput: b.maxToolOutput, maxToolCalls: b.maxToolCalls,
+      delegateTimeoutSec: b.delegateTimeoutSec, maxParallelSubAgents: b.maxParallelSubAgents,
       // v21 autonomous orchestration: autonomous runs through the meta
       // controller (segment loop, DAG, model strategy, workers, resources,
       // verification ledger, recovery). maxSteps remains the PER-SEGMENT safety
       // bound; maxSegments is the task-level fuse (never the definition of
       // completion — verified objective satisfaction is).
-      autonomous: true, segmentSteps: 12, maxSegments: 40, modelStrategy: true,
+      // v25: budgets raised so tests/builds/multi-file work finish; the fuse
+      // is still a fuse. Privileged tools.* flags stay false.
+      autonomous: true, segmentSteps: b.segmentSteps, maxSegments: b.maxSegments, maxContinuations: b.maxContinuations, modelStrategy: true,
     },
     chat: { stream: true, system: "", showReasoning: true, maxHistoryMessages: 40, tools: true, compact: true, compactAtChars: 48000, profile: "auto", restoreCwd: true, historySize: 300 },
     // v20.5: `intelligence` is the master switch for the capability/router/

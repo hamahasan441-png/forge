@@ -26,7 +26,7 @@
  */
 import fs from "node:fs"
 import path from "node:path"
-import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel } from "./config.js"
+import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { CATALOG, getCatalog, envKeyFor, listModels, probe } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
@@ -286,7 +286,7 @@ async function main() {
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
       const planMode = flags.plan !== undefined
       console.log(dim(`forge agent — ${bold(task)}${flags.deep === true ? "  " + green("DEEP") : ""}`))
-      console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? 25}${planMode ? " • PLAN MODE (read-only)" : ""}`))
+      console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps}${planMode ? " • PLAN MODE (read-only)" : ""}`))
       console.log()
       const t0 = Date.now()
       // v20.4: in a terminal the run is rendered from UI state (live dock,

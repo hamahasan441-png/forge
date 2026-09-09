@@ -33,7 +33,7 @@ import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun } from "./shellguard.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
-import { DEFAULT_DIR } from "./config.js"
+import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
 import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
@@ -479,8 +479,8 @@ export function makeToolContext(opts = {}) {
     cwd,
     /** "default" | "verifier" — a verifier sees only verificationTools. */
     mode = "default",
-    timeoutSec = 45,
-    maxToolOutput = 12000,
+    timeoutSec = AGENT_BUDGETS.timeoutSec,
+    maxToolOutput = AGENT_BUDGETS.maxToolOutput,
     skillsDir,
     searchUrl,
     memoryPath,
@@ -493,8 +493,9 @@ export function makeToolContext(opts = {}) {
     assumeYes = false,
     allowNetworkUpload = false, // v21.1: curl -d / wget --post-file / scp … from the model
     allowInterpreterEval = false, // v21.2: node -e / python -c / perl -e …
+    autonomous = false, // v25: in-project git danger without assumeYes
     fetchPrivateUrls = process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
-    delegateTimeoutSec = 180,
+    delegateTimeoutSec = AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates = 2,
     signal = null,
     subAgent = false,
@@ -515,7 +516,7 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     mode,
-    allowOutsideProject, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, fetchPrivateUrls,
+    allowOutsideProject, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,
@@ -587,9 +588,9 @@ async function runBash(ctx, command, timeoutSec) {
       return `BLOCKED: write tools are disabled in this read-only agent — bash command "${String(command).slice(0, 80)}" is a filesystem mutation. Read-only workers may run approved verification commands (test/build/lint) but not arbitrary mutations.`
     }
   }
-  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload, allowInterpreterEval: ctx.allowInterpreterEval })
+  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload, allowInterpreterEval: ctx.allowInterpreterEval, autonomous: ctx.autonomous === true })
   if (!verdict.ok) return verdict.reason
-  const t = Math.min(300, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
+  const t = Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
   if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"
   return new Promise((resolve) => {
     const MAX_BUF = 4 * 1024 * 1024
