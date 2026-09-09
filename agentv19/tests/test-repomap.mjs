@@ -6,7 +6,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { buildRepoMap } from "../forge/repomap.js"
+import { buildRepoMap, buildRepoMapAsync } from "../forge/repomap.js"
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "forge-map-"))
 const w = (rel, body) => { fs.mkdirSync(path.join(ROOT, path.dirname(rel)), { recursive: true }); fs.writeFileSync(path.join(ROOT, rel), body) }
@@ -55,6 +55,41 @@ ok("notes the omitted files", /more source files/.test(bmap))
 const empty = fs.mkdtempSync(path.join(os.tmpdir(), "forge-map-empty-"))
 fs.writeFileSync(path.join(empty, "readme.md"), "# hi")
 ok("no source files → empty string", buildRepoMap(empty) === "")
+
+console.log("== hybrid reorder never widens ==")
+{
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "forge-map-hyb-"))
+  fs.mkdirSync(path.join(tree, "src"))
+  fs.writeFileSync(path.join(tree, "src", "login.js"), "export function login(){}\n")
+  fs.writeFileSync(path.join(tree, "src", "puppy.js"), "export function play(){}\n")
+  fs.writeFileSync(path.join(tree, "src", "steel.js"), "export function beam(){}\n")
+  const listed = (s) => [...String(s).matchAll(/^- (\S+?)(?: \((?:test|config)\))?:/gm)].map((m) => m[1])
+  const q = "login session"
+  const sync = buildRepoMap(tree, { query: q, maxListed: 10 })
+  const noEmb = await buildRepoMapAsync(tree, { query: q, maxListed: 10 })
+  ok("no embedder is byte-identical to sync", noEmb === sync)
+  const throwing = await buildRepoMapAsync(tree, { query: q, maxListed: 10, embed: async () => { throw new Error("offline") } })
+  ok("throwing embedder is byte-identical to sync", throwing === sync)
+  const V = {
+    "login session": [0, 1],
+    "src/login.js login": [1, 0],
+    "src/puppy.js play": [0, 1],
+    "src/steel.js beam": [-1, 0],
+  }
+  const embed = async (texts) => texts.map((t) => {
+    for (const [k, v] of Object.entries(V)) if (t.startsWith(k) || t === k) return v
+    return [0, 0]
+  })
+  const hyb = await buildRepoMapAsync(tree, { query: q, maxListed: 10, embed, alpha: 1 })
+  const hybFiles = listed(hyb)
+  const syncFiles = listed(sync)
+  ok("hybrid lists the same files (never widens)", hybFiles.length === syncFiles.length && hybFiles.every((f) => syncFiles.includes(f)))
+  ok("hybrid promotes the semantic file", hybFiles[0] === "src/puppy.js")
+  ok("sync BM25 still leads with the keyword file", syncFiles[0] === "src/login.js")
+  const emptyAsync = await buildRepoMapAsync(empty)
+  ok("async empty tree is still empty", emptyAsync === "")
+  try { fs.rmSync(tree, { recursive: true, force: true }) } catch {}
+}
 
 try { for (const d of [ROOT, big, empty]) fs.rmSync(d, { recursive: true, force: true }) } catch {}
 console.log(`\n== repomap suite: ${PASS} passed, ${FAIL} failed ==`)

@@ -11,7 +11,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import { rankDocs } from "./retrieval.js"
+import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 
 const SKIP = new Set([
   "node_modules", ".git", ".hg", ".svn", ".next", ".nuxt", ".svelte-kit",
@@ -164,10 +164,62 @@ export function buildRepoMap(root, {
   maxChars = 4000,
   query = "",
 } = {}) {
+  const found = collectRepoFiles(root, { maxFiles, maxBytesPerFile })
+  if (!found.length) return ""
+  return formatRepoMap(orderRepoFiles(found, query), { maxListed, maxSymbols, maxChars })
+}
+
+/**
+ * v24: same scan + BM25 shortlist as buildRepoMap. When `embed` is supplied,
+ * embeddings only REORDER that list — they never widen it (no extra files,
+ * no extra scan). Embedder failure / timeout / no query → byte-identical to
+ * buildRepoMap. Never throws.
+ */
+export async function buildRepoMapAsync(root, {
+  maxFiles = 400,
+  maxListed = 60,
+  maxSymbols = 12,
+  maxBytesPerFile = 256 * 1024,
+  maxChars = 4000,
+  query = "",
+  embed = null,
+  alpha,
+  budgetMs = 4000,
+} = {}) {
+  const found = collectRepoFiles(root, { maxFiles, maxBytesPerFile })
+  if (!found.length) return ""
+  const ordered = orderRepoFiles(found, query)
+  const q = String(query || "").trim()
+  if (!q || typeof embed !== "function") {
+    return formatRepoMap(ordered, { maxListed, maxSymbols, maxChars })
+  }
+  try {
+    const ranked = await rankDocsHybrid(q, ordered.map((f) => ({
+      text: f.rel + " " + f.symbols.join(" ") + " " + f.imports.join(" "),
+      ref: f,
+    })), { embed, alpha, budgetMs })
+    // reorder only: drop anything that is not one of the scanned files
+    const known = new Set(ordered)
+    const next = []
+    const seen = new Set()
+    for (const r of ranked) {
+      const f = r.ref
+      if (!f || !known.has(f) || seen.has(f)) continue
+      seen.add(f)
+      next.push(f)
+    }
+    for (const f of ordered) if (!seen.has(f)) next.push(f)
+    return formatRepoMap(next, { maxListed, maxSymbols, maxChars })
+  } catch {
+    return formatRepoMap(ordered, { maxListed, maxSymbols, maxChars })
+  }
+}
+
+function collectRepoFiles(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024 } = {}) {
   let base
-  try { base = path.resolve(root || process.cwd()) } catch { return "" }
+  try { base = path.resolve(root || process.cwd()) } catch { return [] }
   const skip = new Set([...SKIP, ...gitignoreDirs(base)])
-  let found = []
+  const found = []
   let scanned = 0
   const walk = (dir, depth) => {
     if (scanned >= maxFiles || depth > 8) return
@@ -200,15 +252,19 @@ export function buildRepoMap(root, {
     }
   }
   walk(base, 0)
-  if (!found.length) return ""
+  return found
+}
+
+function orderRepoFiles(found, query) {
   const q = String(query || "").trim()
-  if (q) {
-    const ranked = rankDocs(q, found.map((f, i) => ({ i, text: f.rel + " " + f.symbols.join(" ") + " " + f.imports.join(" ") })))
-    const order = ranked.map((r) => r.i)
-    found = order.map((i) => found[i])
-  } else {
-    found.sort((a, b) => b.symbols.length - a.symbols.length || a.rel.localeCompare(b.rel))
+  if (!q) {
+    return [...found].sort((a, b) => b.symbols.length - a.symbols.length || a.rel.localeCompare(b.rel))
   }
+  const ranked = rankDocs(q, found.map((f, i) => ({ i, text: f.rel + " " + f.symbols.join(" ") + " " + f.imports.join(" ") })))
+  return ranked.map((r) => found[r.i])
+}
+
+function formatRepoMap(found, { maxListed = 60, maxSymbols = 12, maxChars = 4000 } = {}) {
   const lines = ["REPO MAP (top-level symbols — use this to locate code before ls/grep):"]
   let used = lines[0].length
   let shown = 0
