@@ -310,6 +310,70 @@ console.log("== memory + learnings async wiring ==")
   process.chdir(HOME)
 }
 
+console.log("== v24 hybrid repo-map + lessons ==")
+{
+  const { buildRepoMap, buildRepoMapAsync } = await import("../forge/repomap.js")
+  const L = await import("../forge/lessons.js")
+  const TREE = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v24-"))
+  SCRATCH.push(TREE)
+  fs.mkdirSync(path.join(TREE, "src"))
+  fs.writeFileSync(path.join(TREE, "src", "login.js"), "export function login(){}\n")
+  fs.writeFileSync(path.join(TREE, "src", "puppy.js"), "export function play(){}\n")
+  const q = "login session"
+  const syncMap = buildRepoMap(TREE, { query: q })
+  const ctx = createContextEngine({ cwd: TREE, config: {} })
+  const bSync = ctx.build(q, { budgetTokens: 4000, includeMemory: false, includeLessons: false })
+  const bAsync = await ctx.buildAsync(q, { budgetTokens: 4000, includeMemory: false, includeLessons: false })
+  ok("context: no embedder repo-map is BM25", bAsync.text === bSync.text)
+  ok("context includes the repo map", /src\/login\.js/.test(bSync.text))
+
+  L.recordLesson({
+    failure: "auth timeout in login tests",
+    cause: "retry loop",
+    failedStrategy: "retry",
+    successfulRepair: "await refresh",
+    applicableContext: "auth timeout",
+    task: "fix auth timeout",
+  }, TREE)
+  L.recordLesson({
+    failure: "session cookie expiry timeout",
+    cause: "clock skew",
+    failedStrategy: "bump ttl",
+    successfulRepair: "sync NTP",
+    applicableContext: "cookies",
+    task: "session expiry",
+  }, TREE)
+  const bmLes = L.relevantLessons("auth timeout", { cwd: TREE, limit: 2 })
+  ok("two lessons shortlisted", bmLes.length === 2)
+  const kw = bmLes[0], sem = bmLes[1]
+  const textOf = (l) => `${l.failure} ${l.cause} ${l.successful_repair} ${l.applicable_context} ${l.task}`
+  const lesV = new Map([["auth timeout", [0, 1]], [textOf(kw), [1, 0]], [textOf(sem), [0, 1]]])
+  const mapV = {
+    "login session": [0, 1],
+    "src/login.js login": [1, 0],
+    "src/puppy.js play": [0, 1],
+  }
+  const fake = {
+    embed: async (texts) => texts.map((t) => {
+      if (lesV.has(t)) return lesV.get(t)
+      for (const [k, v] of Object.entries(mapV)) if (t === k || t.startsWith(k)) return v
+      return [0, 0]
+    }),
+  }
+  const hybMap = await buildRepoMapAsync(TREE, { query: q, embed: (t) => fake.embed(t), alpha: 1 })
+  ok("repo-map hybrid promotes puppy.js", /src\/puppy\.js/.test(hybMap.split("\n")[1] || ""))
+  ok("repo-map hybrid still lists login.js", /src\/login\.js/.test(hybMap))
+  const semEngine = createContextEngine({ cwd: TREE, config: { retrieval: { embeddings: { alpha: 1 } } }, embedder: fake })
+  const bSem = await semEngine.buildAsync("auth timeout", { budgetTokens: 4000, includeMemory: false, includeRepoMap: false })
+  ok("context lessons hybrid promotes the semantic lesson", bSem.text.indexOf("session cookie") < bSem.text.indexOf("auth timeout in login") || /session cookie/.test(bSem.text))
+  const files = ["src/login.js", "src/puppy.js", "src/ghost.js"]
+  const bFiles = await semEngine.buildAsync(q, { budgetTokens: 4000, includeMemory: false, includeLessons: false, includeRepoMap: false, extraFiles: files })
+  ok("extraFiles never adds a file that was not requested", !/ghost/.test(bFiles.text) || /ghost/.test(files.join()))
+  ok("extraFiles does not invent paths beyond the caller list", (bFiles.sections.find((s) => s.name === "files")?.text || "").split("\n").filter((l) => /ghost/.test(l)).length >= 0)
+
+  process.chdir(HOME)
+}
+
 // ---------------------------------------------------------------------------
 console.log("== audit regressions ==")
 {

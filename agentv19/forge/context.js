@@ -13,9 +13,9 @@
  * tokens it can spend; the engine returns the highest-value slices, ranked.
  * Mutations invalidate the affected cached state via invalidateFor(paths).
  */
-import { buildRepoMap } from "./repomap.js"
+import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearningsAsync, appendMemory } from "./memory.js"
-import { lessonsForPrompt } from "./lessons.js"
+import { lessonsForPrompt, lessonsForPromptAsync } from "./lessons.js"
 import { profileSummary, loadProfile } from "./profile.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import fs from "node:fs"
@@ -86,22 +86,58 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
   }
 
   /**
-   * v23: async build. With no embedder this IS build() (pure BM25, sync core).
-   * With an embedder, the memory/learnings slices are computed by the hybrid
-   * BM25+embeddings rerank (BM25 shortlist, embeddings reorder only) under a
-   * hard rerank budget — every failure degrades to the exact BM25 slice.
+   * v24: async build. With no embedder this IS build() (pure BM25, sync core).
+   * With an embedder, memory / learnings / repo-map / lessons / extra-file
+   * snippets are BM25-shortlisted then embeddings-reordered (never widened).
+   * Every failure degrades to the exact BM25 slice.
    */
   async function buildAsync(task, opts = {}) {
     if (!embedder) return build(task, opts)
     const precise = opts.precision === "precise"
     const pre = {}
+    const alpha = config?.retrieval?.embeddings?.alpha
+    const budgetMs = config?.retrieval?.embeddings?.rerankBudgetMs ?? 4000
+    const embed = (texts) => embedder.embed(texts)
     if (opts.includeMemory !== false && task) {
-      const alpha = config?.retrieval?.embeddings?.alpha
-      const budgetMs = config?.retrieval?.embeddings?.rerankBudgetMs ?? 4000
       pre.memory = await cachedAsync(`memory+sem:${bucket(task)}:${precise ? "p" : "n"}`, [], () =>
         relevantMemoryAsync(task, { cwd, limit: precise ? 6 : 10, embedder, alpha, budgetMs }))
       pre.learnings = await cachedAsync("learnings+sem:" + bucket(task), [], () =>
         relevantLearningsAsync(task, { cwd, limit: 2, embedder, alpha, budgetMs }))
+    }
+    if (opts.includeRepoMap !== false) {
+      pre.repomap = await cachedAsync(`repomap+sem:${bucket(task)}:${precise ? "p" : "n"}`, repoTags(), () => {
+        try {
+          return buildRepoMapAsync(cwd, {
+            query: task || "",
+            maxChars: precise ? 1800 : 4000,
+            maxListed: precise ? 25 : 60,
+            embed, alpha, budgetMs,
+          })
+        } catch { return "" }
+      })
+    }
+    if (opts.includeLessons !== false && task) {
+      pre.lessons = await cachedAsync("lessons+sem:" + bucket(task), [], () =>
+        lessonsForPromptAsync(task, { cwd, limit: precise ? 2 : 3, embedder, alpha, budgetMs }))
+    }
+    if (Array.isArray(opts.extraFiles) && opts.extraFiles.length) {
+      const cap = precise ? 3 : 6
+      const listed = opts.extraFiles.slice(0, cap)
+      try {
+        const ranked = await rankAsync(task || "", listed.map((f) => ({ text: String(f), path: f })))
+        const order = []
+        const seen = new Set()
+        for (const r of ranked) {
+          const p = r.path ?? listed[r.i]
+          if (!p || seen.has(p) || !listed.includes(p)) continue
+          seen.add(p)
+          order.push(p)
+        }
+        for (const p of listed) if (!seen.has(p)) order.push(p)
+        pre.extraFiles = order.slice(0, cap)
+      } catch {
+        pre.extraFiles = listed
+      }
     }
     return _assemble(task, opts, pre)
   }
@@ -122,9 +158,11 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
 
     // 2. repo map — ranked by task relevance; in precise mode shrink the cap
     if (opts.includeRepoMap !== false) {
-      const map = cached("repomap:" + (precise ? "precise" : "normal"), repoTags(), () => {
-        try { return buildRepoMap(cwd, { query: task || "", maxChars: precise ? 1800 : 4000, maxListed: precise ? 25 : 60 }) } catch { return "" }
-      })
+      const map = pre.repomap !== undefined
+        ? pre.repomap
+        : cached("repomap:" + (precise ? "precise" : "normal"), repoTags(), () => {
+          try { return buildRepoMap(cwd, { query: task || "", maxChars: precise ? 1800 : 4000, maxListed: precise ? 25 : 60 }) } catch { return "" }
+        })
       if (map) { sections.push({ name: "repomap", text: map }); sources.repomap = true }
     }
 
@@ -143,16 +181,21 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
       if (learn) sections.push({ name: "learnings", text: learn })
     }
 
-    // 4. structured failure lessons (v21)
+    // 4. structured failure lessons (v21) — hybrid-reranked when pre.lessons set
     if (opts.includeLessons !== false && task) {
-      const les = lessonsForPrompt(task, { cwd, limit: precise ? 2 : 3 })
+      const les = pre.lessons !== undefined
+        ? pre.lessons
+        : lessonsForPrompt(task, { cwd, limit: precise ? 2 : 3 })
       if (les) sections.push({ name: "lessons", text: les })
     }
 
-    // 5. explicitly requested files (the controller decides these from the DAG)
+    // 5. explicitly requested files (the controller decides these from the DAG).
+    //    embeddings may REORDER the caller list, never add to it.
     if (Array.isArray(opts.extraFiles) && opts.extraFiles.length) {
+      const cap = precise ? 3 : 6
+      const files = Array.isArray(pre.extraFiles) ? pre.extraFiles : opts.extraFiles.slice(0, cap)
       const snippets = []
-      for (const f of opts.extraFiles.slice(0, precise ? 3 : 6)) {
+      for (const f of files.slice(0, cap)) {
         const txt = readSnippet(path.resolve(cwd, f), precise ? 1200 : 2000)
         if (txt) snippets.push(txt)
       }

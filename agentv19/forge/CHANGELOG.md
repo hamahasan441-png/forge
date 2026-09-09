@@ -3,7 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v23.0.0 — "Forge ∞"
+## [Unreleased] — v24.0.0 — "retrieval surface"
+
+### Added (v24.0 — hybrid repo-map + lessons rerank)
+- **Hybrid repo-map** (`buildRepoMapAsync`): the file walk and BM25 shortlist are unchanged. When an embeddings provider is configured, vectors only REORDER that list. A miss is the v23 BM25 map, never a wider scan.
+- **Lessons rerank** (`relevantLessonsAsync`, `lessonsForPromptAsync`, `ineffectiveStrategiesAsync`): same contract — BM25 shortlist, embeddings reorder, throw/timeout → BM25.
+- **Context engine** `buildAsync` now hybrid-ranks repo-map, lessons, and extra-file snippets (caller list only). `build()` stays synchronous BM25.
+- **Agent prompt** precomputes `repoMapBlock` next to memory/learnings when embeddings are on. Delegated sub-agents stay on BM25.
+
+∞ (v23.0.0) and Ω (v22.0.0) ship in this line; PLAN-v25 / PLAN-v26 still hold. PLAN-v24 Tier 2–3 (vision, browser, sandbox, FORGE-BENCH, mid-task re-plan) are not this release.
+
+## v23.0.0 — "Forge ∞"
 
 ### Added (v23.0 — causal engine, self-diagnostics, adversarial review)
 - **Causal engine** (`causal.js`): SYMPTOM / PROXIMATE / ROOT / CONTRIBUTING / SECONDARY. Repair targets a live ROOT when one exists; a REJECTED root is never retried. Counterfactual of an impact radius names `ifFixed` vs `stillAtRisk` (a miss is UNKNOWN, never "no dependents").

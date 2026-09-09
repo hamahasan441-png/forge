@@ -33,7 +33,7 @@ import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
-import { recordLesson, ineffectiveStrategies } from "./lessons.js"
+import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
@@ -708,7 +708,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const contextBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
     const contextBlock = typeof contextBuilt === "string" ? contextBuilt : contextBuilt?.text ?? ""
 
-    const knownBad = ineffectiveStrategies(state.objective, { cwd: process.cwd() })
+    const knownBad = embedder
+      ? await ineffectiveStrategiesAsync(state.objective, { cwd: process.cwd(), embedder, alpha: embCfg.alpha, budgetMs: embCfg.rerankBudgetMs })
+      : ineffectiveStrategies(state.objective, { cwd: process.cwd() })
     if (knownBad.length) emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `avoiding ${knownBad.length} previously-ineffective approach(es)`, avoided: knownBad.slice(0, 2).map((l) => l.failed_strategy || l.failed_action) })
 
     let dagFindings = ""

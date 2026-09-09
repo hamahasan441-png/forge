@@ -21,7 +21,7 @@ import fs from "node:fs"
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { projectDir } from "./memory.js"
-import { rankDocs } from "./retrieval.js"
+import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import { redact } from "./secrets.js"
 
 const MAX_LESSONS = 300
@@ -225,22 +225,89 @@ export function ineffectiveStrategies(query, { cwd = process.cwd(), strategyHint
 
 /** Lessons with a known successful repair, relevance-ranked (for context). */
 export function relevantLessons(query, { cwd = process.cwd(), limit = 3, framework = null, minConfidence = 0 } = {}) {
-  let lessons = loadLessons(cwd).filter((l) => l.successful_repair || l.solution)
-  if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
-  if (minConfidence > 0) lessons = lessons.filter((l) => Number(l.confidence ?? 0) >= minConfidence)
-  if (!lessons.length || !String(query ?? "").trim()) return []
-  return rankDocs(String(query), lessons.map((l, i) => ({ i, text: `${l.failure} ${l.cause} ${l.successful_repair} ${l.applicable_context} ${l.task}` })))
+  const lessons = lessonPool(query, { cwd, framework, minConfidence, needRepair: true })
+  if (!lessons.length) return []
+  return rankDocs(String(query), lessonDocs(lessons))
     .filter((r) => r.score > 0)
     .slice(0, limit)
     .map((r) => lessons[r.i])
 }
 
+/**
+ * v24: BM25 shortlist, embeddings REORDER only. No embedder / failure → the
+ * exact relevantLessons() result. Never widens the shortlist. Never throws.
+ */
+export async function relevantLessonsAsync(query, {
+  cwd = process.cwd(), limit = 3, framework = null, minConfidence = 0,
+  embedder = null, alpha, budgetMs = 4000,
+} = {}) {
+  const bm = relevantLessons(query, { cwd, limit, framework, minConfidence })
+  if (!embedder || typeof embedder.embed !== "function" || !bm.length) return bm
+  try {
+    const pool = lessonPool(query, { cwd, framework, minConfidence, needRepair: true })
+    if (!pool.length) return bm
+    // shortlist = BM25's top (limit*4), embeddings only reorder that slice
+    const shortN = Math.max(limit * 4, 8)
+    const short = rankDocs(String(query), lessonDocs(pool))
+      .filter((r) => r.score > 0)
+      .slice(0, shortN)
+      .map((r) => pool[r.i])
+    if (!short.length) return bm
+    const ranked = await rankDocsHybrid(String(query), short.map((l) => ({ text: lessonText(l), ref: l })), {
+      embed: (texts) => embedder.embed(texts),
+      alpha,
+      budgetMs,
+    })
+    const out = []
+    const seen = new Set()
+    for (const r of ranked) {
+      if (!r.ref || seen.has(r.ref) || !short.includes(r.ref)) continue
+      seen.add(r.ref)
+      out.push(r.ref)
+      if (out.length >= limit) break
+    }
+    return out.length ? out : bm
+  } catch {
+    return bm
+  }
+}
+
 /** Compact, model-facing block of relevant learned fixes. "" when none. */
 export function lessonsForPrompt(query, opts = {}) {
-  const hits = relevantLessons(query, opts)
-  if (!hits.length) return ""
-  const lines = hits.map((l) => `- failure: ${l.failure || "?"} • cause: ${l.cause || "?"} • fix that worked: ${l.successful_repair}`)
-  return "LEARNED FROM PAST FAILURES (do not repeat the failed approach):\n" + lines.join("\n")
+  return formatLessons(relevantLessons(query, opts))
+}
+
+export async function lessonsForPromptAsync(query, opts = {}) {
+  return formatLessons(await relevantLessonsAsync(query, opts))
+}
+
+/**
+ * Async twin of ineffectiveStrategies. Embeddings reorder the BM25 hits;
+ * the direct strategy-name match still always counts. Failure → BM25.
+ */
+export async function ineffectiveStrategiesAsync(query, {
+  cwd = process.cwd(), strategyHint = "", limit = 5, framework = null,
+  minConfidence = 0, embedder = null, alpha, budgetMs = 4000,
+} = {}) {
+  const bm = ineffectiveStrategies(query, { cwd, strategyHint, limit, framework, minConfidence })
+  if (!embedder || typeof embedder.embed !== "function" || !bm.length) return bm
+  try {
+    const ranked = await rankDocsHybrid(
+      String(query ?? "") + " " + String(strategyHint ?? ""),
+      bm.map((l) => ({ text: `${l.failure} ${l.cause} ${l.failed_strategy} ${l.failed_action} ${l.applicable_context}`, ref: l })),
+      { embed: (texts) => embedder.embed(texts), alpha, budgetMs },
+    )
+    const out = []
+    const seen = new Set()
+    for (const r of ranked) {
+      if (!r.ref || seen.has(r.ref) || !bm.includes(r.ref)) continue
+      seen.add(r.ref)
+      out.push(r.ref)
+    }
+    return out.length ? out.slice(0, limit) : bm
+  } catch {
+    return bm
+  }
 }
 
 export function lessonStats(cwd = process.cwd()) {
@@ -257,4 +324,27 @@ export function lessonStats(cwd = process.cwd()) {
     retired: lessons.filter((l) => Number(l.confidence ?? 1) <= 0.15).length,
     path: lessonsPath(cwd),
   }
+}
+
+function lessonPool(query, { cwd, framework, minConfidence, needRepair }) {
+  if (!String(query ?? "").trim()) return []
+  let lessons = loadLessons(cwd)
+  if (needRepair) lessons = lessons.filter((l) => l.successful_repair || l.solution)
+  if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
+  if (minConfidence > 0) lessons = lessons.filter((l) => Number(l.confidence ?? 0) >= minConfidence)
+  return lessons
+}
+
+function lessonText(l) {
+  return `${l.failure} ${l.cause} ${l.successful_repair} ${l.applicable_context} ${l.task}`
+}
+
+function lessonDocs(lessons) {
+  return lessons.map((l, i) => ({ i, text: lessonText(l) }))
+}
+
+function formatLessons(hits) {
+  if (!hits.length) return ""
+  const lines = hits.map((l) => `- failure: ${l.failure || "?"} • cause: ${l.cause || "?"} • fix that worked: ${l.successful_repair}`)
+  return "LEARNED FROM PAST FAILURES (do not repeat the failed approach):\n" + lines.join("\n")
 }

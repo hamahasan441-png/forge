@@ -150,5 +150,51 @@ console.log("== garbage in, no crash out ==")
   ok("statistics survive malformed records", !threw2)
 }
 
+console.log("== hybrid lessons rerank never widens ==")
+{
+  const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "forge-les-hyb-"))
+  L.recordLesson({
+    failure: "auth timeout in login tests",
+    cause: "retry loop",
+    failedStrategy: "retry the suite",
+    successfulRepair: "awaited the token refresh",
+    applicableContext: "auth timeout",
+    task: "fix auth timeout",
+  }, DIR)
+  L.recordLesson({
+    failure: "session cookie expiry timeout on the identity gateway",
+    cause: "clock skew",
+    failedStrategy: "bump the ttl",
+    successfulRepair: "sync NTP before issuing cookies",
+    applicableContext: "identity gateway cookies",
+    task: "session expiry",
+  }, DIR)
+  const q = "auth timeout"
+  const bm = L.relevantLessons(q, { cwd: DIR, limit: 2 })
+  const noEmb = await L.relevantLessonsAsync(q, { cwd: DIR, limit: 2 })
+  ok("no embedder is the BM25 list", JSON.stringify(noEmb.map((l) => l.id)) === JSON.stringify(bm.map((l) => l.id)))
+  const throwing = { embed: async () => { throw new Error("offline") } }
+  const fell = await L.relevantLessonsAsync(q, { cwd: DIR, limit: 2, embedder: throwing })
+  ok("embedder failure is the BM25 list", JSON.stringify(fell.map((l) => l.id)) === JSON.stringify(bm.map((l) => l.id)))
+  ok("BM25 prefers the keyword lesson", /auth timeout/.test(bm[0]?.failure ?? ""))
+  ok("BM25 shortlist has both lessons", bm.length === 2)
+  const kw = bm[0]
+  const sem = bm[1]
+  const textOf = (l) => `${l.failure} ${l.cause} ${l.successful_repair} ${l.applicable_context} ${l.task}`
+  const V = new Map([[q, [0, 1]], [textOf(kw), [1, 0]], [textOf(sem), [0, 1]]])
+  const fake = { embed: async (texts) => texts.map((t) => V.get(t) ?? [0, 0]) }
+  const hyb = await L.relevantLessonsAsync(q, { cwd: DIR, limit: 2, embedder: fake, alpha: 1 })
+  ok("hybrid returns only shortlisted lessons", hyb.every((l) => bm.some((b) => b.id === l.id)))
+  ok("hybrid does not invent lessons", hyb.length <= bm.length)
+  ok("hybrid promotes the semantic lesson", hyb[0]?.id === sem.id)
+  const promptBm = L.lessonsForPrompt(q, { cwd: DIR })
+  const promptNo = await L.lessonsForPromptAsync(q, { cwd: DIR })
+  ok("prompt async without embedder matches", promptNo === promptBm)
+  const ineffBm = L.ineffectiveStrategies(q, { cwd: DIR, limit: 5 })
+  const ineffNo = await L.ineffectiveStrategiesAsync(q, { cwd: DIR, limit: 5 })
+  ok("ineffectiveStrategies async without embedder matches", JSON.stringify(ineffNo.map((l) => l.id)) === JSON.stringify(ineffBm.map((l) => l.id)))
+  try { fs.rmSync(DIR, { recursive: true, force: true }) } catch {}
+}
+
 console.log(`\n== lessons-schema suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
