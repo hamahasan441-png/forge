@@ -217,7 +217,12 @@ console.log("== agent manager: roles, cancellation, conflicts ==")
 // ---------------------------------------------------------------------------
 console.log("== resource manager: adaptation ==")
 {
-  const rm = resources.createResourceManager({ config: {}, cwd: WORK })
+  const rm = resources.createResourceManager({
+    config: {},
+    cwd: WORK,
+    // pin normal so 1.95M tokens is ~97% of the 2M budget on any host (v27 high is 4M)
+    profile: { cores: 4, freeMB: 2000, totalMB: 4096, tier: "normal" },
+  })
   // simulate high token usage
   rm.record({ tokensIn: 1_900_000, tokensOut: 50_000 })
   const ev = rm.evaluate()

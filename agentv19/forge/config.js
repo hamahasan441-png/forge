@@ -38,7 +38,7 @@ export const AGENT_BUDGETS = Object.freeze({
   maxToolOutput: 32000,
   maxToolCalls: 250,
   delegateTimeoutSec: 300,
-  maxParallelSubAgents: 6,
+  maxParallelSubAgents: 8,
   segmentSteps: 32,
   maxSegments: 80,
   maxContinuations: 12,
@@ -62,8 +62,9 @@ export function defaultConfig() {
       // verification ledger, recovery). maxSteps remains the PER-SEGMENT safety
       // bound; maxSegments is the task-level fuse (never the definition of
       // completion — verified objective satisfaction is).
-      // v26: maxParallelSubAgents is the CEILING for read-only DAG workers
-      // (class strategy picks a smaller number; low-RAM still clamps to 1).
+      // v27: maxParallelSubAgents is the CEILING for read-only DAG workers
+      // (class strategy picks a smaller number; 12GB high-tier may use all 8;
+      // low-RAM still clamps to 1).
       // Privileged tools.* flags stay false.
       autonomous: true, segmentSteps: b.segmentSteps, maxSegments: b.maxSegments, maxContinuations: b.maxContinuations, modelStrategy: true,
     },

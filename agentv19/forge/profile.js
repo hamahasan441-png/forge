@@ -23,12 +23,16 @@ import { projectDir } from "./memory.js"
 
 // --- resource awareness -------------------------------------------------------
 
-export function resourceProfile() {
-  const cores = os.cpus()?.length ?? 1
-  const freeMB = Math.round(os.freemem() / (1024 * 1024))
-  const totalMB = Math.round(os.totalmem() / (1024 * 1024))
-  const low = freeMB < 700 || totalMB < 2048 || cores <= 2
-  const high = !low && cores >= 6 && freeMB > 4000
+export function resourceProfile(sample) {
+  const cores = Number.isFinite(sample?.cores) ? Number(sample.cores) : (os.cpus()?.length ?? 1)
+  const freeMB = Number.isFinite(sample?.freeMB) ? Number(sample.freeMB) : Math.round(os.freemem() / (1024 * 1024))
+  const totalMB = Number.isFinite(sample?.totalMB) ? Number(sample.totalMB) : Math.round(os.totalmem() / (1024 * 1024))
+  // Phones / this CI (2 cores) / starving processes stay low even with 12GB.
+  const low = totalMB < 2048 || cores <= 2 || freeMB < 700
+  // 8GB+ laptops (12GB / 4-core included) are high if they aren't starving.
+  // The v26 `cores >= 6 && freeMB > 4000` path is kept so a 6-core / 6GB
+  // workstation that was already high stays high.
+  const high = !low && (totalMB >= 8192 || (cores >= 6 && freeMB > 4000))
   return { cores, freeMB, totalMB, tier: low ? "low" : high ? "high" : "normal" }
 }
 

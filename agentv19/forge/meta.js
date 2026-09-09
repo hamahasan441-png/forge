@@ -28,7 +28,7 @@
 import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, finalizeStatus } from "./taskstate.js"
 import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
 import { canCompleteTask, CHECK as GATE_CHECK } from "./completion.js"
-import { createResourceManager, ADAPT } from "./resources.js"
+import { createResourceManager, ADAPT, fanoutWaitMs } from "./resources.js"
 import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
@@ -409,9 +409,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const clearRequiredActions = () => requiredActions.clear()
 
   /** P0: no mutation boundary may be crossed while a worker is still alive. */
-  const settleWorkers = async (graceMs = 4000) => {
+  const settleWorkers = async (graceMs) => {
+    const ms = graceMs == null ? fanoutWaitMs(resources.state.tier) : graceMs
     try {
-      const res = await manager.settle({ graceMs })
+      const res = await manager.settle({ graceMs: ms })
       if (!res.settled) {
         emit({ type: "WORKER_ORPHANED", taskId, runId: taskRunId, stillRunning: res.stillRunning, reason: "workers still alive at a mutation boundary" })
       }
@@ -706,7 +707,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     // v23: buildAsync = hybrid rerank when embeddings are configured, else the
     // exact synchronous BM25 build (no embedder → no behavior change)
-    const contextBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
+    const contextBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: resources.state.tier === "high" ? 4000 : 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
     const contextBlock = typeof contextBuilt === "string" ? contextBuilt : contextBuilt?.text ?? ""
 
     const knownBad = embedder
@@ -770,8 +771,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           // Bounded wait: the deadline must be cleared (and unref'd) or it keeps
           // a timer alive long after the workers have settled.
           let fanoutTimer = null
+          const waitMs = fanoutWaitMs(resources.state.tier)
           const fanoutDeadline = new Promise((resolve) => {
-            fanoutTimer = setTimeout(resolve, 4000)
+            fanoutTimer = setTimeout(resolve, waitMs)
             if (fanoutTimer && typeof fanoutTimer.unref === "function") fanoutTimer.unref()
           })
           await Promise.race([Promise.allSettled(jobs), fanoutDeadline])
