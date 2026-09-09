@@ -265,7 +265,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     autonomous,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
-    maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : 2),
+    maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     signal,
     subAgent: readonly && !planOnly,
     delegateRunner: readOnly && !planOnly

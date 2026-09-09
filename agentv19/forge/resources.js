@@ -15,6 +15,7 @@
 import os from "node:os"
 import fs from "node:fs"
 import { resourceProfile } from "./profile.js"
+import { AGENT_BUDGETS } from "./config.js"
 
 export const ADAPT = {
   NONE: "none",
@@ -24,6 +25,19 @@ export const ADAPT = {
   PREFER_FAST_MODEL: "prefer_fast_model",
   REDUCE_TOOL_OUTPUT: "reduce_tool_output",
   PRECISE_RETRIEVAL: "precise_retrieval",
+}
+
+/**
+ * v26: read-only worker ceiling. Class strategy (MICRO=0 … ARCH=6) picks the
+ * intended fan-out; this is the machine/config cap the scheduler cannot exceed.
+ * Low-RAM / low-tier machines stay at 1. Never widens a security boundary.
+ */
+export function workerCeiling(config = {}, tier = "normal") {
+  const configured = Number(config?.agent?.maxParallelSubAgents)
+  const cap = Number.isFinite(configured) && configured > 0 ? configured : AGENT_BUDGETS.maxParallelSubAgents
+  if (tier === "low") return 1
+  const byTier = tier === "high" ? AGENT_BUDGETS.maxParallelSubAgents : Math.min(4, AGENT_BUDGETS.maxParallelSubAgents)
+  return Math.max(1, Math.min(cap, byTier, AGENT_BUDGETS.maxParallelSubAgents))
 }
 
 export function createResourceManager({ config = {}, cwd = process.cwd() } = {}) {
@@ -39,7 +53,7 @@ export function createResourceManager({ config = {}, cwd = process.cwd() } = {})
     tokenBudget: config.agent?.tokenBudget ?? (base.tier === "low" ? 600_000 : 2_000_000),
     toolCalls: 0,
     workers: 0,
-    maxWorkers: config.agent?.maxParallelSubAgents ?? (base.tier === "low" ? 1 : base.tier === "high" ? 3 : 2),
+    maxWorkers: workerCeiling(config, base.tier),
     segments: 0,
     startedAt: Date.now(),
     lastLatencyMs: 0,
@@ -102,9 +116,12 @@ export function createResourceManager({ config = {}, cwd = process.cwd() } = {})
       limits.maxWorkers = 1
       limits.maxToolOutputChars = Math.min(limits.maxToolOutputChars, 6000)
       actions.push({ action: ADAPT.REDUCE_CONCURRENCY, why: `only ${state.freeMB}MB free RAM — 1 worker`, apply: "immediate" })
-    } else if (state.freeMB > 2500 && state.maxWorkers < 3 && state.tier !== "low") {
-      limits.maxWorkers = Math.min(3, state.maxWorkers + 1)
-      actions.push({ action: ADAPT.INCREASE_CONCURRENCY, why: `${state.freeMB}MB free RAM — room for another worker`, apply: "next" })
+    } else if (state.freeMB > 2500 && state.tier !== "low") {
+      const ceiling = workerCeiling(config, state.tier)
+      if (limits.maxWorkers < ceiling) {
+        limits.maxWorkers = Math.min(ceiling, limits.maxWorkers + 1)
+        actions.push({ action: ADAPT.INCREASE_CONCURRENCY, why: `${state.freeMB}MB free RAM — room for another worker`, apply: "next" })
+      }
     }
 
     // --- disk: tight disk is a signal to be careful, never to bypass checks

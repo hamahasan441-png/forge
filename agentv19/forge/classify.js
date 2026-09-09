@@ -105,7 +105,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.MEDIUM,
         plan: "model",
-        workers: 1,
+        workers: 2,
         maxSegments: 40,
         deep: false,
         verification: ["syntax", "focused_test"],
@@ -117,7 +117,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.LARGE,
         plan: "model",
-        workers: 2,
+        workers: 4,
         maxSegments: 80,
         deep: true,
         verification: ["syntax", "focused_test", "regression_test"],
@@ -129,7 +129,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.RECOVERY,
         plan: "restore",
-        workers: 1,
+        workers: 2,
         maxSegments: 40,
         deep: true,
         verification: ["syntax", "focused_test"],
@@ -141,7 +141,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.ARCHITECTURAL,
         plan: "model",
-        workers: 2,
+        workers: 6,
         maxSegments: 120,
         deep: true,
         verification: ["syntax", "focused_test", "regression_test", "build"],

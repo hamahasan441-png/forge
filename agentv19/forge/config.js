@@ -38,7 +38,7 @@ export const AGENT_BUDGETS = Object.freeze({
   maxToolOutput: 32000,
   maxToolCalls: 250,
   delegateTimeoutSec: 300,
-  maxParallelSubAgents: 2,
+  maxParallelSubAgents: 6,
   segmentSteps: 32,
   maxSegments: 80,
   maxContinuations: 12,
@@ -62,8 +62,9 @@ export function defaultConfig() {
       // verification ledger, recovery). maxSteps remains the PER-SEGMENT safety
       // bound; maxSegments is the task-level fuse (never the definition of
       // completion — verified objective satisfaction is).
-      // v25: budgets raised so tests/builds/multi-file work finish; the fuse
-      // is still a fuse. Privileged tools.* flags stay false.
+      // v26: maxParallelSubAgents is the CEILING for read-only DAG workers
+      // (class strategy picks a smaller number; low-RAM still clamps to 1).
+      // Privileged tools.* flags stay false.
       autonomous: true, segmentSteps: b.segmentSteps, maxSegments: b.maxSegments, maxContinuations: b.maxContinuations, modelStrategy: true,
     },
     chat: { stream: true, system: "", showReasoning: true, maxHistoryMessages: 40, tools: true, compact: true, compactAtChars: 48000, profile: "auto", restoreCwd: true, historySize: 300 },

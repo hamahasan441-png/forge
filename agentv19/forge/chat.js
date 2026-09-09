@@ -499,7 +499,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     assumeYes,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
-    maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : 2),
+    maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
         runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
