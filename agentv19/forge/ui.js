@@ -104,7 +104,7 @@ export function estimateTokens(s) {
  *  banner (e2e, clean-room, PTY) keep working. */
 export function printBanner(version, provider, model, extra) {
   console.log()
-  console.log(bold(magenta("forge")) + dim(` v${version} — Ω autonomous engineering`))
+  console.log(bold(magenta("forge")) + dim(` v${version} — ∞ autonomous engineering`))
   console.log(dim(`  provider: ${provider || "(none)"}   model: ${model || "(none)"}${extra ? "   " + extra : ""}`))
   console.log(dim("  /help commands • Alt+P palette • Ctrl+C cancel • Ctrl+C again exit"))
   console.log()

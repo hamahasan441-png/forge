@@ -171,9 +171,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   const riskLevel = riskForChange({ task: state.objective })
-  const classified = classifyTask(state.objective)
+  const classified = classifyTask(state.objective, { resume: Boolean(resumeRec) })
   const omega = createKernel({ cwd: process.cwd() })
-  omega.classify(state.objective)
+  omega.classify(state.objective, { resume: Boolean(resumeRec) })
   ts.transition(TASK_STATUS.PLANNING, { reason: "building plan" })
   emit({ type: "TASK_STARTED", taskId, runId: taskRunId, objective: state.objective, risk: riskLevel, taskClass: classified.class, strategy: classified.strategy.class })
   emit({
@@ -186,6 +186,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     plan: classified.strategy.plan,
     workers: classified.strategy.workers,
     verification: classified.strategy.verification,
+    resume: Boolean(resumeRec),
+    underlying: classified.underlying || null,
   })
   if (maxSegments == null && config?.agent?.maxSegments == null && classified.strategy.maxSegments) {
     maxSeg = classified.strategy.maxSegments
@@ -208,7 +210,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.transition(TASK_STATUS.PLANNING, { reason: "plan restored from the task record" })
     }
     const fastPath = !restoredDAG && classified.strategy.plan === "synthesize" && classified.class === TASK_CLASS.MICRO
-    const planRes = restoredDAG || fastPath ? null : await agent({
+    const recoveryPath = !restoredDAG && classified.class === TASK_CLASS.RECOVERY
+    const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
       task: `${state.objective}\n\nProduce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
@@ -229,6 +232,22 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         class: classified.class,
         nodes: planDefs.length,
         reason: `${classified.class} task — skip model planner`,
+        items: planDefs.map((n, i) => ({ n: i + 1, text: n.title || n.objective || n.id, status: "todo" })),
+      })
+    } else if (recoveryPath) {
+      // resume without a DAG: a 3-node inspect→patch→verify, no extra model call
+      planDefs = synthesizePlan(state.objective, TASK_CLASS.SMALL)
+      planValidation = dagLib.validatePlan(planDefs)
+      if (!planValidation.ok) {
+        const repaired = dagLib.repairPlan(planDefs, state.objective, planValidation)
+        if (repaired.ok) { planDefs = repaired.nodes; planValidation = dagLib.validatePlan(planDefs); planRepaired = true }
+      }
+      emit({
+        type: "PLAN_SYNTHESIZED",
+        taskId, runId: taskRunId,
+        class: classified.class,
+        nodes: planDefs.length,
+        reason: "RECOVERY without a recorded DAG — synthesised inspect→patch→verify",
         items: planDefs.map((n, i) => ({ n: i + 1, text: n.title || n.objective || n.id, status: "todo" })),
       })
     } else if (!restoredDAG) {
@@ -473,6 +492,28 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const fr = recomputeFinalRisk()
     const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
     const vv = ledger.status(fr.risk, changedRel)
+    if (classified.strategy.requireReview) {
+      emit({ type: "REVIEW_STARTED", taskId, runId: taskRunId, segmentId, nodeId, class: classified.class })
+      let rev = { required: true, ok: true, findings: [], blockers: [], checks: [] }
+      try {
+        const filesAbs = changedRel.map((f) => path.resolve(process.cwd(), f))
+        const impactForReview = filesAbs.length ? omega.impact(filesAbs) : {}
+        rev = omega.review({
+          klass: classified.class,
+          objective: state.objective,
+          files: changedRel,
+          impact: impactForReview,
+          verificationOk: vv.ok,
+          checkpoint: state.last_checkpoint_id ?? null,
+        })
+      } catch { /* review is a checklist; never throw out of completion */ }
+      emit({
+        type: "REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId,
+        ok: rev.ok, required: rev.required, findings: (rev.findings || []).map((f) => f.id),
+        blockers: (rev.blockers || []).map((b) => b.id), checks: rev.checks || [],
+      })
+      for (const b of rev.blockers || []) addRequiredAction(`review: ${b.id}${b.detail ? ` (${b.detail})` : ""}`)
+    }
     const gate = canCompleteTask({
       planValid: planValidation ? planValidation.ok !== false : true,
       planErrors: planValidation?.errors ?? [],
@@ -1006,10 +1047,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (changedRel.length) {
       try {
         impact = omega.impact(changedRel.map((f) => path.resolve(process.cwd(), f)))
+        let cf = null
+        try { cf = omega.counterfactualOf(null) } catch { cf = null }
         emit({
           type: "IMPACT_ANALYZED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
           radius: impact.radius, scope: impact.scope, importers: impact.importers.length,
           tests: impact.tests.slice(0, 8), unknown: impact.unknown,
+          stillAtRisk: cf?.stillAtRisk?.slice(0, 8) || [],
         })
         for (const f of changedRel) omega.noteWrite(f)
       } catch { /* impact is advisory; never block verification */ }
@@ -1290,6 +1334,18 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
     const next = omega.nextRepair()
     if (observed.diagnosis?.failed) {
       hypoHint += `\n\nFailure class: ${observed.diagnosis.code}. Evidence: ${String(observed.diagnosis.evidence ?? "").slice(0, 240)}.`
+    }
+    if (observed.originHint) hypoHint += `\n${observed.originHint}`
+    if (observed.origin) {
+      emit({ type: "ORIGIN_CLASSIFIED", taskId, runId: taskRunId, segmentId, nodeId, origin: observed.origin.origin, why: observed.origin.why, code: observed.origin.code })
+    }
+    if (next.causal?.node) {
+      hypoHint += `\nCausal target (${next.causal.layer}, ${next.causal.node.id}): ${next.causal.node.description} — ${next.causal.reason}`
+      emit({
+        type: "CAUSAL_UPDATED", taskId, runId: taskRunId, segmentId, nodeId,
+        layer: next.causal.layer, id: next.causal.node.id,
+        description: next.causal.node.description, reason: next.causal.reason,
+      })
     }
     if (next.hypothesis) {
       hypoHint += `\nCurrent hypothesis (${next.hypothesis.id}, ${next.hypothesis.status}, conf=${Number(next.hypothesis.confidence).toFixed(2)}): ${next.hypothesis.description}`

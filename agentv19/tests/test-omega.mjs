@@ -215,7 +215,7 @@ console.log("== Ω kernel ==")
   ok("kernel escalates a looping repair", k.nextRepair().action === "escalate")
   const smallPlan = k.planFor("add a log line")
   ok("kernel synthesises SMALL plan", Array.isArray(smallPlan) && smallPlan.length === 3)
-  ok("banner keeps forge v prefix", omegaBanner("22.0.0").startsWith("forge v22.0.0"))
+  ok("banner keeps forge v prefix", omegaBanner("23.0.0").startsWith("forge v23.0.0"))
 }
 
 console.log("== Ω HUD is width-safe ==")
@@ -252,7 +252,7 @@ console.log("== Ω HUD is width-safe ==")
 
 console.log("== package version ==")
 {
-  ok("VERSION is 22.0.0", VERSION === "22.0.0")
+  ok("VERSION is 23.0.0", VERSION === "23.0.0")
 }
 
 console.log(`\n== omega suite: ${PASS} passed, ${FAIL} failed ==`)

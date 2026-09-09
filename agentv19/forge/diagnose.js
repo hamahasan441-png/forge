@@ -33,6 +33,9 @@ export const FAILURE = {
   PERFORMANCE_FAILURE: "PERFORMANCE_FAILURE",
   RESOURCE_FAILURE: "RESOURCE_FAILURE",
   TOOL_FAILURE: "TOOL_FAILURE",
+  CONFIGURATION_FAILURE: "CONFIGURATION_FAILURE",
+  RUNTIME_FAILURE: "RUNTIME_FAILURE",
+  INTEGRATION_FAILURE: "INTEGRATION_FAILURE",
   UNKNOWN: "UNKNOWN",
 }
 export const FAILURE_CODES = Object.values(FAILURE)
@@ -59,6 +62,9 @@ const PATTERNS = [
   [FAILURE.SYNTAX_FAILURE, /SyntaxError|Unexpected token|Unexpected end of (input|JSON)|IndentationError|parse error|invalid syntax|unterminated string/i],
   [FAILURE.TEST_FAILURE, /\d+ (test|spec|assertion)s? failed|tests? failed|FAIL(ED)?\s|✗|AssertionError|expect\(.*\)\.to|assert\.|\bfailing tests?\b|\d+ failed,/i],
   [FAILURE.BUILD_FAILURE, /build failed|compilation (failed|error)|error TS\d+|rustc: error|cannot compile|webpack.*ERROR|tsc .*error/i],
+  [FAILURE.CONFIGURATION_FAILURE, /configuration (error|invalid|missing)|missing config\b|invalid config\b|malformed (json|yaml|toml) config|config schema/i],
+  [FAILURE.RUNTIME_FAILURE, /uncaught (exception|error)|ReferenceError\b|\bruntime error\b/i],
+  [FAILURE.INTEGRATION_FAILURE, /API contract|schema mismatch between|502 Bad Gateway|503 Service Unavailable/i],
   [FAILURE.TYPE_FAILURE, /TypeError\b|incompatible types|type mismatch|cannot assign.*(type|to parameter)/i],
   [FAILURE.STATE_FAILURE, /EBUSY|resource busy|stale (lock|state)|already locked|ELOCKED/i],
   [FAILURE.CONCURRENCY_FAILURE, /deadlock|race condition|EAGAIN|resource temporarily unavailable|concurrent modification/i],
@@ -236,6 +242,21 @@ export function recoveryPlan(code, opts = {}) {
       add(STRATEGY.ALTERNATE_TOOL, "the tool/plugin itself failed — use a builtin", true)
       add(STRATEGY.INSPECT_FIRST, "confirm the tool is still alive before retrying it", true)
       add(STRATEGY.ABORT, "do not keep restarting a crashed plugin", true)
+      break
+    case FAILURE.CONFIGURATION_FAILURE:
+      add(STRATEGY.INSPECT_FIRST, "read the config the process named before changing it", true)
+      add(STRATEGY.FIX_ARGUMENTS, "correct the configuration, then re-run once", true)
+      add(STRATEGY.ESCALATE, "config changes can be a product decision", true)
+      break
+    case FAILURE.RUNTIME_FAILURE:
+      add(STRATEGY.INSPECT_FIRST, "read the stack: uncaught exceptions are rarely fixed by retrying", true)
+      add(STRATEGY.REDUCE_SCOPE, "reproduce with the smallest input that throws", true)
+      add(STRATEGY.ESCALATE, "if the crash is in forge itself, stop patching the project", true)
+      break
+    case FAILURE.INTEGRATION_FAILURE:
+      add(STRATEGY.INSPECT_FIRST, "the contract between two systems drifted — read both sides", true)
+      add(STRATEGY.ALTERNATE_TOOL, "try a second endpoint/source before editing both", true)
+      add(STRATEGY.ESCALATE, "an API contract change may need a human", true)
       break
     case FAILURE.CANCELLED:
       add(STRATEGY.ABORT, "the user interrupted — do not restart without being asked", true)

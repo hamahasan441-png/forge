@@ -3,7 +3,21 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v22.0.0 — "Forge Ω"
+## [Unreleased] — v23.0.0 — "Forge ∞"
+
+### Added (v23.0 — causal engine, self-diagnostics, adversarial review)
+- **Causal engine** (`causal.js`): SYMPTOM / PROXIMATE / ROOT / CONTRIBUTING / SECONDARY. Repair targets a live ROOT when one exists; a REJECTED root is never retried. Counterfactual of an impact radius names `ifFixed` vs `stillAtRisk` (a miss is UNKNOWN, never "no dependents").
+- **Self-diagnostics** (`selfdiag.js`): a failure is PROJECT or FORGE. Plugin/host death and safety blocks are FORGE — the repair prompt is told not to patch the user's repo around a forge failure.
+- **Task model** (`taskmodel.js`): REQUIREMENT / IMPLEMENTATION / ASSUMPTION / INFERENCE / FACT. An ASSUMPTION never promotes to a REQUIREMENT.
+- **RECOVERY class**: `classifyTask(task, { resume: true })` only. A typo is still MICRO; resume of a typo is RECOVERY with the underlying class preserved. `classifyTaskComplexity()` is unchanged.
+- **Adversarial review** (`review.js`): LARGE / ARCHITECTURAL get a deterministic checklist before COMPLETED (secrets, assumption-as-requirement, blast radius, unknown impact). No extra model call. Findings warn; blockers become required actions.
+- **Telemetry** (`telemetry.js`): process-local counters (`classify`, `command.fail`, `origin.forge`, `repair.loop_escalate`, …). No network, no files, no PII.
+- **Failure taxonomy** expanded: CONFIGURATION, RUNTIME, INTEGRATION — patterns sit after TEST/BUILD so they cannot steal SyntaxError, TypeError, "unknown tool", or plugin crash.
+- **HUD / banner**: `FORGE ∞`, cause + origin lines, `forge v${version} — ∞ autonomous engineering`. The `forge v${version}` prefix is unchanged.
+
+Ω (v22.0.0) ships in this bump when stacked; the Ω contract in PLAN-v25 still holds.
+
+## v22.0.0 — "Forge Ω"
 
 ### Added (v22.0 — autonomous software engineering system)
 - **Task classifier** (`classify.js`): MICRO / SMALL / MEDIUM / LARGE / ARCHITECTURAL. The meta controller picks the smallest sufficient workflow. MICRO skips the model planner and synthesises a one-node DAG (inspect→patch→verify). `classifyTaskComplexity()` (trivial…critical) is unchanged — effort and model-strategy tests stay green.
