@@ -58,6 +58,7 @@ export const EVENTS = [
   "VIEW_CHANGED",
   // authoritative task metadata from the v21 controller
   "SEGMENT_UPDATED", "DAG_UPDATED", "META_UPDATE", "TASK_CLASSIFIED",
+  "CAUSAL_UPDATED", "REVIEW_STARTED", "REVIEW_COMPLETED", "ORIGIN_CLASSIFIED",
 ]
 
 export const VIEWS = ["tools", "plan", "diff", "verification"]
@@ -175,6 +176,39 @@ export function reduce(s, ev) {
           confidence: ev.confidence ?? null,
           workflow: Array.isArray(ev.workflow) ? ev.workflow : [],
           plan: ev.plan || null,
+          resume: !!ev.resume,
+          underlying: ev.underlying || null,
+        },
+      }
+    }
+    case "CAUSAL_UPDATED": {
+      return {
+        ...s,
+        omega: {
+          ...(s.omega || {}),
+          causal: { layer: ev.layer || null, id: ev.id || null, description: String(ev.description || "").slice(0, 200), reason: String(ev.reason || "").slice(0, 160) },
+        },
+      }
+    }
+    case "ORIGIN_CLASSIFIED": {
+      return {
+        ...s,
+        omega: {
+          ...(s.omega || {}),
+          origin: ev.origin || null,
+          originWhy: String(ev.why || "").slice(0, 160),
+        },
+      }
+    }
+    case "REVIEW_STARTED": {
+      return { ...s, state: s.task ? "REVIEWING" : s.state, omega: { ...(s.omega || {}), review: { status: "started", class: ev.class || null } } }
+    }
+    case "REVIEW_COMPLETED": {
+      return {
+        ...s,
+        omega: {
+          ...(s.omega || {}),
+          review: { status: ev.ok ? "ok" : "block", ok: !!ev.ok, findings: ev.findings || [], blockers: ev.blockers || [] },
         },
       }
     }
@@ -707,8 +741,8 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
       }
       break
     case "TASK_CLASSIFIED":
-      emit({ type: "TASK_CLASSIFIED", class: ev.class, legacy: ev.legacy, confidence: ev.confidence, workflow: ev.workflow, plan: ev.plan })
-      emit({ type: "NOTICE", level: "info", text: `Ω ${ev.class}${ev.legacy ? ` (${ev.legacy})` : ""} • ${Array.isArray(ev.workflow) ? ev.workflow.join(" → ") : "workflow"}` })
+      emit({ type: "TASK_CLASSIFIED", class: ev.class, legacy: ev.legacy, confidence: ev.confidence, workflow: ev.workflow, plan: ev.plan, resume: ev.resume, underlying: ev.underlying })
+      emit({ type: "NOTICE", level: "info", text: `∞ ${ev.class}${ev.legacy ? ` (${ev.legacy})` : ""}${ev.resume ? " resume" : ""} • ${Array.isArray(ev.workflow) ? ev.workflow.join(" → ") : "workflow"}` })
       break
     case "MODEL_SELECTED":
       emit({ type: "NOTICE", level: "info", text: `model ${ev.provider}/${ev.model} (${ev.confidence}) — ${String(ev.reason ?? "").slice(0, 100)}` })
@@ -729,10 +763,26 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
     case "PLAN_SYNTHESIZED":
       emit({ type: "STATE_CHANGED", state: "PLANNING" })
       if (Array.isArray(ev.items) && ev.items.length) emit({ type: "PLAN_UPDATED", items: ev.items })
-      emit({ type: "NOTICE", level: "info", text: `Ω synthesised ${ev.nodes || ev.items?.length || 0}-node plan (${ev.class})` })
+      emit({ type: "NOTICE", level: "info", text: `∞ synthesised ${ev.nodes || ev.items?.length || 0}-node plan (${ev.class})` })
       break
     case "IMPACT_ANALYZED":
       emit({ type: "NOTICE", level: "info", text: `impact radius ${ev.radius ?? "?"} • ${(ev.scope || []).join(" → ") || "syntax"}` })
+      break
+    case "CAUSAL_UPDATED":
+      emit({ type: "CAUSAL_UPDATED", layer: ev.layer, id: ev.id, description: ev.description, reason: ev.reason })
+      emit({ type: "NOTICE", level: "info", text: `cause ${ev.layer || "?"}: ${String(ev.description || ev.reason || "").slice(0, 100)}` })
+      break
+    case "ORIGIN_CLASSIFIED":
+      emit({ type: "ORIGIN_CLASSIFIED", origin: ev.origin, why: ev.why, code: ev.code })
+      if (ev.origin === "FORGE") emit({ type: "NOTICE", level: "warn", text: `origin FORGE — ${String(ev.why || "").slice(0, 100)}` })
+      break
+    case "REVIEW_STARTED":
+      emit({ type: "REVIEW_STARTED", class: ev.class })
+      emit({ type: "NOTICE", level: "info", text: `review ${ev.class || ""}` })
+      break
+    case "REVIEW_COMPLETED":
+      emit({ type: "REVIEW_COMPLETED", ok: ev.ok, findings: ev.findings, blockers: ev.blockers, checks: ev.checks })
+      emit({ type: "NOTICE", level: ev.ok ? "info" : "warn", text: ev.ok ? "review ok" : `review blocked: ${(ev.blockers || []).join(", ") || "findings"}` })
       break
     case "SEGMENT_STARTED":
       emit({ type: "SEGMENT_UPDATED", n: ev.segment, max: ev.maxSteps })

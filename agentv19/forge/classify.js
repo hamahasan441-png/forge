@@ -16,6 +16,7 @@ export const TASK_CLASS = {
   MEDIUM: "MEDIUM",
   LARGE: "LARGE",
   ARCHITECTURAL: "ARCHITECTURAL",
+  RECOVERY: "RECOVERY",
 }
 
 export const ALL_CLASSES = Object.values(TASK_CLASS)
@@ -26,6 +27,7 @@ const LEGACY_OF = {
   MEDIUM: "moderate",
   LARGE: "complex",
   ARCHITECTURAL: "critical",
+  RECOVERY: "complex",
 }
 
 const CLASS_OF_LEGACY = {
@@ -123,6 +125,18 @@ export function strategyFor(klass) {
         requireReview: true,
         requireRepoModel: true,
       }
+    case TASK_CLASS.RECOVERY:
+      return {
+        class: TASK_CLASS.RECOVERY,
+        plan: "restore",
+        workers: 1,
+        maxSegments: 20,
+        deep: true,
+        verification: ["syntax", "focused_test"],
+        workflow: ["recover", "reconcile", "inspect", "repair", "verify"],
+        requireReview: false,
+        requireRepoModel: true,
+      }
     default:
       return {
         class: TASK_CLASS.ARCHITECTURAL,
@@ -139,11 +153,26 @@ export function strategyFor(klass) {
 }
 
 /**
- * Full Ω classification.
- * @returns {{ class, legacy, confidence, signals, strategy }}
+ * Full Ω/∞ classification.
+ * opts.resume = true is the only way to get RECOVERY — a typo never becomes
+ * a recovery workflow, and a resume never steals MICRO scoring of the text.
+ * @returns {{ class, legacy, confidence, signals, strategy, underlying? }}
  */
-export function classifyTask(task, _opts = {}) {
+export function classifyTask(task, opts = {}) {
   const text = String(task ?? "")
+  if (opts && opts.resume) {
+    const underlying = classifyTask(text, {})
+    const strategy = strategyFor(TASK_CLASS.RECOVERY)
+    return {
+      class: TASK_CLASS.RECOVERY,
+      legacy: underlying.legacy,
+      confidence: 0.9,
+      signals: ["resume", ...underlying.signals],
+      strategy,
+      task: text.slice(0, 400),
+      underlying: underlying.class,
+    }
+  }
   const legacy = classifyTaskComplexity(text)
   let klass = CLASS_OF_LEGACY[legacy] || TASK_CLASS.MEDIUM
   const t = text.toLowerCase()

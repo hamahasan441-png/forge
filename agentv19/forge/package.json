@@ -1,7 +1,7 @@
 {
   "name": "forge-agent-cli",
-  "version": "22.0.0",
-  "description": "forge Ω — autonomous software engineering system. Zero dependencies, pure Node, direct-to-provider. Adaptive task classification, hypothesis-driven repair, impact-aware testing, premium terminal HUD, coding agent with checkpoints/undo + plan mode + 17 hardened tools, hierarchical memory, sessions with resume, SSRF-guarded fetches, secret redaction.",
+  "version": "23.0.0",
+  "description": "forge ∞ — autonomous software engineering system. Zero dependencies, pure Node, direct-to-provider. Causal diagnosis, self-diagnostics, task origin tags, adversarial review, adaptive classification, hypothesis-driven repair, impact-aware testing, premium terminal HUD, coding agent with checkpoints/undo + plan mode + 17 hardened tools, hierarchical memory, sessions with resume, SSRF-guarded fetches, secret redaction.",
   "type": "module",
   "bin": {
     "forge": "./forge.js"
@@ -77,6 +77,11 @@
     "impact.js",
     "cmdout.js",
     "omega.js",
+    "causal.js",
+    "selfdiag.js",
+    "taskmodel.js",
+    "review.js",
+    "telemetry.js",
     "README.md",
     "CHANGELOG.md",
     "install.sh",

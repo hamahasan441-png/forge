@@ -963,7 +963,7 @@ export function renderOmegaPanel(state, width, o) {
   const boxed = w >= 48 && !o.ascii && !o.a11y
   const inner = boxed ? Math.max(8, w - 2) : Math.max(8, w - 1)
   const project = state.cwd ? tildify(state.cwd).split(/[\\/]/).filter(Boolean).pop() : ""
-  const title = `FORGE Ω${project ? `  project: ${project}` : ""}`
+  const title = `FORGE ∞${project ? `  project: ${project}` : ""}`
   const task = state.task?.title || ""
   const klass = state.omega?.class ? String(state.omega.class) : ""
   const plan = Array.isArray(state.plan) ? state.plan : []
@@ -980,6 +980,12 @@ export function renderOmegaPanel(state, width, o) {
     body.push(fitS(`> ${task}`, inner, o))
   }
   if (klass) body.push(fitS(o.th.muted(`class ${klass}${state.omega?.legacy ? ` (${state.omega.legacy})` : ""}`), inner, o))
+  if (state.omega?.causal?.description) {
+    body.push(fitS(o.th.muted(`cause ${state.omega.causal.layer || "?"}  ${state.omega.causal.description}`), inner, o))
+  }
+  if (state.omega?.origin) {
+    body.push(fitS(o.th.muted(`origin ${state.omega.origin}`), inner, o))
+  }
   if (plan.length) {
     body.push(fitS("PLAN", inner, o))
     for (const item of plan.slice(0, 8)) {
