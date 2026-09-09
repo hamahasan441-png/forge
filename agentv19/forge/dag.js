@@ -858,6 +858,80 @@ export function updateDAG(graph, newDefs = [], opts = {}) {
   return buildDAG(combined)
 }
 
+/**
+ * v28 mid-task replan: keep COMPLETED nodes (status + verification), drop
+ * unfinished ones, splice in a new remaining plan. New ids are prefixed so
+ * a numbered list (`n1`…) cannot collide with a completed `n1`. Dependencies
+ * on completed ids are kept; unknown deps are dropped. Never a second writer.
+ *
+ * Returns { ok, graph, kept, added, dropped, error }.
+ */
+export function replanRemaining(graph, newDefs = [], opts = {}) {
+  const prefix = String(opts.prefix ?? "rp")
+  if (!graph) {
+    const defs = (newDefs ?? []).map((d, i) => ({ ...d, id: `${prefix}${i + 1}` }))
+    if (!defs.length) return { ok: false, graph: null, kept: 0, added: 0, dropped: 0, error: "empty replan" }
+    return { ok: true, graph: buildDAG(defs), kept: 0, added: defs.length, dropped: 0, error: null }
+  }
+  const kept = [...graph.nodes.values()].filter((n) => n.status === NODE_STATUS.COMPLETED)
+  const keptIds = new Set(kept.map((n) => n.id))
+  const dropped = [...graph.nodes.values()].filter((n) => n.status !== NODE_STATUS.COMPLETED)
+  const incoming = Array.isArray(newDefs) ? newDefs : []
+  if (!incoming.length) return { ok: false, graph, kept: kept.length, added: 0, dropped: dropped.length, error: "empty replan" }
+
+  const idMap = new Map()
+  incoming.forEach((d, i) => {
+    const oldId = String(d?.id ?? `n${i + 1}`).trim() || `n${i + 1}`
+    idMap.set(oldId, `${prefix}${i + 1}`)
+  })
+  const remapDep = (d) => {
+    const s = String(d)
+    if (keptIds.has(s)) return s
+    if (idMap.has(s)) return idMap.get(s)
+    return null
+  }
+  const remapped = incoming.map((d, i) => {
+    const deps = [...new Set((d.dependencies ?? d.deps ?? []).map(remapDep).filter(Boolean))]
+    return {
+      ...d,
+      id: `${prefix}${i + 1}`,
+      dependencies: deps,
+      status: NODE_STATUS.PENDING,
+      createdBy: opts.creator ?? "replan",
+      createdReason: opts.reason ?? "mid-task replan from verification evidence",
+      createdEvidence: opts.evidence == null ? null : String(opts.evidence).slice(0, 600),
+    }
+  })
+
+  const combined = [...kept, ...remapped]
+  let nodes = combined
+  const validation = validatePlan(combined)
+  if (!validation.ok) {
+    const repair = repairPlan(combined, opts.objective ?? "", validation)
+    if (!repair.ok) return { ok: false, graph, kept: kept.length, added: 0, dropped: dropped.length, error: validation.errors.join("; "), validation }
+    nodes = repair.nodes.map((n) => keptIds.has(n.id) ? (kept.find((k) => k.id === n.id) || n) : n)
+  }
+  let next
+  try {
+    next = buildDAG(nodes)
+  } catch (e) {
+    return { ok: false, graph, kept: kept.length, added: 0, dropped: dropped.length, error: String(e?.message ?? e) }
+  }
+  for (const k of kept) {
+    const n = next.nodes.get(k.id)
+    if (!n) continue
+    n.status = NODE_STATUS.COMPLETED
+    n.result = k.result
+    n.verificationSatisfied = k.verificationSatisfied
+    n.verificationId = k.verificationId
+    n.ended_at = k.ended_at
+  }
+  for (const n of next.nodes.values()) {
+    if (n.status === NODE_STATUS.PENDING && depsSatisfied(next, n)) n.status = NODE_STATUS.READY
+  }
+  return { ok: true, graph: next, kept: kept.length, added: remapped.length, dropped: dropped.length, error: null }
+}
+
 function stampProvenance(defs, { parent, reason, evidence, creator }) {
   const at = Date.now()
   return (defs ?? []).map((d) => (d && typeof d === "object" ? {
