@@ -135,7 +135,7 @@ out=$(printf 'hello\n/retry\n/exit\n' | $F chat 2>&1)
 n=$(echo "$out" | grep -c "Hello from mock!")
 if [ "${n:-0}" -ge 2 ]; then PASS=$((PASS+1)); echo "  ok  chat /retry regenerates"
 else FAIL=$((FAIL+1)); echo "  FAIL chat /retry regenerates (got $n answers)"; fi
-check "banner v21" "$out" "v21"
+check "banner v22" "$out" "forge v22"
 
 # 18. chat /export writes markdown transcript
 mkdir -p "$T/work"
