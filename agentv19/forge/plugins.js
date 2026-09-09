@@ -104,18 +104,52 @@ function validateTool(t, reserved, seen) {
 // grants
 // ---------------------------------------------------------------------------
 
+function pathInside(p, dir) {
+  const rel = path.relative(dir, p)
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+}
+
 /** Paths a grant may never cover, however it is spelled. */
 function forbiddenGrantPath(abs, pluginDir) {
   const home = os.homedir()
   const real = (() => { try { return fs.realpathSync(abs) } catch { return abs } })()
-  const inside = (p, dir) => { const rel = path.relative(dir, p); return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel)) }
   if (real === path.parse(real).root) return "the filesystem root"
   if (real === home) return "the whole home directory"
-  if (inside(real, DEFAULT_DIR) || inside(DEFAULT_DIR, real)) return "forge's own state directory (~/.forge)"
-  if (inside(real, path.join(home, ".forge")) || inside(path.join(home, ".forge"), real)) return "forge's own state directory (~/.forge)"
-  if (pluginDir && (inside(real, pluginDir) || inside(pluginDir, real))) return "the plugin directory itself"
-  for (const d of [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gcloud"]) if (inside(real, path.join(home, d))) return `credentials (~/${d})`
+  if (pathInside(real, DEFAULT_DIR) || pathInside(DEFAULT_DIR, real)) return "forge's own state directory (~/.forge)"
+  if (pathInside(real, path.join(home, ".forge")) || pathInside(path.join(home, ".forge"), real)) return "forge's own state directory (~/.forge)"
+  if (pluginDir && (pathInside(real, pluginDir) || pathInside(pluginDir, real))) return "the plugin directory itself"
+  for (const d of [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gcloud"]) if (pathInside(real, path.join(home, d))) return `credentials (~/${d})`
   return null
+}
+
+/**
+ * A read/write grant that is itself a symlink whose realpath leaves the
+ * project (and is not inside the plugin dir) is dropped. Node's permission
+ * model follows symlinks inside a granted path — refusing the GRANT itself
+ * when it is the escape is the control we own.
+ */
+function symlinkGrantEscapes(abs, { cwd, pluginDir }) {
+  let st
+  try { st = fs.lstatSync(abs) } catch { return null }
+  if (!st.isSymbolicLink()) return null
+  let real
+  try { real = fs.realpathSync(abs) } catch { return "dangling symlink" }
+  const project = path.resolve(cwd)
+  if (pathInside(real, project)) return null
+  if (pluginDir && pathInside(real, pluginDir)) return null
+  return `symlink target ${real} leaves the project`
+}
+
+/** Plugin files that are symlinks escaping ~/.forge/tools are skipped, not imported. */
+function pluginFileEscapes(full, pluginDir) {
+  try {
+    const st = fs.lstatSync(full)
+    if (!st.isSymbolicLink()) return false
+    const real = fs.realpathSync(full)
+    return !pathInside(real, pluginDir)
+  } catch {
+    return true // dangling / unreadable → skip
+  }
 }
 
 /**
@@ -146,6 +180,8 @@ export function resolveGrants(file, declared, granted, { cwd, pluginDir }) {
       if (!dl.some((x) => path.resolve(cwd, x.startsWith("~") ? path.join(os.homedir(), x.slice(1)) : x) === abs)) { notes.push(`${file}: ${kind} grant "${raw}" is not declared by the plugin — ignored`); continue }
       const bad = forbiddenGrantPath(abs, pluginDir)
       if (bad) { notes.push(`${file}: ${kind} grant "${raw}" covers ${bad} — refused`); continue }
+      const escaped = symlinkGrantEscapes(abs, { cwd, pluginDir })
+      if (escaped) { notes.push(`${file}: ${kind} grant "${raw}" is a ${escaped} — refused`); continue }
       out.push(abs)
     }
     for (const raw of dl) if (!gl.includes(raw)) notes.push(`${file}: ${kind} "${raw}" declared but not granted — denied`)
@@ -311,8 +347,14 @@ class PluginWorker {
  * @returns {{ tools: Array<{name, readOnly, def, run, source, capabilities}>, errors: string[], close(): void }}
  * `reserved` is the set/array of built-in tool names a plugin may not shadow.
  * `grants` is config.tools.pluginGrants ({ "<file>": {...} }); `cwd` the project.
+ * `startedAt` (ms) + `allowNewPlugins` (default true when startedAt is omitted)
+ * implement same-run quarantine: a `*.mjs` whose mtime is newer than the
+ * task/chat start is skipped, so a model that writes ~/.forge/tools/pwn.mjs
+ * in segment 1 cannot have it import()ed in segment 2. Isolation tests write
+ * plugins after process start — they MUST pass startedAt=null (the default)
+ * or they skip every plugin they just created.
  */
-export async function loadToolPlugins(dir = PLUGINS_DIR, { reserved = [], grants = {}, cwd = process.cwd() } = {}) {
+export async function loadToolPlugins(dir = PLUGINS_DIR, { reserved = [], grants = {}, cwd = process.cwd(), startedAt = null, allowNewPlugins } = {}) {
   const workers = []
   const result = { tools: [], errors: [], close: () => { for (const w of workers) w.kill() } }
   let files = []
@@ -331,8 +373,21 @@ export async function loadToolPlugins(dir = PLUGINS_DIR, { reserved = [], grants
   const reservedSet = new Set(reserved)
   const seen = new Set()
   const pluginDir = path.resolve(dir)
+  const quarantine = startedAt != null && allowNewPlugins !== true
   for (const f of files.sort()) {
     const full = path.join(pluginDir, f)
+    if (pluginFileEscapes(full, pluginDir)) {
+      result.errors.push(`${f}: skipped — plugin file is a symlink that escapes the plugin directory`)
+      continue
+    }
+    if (quarantine) {
+      let mtime
+      try { mtime = fs.statSync(full).mtimeMs } catch { continue }
+      if (mtime > startedAt) {
+        result.errors.push(`${f}: skipped — plugin is newer than this task/chat start (same-run quarantine)`)
+        continue
+      }
+    }
     // grants are resolved twice: first with what the config says, then again
     // once the plugin's declaration is known (declared ∩ granted)
     const granted = grants?.[f] ?? grants?.[path.basename(f, path.extname(f))] ?? {}

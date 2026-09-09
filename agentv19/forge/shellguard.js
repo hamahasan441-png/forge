@@ -255,6 +255,30 @@ const GIT_CONFIRM = new Set(["reset", "clean", "push", "checkout", "restore", "r
 const SHELL_WRAPPERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "busybox", "eval", "source", "."])
 /** Scripting runtimes: the payload is CODE, not shell — scan it for markers. */
 const CODE_WRAPPERS = new Set(["python", "python2", "python3", "py", "perl", "ruby", "node", "nodejs", "deno", "bun", "lua", "php", "Rscript", "groovy", "osascript"])
+
+/**
+ * True when a CODE_WRAPPER invocation is *inline eval* (`node -e`, `python -c`,
+ * `perl -e`, `php -r`, `deno eval`, …) rather than a script file
+ * (`node ./scripts/build.js`). Inline eval is capability-equivalent to
+ * arbitrary code the model did not have to write to disk first, so v21.2
+ * classifies it `danger` unless `tools.allowInterpreterEval` is set.
+ */
+function hasInlineEval(prog, rest) {
+  const p = String(prog ?? "").toLowerCase()
+  const args = Array.isArray(rest) ? rest : []
+  const pythonish = p === "python" || p === "python2" || p === "python3" || p === "py"
+  const phpish = p === "php"
+  if ((p === "deno" || p === "bun") && args.some((a) => a === "eval")) return true
+  for (const a of args) {
+    if (pythonish && (a === "-c" || (a.startsWith("-c") && !a.startsWith("--")))) return true
+    if (phpish && (a === "-r" || (a.startsWith("-r") && !a.startsWith("--")))) return true
+    if (a === "-e" || a === "--eval" || a === "-p" || a === "--print") return true
+    if (a.startsWith("--eval=") || a.startsWith("--print=")) return true
+    // perl/ruby/lua/osascript bundled short flags: -le, -ne, -pe, -ane
+    if (!pythonish && !phpish && /^-[A-Za-z]*e[A-Za-z]*$/.test(a) && a.length <= 6) return true
+  }
+  return false
+}
 /** Prefix programs: everything after their own flags is the real command. */
 const PREFIX_WRAPPERS = new Set(["env", "nohup", "nice", "timeout", "time", "command", "stdbuf", "setsid", "xargs", "script", "watch", "unbuffer", "parallel"])
 /** Flags that take a value, so unwrapping must skip the value too. */
@@ -309,20 +333,23 @@ function unwrapWrapper(prog, rest, sub, ctx, depth) {
     }
   }
 
-  // 3. scripting runtimes: the payload is code — scan it for destructive calls.
-  //
-  // NOTE (v21.1 audit): this text scan is a guard against OBVIOUS one-liners,
-  // not a code-execution boundary. `node -e` is capability-equivalent to
-  // `node script.js` (which the model may write via write_file), so refusing
-  // inline code here would be a bypassable condition, not a fix. The process
-  // boundary for model-run code is the OS sandbox the operator runs forge in;
-  // destination + egress rules below still apply to the surrounding shell.
+  // 3. scripting runtimes: the payload is code — scan it for destructive
+  //    calls, and refuse *inline eval* (`node -e` / `python -c` / …) unless
+  //    the user opted in with tools.allowInterpreterEval. Script-file
+  //    execution (`node ./scripts/build.js`) stays `low`: the model already
+  //    has write_file, so refusing only the -e form would be a bypassable
+  //    condition. CODE_DANGER remains an extra danger layer on top of both.
   if (CODE_WRAPPERS.has(p)) {
     const code = rest.join(" ")
     const hit = CODE_DANGER.find(([re]) => re.test(code))
-    const cand = hit
-      ? { level: "danger", reason: `${prog} script ${hit[1]}` }
-      : { level: "low", reason: null }
+    let cand
+    if (hit) {
+      cand = { level: "danger", reason: `${prog} script ${hit[1]}` }
+    } else if (hasInlineEval(p, rest) && ctx.allowInterpreterEval !== true) {
+      cand = { level: "danger", reason: `${prog} inline eval needs tools.allowInterpreterEval` }
+    } else {
+      cand = { level: "low", reason: null }
+    }
     if (!worst || LEVEL_RANK[cand.level] > LEVEL_RANK[worst.level]) worst = cand
   }
 
@@ -700,6 +727,7 @@ function classifyCommandUnsafe(command, ctx = {}, depth = 0) {
     home: ctx.home || os.homedir(),
     allowSudo: ctx.allowSudo === true,
     allowNetworkUpload: ctx.allowNetworkUpload === true, // v21.1: curl -d / wget --post-file …
+    allowInterpreterEval: ctx.allowInterpreterEval === true, // v21.2: node -e / python -c …
     env: ctx.env || process.env, // v20.1: $VAR targets are expanded with this
   }
   const subs = splitSubcommands(String(command ?? ""))
@@ -730,7 +758,7 @@ function classifyCommandUnsafe(command, ctx = {}, depth = 0) {
 /** Policy: may the MODEL's bash tool run this? (block/danger refused;
  *  confirm allowed only when file targets stay inside the project). */
 export function modelMayRun(command, ctx, opts = {}) {
-  const c = classifyCommand(command, { ...ctx, allowSudo: opts.allowSudo, allowNetworkUpload: opts.allowNetworkUpload })
+  const c = classifyCommand(command, { ...ctx, allowSudo: opts.allowSudo, allowNetworkUpload: opts.allowNetworkUpload, allowInterpreterEval: opts.allowInterpreterEval === true || ctx?.allowInterpreterEval === true })
   if (c.level === "block") return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "catastrophic command"}. Refine the command.` }
   if (c.level === "danger") {
     if (opts.assumeYes) return { ok: true, reason: c.reasons[0], level: c.level }

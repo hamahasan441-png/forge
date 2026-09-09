@@ -75,13 +75,12 @@ SIGKILL fallback, so a run never leaks a child process. `test-mcp.mjs` (30
 checks) proves this end-to-end: the real `runAgent` invokes an MCP tool, the
 result flows back, and the server is confirmed shut down.
 
-**Still deferred (a follow-up):** the interactive `chat.js` tool loop. It calls
-`process.exit()` at session end and has several exit paths, so a correct
-MCP-server lifecycle there needs its own synchronous-cleanup handling and can't
-be integration-tested in-process the way the agent loop can. Rather than ship
-untested process-management code into the interactive path, it is a separate
-change. Autonomous runs (`forge agent`, the meta controller, delegates, plan
-mode) — where MCP tools matter most — are fully covered.
+**Delivered in v21.2.** `chat.js` loads configured MCP servers through
+`loadChatPlugins` (same `loadMcpTools` path as `runAgent`), joins them to
+the plugin list, and `closeChatPlugins` runs on `/exit`, Ctrl+C, EOF,
+one-shot return and `process.exit` (stdin-close + SIGKILL fallback).
+`test-v21-2.mjs` proves a stub server is called from the chat loader and
+is shut down. Autonomous runs were already covered.
 
 ### 2. LSP bridge — `lsp.js`  ✅ client delivered (PR #12); agent tools next
 Zero-dependency JSON-RPC client over the LSP stdio transport (Content-Length
@@ -105,10 +104,12 @@ checks, includes the real `runAgent` calling `lsp_diagnostics` and the server
 being shut down afterward). Symbol-based tools locate the identifier's first
 word-boundary occurrence, so the model passes a name, not a line/column.
 
-**Still open:** feeding diagnostics automatically into the verification ledger
-(running `lsp_diagnostics` on changed files as part of the post-write gate). The
-tool makes the evidence available now; the automatic gate hook is a separate
-change so it can be designed against `verifyledger.js` without widening this PR.
+**Delivered in v21.2.** After a mutating segment, `collectDiagnosticsForFiles`
+runs `lsp_diagnostics` on each changed file that has a configured language
+server and records the result as `SYNTAX` evidence. Error-severity
+diagnostics fail the hard gate for HIGH/CRITICAL the same way a failed
+`node --check` does. Off when `lsp.servers` is empty; a missing server is
+skipped, not a gate failure. `test-v21-2.mjs` covers clean/error/unconfigured.
 
 ### 3. Semantic retrieval — `embeddings.js` + `retrieval.js` hybrid  ✅ delivered (this PR)
 Provider-embedding ranking added on top of BM25, with BM25 kept as the

@@ -471,8 +471,8 @@ for (const [cmd, want] of WRAP) {
 const WRAP_OK = [
   ['bash -c "echo hi"', "safe"],
   ['sh -c "ls -la"', "safe"],
-  ['python3 -c "print(1)"', "low"],
-  ['node -e "console.log(1)"', "low"],
+  ['python3 app.py', "low"],
+  ['node ./scripts/build.js', "low"],
   ["env FOO=1 echo hi", "safe"],
   ["timeout 5 ls", "safe"],
   ["npm test", "safe"],
@@ -482,10 +482,16 @@ for (const [cmd, want] of WRAP_OK) {
   const got = cw(cmd)
   ok(`benign: ${cmd.slice(0, 34)} stays ${want}`, got.level === want)
 }
+ok("inline python -c is danger without consent", cw('python3 -c "print(1)"').level === "danger")
+ok("inline node -e is danger without consent", cw('node -e "console.log(1)"').level === "danger")
+ok("allowInterpreterEval restores python -c to low", cw('python3 -c "print(1)"', { allowInterpreterEval: true }).level === "low")
+ok("allowInterpreterEval restores node -e to low", cw('node -e "console.log(1)"', { allowInterpreterEval: true }).level === "low")
+ok("CODE_DANGER still fires with consent", cw('python3 -c "import os; os.system(\'rm -rf /\')"', { allowInterpreterEval: true }).level === "danger")
 ok("model refused: sh -c root wipe", modelMayRun('sh -c "rm -rf /"', { cwd: WORK, root: WORK }).ok === false)
 ok("model refused: python os.system root wipe", modelMayRun('python3 -c "import os; os.system(\'rm -rf /\')"', { cwd: WORK, root: WORK }).ok === false)
 ok("model refused: xargs rm", modelMayRun("xargs rm -rf /tmp/x", { cwd: WORK, root: WORK }).ok === false)
-ok("model may still run python -c", modelMayRun('python3 -c "print(1)"', { cwd: WORK, root: WORK }).ok === true)
+ok("model refused: python -c without consent", modelMayRun('python3 -c "print(1)"', { cwd: WORK, root: WORK }).ok === false)
+ok("model may run python -c with consent", modelMayRun('python3 -c "print(1)"', { cwd: WORK, root: WORK }, { allowInterpreterEval: true }).ok === true)
 ok("model may still run sh -c echo", modelMayRun('sh -c "echo hi"', { cwd: WORK, root: WORK }).ok === true)
 
 console.log("== v20.1 P0-2: $VAR targets are expanded before classification ==")

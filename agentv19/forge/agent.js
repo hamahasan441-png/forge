@@ -169,7 +169,7 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
  * runAgent MUST accept taskId, runId, segmentId, nodeId
  * Every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  */
-export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false }) {
+export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
@@ -229,7 +229,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   let pluginHost = null // v21.1: isolated plugin workers, closed in `finally`
   if (config.tools?.plugins !== false) {
     try {
-      const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES, grants: config.tools?.pluginGrants ?? {}, cwd: process.cwd() })
+      const loaded = await loadToolPlugins(undefined, {
+        reserved: BUILTIN_TOOL_NAMES,
+        grants: config.tools?.pluginGrants ?? {},
+        cwd: process.cwd(),
+        startedAt: pluginStartedAt,
+        allowNewPlugins: config.tools?.allowNewPlugins === true,
+      })
       plugins = loaded.tools
       pluginHost = loaded
       if (!isDelegatedSubAgent) {
@@ -275,6 +281,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
     allowNetworkUpload: config.tools?.allowNetworkUpload === true,
+    allowInterpreterEval: config.tools?.allowInterpreterEval === true,
     assumeYes: config.tools?.assumeYes === true,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? 180,

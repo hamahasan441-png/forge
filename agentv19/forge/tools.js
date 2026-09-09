@@ -491,6 +491,7 @@ export function makeToolContext(opts = {}) {
     allowSudo = false,
     assumeYes = false,
     allowNetworkUpload = false, // v21.1: curl -d / wget --post-file / scp … from the model
+    allowInterpreterEval = false, // v21.2: node -e / python -c / perl -e …
     fetchPrivateUrls = process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec = 180,
     maxParallelDelegates = 2,
@@ -513,7 +514,7 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     mode,
-    allowOutsideProject, allowSudo, assumeYes, allowNetworkUpload, fetchPrivateUrls,
+    allowOutsideProject, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,
@@ -585,7 +586,7 @@ async function runBash(ctx, command, timeoutSec) {
       return `BLOCKED: write tools are disabled in this read-only agent — bash command "${String(command).slice(0, 80)}" is a filesystem mutation. Read-only workers may run approved verification commands (test/build/lint) but not arbitrary mutations.`
     }
   }
-  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload })
+  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload, allowInterpreterEval: ctx.allowInterpreterEval })
   if (!verdict.ok) return verdict.reason
   const t = Math.min(300, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
   if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"

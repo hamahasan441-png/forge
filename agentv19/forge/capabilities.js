@@ -549,7 +549,7 @@ export function operationRisk(name, args = {}, ctx = {}) {
   switch (name) {
     case "bash": {
       const command = String(a.command ?? "")
-      const v = classifyCommand(command, { cwd, root, allowSudo: ctx.allowSudo === true })
+      const v = classifyCommand(command, { cwd, root, allowSudo: ctx.allowSudo === true, allowInterpreterEval: ctx.allowInterpreterEval === true })
       // shellguard level → forge risk. safe/low stay LOW; anything that needs
       // confirmation is at least HIGH; danger/block are CRITICAL.
       const map = { safe: RISK.LOW, low: RISK.LOW, confirm: RISK.HIGH, danger: RISK.CRITICAL, block: RISK.CRITICAL }

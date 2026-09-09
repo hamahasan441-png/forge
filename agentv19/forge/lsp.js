@@ -402,3 +402,43 @@ export function createLspSession(config, { cwd = process.cwd() } = {}) {
     },
   }
 }
+
+/**
+ * Run `lsp_diagnostics` on each changed file that has a configured language
+ * server and return `{ file, text, passed, errorCount }[]` for the
+ * verification ledger. Error-severity diagnostics fail (`passed: false`);
+ * warnings/info/clean pass. A missing/unconfigured/failed server is skipped
+ * (not a gate failure — LSP is optional evidence). Off when `lsp.servers`
+ * is empty. Caller does not own the session.
+ */
+export async function collectDiagnosticsForFiles(config, files, { cwd = process.cwd() } = {}) {
+  const out = []
+  if (!config?.lsp?.servers || typeof config.lsp.servers !== "object") return out
+  if (!Object.keys(config.lsp.servers).length) return out
+  const wanted = []
+  const seen = new Set()
+  for (const f of files || []) {
+    const abs = path.resolve(cwd, String(f))
+    if (seen.has(abs)) continue
+    seen.add(abs)
+    if (!serverForFile(config, abs)) continue
+    try { if (!fsMod.existsSync(abs)) continue } catch { continue }
+    wanted.push(abs)
+  }
+  if (!wanted.length) return out
+  const session = createLspSession(config, { cwd })
+  try {
+    const tool = session.tools.find((t) => t.name === "lsp_diagnostics")
+    if (!tool) return out
+    for (const abs of wanted) {
+      let text
+      try { text = String(await tool.run({ path: abs })) } catch (e) { text = `ERROR: ${e?.message ?? e}` }
+      if (/^no such file|^no language server configured|^language server ".*" failed to start|^ERROR:/.test(text)) continue
+      const errorCount = (text.match(/^error /gm) || []).length
+      out.push({ file: abs, text, passed: errorCount === 0, errorCount })
+    }
+  } finally {
+    try { await session.close() } catch {}
+  }
+  return out
+}
