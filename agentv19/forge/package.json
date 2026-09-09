@@ -1,7 +1,7 @@
 {
   "name": "forge-agent-cli",
-  "version": "24.0.0",
-  "description": "forge ∞ — autonomous software engineering system. Zero dependencies, pure Node, direct-to-provider. Hybrid retrieval (BM25+embeddings reorder, never widen), causal diagnosis, self-diagnostics, task origin tags, adversarial review, adaptive classification, hypothesis-driven repair, impact-aware testing, premium terminal HUD, coding agent with checkpoints/undo + plan mode + 17 hardened tools, hierarchical memory, sessions with resume, SSRF-guarded fetches, secret redaction.",
+  "version": "25.0.0",
+  "description": "forge ∞ — autonomous software engineering system. Zero dependencies, pure Node, direct-to-provider. v25 unbounded execution (raised budgets, in-project interpreter-eval + git danger; block-class / SSRF / write-boundary stay). Hybrid retrieval (BM25+embeddings reorder, never widen), causal diagnosis, self-diagnostics, task origin tags, adversarial review, adaptive classification, hypothesis-driven repair, impact-aware testing, premium terminal HUD, coding agent with checkpoints/undo + plan mode + 17 hardened tools, hierarchical memory, sessions with resume, SSRF-guarded fetches, secret redaction.",
   "type": "module",
   "bin": {
     "forge": "./forge.js"

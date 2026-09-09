@@ -13,8 +13,9 @@
  *   "block"   catastrophic — refused everywhere, always (root wipe, mkfs,
  *             dd to raw devices, fork bombs, shutdown, device redirects…)
  *   "danger"  destructive outside the project / credentials — refused for the
- *             MODEL's bash tool; the interactive terminal asks y/N
- *   "confirm" plausible damage (rm, git reset --hard, sudo, installs…) — the
+ *             MODEL's bash tool unless assumeYes OR (v25) a narrow autonomous
+ *             in-project git exception; the interactive terminal asks y/N
+ *   "confirm" plausible damage (rm, git reset, sudo, installs…) — the
  *             interactive terminal asks y/N; the model may run it only when
  *             its file targets stay inside the project (normal dev work)
  *   "low"     ordinary mutating dev commands (mkdir, npm test, make…)
@@ -755,13 +756,51 @@ function classifyCommandUnsafe(command, ctx = {}, depth = 0) {
   return { level, reasons: [...new Set(reasons.filter(Boolean))], targets, programs }
 }
 
+/** Programs the autonomous agent may never run as danger-class, even in-project. */
+const AUTONOMOUS_NEVER = new Set(["sudo", "doas", "su", "apt", "apt-get", "apk", "dnf", "yum", "zypper", "pacman", "pkg", "useradd", "userdel", "usermod", "passwd"])
+
+/**
+ * v25: in-project git with a destructive flag (reset --hard, clean -fd, …).
+ * Everything else that classifies danger still needs assumeYes. Interpreter
+ * eval is a separate flag (allowInterpreterEval) and is not granted here.
+ */
+export function autonomousWorkAllowed(c, ctx = {}, command = "") {
+  const programs = (c?.programs || []).map((p) => String(p || "").toLowerCase())
+  if (programs.some((p) => AUTONOMOUS_NEVER.has(p))) return false
+  const reasons = (c?.reasons || []).join(" ").toLowerCase()
+  if (/publish/.test(reasons)) return false
+  if (/cloud metadata|link-local/.test(reasons)) return false
+  if (/modifies system (packages|accounts)/.test(reasons)) return false
+  if (/\(global\)/.test(reasons)) return false
+  if (/outside the project|system directory|system root|raw device|kernel memory|protected location/.test(reasons)) return false
+  if (/root wipe|fork-bomb|formats a filesystem|catastrophic/.test(reasons)) return false
+  if (/filter-branch/.test(reasons)) return false
+  if (/\bpush\b/.test(reasons)) return false
+  if (!programs.includes("git")) return false
+  if (!/\bgit\s+(reset|clean|checkout|restore|rebase)\b/.test(reasons)) return false
+  const root = path.resolve((ctx && (ctx.root || ctx.cwd)) || process.cwd())
+  const outside = (c.targets || []).find((t) => t && !insideDir(t, root) && !isScratchPath(t))
+  if (outside) return false
+  return true
+}
+
 /** Policy: may the MODEL's bash tool run this? (block/danger refused;
- *  confirm allowed only when file targets stay inside the project). */
+ *  confirm allowed only when file targets stay inside the project).
+ *
+ *  v25 `opts.autonomous`: a mutating coding agent may run a NARROW set of
+ *  in-project danger operations that otherwise stall real work (git reset
+ *  --hard / clean / checkout -f / restore -f / rebase -f). It does NOT
+ *  grant assumeYes. Still refused: block-class, outside-project rm, sudo,
+ *  metadata, apt-get, npm publish, npm -g, force-push, filter-branch,
+ *  CODE_DANGER, interpreter-eval (that is `allowInterpreterEval`). */
 export function modelMayRun(command, ctx, opts = {}) {
   const c = classifyCommand(command, { ...ctx, allowSudo: opts.allowSudo, allowNetworkUpload: opts.allowNetworkUpload, allowInterpreterEval: opts.allowInterpreterEval === true || ctx?.allowInterpreterEval === true })
   if (c.level === "block") return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "catastrophic command"}. Refine the command.` }
   if (c.level === "danger") {
     if (opts.assumeYes) return { ok: true, reason: c.reasons[0], level: c.level }
+    if ((opts.autonomous === true || ctx?.autonomous === true) && autonomousWorkAllowed(c, ctx, command)) {
+      return { ok: true, reason: c.reasons[0], level: c.level }
+    }
     return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "destructive outside the project"}. This needs explicit user consent — ask the user to run it in the terminal (or set tools.assumeYes: true).`, level: c.level }
   }
   if (c.level === "confirm") {

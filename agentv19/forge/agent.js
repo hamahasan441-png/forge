@@ -30,7 +30,7 @@ import { createLspSession } from "./lsp.js"
 import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
-import { DEFAULT_DIR } from "./config.js"
+import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
 import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearningsAsync } from "./memory.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
@@ -67,6 +67,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "4. When done, reply with a concise final summary: what changed, files touched, verification result.",
     "5. If a task is impossible, say exactly why and what you tried.",
     "6. Write operations must stay inside the working directory; sensitive files (.env, keys, credentials) are protected. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
+    "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. Catastrophic commands, writes outside the project, sudo, and publishes are blocked — refine the command instead of asking the user to disable safety.",
     "",
     "TOOLS — all available, use them automatically as needed:",
     "- Multi-step work: keep a `todo` list (set at start, update statuses as you go).",
@@ -189,8 +190,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       if (deepEffort) onEvent?.({ type: "info", text: `auto profile → ${level} task → deep effort`, ...identityMeta() })
     }
   }
-  const maxSteps = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? 25, readonly ? 10 : 1000)
-  const maxToolCalls = Math.min(500, Math.max(10, config.agent?.maxToolCalls ?? 80))
+  const maxSteps = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps, readonly ? 10 : AGENT_BUDGETS.maxStepsHardCap)
+  const maxToolCalls = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(10, config.agent?.maxToolCalls ?? AGENT_BUDGETS.maxToolCalls))
   const skillsDir = resolveSkillsDir(config.skills?.dir)
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
   const runId = effectiveRunId
@@ -238,12 +239,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { lspSession = null }
   }
   let subCounter = 0
+  // v25: a mutating autonomous agent may run node -e / python -c and
+  // in-project git --hard without tools.assumeYes. Read-only / plan / verifier
+  // paths stay on explicit consent. assumeYes is NEVER auto-flipped — that
+  // would also permit outside-project rm, sudo, metadata, apt-get, npm publish.
+  const autonomous = !readonly && config.agent?.autonomous !== false
   const tools = makeToolContext({
     plugins,
     cwd: process.cwd(),
     root: process.cwd(),
-    timeoutSec: config.agent?.timeoutSec ?? 45,
-    maxToolOutput: config.agent?.maxToolOutput ?? 12000,
+    timeoutSec: config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec,
+    maxToolOutput: config.agent?.maxToolOutput ?? AGENT_BUDGETS.maxToolOutput,
     skillsDir,
     searchUrl: config.tools?.searchUrl || "",
     memoryPath,
@@ -254,10 +260,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     allowOutsideProject: config.tools?.allowOutsideProject === true,
     allowSudo: config.tools?.allowSudo === true,
     allowNetworkUpload: config.tools?.allowNetworkUpload === true,
-    allowInterpreterEval: config.tools?.allowInterpreterEval === true,
+    allowInterpreterEval: config.tools?.allowInterpreterEval === true || autonomous,
     assumeYes: config.tools?.assumeYes === true,
+    autonomous,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
-    delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? 180,
+    delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : 2),
     signal,
     subAgent: readonly && !planOnly,
@@ -278,7 +285,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       root: process.cwd(),
       readOnly: readonly,
       allowSudo: config.tools?.allowSudo === true,
+      allowInterpreterEval: config.tools?.allowInterpreterEval === true || autonomous,
       assumeYes: config.tools?.assumeYes === true,
+      autonomous,
     },
     config,
     onEvent,

@@ -39,13 +39,14 @@ import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { redact } from "./secrets.js"
 import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
+import { AGENT_BUDGETS } from "./config.js"
 import { createKernel } from "./omega.js"
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
 
-const SEGMENT_STEPS = 12
-const MAX_SEGMENTS_DEFAULT = 40
+const SEGMENT_STEPS = AGENT_BUDGETS.segmentSteps
+const MAX_SEGMENTS_DEFAULT = AGENT_BUDGETS.maxSegments
 
 export const FINAL = { COMPLETED: "COMPLETED", FAILED: "FAILED", CANCELLED: "CANCELLED", WAITING: "WAITING" }
 
@@ -140,7 +141,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
   // P0 segment safety fuse: a continuation is a RESUME, not a failure. The
   // continuation budget bounds it so "resume later" cannot loop forever.
-  const maxContinuations = config?.agent?.maxContinuations ?? 5
+  const maxContinuations = config?.agent?.maxContinuations ?? AGENT_BUDGETS.maxContinuations
   // how many times this task has already been resumed after a safety fuse
   let continuationCount = Number(resumeRec?.continuation_count ?? 0) || 0
 

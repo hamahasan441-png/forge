@@ -28,7 +28,7 @@ import readline from "node:readline"
 import { execFile } from "node:child_process"
 import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
-import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel } from "./config.js"
+import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { createToolIntel } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -485,8 +485,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     plugins,
     cwd: process.cwd(),
     root: process.cwd(),
-    timeoutSec: config.agent?.timeoutSec ?? 45,
-    maxToolOutput: config.agent?.maxToolOutput ?? 12000,
+    timeoutSec: config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec,
+    maxToolOutput: config.agent?.maxToolOutput ?? AGENT_BUDGETS.maxToolOutput,
     skillsDir: resolvedSkillsDir,
     searchUrl: config.tools?.searchUrl || "",
     memoryPath,
@@ -498,7 +498,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     allowInterpreterEval: config.tools?.allowInterpreterEval === true,
     assumeYes,
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
-    delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? 180,
+    delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : 2),
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
@@ -678,7 +678,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       printTerminal(cmd, shellState.history.map((h, i) => `${String(i + 1).padStart(4)}  ${h}`).join("\n"))
       return
     }
-    const timeoutMs = Math.min(300, Math.max(1, config.agent?.timeoutSec ?? 45)) * 1000
+    const timeoutMs = Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec)) * 1000
     const out = await new Promise((resolve) => {
       execFile("/bin/sh", ["-c", cmd], { cwd: shellState.cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, ...shellState.env, TERM: "dumb" } }, (error, stdout, stderr) => {
         let o = ""
@@ -1499,7 +1499,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         info(`verify: ${bold(command)}`)
         const t0 = Date.now()
         if (ui) { dispatchUI({ type: "TASK_STARTED", kind: "chat", title: `verify: ${command}`, id: null }); dispatchUI({ type: "TEST_STARTED", command }) }
-        const timeoutMs = Math.min(600, Math.max(1, config.agent?.timeoutSec ?? 45) * 4) * 1000
+        const timeoutMs = Math.min(AGENT_BUDGETS.bashTimeoutCapSec * 2, Math.max(1, config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec) * 4) * 1000
         const result = await new Promise((resolve) => {
           execFile("/bin/sh", ["-c", command], { cwd: process.cwd(), timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, ...shellState.env, TERM: "dumb" } }, (error, stdout, stderr) => {
             let r = ""

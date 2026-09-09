@@ -3,7 +3,23 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v24.0.0 — "retrieval surface"
+## [Unreleased] — v25.0.0 — "unbounded execution"
+
+### Added (v25.0 — operational budgets + in-project autonomy)
+- **Raised default budgets** (`AGENT_BUDGETS`): 80 steps/segment, 180s bash timeout, 32 segment steps, 80 segments, 250 tool calls, 12 continuations, 32 KB tool output. The fuse is still a fuse — completion is the 9-check gate.
+- **Bash timeout cap 900s** so a long test/build the user configured for is not killed at 5 minutes.
+- **Autonomous interpreter eval**: a mutating `runAgent` pass may run `node -e` / `python -c` / `perl -e`. `tools.allowInterpreterEval` stays false in defaultConfig and is still stripped from project `forge.config.json`. Classifier tests that omit the flag stay green. CODE_DANGER (`os.system('rm -rf /')`) is still refused.
+- **Autonomous in-project git danger**: `git reset --hard`, `git clean -fd`, `git checkout -f` run without `tools.assumeYes`. `git push`, `filter-branch`, outside-project rm, sudo, metadata, apt-get, npm publish, npm -g stay refused.
+- **Class fuses raised** (MICRO 8 / SMALL 16 / MEDIUM 40 / LARGE 80 / RECOVERY 40 / ARCH 120). `classifyTaskComplexity()` is unchanged.
+
+### Safety (unchanged, still tested)
+- Block-class (`rm -rf /`, mkfs, fork bombs, dd to disk, shutdown) refused even with autonomous + assumeYes.
+- `assumeYes` / `allowSudo` / `allowOutsideProject` / `fetchPrivateUrls` stay false. Project config cannot set them.
+- SSRF, securefs write boundary, plugin isolation, PRIVILEGED_TOOL_KEYS — not this release.
+
+PLAN-v28 is the contract. PLAN-v24 Tier 2–3 (vision, browser, sandbox, FORGE-BENCH) are not this release.
+
+## v24.0.0 — "retrieval surface"
 
 ### Added (v24.0 — hybrid repo-map + lessons rerank)
 - **Hybrid repo-map** (`buildRepoMapAsync`): the file walk and BM25 shortlist are unchanged. When an embeddings provider is configured, vectors only REORDER that list. A miss is the v23 BM25 map, never a wider scan.
