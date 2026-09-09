@@ -22,6 +22,7 @@ import { classifyOrigin, formatOrigin, ORIGIN } from "./selfdiag.js"
 import { createTaskModel, seedFromObjective, TAG } from "./taskmodel.js"
 import { adversarialReview, needsReview, formatReview } from "./review.js"
 import { createTelemetry, METRIC } from "./telemetry.js"
+import { createInfoGainEngine, formatExperiment } from "./infogain.js"
 
 export { TASK_CLASS, HSTATUS, KIND, LAYER, ORIGIN, TAG, METRIC, FAILURE }
 
@@ -31,9 +32,11 @@ export function createKernel({ cwd = process.cwd() } = {}) {
   const causal = createCausalEngine()
   const tasks = createTaskModel()
   const telemetry = createTelemetry()
+  const gain = createInfoGainEngine()
   let lastClass = null
   let lastOrigin = null
   let lastImpact = null
+  let lastDiagnosis = null
   const writes = {}
 
   function classify(task, opts = {}) {
@@ -60,6 +63,7 @@ export function createKernel({ cwd = process.cwd() } = {}) {
     const d = classifyFailure(result, meta)
     const origin = classifyOrigin(result, { ...meta, diagnosis: d })
     lastOrigin = origin
+    lastDiagnosis = d
     evidence.record(d.failed
       ? fact(`failure:${d.code}`, { source: "command", files: meta.files || [] })
       : verified(`command ok exit=${d.exitCode ?? 0}`, { source: "command", files: meta.files || [] }))
@@ -108,23 +112,42 @@ export function createKernel({ cwd = process.cwd() } = {}) {
     }
   }
 
+  function attachExperiment(base) {
+    const looping = base.action === "escalate" && /twice/.test(String(base.reason || ""))
+    const experiment = gain.select({
+      klass: lastClass?.class,
+      origin: base.origin || lastOrigin,
+      code: lastDiagnosis?.code || lastOrigin?.code,
+      action: base.action,
+      hypothesis: base.hypothesis,
+      causal: base.causal,
+      looping,
+    })
+    telemetry.inc(METRIC.INFOGAIN)
+    return { ...base, experiment }
+  }
+
   function nextRepair() {
     const target = causal.nextTarget()
     const h = hypo.best()
     if (lastOrigin && lastOrigin.origin === ORIGIN.FORGE) {
       telemetry.inc(METRIC.LOOP_ESCALATE)
-      return { action: "escalate", reason: lastOrigin.why, origin: lastOrigin, causal: target, hypothesis: h }
+      return attachExperiment({ action: "escalate", reason: lastOrigin.why, origin: lastOrigin, causal: target, hypothesis: h })
     }
-    if (!h && !target.node) return { action: "inspect", reason: "no open hypothesis", origin: lastOrigin, causal: target }
+    if (!h && !target.node) return attachExperiment({ action: "inspect", reason: "no open hypothesis", origin: lastOrigin, causal: target })
     const last = h && h.tests[h.tests.length - 1]
     if (h && last && hypo.looping(h.id, last.test)) {
       telemetry.inc(METRIC.LOOP_ESCALATE)
-      return { action: "escalate", reason: "same hypothesis already tested twice", hypothesis: h, origin: lastOrigin, causal: target }
+      return attachExperiment({ action: "escalate", reason: "same hypothesis already tested twice", hypothesis: h, origin: lastOrigin, causal: target })
     }
     if (target.layer === LAYER.ROOT && target.node) {
-      return { action: "test", hypothesis: h, reason: target.reason, origin: lastOrigin, causal: target }
+      return attachExperiment({ action: "test", hypothesis: h, reason: target.reason, origin: lastOrigin, causal: target })
     }
-    return { action: h ? "test" : "inspect", hypothesis: h, reason: h ? `discriminate ${h.id}` : target.reason, origin: lastOrigin, causal: target }
+    return attachExperiment({ action: h ? "test" : "inspect", hypothesis: h, reason: h ? `discriminate ${h.id}` : target.reason, origin: lastOrigin, causal: target })
+  }
+
+  function noteExperiment(id, result = null) {
+    return gain.record(id, result)
   }
 
   function confirmRootCause(id) {
@@ -168,6 +191,7 @@ export function createKernel({ cwd = process.cwd() } = {}) {
       causal: causal.chain(),
       tasks: tasks.snapshot(),
       telemetry: telemetry.snapshot(),
+      infogain: gain.snapshot(),
       writes: { ...writes },
     }
   }
@@ -175,8 +199,8 @@ export function createKernel({ cwd = process.cwd() } = {}) {
   return {
     classify, workflow, planFor, observeCommand, impact, noteWrite,
     nextRepair, confirmRootCause, rejectCause, snapshot, review,
-    counterfactualOf, needsReview,
-    hypotheses: hypo, evidence, causal, tasks, telemetry,
+    counterfactualOf, needsReview, noteExperiment,
+    hypotheses: hypo, evidence, causal, tasks, telemetry, infogain: gain,
     testingScope, createCommandResult,
   }
 }
@@ -185,4 +209,4 @@ export function omegaBanner(version) {
   return `forge v${version} — ∞ autonomous engineering`
 }
 
-export { strategyFor, needsReview, formatReview, formatOrigin, counterfactual }
+export { strategyFor, needsReview, formatReview, formatOrigin, counterfactual, formatExperiment }

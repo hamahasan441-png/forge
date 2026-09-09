@@ -16,6 +16,7 @@ export const METRIC = {
   COMMAND_FAIL: "command.fail",
   COMMAND_OK: "command.ok",
   RECOVERY: "classify.recovery",
+  INFOGAIN: "infogain.select",
 }
 
 export function createTelemetry() {

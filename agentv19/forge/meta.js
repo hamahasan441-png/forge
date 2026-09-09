@@ -1434,9 +1434,10 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
   const failText = String(error ?? verification?.reason ?? "")
   let hypoHint = ""
   let observed = null
+  let next = null
   if (omega) {
     observed = omega.observeCommand(failText, { tool: "segment", files: changedFiles })
-    const next = omega.nextRepair()
+    next = omega.nextRepair()
     if (observed.diagnosis?.failed) {
       hypoHint += `\n\nFailure class: ${observed.diagnosis.code}. Evidence: ${String(observed.diagnosis.evidence ?? "").slice(0, 240)}.`
     }
@@ -1458,6 +1459,18 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
         hypoHint += `\nThis hypothesis has already been tested twice — do NOT retry it. Pick a different cause.`
       }
     }
+    if (next.experiment) {
+      const g = Number.isFinite(next.experiment.gain) ? Number(next.experiment.gain).toFixed(3) : "?"
+      hypoHint += `\nNext experiment (${next.experiment.id}, gain=${g}, kind=${next.experiment.kind}): ${next.experiment.instruction}`
+      if (next.experiment.avoided?.length) {
+        hypoHint += `\nAvoided (already uninformative): ${next.experiment.avoided.slice(0, 6).join(", ")}`
+      }
+      emit({
+        type: "EXPERIMENT_SELECTED", taskId, runId: taskRunId, segmentId, nodeId,
+        id: next.experiment.id, kind: next.experiment.kind, gain: next.experiment.gain,
+        reason: next.experiment.reason,
+      })
+    }
     const rejected = omega.hypotheses.snapshot().filter((h) => h.status === "REJECTED")
     if (rejected.length) {
       hypoHint += `\nRejected causes (do not retry): ${rejected.map((h) => h.description).slice(0, 4).join("; ")}`
@@ -1470,6 +1483,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
     const fixed = !r.error && !r.budgetHit
     if (omega && observed?.hypothesis) {
       omega.hypotheses.recordTest(observed.hypothesis.id, { name: "repair-pass", result: fixed ? "pass" : "fail" })
+      if (omega.noteExperiment && next?.experiment?.id) omega.noteExperiment(next.experiment.id, fixed ? "pass" : "fail")
       if (fixed) omega.confirmRootCause(observed.hypothesis.id)
       else if (omega.hypotheses.looping(observed.hypothesis.id, "repair-pass")) {
         omega.rejectCause(observed.hypothesis.id, "same repair already failed twice")
