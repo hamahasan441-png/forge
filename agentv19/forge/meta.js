@@ -28,12 +28,12 @@
 import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, finalizeStatus } from "./taskstate.js"
 import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
 import { canCompleteTask, CHECK as GATE_CHECK } from "./completion.js"
-import { createResourceManager, ADAPT, fanoutWaitMs } from "./resources.js"
+import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./resources.js"
 import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
-import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync } from "./lessons.js"
+import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
@@ -41,6 +41,7 @@ import { redact } from "./secrets.js"
 import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
 import { AGENT_BUDGETS } from "./config.js"
 import { createKernel } from "./omega.js"
+import { shouldReplan, replanPrompt, planLessonsPrefix } from "./replan.js"
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -212,9 +213,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     const fastPath = !restoredDAG && classified.strategy.plan === "synthesize" && classified.class === TASK_CLASS.MICRO
     const recoveryPath = !restoredDAG && classified.class === TASK_CLASS.RECOVERY
+    const planLessons = (!restoredDAG && !fastPath && !recoveryPath)
+      ? lessonsForPlan(state.objective, { cwd: process.cwd() })
+      : { text: "", avoided: [], count: 0 }
+    const lessonPrefix = planLessonsPrefix(planLessons)
+    if (planLessons.count || planLessons.avoided.length) {
+      emit({ type: "PLAN_LESSONS", taskId, runId: taskRunId, count: planLessons.count, avoided: planLessons.avoided.slice(0, 4) })
+    }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\nProduce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -393,6 +401,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let finalState = null
   let consecutiveFailures = 0
   let repairCount = 0
+  let replanCount = 0
   let evidenceRequests = 0
   let totalToolCalls = 0
   const changedFiles = new Set()
@@ -410,7 +419,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   /** P0: no mutation boundary may be crossed while a worker is still alive. */
   const settleWorkers = async (graceMs) => {
-    const ms = graceMs == null ? fanoutWaitMs(resources.state.tier) : graceMs
+    const ms = graceMs == null ? fanoutWaitMs(resources.state.tier, resources.state) : graceMs
     try {
       const res = await manager.settle({ graceMs: ms })
       if (!res.settled) {
@@ -622,6 +631,89 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   ts.transition(TASK_STATUS.EXECUTING, { reason: "starting segments" })
 
+  /** v28: rewrite remaining DAG from verification evidence. MICRO never. At most maxReplans. */
+  const tryMidTaskReplan = async ({ reason, evidence }) => {
+    let escalate = false
+    let causalHint = ""
+    try {
+      const next = omega?.nextRepair?.()
+      escalate = next?.action === "escalate"
+      if (next?.causal?.node) causalHint = `${next.causal.layer}: ${next.causal.node.description}`
+    } catch {}
+    if (!shouldReplan({
+      klass: classified.class,
+      repairCount,
+      consecutiveFailures,
+      replanCount,
+      profile: resources.state,
+      escalate,
+    })) return { ok: false }
+    if (!dag) return { ok: false }
+    const completed = [...dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED)
+    const failed = [...dag.nodes.values()].filter((n) => n.status !== dagLib.NODE_STATUS.COMPLETED)
+    const planL = lessonsForPlan(state.objective, { cwd: process.cwd() })
+    const prompt = replanPrompt({
+      objective: state.objective,
+      reason,
+      evidence,
+      completed,
+      failed,
+      lessons: planL.text,
+      avoided: planL.avoided,
+      causal: causalHint,
+    })
+    emit({
+      type: "PLAN_REPLAN_STARTED",
+      taskId, runId: taskRunId,
+      reason: String(reason ?? "").slice(0, 240),
+      kept: completed.length,
+      dropped: failed.length,
+      attempt: replanCount + 1,
+    })
+    ts.transition(TASK_STATUS.REPAIRING, { reason: "mid-task replan from verification evidence" })
+    let replanRes
+    try {
+      replanRes = await agent({
+        config, provider: prov, signal,
+        task: prompt,
+        taskId, runId: taskRunId, segmentId: `seg-replan-${replanCount + 1}`, nodeId: null,
+        planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4,
+        deep: classified.strategy.deep,
+        onEvent: passThrough(emit, "replan"), suppressRunEvents: true,
+      })
+    } catch (e) {
+      emit({ type: "PLAN_REPLANNED", taskId, runId: taskRunId, ok: false, reason: "verification", error: String(e?.message ?? e).slice(0, 200) })
+      return { ok: false }
+    }
+    const defs = dagLib.parsePlanToDAG(replanRes?.text ?? "")
+    const result = dagLib.replanRemaining(dag, defs, {
+      prefix: `rp${replanCount + 1}_`,
+      reason: String(reason ?? "verification"),
+      evidence: String(evidence ?? "").slice(0, 600),
+      objective: state.objective,
+      creator: "mid-task-replan",
+    })
+    if (!result.ok) {
+      emit({ type: "PLAN_REPLANNED", taskId, runId: taskRunId, ok: false, reason: "verification", error: result.error, nodes: defs.length })
+      return { ok: false }
+    }
+    dag = result.graph
+    replanCount++
+    persistDAG()
+    ts.setPlan([...dag.nodes.values()].map((n) => n.objective ?? n.id), "model+replanned")
+    emit({
+      type: "PLAN_REPLANNED",
+      taskId, runId: taskRunId,
+      ok: true,
+      reason: "verification",
+      kept: result.kept,
+      added: result.added,
+      dropped: result.dropped,
+      nodes: dag.nodes.size,
+    })
+    return { ok: true, clearNode: true }
+  }
+
   while (segment < maxSeg) {
     if (signal?.aborted) { finalStatus = explicitFinalization(FINAL.CANCELLED); break }
 
@@ -707,7 +799,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     // v23: buildAsync = hybrid rerank when embeddings are configured, else the
     // exact synchronous BM25 build (no embedder → no behavior change)
-    const contextBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: resources.state.tier === "high" ? 4000 : 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
+    const contextBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: resources.state.burst ? 5000 : resources.state.tier === "high" ? 4000 : 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
     const contextBlock = typeof contextBuilt === "string" ? contextBuilt : contextBuilt?.text ?? ""
 
     const knownBad = embedder
@@ -718,9 +810,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     let dagFindings = ""
     if (dag && workersEnabled && (workers != null || classified.strategy.workers > 0) && !signal?.aborted) {
       try {
+        const classWorkers = scaleWorkers(classified.strategy.workers, resources.state)
         const parallelN = workers != null
           ? Math.max(1, resources.state.maxWorkers)
-          : Math.max(1, Math.min(resources.state.maxWorkers, classified.strategy.workers))
+          : Math.max(1, Math.min(resources.state.maxWorkers, classWorkers))
         const batch = dagLib.scheduleBatch(dag, { maxParallel: parallelN, conflictKeys: dagLib.canonicalConflictKeys })
           .filter((n) => n.read_only && n.role && n.role !== "coder" && n.id !== currentNodeId)
         if (batch.length) {
@@ -771,7 +864,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           // Bounded wait: the deadline must be cleared (and unref'd) or it keeps
           // a timer alive long after the workers have settled.
           let fanoutTimer = null
-          const waitMs = fanoutWaitMs(resources.state.tier)
+          const waitMs = fanoutWaitMs(resources.state.tier, resources.state)
           const fanoutDeadline = new Promise((resolve) => {
             fanoutTimer = setTimeout(resolve, waitMs)
             if (fanoutTimer && typeof fanoutTimer.unref === "function") fanoutTimer.unref()
@@ -1032,6 +1125,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           break
         }
       }
+      const rp = await tryMidTaskReplan({ reason: res.error, evidence: String(res.error).slice(0, 400) })
+      if (rp.ok) { currentNodeId = null; currentNode = null }
       ts.transition(TASK_STATUS.EXECUTING, { reason: "after repair" })
       continue
     }
@@ -1115,6 +1210,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           } else {
             dagLib.markVerifying(dag, currentNodeId)
             persistDAG()
+            const rp = await tryMidTaskReplan({
+              reason: vAfter.reason || v.reason || "verification failed",
+              evidence: (vAfter.missing || v.missing || []).join(", "),
+            })
+            if (rp.ok) { currentNodeId = null; currentNode = null }
           }
         } catch { }
       }

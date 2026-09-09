@@ -3,7 +3,19 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v27.0.0 — "high-capacity"
+## [Unreleased] — v28.0.0 — "8-core burst"
+
+### Added (v28.0 — 13T Pro 8-core / 12GB: faster, smarter)
+- **MemAvailable, not MemFree.** `readAvailableMB()` reads `/proc/meminfo` so an 8-core 12GB phone is not classified low just because the kernel filled RAM with cache. Injected `{ freeMB }` still wins in tests. Starving (`freeMB < 700`) stays low.
+- **Burst profile.** `cores >= 8 && totalMB >= 8192 && !low` → `burst`. Xiaomi 13T Pro is burst. A 12GB / 4-core laptop stays high, not burst (v27).
+- **Burst workers.** `scaleWorkers` raises MEDIUM 4→6, LARGE 6→8, RECOVERY 4→6 on burst, capped at 8. MICRO/SMALL stay 0. `strategyFor` base numbers unchanged. Mutators still serialize.
+- **Faster fan-out hang ceiling on burst:** `fanoutWaitMs("high", { burst: true })` is 5s. 1-arg `fanoutWaitMs("high")` stays 8s.
+- **Lessons steer the first plan.** `lessonsForPlan` injects LEARNED FROM PAST FAILURES + avoided strategies into the model planner (`PLAN_LESSONS`). Never ASSUMPTION→REQUIREMENT.
+- **Mid-task replan from verification evidence.** After 2 failed repairs / 2 consecutive failures / omega escalate, `replanRemaining` keeps COMPLETED nodes and prefixes new ids (`rp1_…`). MICRO/SMALL never replan. Burst may replan twice. Cycle replan is unchanged.
+
+Single mutating writer is unchanged. PLAN-v31 is the contract. Vision, browser, FORGE-BENCH are not this release. `assumeYes` stays false.
+
+## v27.0.0 — "high-capacity"
 
 ### Added (v27.0 — 12GB is high: harder, smarter, deeper, faster)
 - **12GB / 4-core is high-capacity.** `resourceProfile` treats `totalMB >= 8192` as high (the user's 12GB laptop) unless the box is low: 2 cores, <2GB total, or <700MB free. 2-core CI and phones stay low. Tests inject `{ cores, freeMB, totalMB }`.

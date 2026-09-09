@@ -32,6 +32,8 @@ export const ADAPT = {
  * the intended fan-out; this is the machine/config cap the scheduler cannot
  * exceed. Low-RAM / low-tier machines stay at 1. Never widens a security
  * boundary. v27: high (12GB / 8GB+) may use the full AGENT_BUDGETS cap (8).
+ * v28: `scaleWorkers` may raise a class cap by +2 on 8-core burst, still
+ * under this ceiling. Mutators still serialize.
  */
 export function workerCeiling(config = {}, tier = "normal") {
   const configured = Number(config?.agent?.maxParallelSubAgents)
@@ -48,17 +50,38 @@ export function tokenBudgetFor(tier) {
   return 2_000_000
 }
 
-/** Bounded wait for read-only fan-out. High-capacity machines wait longer so workers actually finish. */
-export function fanoutWaitMs(tier) {
+/** Bounded wait for read-only fan-out. High-capacity machines wait longer so workers actually finish. Burst (8-core) finishes sooner — shorter hang ceiling, race still returns early. */
+export function fanoutWaitMs(tier, profile = null) {
+  if (profile && profile.burst) return 5000
   return tier === "high" ? 8000 : 4000
 }
 
+/**
+ * Class strategy is the BASE fan-out (MICRO/SMALL stay 0). On an 8-core
+ * burst box raise MEDIUM/LARGE/RECOVERY by 2, still capped at the budget.
+ * Does not spawn a second writer — callers still pass the result through
+ * scheduleBatch (mutators serialize).
+ */
+export function scaleWorkers(base, profile = null) {
+  const n = Math.max(0, Number(base) || 0)
+  if (n === 0) return 0
+  if (profile?.burst) return Math.min(AGENT_BUDGETS.maxParallelSubAgents, n + 2)
+  return n
+}
+
 export function createResourceManager({ config = {}, cwd = process.cwd(), profile = null } = {}) {
+  const derived = profile && typeof profile === "object" ? resourceProfile(profile) : resourceProfile()
   const base = profile && typeof profile === "object"
-    ? { ...resourceProfile(profile), ...profile, tier: profile.tier || resourceProfile(profile).tier }
-    : resourceProfile()
+    ? {
+        ...derived,
+        ...profile,
+        tier: profile.tier || derived.tier,
+        burst: profile.burst != null ? Boolean(profile.burst) : derived.burst,
+      }
+    : derived
   const state = {
     tier: base.tier,
+    burst: Boolean(base.burst),
     cores: base.cores,
     freeMB: base.freeMB,
     totalMB: base.totalMB,
@@ -181,6 +204,7 @@ export function createResourceManager({ config = {}, cwd = process.cwd(), profil
 
   const snapshot = () => ({
     tier: state.tier,
+    burst: Boolean(state.burst),
     cores: state.cores,
     freeMB: state.freeMB,
     totalMB: state.totalMB,

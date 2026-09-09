@@ -277,6 +277,21 @@ export function lessonsForPrompt(query, opts = {}) {
   return formatLessons(relevantLessons(query, opts))
 }
 
+/**
+ * v28 — lessons that STEER a plan, not just a repair. Same retrieval as
+ * the context engine (BM25; embeddings reorder elsewhere). Never promotes
+ * an assumption to a requirement — this is advisory text for the planner.
+ */
+export function lessonsForPlan(query, opts = {}) {
+  const hits = relevantLessons(query, { ...opts, limit: opts.limit ?? 4 })
+  const avoided = ineffectiveStrategies(query, { ...opts, limit: opts.limit ?? 4 })
+  return {
+    text: formatLessons(hits),
+    avoided: avoided.map((l) => l.failed_strategy || l.failed_action || l.strategy).filter(Boolean),
+    count: hits.length,
+  }
+}
+
 export async function lessonsForPromptAsync(query, opts = {}) {
   return formatLessons(await relevantLessonsAsync(query, opts))
 }

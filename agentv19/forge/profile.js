@@ -12,6 +12,11 @@
  * used to scale sub-agent concurrency and caches (ARM64/Termux friendly:
  * a 1-2GB phone gets 1 delegate and tighter budgets, not a crash).
  *
+ * v28: prefer MemAvailable over MemFree so an 8-core / 12GB phone (Xiaomi
+ * 13T Pro, Termux) is not classified low just because the kernel filled
+ * RAM with cache. `burst` is high-tier AND cores >= 8 — more read-only
+ * workers, not a second writer.
+ *
  * Zero dependencies; every call is best-effort and never throws.
  */
 import fs from "node:fs"
@@ -23,17 +28,35 @@ import { projectDir } from "./memory.js"
 
 // --- resource awareness -------------------------------------------------------
 
+/**
+ * Linux MemAvailable (kB → MB). os.freemem() is MemFree, which is often
+ * hundreds of MB on a 12GB box because cache is not "free". Termux on an
+ * 8-core 13T Pro would otherwise look starved and stay low-tier.
+ * Sample-injected tests never hit this path.
+ */
+export function readAvailableMB() {
+  try {
+    const txt = fs.readFileSync("/proc/meminfo", "utf8")
+    const m = txt.match(/^MemAvailable:\s+(\d+)\s+kB/mi)
+    if (m) return Math.round(Number(m[1]) / 1024)
+  } catch {}
+  return Math.round(os.freemem() / (1024 * 1024))
+}
+
 export function resourceProfile(sample) {
   const cores = Number.isFinite(sample?.cores) ? Number(sample.cores) : (os.cpus()?.length ?? 1)
-  const freeMB = Number.isFinite(sample?.freeMB) ? Number(sample.freeMB) : Math.round(os.freemem() / (1024 * 1024))
   const totalMB = Number.isFinite(sample?.totalMB) ? Number(sample.totalMB) : Math.round(os.totalmem() / (1024 * 1024))
+  const freeMB = Number.isFinite(sample?.freeMB) ? Number(sample.freeMB) : readAvailableMB()
   // Phones / this CI (2 cores) / starving processes stay low even with 12GB.
   const low = totalMB < 2048 || cores <= 2 || freeMB < 700
   // 8GB+ laptops (12GB / 4-core included) are high if they aren't starving.
   // The v26 `cores >= 6 && freeMB > 4000` path is kept so a 6-core / 6GB
   // workstation that was already high stays high.
   const high = !low && (totalMB >= 8192 || (cores >= 6 && freeMB > 4000))
-  return { cores, freeMB, totalMB, tier: low ? "low" : high ? "high" : "normal" }
+  const tier = low ? "low" : high ? "high" : "normal"
+  // 8-core 12GB (13T Pro) is burst: more read-only workers on MEDIUM/LARGE.
+  const burst = !low && cores >= 8 && totalMB >= 8192
+  return { cores, freeMB, totalMB, burst, tier }
 }
 
 // --- project profile ----------------------------------------------------------
