@@ -3,7 +3,18 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v26.0.0 — "DAG fan-out"
+## [Unreleased] — v27.0.0 — "high-capacity"
+
+### Added (v27.0 — 12GB is high: harder, smarter, deeper, faster)
+- **12GB / 4-core is high-capacity.** `resourceProfile` treats `totalMB >= 8192` as high (the user's 12GB laptop) unless the box is low: 2 cores, <2GB total, or <700MB free. 2-core CI and phones stay low. Tests inject `{ cores, freeMB, totalMB }`.
+- **More workers on high:** `AGENT_BUDGETS.maxParallelSubAgents` → 8. Class caps MEDIUM 4 / LARGE 6 / RECOVERY 4 / ARCH 8. `workerCeiling` high = 8, normal ≤ 4, low = 1. Mutators still serialize. MICRO/SMALL stay 0.
+- **Deeper auto on high:** `resolveEffort("auto", task, { tier: "high" })` deeps moderate work. 2-arg auto is unchanged (trivial stays shallow, complex goes deep) so `test-effort.mjs` stays green. `runAgent` passes the live tier.
+- **Bigger high-tier budgets:** 4M tokens, 8s fan-out wait, 4000 context tokens.
+- **Sandbox bash when bwrap exists** (`sandbox.js`): wrap *after* `modelMayRun`. Pid unshare, project bind, no net unshare. Missing binary → `/bin/sh -c` and `sandboxed: false`. Never a fake sandbox. `FORGE_SANDBOX=0` disables.
+
+Single mutating writer is unchanged. PLAN-v30 is the contract. Vision, browser, FORGE-BENCH, mid-task re-plan are not this release. `assumeYes` stays false.
+
+## v26.0.0 — "DAG fan-out"
 
 ### Added (v26.0 — read-only workers beyond 2)
 - **Class worker caps**: MEDIUM 2, LARGE 4, RECOVERY 2, ARCH 6. MICRO/SMALL stay 0 unless the caller requested workers.

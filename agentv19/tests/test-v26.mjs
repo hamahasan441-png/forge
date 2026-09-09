@@ -36,23 +36,23 @@ console.log("== class worker caps ==")
 {
   eq("MICRO stays 0", strategyFor(TASK_CLASS.MICRO).workers, 0)
   eq("SMALL stays 0", strategyFor(TASK_CLASS.SMALL).workers, 0)
-  eq("MEDIUM is 2", strategyFor(TASK_CLASS.MEDIUM).workers, 2)
-  eq("LARGE is 4", strategyFor(TASK_CLASS.LARGE).workers, 4)
-  eq("RECOVERY is 2", strategyFor(TASK_CLASS.RECOVERY).workers, 2)
-  eq("ARCH is 6", strategyFor(TASK_CLASS.ARCHITECTURAL).workers, 6)
-  eq("AGENT_BUDGETS ceiling is 6", AGENT_BUDGETS.maxParallelSubAgents, 6)
-  eq("defaultConfig uses the ceiling", defaultConfig().agent.maxParallelSubAgents, 6)
+  eq("MEDIUM is 4", strategyFor(TASK_CLASS.MEDIUM).workers, 4)
+  eq("LARGE is 6", strategyFor(TASK_CLASS.LARGE).workers, 6)
+  eq("RECOVERY is 4", strategyFor(TASK_CLASS.RECOVERY).workers, 4)
+  eq("ARCH is 8", strategyFor(TASK_CLASS.ARCHITECTURAL).workers, 8)
+  eq("AGENT_BUDGETS ceiling is 8", AGENT_BUDGETS.maxParallelSubAgents, 8)
+  eq("defaultConfig uses the ceiling", defaultConfig().agent.maxParallelSubAgents, 8)
   ok("classifyTaskComplexity is frozen (typo still trivial)", classifyTaskComplexity("fix a typo") === "trivial")
 }
 
 console.log("== workerCeiling: tier clamp, never above 6 ==")
 {
-  eq("low tier is always 1", workerCeiling({ agent: { maxParallelSubAgents: 6 } }, "low"), 1)
+  eq("low tier is always 1", workerCeiling({ agent: { maxParallelSubAgents: 8 } }, "low"), 1)
   eq("low ignores a huge config", workerCeiling({ agent: { maxParallelSubAgents: 99 } }, "low"), 1)
-  eq("high with default is 6", workerCeiling({}, "high"), 6)
+  eq("high with default is 8", workerCeiling({}, "high"), 8)
   eq("normal with default is 4", workerCeiling({}, "normal"), 4)
   eq("config 3 is respected on high", workerCeiling({ agent: { maxParallelSubAgents: 3 } }, "high"), 3)
-  eq("config 99 is still capped at 6", workerCeiling({ agent: { maxParallelSubAgents: 99 } }, "high"), 6)
+  eq("config 99 is still capped at 8", workerCeiling({ agent: { maxParallelSubAgents: 99 } }, "high"), 8)
 }
 
 console.log("== scheduleBatch: 6 independent readers, one writer ==")
@@ -68,7 +68,7 @@ console.log("== scheduleBatch: 6 independent readers, one writer ==")
   const four = dag.scheduleBatch(readers, { maxParallel: 4 })
   eq("maxParallel 4 is respected", four.length, 4)
   const def = dag.scheduleBatch(readers)
-  eq("default maxParallel is 6", def.length, 6)
+  eq("default maxParallel covers 6 readers", def.length, 6)
 
   const writers = dag.buildDAG(
     Array.from({ length: 6 }, (_, i) => ({
@@ -123,8 +123,8 @@ console.log("== meta filter still refuses a coder worker (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 26.0.0", VERSION, "26.0.0")
-  eq("package.json is 26.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "26.0.0")
+  eq("VERSION is 27.0.0", VERSION, "27.0.0")
+  eq("package.json is 27.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "27.0.0")
 }
 
 console.log(`\n== v26 suite: ${PASS} passed, ${FAIL} failed ==`)

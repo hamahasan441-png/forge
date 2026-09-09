@@ -183,12 +183,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   let deepEffort = deep
   if (deepEffort === undefined) {
     const profile = config.chat?.profile ?? "auto"
-    deepEffort = profile === "deep"
-    if (profile === "auto") {
-      const level = classifyTaskComplexity(task)
-      deepEffort = level === "complex" || level === "critical"
-      if (deepEffort) onEvent?.({ type: "info", text: `auto profile → ${level} task → deep effort`, ...identityMeta() })
-    }
+    const resolved = resolveEffort(profile, task, { tier: resProfile.tier })
+    deepEffort = resolved.deep
+    if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
   }
   const maxSteps = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps, readonly ? 10 : AGENT_BUDGETS.maxStepsHardCap)
   const maxToolCalls = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(10, config.agent?.maxToolCalls ?? AGENT_BUDGETS.maxToolCalls))

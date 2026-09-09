@@ -34,9 +34,10 @@ not spawn a second writer.
 - `freeMB < 400` still forces `limits.maxWorkers = 1`.
 - `classifyTaskComplexity()` is unchanged.
 
-## Still PLAN-v24 (not this release)
+## Still PLAN-v24 (not v26)
 
-Vision, browser tool, sandbox bash, FORGE-BENCH, mid-task re-plan, deeper lessons-into-planning.
+Vision, browser tool, FORGE-BENCH, mid-task re-plan, deeper lessons-into-planning.
+Sandbox bash shipped in v27 (PLAN-v30).
 
 ## Explicitly not this release
 

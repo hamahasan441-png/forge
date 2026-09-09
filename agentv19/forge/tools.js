@@ -31,6 +31,7 @@ import path from "node:path"
 import { snapshotBefore, sealCreated, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun } from "./shellguard.js"
+import { wrapBash } from "./sandbox.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
@@ -598,7 +599,8 @@ async function runBash(ctx, command, timeoutSec) {
     let timedOut = false, aborted = false
     const startedAt = Date.now()
     // detached → own process group, so killTree() can reach grandchildren
-    const child = spawn("/bin/sh", ["-c", command], { cwd: ctx.cwd, env: { ...process.env, TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
+    const wrapped = wrapBash(command, { cwd: ctx.cwd, root: ctx.root })
+    const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
     const timer = setTimeout(() => { timedOut = true; killTree(child) }, t)
     const onAbort = () => { aborted = true; killTree(child) }
     if (ctx.signal) ctx.signal.addEventListener("abort", onAbort, { once: true })

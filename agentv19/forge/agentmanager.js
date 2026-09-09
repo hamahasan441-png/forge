@@ -82,7 +82,7 @@ const SETTLED = new Set([
 const DEFAULT_GRACE_MS = 5_000
 
 export function createAgentManager({
-  maxWorkers = 6,
+  maxWorkers = 8,
   defaultTimeoutMs = 180_000,
   /** how many SETTLED worker records to keep for stats/audit (bounded) */
   maxRecords = 200,

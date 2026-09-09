@@ -415,9 +415,9 @@ export function dagStats(graph) {
  * Nodes eligible to run CONCURRENTLY: ready, read-only, no conflicting targets.
  * Uses canonical conflict keys by default, never empty.
  * Mutating nodes are always returned one at a time (serialized).
- * v26: default maxParallel is 6 (ARCH ceiling); callers pass a smaller class cap.
+ * v27: default maxParallel is 8 (ARCH / high-tier ceiling); callers pass a smaller class cap.
  */
-export function scheduleBatch(graph, { maxParallel = 6, conflictKeys = canonicalConflictKeys } = {}) {
+export function scheduleBatch(graph, { maxParallel = 8, conflictKeys = canonicalConflictKeys } = {}) {
   const ready = readyNodes(graph)
   if (!ready.length) return []
   const batch = []

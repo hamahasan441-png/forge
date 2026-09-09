@@ -28,9 +28,10 @@ export const ADAPT = {
 }
 
 /**
- * v26: read-only worker ceiling. Class strategy (MICRO=0 … ARCH=6) picks the
- * intended fan-out; this is the machine/config cap the scheduler cannot exceed.
- * Low-RAM / low-tier machines stay at 1. Never widens a security boundary.
+ * v26/v27: read-only worker ceiling. Class strategy (MICRO=0 … ARCH=8) picks
+ * the intended fan-out; this is the machine/config cap the scheduler cannot
+ * exceed. Low-RAM / low-tier machines stay at 1. Never widens a security
+ * boundary. v27: high (12GB / 8GB+) may use the full AGENT_BUDGETS cap (8).
  */
 export function workerCeiling(config = {}, tier = "normal") {
   const configured = Number(config?.agent?.maxParallelSubAgents)
@@ -40,8 +41,22 @@ export function workerCeiling(config = {}, tier = "normal") {
   return Math.max(1, Math.min(cap, byTier, AGENT_BUDGETS.maxParallelSubAgents))
 }
 
-export function createResourceManager({ config = {}, cwd = process.cwd() } = {}) {
-  const base = resourceProfile()
+/** Token budget scales with RAM; high (12GB) gets 4M so deep runs don't compact early. */
+export function tokenBudgetFor(tier) {
+  if (tier === "low") return 600_000
+  if (tier === "high") return 4_000_000
+  return 2_000_000
+}
+
+/** Bounded wait for read-only fan-out. High-capacity machines wait longer so workers actually finish. */
+export function fanoutWaitMs(tier) {
+  return tier === "high" ? 8000 : 4000
+}
+
+export function createResourceManager({ config = {}, cwd = process.cwd(), profile = null } = {}) {
+  const base = profile && typeof profile === "object"
+    ? { ...resourceProfile(profile), ...profile, tier: profile.tier || resourceProfile(profile).tier }
+    : resourceProfile()
   const state = {
     tier: base.tier,
     cores: base.cores,
@@ -50,7 +65,7 @@ export function createResourceManager({ config = {}, cwd = process.cwd() } = {})
     diskFreeMB: 0,
     tokensIn: 0,
     tokensOut: 0,
-    tokenBudget: config.agent?.tokenBudget ?? (base.tier === "low" ? 600_000 : 2_000_000),
+    tokenBudget: config.agent?.tokenBudget ?? tokenBudgetFor(base.tier),
     toolCalls: 0,
     workers: 0,
     maxWorkers: workerCeiling(config, base.tier),

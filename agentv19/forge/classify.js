@@ -105,7 +105,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.MEDIUM,
         plan: "model",
-        workers: 2,
+        workers: 4,
         maxSegments: 40,
         deep: false,
         verification: ["syntax", "focused_test"],
@@ -117,7 +117,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.LARGE,
         plan: "model",
-        workers: 4,
+        workers: 6,
         maxSegments: 80,
         deep: true,
         verification: ["syntax", "focused_test", "regression_test"],
@@ -129,7 +129,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.RECOVERY,
         plan: "restore",
-        workers: 2,
+        workers: 4,
         maxSegments: 40,
         deep: true,
         verification: ["syntax", "focused_test"],
@@ -141,7 +141,7 @@ export function strategyFor(klass) {
       return {
         class: TASK_CLASS.ARCHITECTURAL,
         plan: "model",
-        workers: 6,
+        workers: 8,
         maxSegments: 120,
         deep: true,
         verification: ["syntax", "focused_test", "regression_test", "build"],
@@ -197,13 +197,17 @@ export function classifyTask(task, opts = {}) {
   return { class: klass, legacy, confidence, signals, strategy, task: text.slice(0, 400) }
 }
 
-export function resolveEffort(profile, task) {
+export function resolveEffort(profile, task, opts = {}) {
   switch (profile) {
     case "fast": return { deep: false, why: "profile=fast" }
     case "deep": return { deep: true, why: "profile=deep" }
     case "auto": {
       const level = classifyTaskComplexity(task)
+      // v27: a 12GB high-capacity machine also deeps moderate work. 2-arg
+      // auto (no opts.tier) is unchanged — trivial stays shallow, complex
+      // goes deep — so test-effort.mjs stays green.
       const deep = level === "complex" || level === "critical"
+        || (opts.tier === "high" && level === "moderate")
       return { deep, why: `profile=auto → ${level} task → ${deep ? "deep" : "standard"} effort` }
     }
     default: return { deep: false, why: "profile=balanced" }
