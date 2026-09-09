@@ -413,7 +413,7 @@ Optional tuning (all in the config file — defaults are sensible, start empty):
 
 ```json
 "retry":  { "attempts": 3, "backoffMs": 1500, "connectMs": 30000, "requestTimeoutMs": 180000 },
-"agent":  { "maxSteps": 25, "timeoutSec": 45, "maxToolOutput": 12000, "maxToolCalls": 80, "delegateTimeoutSec": 180, "maxParallelSubAgents": 2 },
+"agent":  { "maxSteps": 80, "timeoutSec": 180, "maxToolOutput": 32000, "maxToolCalls": 250, "delegateTimeoutSec": 300, "maxParallelSubAgents": 6 },
 "chat":   { "tools": true, "compact": true, "compactAtChars": 48000, "shellAuto": true, "deep": false, "profile": "auto", "restoreCwd": true },
 "ui":     { "dock": true, "thinking": true, "ascii": false, "a11y": false, "collapse": true },
 "tools":  { "searchUrl": "http://your-searxng/search", "allowOutsideProject": false, "allowSudo": false, "assumeYes": false, "fetchPrivateUrls": false },

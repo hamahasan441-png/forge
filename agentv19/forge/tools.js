@@ -520,7 +520,7 @@ export function makeToolContext(opts = {}) {
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,
-    _delegateMax: Math.max(1, Math.min(4, maxParallelDelegates)),
+    _delegateMax: Math.max(1, Math.min(AGENT_BUDGETS.maxParallelSubAgents, maxParallelDelegates)),
   }
   const allDefs = plugins.length ? [...TOOL_DEFS, ...plugins.map((p) => p.def)] : TOOL_DEFS
   let filteredDefs = allDefs
