@@ -34,6 +34,7 @@ import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { evaluateSkills, formatSkillPicks, selectPlugins } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
+import { engineFor } from "./langengine.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -61,7 +62,7 @@ const ROLE_DIRECTIVES = {
   integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -123,6 +124,8 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     const klass = (() => { try { return classifyTask(task).class } catch { return null } })()
     const langBlock = formatLangReason(languagesIn(task, { cwd, klass }))
     if (langBlock) lines.push("", langBlock)
+    const engineBlock = engineFor(task, { cwd, config, klass })
+    if (engineBlock) lines.push("", engineBlock)
   }
   return lines.join("\n")
 }
@@ -356,7 +359,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   }
 
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
 

@@ -34,6 +34,7 @@ import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
+import { engineFor } from "./langengine.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
@@ -233,9 +234,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       : []
     const langPrefix = formatLangReason(planLangs)
     if (planLangs.length) emit({ type: "PLAN_LANG", taskId, runId: taskRunId, langs: planLangs })
+    const enginePrefix = (!restoredDAG && !fastPath && !recoveryPath)
+      ? engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
+      : ""
+    if (enginePrefix) emit({ type: "PLAN_ENGINE", taskId, runId: taskRunId })
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -666,13 +671,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const failed = [...dag.nodes.values()].filter((n) => n.status !== dagLib.NODE_STATUS.COMPLETED)
     const planL = lessonsForPlan(state.objective, { cwd: process.cwd() })
     const langBlock = formatLangReason(languagesIn(state.objective, { cwd: process.cwd(), klass: classified.class }))
+    const engineBlock = engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
     const prompt = replanPrompt({
       objective: state.objective,
       reason,
       evidence,
       completed,
       failed,
-      lessons: [planL.text, langBlock].filter(Boolean).join("\n\n"),
+      lessons: [planL.text, langBlock, engineBlock].filter(Boolean).join("\n\n"),
       avoided: planL.avoided,
       causal: causalHint,
     })

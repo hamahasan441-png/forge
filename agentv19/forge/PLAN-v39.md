@@ -51,9 +51,9 @@ from disk (retrieval drops STALE; history remains).
 
 ## Bigger map (not this release)
 
-§6 language-aware engine beyond regex adapters (LSP / compiler as
-optional, never a runtime dep). World-model rewrite, Tree-sitter as a
-runtime dep, edit-transaction rewrite stay explicitly out.
+Shipped next: **v37.0.0 / PLAN-v40** (language-aware engine). World-model
+rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite stay
+explicitly out.
 
 ## Non-goals
 
