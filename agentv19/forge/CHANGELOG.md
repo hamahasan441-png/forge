@@ -3,7 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v32.0.0 — "index"
+## [Unreleased] — v33.0.0 — "xlang"
+
+### Added (v33.0 — one connected system, not per-language silos)
+- **Cross-language graph** (`xlang.js`). Contracts from regex (HTTP routes, SQL tables, proto/GraphQL, OpenAPI paths, Docker services, CI jobs). Edges: IMPLEMENTS (same contract, different languages), CONSUMES (fetch/requests → producer), TEST, DEPLOY. `{id}` and `:id` routes normalize to one key. Built from the v32 index — unchanged files are not re-read.
+- **Context slice.** `CROSS GRAPH (source → contract → consumer → test → deploy)` after the repo map. Empty graph is omitted, never invented.
+- **Impact uses the graph.** `impactRadius` follows IMPORT/CONSUMES/IMPLEMENTS when the index connects; the v22 string-scan remains the fallback. `testsForFiles` picks tests along those edges. `skipUnchangedTests` only skips when a ledger of size+mtime is supplied (no ledger → skip nothing).
+
+Single mutating writer is unchanged. PLAN-v36 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
+## v32.0.0 — "index"
+
 
 ### Added (v32.0 — skip unchanged reads, map more languages)
 - **Incremental code index** (`index.js`). Persist file fingerprints (size + mtime) plus extracted symbols under `~/.forge/projects/<hash>/index.json` via `writeStateFile`. Unchanged files are not re-read. Missing / corrupt / wrong-version cache → full parse, never a throw. `FORGE_INDEX=0` disables persist+reuse (always parse). A fingerprint without a `symbols` array is not a hit.

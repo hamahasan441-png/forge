@@ -13,7 +13,8 @@
  * tokens it can spend; the engine returns the highest-value slices, ranked.
  * Mutations invalidate the affected cached state via invalidateFor(paths).
  */
-import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
+import { buildRepoMap, buildRepoMapAsync, buildCrossGraph } from "./repomap.js"
+import { formatCrossGraph } from "./xlang.js"
 import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearningsAsync, appendMemory } from "./memory.js"
 import { lessonsForPrompt, lessonsForPromptAsync } from "./lessons.js"
 import { profileSummary, loadProfile } from "./profile.js"
@@ -164,6 +165,12 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
           try { return buildRepoMap(cwd, { query: task || "", maxChars: precise ? 1800 : 4000, maxListed: precise ? 25 : 60 }) } catch { return "" }
         })
       if (map) { sections.push({ name: "repomap", text: map }); sources.repomap = true }
+      const cross = cached("cross:" + (precise ? "precise" : "normal"), repoTags(), () => {
+        try {
+          return formatCrossGraph(buildCrossGraph(cwd), { query: task || "", maxChars: precise ? 600 : 1200 })
+        } catch { return "" }
+      })
+      if (cross) { sections.push({ name: "cross", text: cross }); sources.cross = true }
     }
 
     // 3. relevant memory (global + project) — demand-driven BM25, or the v23

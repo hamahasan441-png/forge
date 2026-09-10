@@ -1,7 +1,7 @@
 {
   "name": "forge-agent-cli",
-  "version": "32.0.0",
-  "description": "forge ∞ — autonomous software engineering system. Zero dependencies, pure Node, direct-to-provider. v32 incremental code index (size+mtime, skip unchanged reads) + language adapters (regex, no Tree-sitter). v31 browser tool (opt-in chromium/agent-browser, UNAVAILABLE when absent, SSRF-guarded). v30 vision (read_image + image parts, config-only, no new dep). v29 information-gain experiments + FORGE-BENCH (12-case deterministic eval). v28 8-core burst (13T Pro / MemAvailable, mid-task replan, lessons-into-planning). v27 high-capacity 12GB (8 workers, deep moderate, 4M tokens, bwrap sandbox when present). v26 DAG fan-out (read-only workers by class; single mutating writer; low-RAM clamp 1). v25 unbounded execution. Hybrid retrieval (BM25+embeddings reorder, never widen), causal diagnosis, self-diagnostics, task origin tags, adversarial review, adaptive classification, hypothesis-driven repair, impact-aware testing, premium terminal HUD, coding agent with checkpoints/undo + plan mode + 19 hardened tools, hierarchical memory, sessions with resume, SSRF-guarded fetches, secret redaction.",
+  "version": "33.0.0",
+  "description": "forge ∞ — autonomous software engineering system. Zero dependencies, pure Node, direct-to-provider. v33 cross-language graph (source → contract → consumer → test → deploy, no Tree-sitter). v32 incremental code index (size+mtime, skip unchanged reads) + language adapters (regex, no Tree-sitter). v31 browser tool (opt-in chromium/agent-browser, UNAVAILABLE when absent, SSRF-guarded). v30 vision (read_image + image parts, config-only, no new dep). v29 information-gain experiments + FORGE-BENCH (12-case deterministic eval). v28 8-core burst (13T Pro / MemAvailable, mid-task replan, lessons-into-planning). v27 high-capacity 12GB (8 workers, deep moderate, 4M tokens, bwrap sandbox when present). v26 DAG fan-out (read-only workers by class; single mutating writer; low-RAM clamp 1). v25 unbounded execution. Hybrid retrieval (BM25+embeddings reorder, never widen), causal diagnosis, self-diagnostics, task origin tags, adversarial review, adaptive classification, hypothesis-driven repair, impact-aware testing, premium terminal HUD, coding agent with checkpoints/undo + plan mode + 19 hardened tools, hierarchical memory, sessions with resume, SSRF-guarded fetches, secret redaction.",
   "type": "module",
   "bin": {
     "forge": "./forge.js"
@@ -43,6 +43,7 @@
     "repomap.js",
     "index.js",
     "lang.js",
+    "xlang.js",
     "plugins.js",
     "mcp.js",
     "lsp.js",

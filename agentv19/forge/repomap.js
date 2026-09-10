@@ -1,5 +1,5 @@
 /**
- * forge — repo map / semantic graph (v20.2 hardened v23, incremental v32)
+ * forge — repo map / semantic graph (v20.2 hardened v23, incremental v32, cross v33)
  *
  * P1 semantic repo graph: FILE → IMPORT → EXPORT → SYMBOL → CALL → TYPE → TEST → CONFIG → DEPENDENCY
  * v32: language adapters (lang.js) + incremental index (index.js). Unchanged
@@ -15,6 +15,7 @@ import {
   isSourceFile, isConfigFile,
 } from "./lang.js"
 import { loadIndex, saveIndex, cacheHit, recordFromSource, indexEnabled } from "./index.js"
+import { linkRecords, emptyCrossGraph } from "./xlang.js"
 
 const SKIP = new Set([
   "node_modules", ".git", ".hg", ".svn", ".next", ".nuxt", ".svelte-kit",
@@ -24,6 +25,22 @@ const SKIP = new Set([
 
 let lastIndexStats = { reused: 0, parsed: 0, files: 0, persisted: false }
 export function getIndexStats() { return { ...lastIndexStats } }
+
+/** UNIFIED §7: indexed records → cross-language graph. Never throws. */
+export function buildCrossGraph(root, opts = {}) {
+  try {
+    const walked = walkIndexed(root, {
+      maxFiles: opts.maxFiles ?? 400,
+      maxBytesPerFile: opts.maxBytesPerFile ?? 256 * 1024,
+    })
+    lastIndexStats = walked.stats
+    const g = linkRecords(walked.records)
+    g.stats = { ...g.stats, reused: walked.stats.reused, parsed: walked.stats.parsed }
+    return g
+  } catch {
+    return emptyCrossGraph()
+  }
+}
 
 function gitignoreDirs(root) {
   const out = new Set()
@@ -141,13 +158,14 @@ function walkIndexed(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024 } = {}
       const rel = path.relative(base, full)
       const cached = cache.files?.[rel]
       let rec
-      if (cacheHit(cached, st)) {
+      if (cacheHit(cached, st) && Array.isArray(cached.contracts)) {
         rec = { ...cached, rel }
         reused++
       } else {
         let src = ""
         try { src = fs.readFileSync(full, "utf8") } catch { continue }
         rec = { rel, ...recordFromSource(e.name, src, full, st) }
+        if (!Array.isArray(rec.contracts)) rec.contracts = []
         parsed++
       }
       nextFiles[rel] = rec
@@ -214,6 +232,7 @@ export function buildSemanticGraph(root, opts = {}) {
       isTest: !!rec.test,
       isConfig: !!rec.config,
       lang: rec.lang,
+      contracts: rec.contracts || [],
       dependencies: [],
     }
     for (const imp of node.imports) {
@@ -224,6 +243,7 @@ export function buildSemanticGraph(root, opts = {}) {
     for (const sym of node.symbols) edges.push({ from: rel, to: sym, kind: "SYMBOL" })
     for (const call of node.calls) edges.push({ from: rel, to: call, kind: "CALL" })
     for (const t of node.types) edges.push({ from: rel, to: t, kind: "TYPE" })
+    for (const c of node.contracts) edges.push({ from: rel, to: `${c.kind}:${c.name}`, kind: "CONTRACT" })
     if (node.isTest) edges.push({ from: rel, kind: "TEST", to: "test" })
     if (node.isConfig) edges.push({ from: rel, kind: "CONFIG", to: "config" })
     for (const dep of node.dependencies) edges.push({ from: rel, to: dep, kind: "DEPENDENCY" })
@@ -243,6 +263,7 @@ export function buildSemanticGraph(root, opts = {}) {
       tests: edges.filter(e => e.kind === "TEST").length,
       configs: edges.filter(e => e.kind === "CONFIG").length,
       dependencies: edges.filter(e => e.kind === "DEPENDENCY").length,
+      contracts: edges.filter(e => e.kind === "CONTRACT").length,
       reused: walked.stats.reused,
       parsed: walked.stats.parsed,
     },

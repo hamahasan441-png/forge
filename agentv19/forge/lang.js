@@ -148,6 +148,8 @@ export const ADAPTERS = Object.freeze([
   { id: "terraform", name: "Terraform", ext: [".tf", ".tfvars"] },
   { id: "docker", name: "Docker", files: ["Dockerfile", "Dockerfile.dev"] },
   { id: "make", name: "Make", files: ["Makefile", "makefile", "GNUmakefile"] },
+  { id: "protobuf", name: "Protocol Buffers", ext: [".proto"] },
+  { id: "graphql", name: "GraphQL", ext: [".graphql", ".gql"] },
 ])
 
 export const UNKNOWN = Object.freeze({ id: "unknown", name: "Unknown", ext: [] })
