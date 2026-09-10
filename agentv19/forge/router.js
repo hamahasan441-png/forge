@@ -33,6 +33,7 @@ import {
   operationRisk, classifyCall, costScore,
 } from "./capabilities.js"
 import { verificationPlan } from "./verify.js"
+import { discoverToolchain } from "./lang.js"
 
 // ---------------------------------------------------------------------------
 // 1. task analysis (§3)
@@ -397,16 +398,8 @@ function synthesizeArgs(step, analysis, context) {
 /** The project's own test command, read from real files (never invented). */
 export function detectTestCommand(cwd = process.cwd()) {
   try {
-    const pkgPath = path.join(cwd, "package.json")
-    if (fs.existsSync(pkgPath)) {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"))
-      if (pkg.scripts?.test) return "npm test"
-      if (pkg.scripts?.build) return "npm run build"
-    }
-    if (fs.existsSync(path.join(cwd, "pytest.ini")) || fs.existsSync(path.join(cwd, "pyproject.toml"))) return "pytest -q"
-    if (fs.existsSync(path.join(cwd, "go.mod"))) return "go test ./..."
-    if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return "cargo test"
-    if (fs.existsSync(path.join(cwd, "Makefile"))) return "make test"
+    const t = discoverToolchain(cwd)
+    return t.test || t.build || ""
   } catch { /* fall through */ }
   return ""
 }
