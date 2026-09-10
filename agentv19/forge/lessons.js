@@ -23,8 +23,8 @@ import path from "node:path"
 import { projectDir } from "./memory.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import { redact } from "./secrets.js"
-import { isStale, writesFromIndex } from "./evidence.js"
 import { loadIndex } from "./index.js"
+import { entryIsStale, worldFromIndex } from "./memgraph.js"
 
 const MAX_LESSONS = 300
 
@@ -362,16 +362,16 @@ function lessonAsOf(l) {
   return Number.isFinite(t) ? t : 0
 }
 
-/** A lesson about files is stale when the v32 index says those files changed after it was recorded. No files / no index → not stale. */
+/** A lesson about files is stale when the v32 index (or a graph neighbor) changed after it was recorded. No files / no index → not stale. */
 export function lessonIsStale(l, cwd = process.cwd()) {
   const files = Array.isArray(l?.files) ? l.files.map(String).filter(Boolean) : []
   if (!files.length) return false
   const asOf = lessonAsOf(l)
   if (!asOf) return false
-  let writes = {}
-  try { writes = writesFromIndex(loadIndex(cwd)) } catch { return false }
-  if (!Object.keys(writes).length) return false
-  return isStale({ kind: "FACT", files, asOf }, writes)
+  let world
+  try { world = worldFromIndex(loadIndex(cwd)) } catch { return false }
+  if (!Object.keys(world.writes || {}).length) return false
+  return entryIsStale({ files, asOf, text: lessonText(l) }, world)
 }
 
 function lessonText(l) {
