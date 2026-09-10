@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v41.0.0 — "compose"
+
+### Added (v41.0 — v32+ pipeline as one snapshot)
+- **`compose()`.** Index → world (graph + writes) → memory (stale-dropped against that world) → skills (v34 + learned) → strategy (`hardAvoid`) → tools (plugins + `focusedVerify`). One snapshot, not five independent calls.
+- **Planner sees the join.** `PLAN_COMPOSE` injects `[world]`, `[avoid]`, `[skills]`, `[verify next]` into the plan prompt. MICRO/SMALL still skip the model plan path.
+- **Context engine section.** `createContextEngine().build` carries a compact `compose` slice so the executing agent sees the same world/avoid/verify the planner did.
+- **Memory reuses the world.** `relevantMemory` is called with the snapshot's `writes`/`graph`, not a second `worldFromCwd`.
+
+Single mutating writer is unchanged. PLAN-v44 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v40.0.0 — "evolve"
 
 ### Added (v40.0 — strategy evolution, L4)
