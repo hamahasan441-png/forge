@@ -92,6 +92,7 @@ export const CAPABILITY = {
   DELEGATION: "delegation",
   VERIFICATION: "verification",
   IMAGE_READ: "image_read",
+  BROWSER: "browser_automation",
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +128,7 @@ const CONSERVATIVE = {
 const C = (latency, tokens, output, extra = {}) => ({ latency, tokens, output, cpu: "low", memory: "low", network: false, ...extra })
 
 // ---------------------------------------------------------------------------
-// built-in tool metadata (the 18 shipped tools)
+// built-in tool metadata (the 19 shipped tools)
 // ---------------------------------------------------------------------------
 
 export const BUILTIN_CAPABILITIES = [
@@ -285,6 +286,19 @@ export const BUILTIN_CAPABILITIES = [
     timeout: 30, cost: C(1500, 1200, 8000, { network: true }), verification_required: false, idempotent: true,
     preferred_for: ["unknown library/API behaviour that the repo cannot answer"],
     avoid_when: ["the repository or an installed skill already answers it", "offline"],
+    mutates: [],
+  },
+  {
+    name: "browser",
+    description: "Drive a real browser (open/snapshot/click/fill/screenshot). Missing binary → UNAVAILABLE.",
+    capabilities: [CAPABILITY.BROWSER, CAPABILITY.VERIFICATION, CAPABILITY.NETWORK_FETCH],
+    klass: CLASS.NETWORK, classes: [CLASS.NETWORK, CLASS.EXECUTE, CLASS.VERIFICATION],
+    risk: RISK.MEDIUM, read_only: true, reversible: true, parallel_safe: false,
+    requires_confirmation: false, requires_network: true, requires_filesystem: false,
+    timeout: 45, cost: C(2500, 800, 12000, { cpu: "medium", memory: "medium", network: true }),
+    verification_required: false, idempotent: false,
+    preferred_for: ["verify a real UI", "click through a local page", "screenshot a failing screen", "drive a form"],
+    avoid_when: ["the repository already answers it", "you only need to fetch HTML (use fetch_url)", "offline and no local file:// page"],
     mutates: [],
   },
   {
@@ -616,6 +630,16 @@ export function operationRisk(name, args = {}, ctx = {}) {
       return { risk: RISK.MEDIUM, reasons: ["outbound network request (SSRF-guarded)"], klass: CLASS.NETWORK, network: true, mutation: false }
     case "web_search":
       return { risk: RISK.MEDIUM, reasons: ["outbound search query"], klass: CLASS.NETWORK, network: true, mutation: false }
+    case "browser": {
+      const act = String(a.action ?? "")
+      const writes = act === "screenshot" && String(a.path ?? "").trim()
+      const drives = ["click", "fill", "type", "press", "scroll"].includes(act)
+      return {
+        risk: writes ? RISK.MEDIUM : RISK.MEDIUM,
+        reasons: [writes ? "saves a screenshot file inside the project" : drives ? `drives the page (${act})` : `browser ${act || "action"} (SSRF-guarded)`],
+        klass: CLASS.NETWORK, network: true, mutation: !!writes,
+      }
+    }
     case "memory": {
       const act = String(a.action ?? "read")
       const destructive = act === "clear" || act === "forget"

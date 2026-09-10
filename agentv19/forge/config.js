@@ -74,7 +74,7 @@ export function defaultConfig() {
     // v21.1: `pluginGrants` maps a plugin FILE in ~/.forge/tools to the
     // capabilities the user grants it ({ network, childProcess, read:[], write:[],
     // env:[] }); plugins run isolated and get declared ∩ granted, nothing else.
-    tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true },
+    tools: { searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true, browser: true },
     // v23: Model Context Protocol servers. OFF by default (no servers). Each
     // entry: { command, args?, env?, disabled?, timeoutMs? }. A server's tools
     // become agent tools namespaced mcp__<name>__<tool>, behind the same safety

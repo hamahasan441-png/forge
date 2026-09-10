@@ -57,6 +57,8 @@ PLAN-v31 leftovers after v30:
 |---|---|---|
 | 1 | Browser tool | Opt-in binary. Absent → tool reports unavailable. |
 
+Shipped next: **v31.0.0 / PLAN-v34** (browser tool).
+
 Explicitly not next: world-model rewrite, Tree-sitter / language adapters
 as a runtime dep, edit-transaction rewrite, a second mutating worker,
 flipping `assumeYes`, a fake sandbox.

@@ -3,7 +3,19 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v30.0.0 — "vision"
+## [Unreleased] — v31.0.0 — "browser"
+
+### Added (v31.0 — drive and verify real UIs)
+- **`browser` tool** (`browser.js`, 19th built-in). Actions: open, snapshot, click, fill, type, press, screenshot, scroll, back, reload, close, status. Opt-in binary: `agent-browser` or chromium/chrome (`FORGE_BROWSER` pins). Missing binary → `UNAVAILABLE`, the turn continues — never a fake browser (sandbox.js lesson).
+- **SSRF + path policy.** http(s) goes through `assertFetchableUrl` (same pin as fetch_url). `file://` only via `safePath` inside the project. `javascript:` / `data:` / `blob:` refused. `about:blank` allowed. Local UIs: `tools.fetchPrivateUrls` / `FORGE_ALLOW_PRIVATE_URLS=1`.
+- **Injected driver for tests.** `createMockDriver` / `ctx._browserDriver` so FORGE-BENCH and unit tests never need chromium. Live CDP talks to chromium over a zero-dep WebSocket; `agent-browser` CLI is used when that binary is the one on PATH.
+- **Verifier may look, not drive.** snapshot / screenshot (no path) / open / status / close / reload / back. click/fill/type/press/scroll and screenshot-with-path are blocked in VERIFY. Screenshot-with-path is the only filesystem mutation; `browser` is not in `WRITE_TOOLS`.
+- **Screenshots attach as vision parts** when the provider can see (v30). Pixels never land in the tool-result string.
+- **`tools.browser`** default true. Not privileged — a project `forge.config.json` may set it false. `assumeYes` stays false.
+
+Single mutating writer is unchanged. PLAN-v34 is the contract.
+
+## v30.0.0 — "vision"
 
 ### Added (v30.0 — see screenshots, diagrams, failing-UI captures)
 - **`read_image` tool** (`vision.js`, 18th built-in). Local raster files only (png/jpeg/gif/webp, magic-byte detect). SVG refused. Remote URLs refused (no fetch, no SSRF). Same `safePath` as `read_file` (`.env` / keys stay blocked). Result is still a string (mime, pixels, bytes); pixels live on `ctx._pendingVision` and are injected as a user message after the tool batch.

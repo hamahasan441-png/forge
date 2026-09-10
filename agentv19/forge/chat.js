@@ -31,6 +31,7 @@ import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { injectPendingVision, stripOldVisionParts } from "./vision.js"
+import { closeBrowserSession } from "./browser.js"
 import { createToolIntel } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
@@ -480,7 +481,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const chatExternals = await loadChatPlugins(config, { cwd: process.cwd(), startedAt: pluginStartedAt })
   const plugins = chatExternals.plugins
   for (const e of chatExternals.errors) warn(`tool plugin skipped: ${e}`)
-  const shutdownExternals = () => closeChatPlugins(chatExternals)
+  let toolsRef = null
+  const shutdownExternals = () => {
+    closeChatPlugins(chatExternals)
+    try { closeBrowserSession(toolsRef?.ctx) } catch {}
+  }
   process.once("exit", shutdownExternals)
   const tools = makeToolContext({
     plugins,
@@ -503,11 +508,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     vision: config.tools?.vision !== false,
     visionProvider: { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl },
+    browser: config.tools?.browser !== false,
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
         runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
       ),
   })
+  toolsRef = tools
 
   // v20.5: chat tool calls go through the same capability registry, router,
   // policy gate, failure classification and verification as the agent loop —
@@ -1866,7 +1873,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           break
         }
         console.log(bold(`forge tools (${toolCount()}) — auto-use ${chatToolsEnabled() ? "ON" : "OFF"}`))
-        console.log(`  ${dim("web").padEnd(13)} web_search, fetch_url`)
+        console.log(`  ${dim("web").padEnd(13)} web_search, fetch_url, browser`)
         console.log(`  ${dim("files").padEnd(13)} read_file, read_image, write_file, edit_file, multi_edit, apply_patch, glob_files, list_dir, grep_files`)
         console.log(`  ${dim("shell").padEnd(13)} bash, git_status`)
         console.log(`  ${dim("agent-brain").padEnd(13)} think, todo, memory, delegate, load_skill`)

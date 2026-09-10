@@ -168,10 +168,10 @@ console.log("== stripOldVisionParts keeps the last, stubs the rest ==")
   ok("no-op when one", stripOldVisionParts(msgs.slice(2), { keep: 1 }) === msgs.slice(2) || !contentHasVision(stripOldVisionParts([{ role: "user", content: "hi" }]).content))
 }
 
-console.log("== tool: 18th is read_image, read-only, verifier-allowed ==")
+console.log("== tool: read_image still shipped, read-only, verifier-allowed ==")
 {
-  eq("toolCount 18", toolCount(), 18)
-  eq("TOOL_DEFS length 18", TOOL_DEFS.length, 18)
+  eq("toolCount 19", toolCount(), 19)
+  eq("TOOL_DEFS length 19", TOOL_DEFS.length, 19)
   ok("read_image in defs", TOOL_DEFS.some((t) => t.function.name === "read_image"))
   ok("not a write tool", !WRITE_TOOLS.has("read_image"))
   ok("BUILTIN_TOOL_NAMES", BUILTIN_TOOL_NAMES.has("read_image"))
@@ -270,8 +270,8 @@ console.log("== router: text stays read_file; a png is read_image ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 30.0.0", VERSION, "30.0.0")
-  eq("package.json is 30.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "30.0.0")
+  eq("VERSION is 31.0.0", VERSION, "31.0.0")
+  eq("package.json is 31.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "31.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8"))
   ok("files includes vision.js", pkg.files.includes("vision.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
