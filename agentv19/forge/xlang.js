@@ -351,6 +351,27 @@ export function consumersOf(files, graph, { cwd = "" } = {}) {
 }
 
 /**
+ * Implementation files a test imports (TEST / IMPORT / CONSUMES outgoing).
+ * Empty graph or non-test starts → []. Never invents a path.
+ */
+export function implForFiles(files, graph, { cwd = "" } = {}) {
+  if (!graph?.files?.length) return []
+  const start = (files || []).map((f) => relOf(f, cwd, graph)).filter(Boolean)
+  const out = new Set()
+  for (const s of start) {
+    const node = graph.files.find((f) => f.path === s)
+    if (!node?.isTest) continue
+    for (const n of neighbors(graph, s, [XEDGE.IMPORT, XEDGE.TEST, XEDGE.CONSUMES])) {
+      if (!n || n.includes(":")) continue
+      const t = graph.files.find((f) => f.path === n)
+      if (t?.isTest) continue
+      out.add(n)
+    }
+  }
+  return [...out]
+}
+
+/**
  * Skip tests whose fingerprint (and imported deps) match an optional ledger.
  * No ledger → skip nothing. Never invents a green result.
  *

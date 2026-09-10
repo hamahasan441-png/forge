@@ -308,6 +308,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         skills: composed?.skills || [],
         plugins: composed?.plugins || [],
         avoid: composed?.avoid || [],
+        know: composed?.know || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }

@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v47.0.0 — "know"
+
+### Added (v47.0 — index + graph + lessons as the knowledge graph)
+- **Index locate.** The v32 index finds files by symbol/basename overlap when the task has no filename. MICRO skip. Cap 2.
+- **Graph impl.** `implForFiles` follows TEST→source. Cited tests pull the implementation into the world snapshot so the router does not grep.
+- **Lesson playbook.** High-confidence lessons with a successful repair + files join compose as `[know]` / TRY FIRST. Kernel-looking bodies skipped. Compose stays read-only (does not author SKILL.md).
+
+Single mutating writer is unchanged. PLAN-v50 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v46.0.0 — "apply"
 
 ### Added (v46.0 — skill body + TRY FIRST on execute, MODIFY honors playbookFiles)
