@@ -331,7 +331,14 @@ export function createToolIntel({
           d = { failed: true, code: FAILURE.SYNTAX_FAILURE, evidence: vres.summary, transient: false, retryable: false, safeToRetry: false }
         }
       } else if (vplan.checks.length) {
-        record.verification = { plan: vplan.summary, ok: null, checks: [], recommended: vplan.checks.filter((c) => c.executor === "agent").map((c) => ({ kind: c.kind, why: c.why })), summary: "recommended only" }
+        const recommended = vplan.checks.filter((c) => c.executor === "agent").map((c) => ({
+          kind: c.kind, why: c.why,
+          ...(c.command ? { command: c.command } : {}),
+          ...(c.tests?.length ? { tests: c.tests } : {}),
+        }))
+        record.verification = { plan: vplan.summary, ok: null, checks: [], recommended, summary: "recommended only" }
+        const line = formatVerification({ ran: 0, ok: true, recommended, summary: "recommended only" })
+        if (line) result += `\n${line}`
       }
     }
 

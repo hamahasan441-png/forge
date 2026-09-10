@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v39.0.0 — "focusverify"
+
+### Added (v39.0 — focused verification reaches the model)
+- **`[verify next]`**. HIGH TESTS already named `cargo test` vs `npm test` (v38); `formatVerification` now shows that command to the model. Verification still never runs it.
+- **Graph-connected tests.** `focusedVerify` lists up to 8 test files from the v33 graph (`testsForFiles`). Empty graph → `tests: []`. No invented CLI flags (`npm test -- file.test.js`).
+- **toolintel keeps command + tests** on recommended records.
+
+Single mutating writer is unchanged. PLAN-v42 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
 ## v38.0.0 — "gaps"
 
 ### Added (v38.0 — close real holes, do not weaken tests)
