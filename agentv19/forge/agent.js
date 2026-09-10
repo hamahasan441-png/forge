@@ -32,6 +32,9 @@ import { createLspSession } from "./lsp.js"
 import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
+import { evaluateSkills, formatSkillPicks, selectPlugins } from "./evaluate.js"
+import { languagesIn, formatLangReason } from "./langreason.js"
+import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
 import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearningsAsync } from "./memory.js"
@@ -44,7 +47,6 @@ import { compactHistory, shrinkToolOutput } from "./compaction.js"
 import path from "node:path"
 import fs from "node:fs"
 import { execFileSync } from "node:child_process"
-import { classifyTaskComplexity, resolveEffort } from "./classify.js"
 
 export { classifyTaskComplexity, resolveEffort }
 
@@ -54,6 +56,9 @@ const ROLE_DIRECTIVES = {
   tester: "You are a TEST sub-agent: figure out how this project is tested, run the relevant test/build commands, and report pass/fail evidence. Zero writes.",
   security: "You are a SECURITY sub-agent: look for injection, path traversal, unsafe deserialization, secret exposure, and permission issues. Report concrete risks with file:line references. Zero writes.",
   coder: "You are an ANALYSIS sub-agent for implementation planning: identify exact files and edits needed, but do NOT write — the main agent applies the changes.",
+  architect: "You are an ARCHITECTURE sub-agent: map modules, contracts, and dependencies. Report the smallest change set. Zero writes.",
+  debugger: "You are a DEBUG sub-agent: trace the failing path, name the root cause with file:line evidence. Zero writes.",
+  integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
 function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null }) {
@@ -108,9 +113,16 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   if (skillsEnabled && skillsDir) {
     const idx = indexSkills(skillsDir)
     if (idx.length) {
-      lines.push("", `SKILLS AVAILABLE (${idx.length}) — call load_skill(name) to read full instructions before using one:`)
-      for (const s of idx.slice(0, 40)) lines.push(`- ${s.name}: ${s.desc}`)
+      const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
+      const picks = evaluateSkills(task || "", idx, { klass, skillsDir })
+      const block = formatSkillPicks(picks)
+      if (block) lines.push("", block)
     }
+  }
+  if (task) {
+    const klass = (() => { try { return classifyTask(task).class } catch { return null } })()
+    const langBlock = formatLangReason(languagesIn(task, { cwd, klass }))
+    if (langBlock) lines.push("", langBlock)
   }
   return lines.join("\n")
 }
@@ -243,8 +255,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // paths stay on explicit consent. assumeYes is NEVER auto-flipped — that
   // would also permit outside-project rm, sudo, metadata, apt-get, npm publish.
   const autonomous = !readonly && config.agent?.autonomous !== false
+  const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
   const tools = makeToolContext({
-    plugins,
+    plugins: selectPlugins(task || "", plugins, { klass }),
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec,

@@ -23,6 +23,8 @@ import path from "node:path"
 import { projectDir } from "./memory.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import { redact } from "./secrets.js"
+import { loadIndex } from "./index.js"
+import { entryIsStale, worldFromIndex } from "./memgraph.js"
 
 const MAX_LESSONS = 300
 
@@ -199,6 +201,7 @@ export function ineffectiveStrategies(query, { cwd = process.cwd(), strategyHint
   // here — it must not contaminate an unrelated project's strategy choices.
   if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
   if (minConfidence > 0) lessons = lessons.filter((l) => Number(l.confidence ?? 0) >= minConfidence)
+  lessons = lessons.filter((l) => !lessonIsStale(l, cwd))
   if (!lessons.length) return []
   const scored = rankDocs(String(query ?? "") + " " + String(strategyHint ?? ""), lessons.map((l, i) => ({ i, text: `${l.failure} ${l.cause} ${l.failed_strategy} ${l.failed_action} ${l.applicable_context}` })))
     .filter((r) => r.score > 0)
@@ -347,7 +350,28 @@ function lessonPool(query, { cwd, framework, minConfidence, needRepair }) {
   if (needRepair) lessons = lessons.filter((l) => l.successful_repair || l.solution)
   if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
   if (minConfidence > 0) lessons = lessons.filter((l) => Number(l.confidence ?? 0) >= minConfidence)
+  lessons = lessons.filter((l) => !lessonIsStale(l, cwd))
   return lessons
+}
+
+function lessonAsOf(l) {
+  const raw = l.lastUsed || l.last_used || l.firstSeen || l.first_seen || l.at
+  if (raw == null) return 0
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw
+  const t = Date.parse(raw)
+  return Number.isFinite(t) ? t : 0
+}
+
+/** A lesson about files is stale when the v32 index (or a graph neighbor) changed after it was recorded. No files / no index → not stale. */
+export function lessonIsStale(l, cwd = process.cwd()) {
+  const files = Array.isArray(l?.files) ? l.files.map(String).filter(Boolean) : []
+  if (!files.length) return false
+  const asOf = lessonAsOf(l)
+  if (!asOf) return false
+  let world
+  try { world = worldFromIndex(loadIndex(cwd)) } catch { return false }
+  if (!Object.keys(world.writes || {}).length) return false
+  return entryIsStale({ files, asOf, text: lessonText(l) }, world)
 }
 
 function lessonText(l) {

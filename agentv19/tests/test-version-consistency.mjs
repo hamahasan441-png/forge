@@ -98,9 +98,12 @@ console.log("== the CLI agrees with package.json ==")
 console.log("== documented versions agree with the package ==")
 {
   const changelog = fs.readFileSync(path.join(FORGE, "CHANGELOG.md"), "utf8")
-  const heading = /^##\s*\[?Unreleased\]?\s*—?\s*v?(\d+\.\d+\.\d+)?/im.exec(changelog)
-  const unreleasedVersion = heading?.[1] ?? null
-  ok(`the in-progress CHANGELOG section matches package.json (${unreleasedVersion})`, unreleasedVersion === null || unreleasedVersion === VERSION)
+  // Only the TOP heading is "in progress". Historical `## [Unreleased] — v20.5.0`
+  // leftovers later in the file are not the current release.
+  const firstHeading = /^##\s+.+$/m.exec(changelog)?.[0] ?? ""
+  const latest = /(\d+\.\d+\.\d+)/.exec(firstHeading)?.[1] ?? null
+  ok(`the latest CHANGELOG heading matches package.json (${latest})`, latest === VERSION)
+  ok("an Unreleased banner at the top still matches, if present", !/unreleased/i.test(firstHeading) || latest === VERSION)
   ok("the CHANGELOG states the single-source rule", /package\.json/.test(changelog))
 
   const readme = fs.readFileSync(path.join(FORGE, "README.md"), "utf8")

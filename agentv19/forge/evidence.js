@@ -49,6 +49,18 @@ export function isStale(ev, writes = {}) {
   return false
 }
 
+/** Convert a v32 index (`{ files: { rel: { mtime } } }`) into the writes ledger `isStale` expects. Empty/missing index → {}. */
+export function writesFromIndex(idx) {
+  const out = {}
+  const files = idx && idx.files && typeof idx.files === "object" && !Array.isArray(idx.files) ? idx.files : null
+  if (!files) return out
+  for (const [rel, rec] of Object.entries(files)) {
+    const m = Number(rec?.mtime)
+    if (Number.isFinite(m) && m > 0) out[String(rel)] = m
+  }
+  return out
+}
+
 export function markStale(ev) {
   return { ...ev, kind: KIND.STALE, confidence: 0 }
 }

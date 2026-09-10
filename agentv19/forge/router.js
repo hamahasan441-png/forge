@@ -34,6 +34,7 @@ import {
 } from "./capabilities.js"
 import { verificationPlan } from "./verify.js"
 import { discoverToolchain } from "./lang.js"
+import { languagesIn, verifyFor } from "./langreason.js"
 
 // ---------------------------------------------------------------------------
 // 1. task analysis (§3)
@@ -387,7 +388,7 @@ function synthesizeArgs(step, analysis, context) {
       if (/\bscreenshot\b/i.test(analysis.task || "")) return { action: "screenshot" }
       return { action: "open", url: m ? m[0] : null }
     }
-    case "bash": return { command: detectTestCommand(cwd) }
+    case "bash": return { command: detectTestCommand(cwd, languagesIn(analysis.task || "", { cwd, files: analysis.files })) }
     case "edit_file": return { path: step.target ?? analysis.files[0] ?? null }
     case "write_file": return { path: step.target ?? analysis.files[0] ?? null }
     case "memory": return { action: "append", text: analysis.task.slice(0, 200) }
@@ -395,9 +396,15 @@ function synthesizeArgs(step, analysis, context) {
   }
 }
 
-/** The project's own test command, read from real files (never invented). */
-export function detectTestCommand(cwd = process.cwd()) {
+/** The project's own test command, read from real files (never invented).
+ *  Optional `langs` (v35): prefer the language-native command when that
+ *  ecosystem's manifest exists. 1-arg calls stay frozen (package.json wins). */
+export function detectTestCommand(cwd = process.cwd(), langs) {
   try {
+    if (Array.isArray(langs) && langs.length) {
+      const v = verifyFor(langs, { cwd })
+      if (v) return v
+    }
     const t = discoverToolchain(cwd)
     return t.test || t.build || ""
   } catch { /* fall through */ }

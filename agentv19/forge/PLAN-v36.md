@@ -49,8 +49,9 @@ test (no ledger → skip nothing).
 
 ## Bigger map (not this release)
 
-World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite
-stay explicitly out.
+Shipped next: **v34.0.0 / PLAN-v37** (skill evaluator + plugin selector +
+integrator). World-model rewrite, Tree-sitter as a runtime dep,
+edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 

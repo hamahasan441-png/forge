@@ -3,7 +3,35 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v33.0.0 — "xlang"
+## v36.0.0 — "memgraph"
+
+### Added (v36.0 — Memory ↔ World Model)
+- **Graph-aware invalidation** (`memgraph.js`). A project note or lesson about `app.js` is stale when `util.js` (imported) moved — the v33 graph expands the v32 write ledger to importers, consumers, and tests. Empty graph / no files / no asOf → not stale (never invented).
+- **Retrieval drops STALE.** `relevantMemory` / `relevantLearnings` omit project notes whose cited files (or neighbors) are newer than provenance. Global prefs with no file cites stay. Disk is not deleted; history remains, current truth wins in the prompt.
+- **Lessons follow the graph.** `lessonIsStale` uses the same expansion, so the v34 same-file case still fires and a neighbor change now does too.
+
+Single mutating writer is unchanged. PLAN-v39 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
+## v35.0.0 — "langreason"
+
+### Added (v35.0 — reason in the language you are editing)
+- **Language-specific reasoning** (`langreason.js`). Planner, context, and repair get per-language constraints: Rust ownership/borrowing/unsafe, Python packaging/GIL/imports, JS/TS event loop and types, Go goroutines, C/C++ UB/RAII, JVM nullability, Swift ARC, C# async/LINQ, SQL isolation, shell quoting, Terraform state, Kubernetes reconciliation. Never apply one language's patterns to another.
+- **MICRO/SMALL skip.** A typo does not get a Rust lecture unless the task names the language (`rust`, `cargo`, `pytest`, …).
+- **Native verify, never invented.** `verifyFor(['rust'], { cwd })` is `cargo test` only when `Cargo.toml` exists. 1-arg `detectTestCommand` still prefers `package.json` (v32 frozen). Optional 2nd arg is the v35 path.
+
+Single mutating writer is unchanged. PLAN-v38 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
+## v34.0.0 — "skills"
+
+### Added (v34.0 — right skill, right plugin, one integrator)
+- **Skill evaluator** (`evaluate.js`). Score `name + description` against the task. Inject top 3. MICRO/SMALL get none unless the skill is named. `ok: false` hygiene failures are never selected. Fortune / gaokao / gift-evaluator no longer sit in a coding prompt. `load_skill("coding-agent")` still works when you name it. `FORGE_SKILLS_ALL=1` restores the dump.
+- **Plugin selector.** Isolated user plugins join this-turn schema only when they match the task or are named. MCP and LSP always pass through. No implicit grants. Isolation / symlink refusal / same-run quarantine unchanged.
+- **Integrator** (`integrate.js`, new read-only role). After 2+ upstream workers, one merge node produces a single apply list. The main coder writes. Empty reports → empty list (never invented). Conflicts recorded; later report wins. Fan-out short-circuits the integrator to this function — it is not a second model writer.
+- **Stale lessons.** A lesson that cites files whose v32 index mtime is newer than `lastUsed` is dropped from retrieval. No files / no index → not stale.
+
+Single mutating writer is unchanged. PLAN-v37 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
+## v33.0.0 — "xlang"
 
 ### Added (v33.0 — one connected system, not per-language silos)
 - **Cross-language graph** (`xlang.js`). Contracts from regex (HTTP routes, SQL tables, proto/GraphQL, OpenAPI paths, Docker services, CI jobs). Edges: IMPLEMENTS (same contract, different languages), CONSUMES (fetch/requests → producer), TEST, DEPLOY. `{id}` and `:id` routes normalize to one key. Built from the v32 index — unchanged files are not re-read.

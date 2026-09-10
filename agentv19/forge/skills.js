@@ -37,6 +37,21 @@ function hasAnySkill(dir) {
   }
 }
 
+/** Prefer YAML `description:` (what the evaluator scores), then H1, then first prose. */
+export function skillDescription(md) {
+  const src = String(md ?? "")
+  const fm = src.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  if (fm) {
+    const d = fm[1].match(/^description:\s*(?:"([^"]+)"|'([^']+)'|(.+))$/m)
+    const val = (d?.[1] || d?.[2] || d?.[3] || "").trim()
+    if (val) return val.slice(0, 240)
+  }
+  const h1 = src.match(/^#\s+(.+)$/m)
+  if (h1?.[1]) return h1[1].trim().slice(0, 160)
+  const first = src.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#") && !l.startsWith("---"))
+  return (first || "").slice(0, 160)
+}
+
 /** Index: [{name, desc, path}] — memoized per directory (69 SKILL.md reads happen once per process). */
 const indexMemo = new Map() // dir -> { sig, result }
 
@@ -74,9 +89,7 @@ function computeIndex(dir) {
     let desc = ""
     try {
       const md = fs.readFileSync(skillFile, "utf8")
-      const h1 = md.match(/^#\s+(.+)$/m)
-      const first = md.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#") && !l.startsWith("---"))
-      desc = (h1?.[1] || first || "").slice(0, 110)
+      desc = skillDescription(md)
     } catch {}
     out.push({ name: e.name, desc, path: skillFile })
   }

@@ -47,9 +47,10 @@ export const ROLES = {
   SECURITY: "security",
   DEBUGGER: "debugger",
   ARCHITECT: "architect",
+  INTEGRATOR: "integrator",
 }
 
-const READ_ONLY_ROLES = new Set([ROLES.RESEARCHER, ROLES.REVIEWER, ROLES.SECURITY, ROLES.TESTER, ROLES.ARCHITECT])
+const READ_ONLY_ROLES = new Set([ROLES.RESEARCHER, ROLES.REVIEWER, ROLES.SECURITY, ROLES.TESTER, ROLES.ARCHITECT, ROLES.INTEGRATOR])
 
 /** Is a role permitted to mutate? Only the coder/main agent — and even that is
  *  funnelled through the single mutating context, never a parallel worker. */
@@ -58,7 +59,7 @@ export function roleIsReadOnly(role) {
 }
 
 const ROLE_CONFLICT_WEIGHT = {
-  security: 4, reviewer: 3, debugger: 3, architect: 2, tester: 2, coder: 2, researcher: 1,
+  security: 4, reviewer: 3, integrator: 3, debugger: 3, architect: 2, tester: 2, coder: 2, researcher: 1,
 }
 
 /** Worker lifecycle states. */
