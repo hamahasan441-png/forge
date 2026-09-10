@@ -303,3 +303,47 @@ export function indexLearnedPlugins(cwd = process.cwd(), opts = {}) {
   }
   return out
 }
+
+/**
+ * Render a learned PLAYBOOK as markdown so load_skill can return it
+ * without spawning plugin-host. Never executes the file.
+ */
+export function formatPlaybookMd(book, name = "") {
+  if (!book || typeof book !== "object") return null
+  const title = String(name || book.tool || "playbook").slice(0, 40)
+  const lines = [
+    `# ${title}`,
+    "",
+    String(book.description || "").slice(0, 200),
+    "",
+    "## When",
+    String(book.task || "").slice(0, 400) || "(unspecified)",
+    "",
+    "## What worked",
+    String(book.repair || "").slice(0, 800) || "(unspecified)",
+  ]
+  const files = (Array.isArray(book.files) ? book.files : []).map(relFile).filter(Boolean).slice(0, 8)
+  if (files.length) {
+    lines.push("", "## Files")
+    for (const f of files) lines.push(`- ${f}`)
+  }
+  if (book.command) {
+    lines.push("", "## Verify", `Recommended (do not invent a toolchain): \`${String(book.command).slice(0, 80)}\``)
+  }
+  lines.push("", "Do not edit forge kernel files. Do not flip assumeYes.")
+  return lines.join("\n") + "\n"
+}
+
+/**
+ * load_skill fallback for a learned_* plugin name. Sync. No import(). No spawn.
+ * Symlinks / kernel-looking playbooks / reserved names return null.
+ */
+export function readLearnedPlaybookByName(cwd, name) {
+  const n = String(name || "").trim()
+  if (!n.startsWith("learned_") || !NAME_RE.test(n) || FORBIDDEN_NAMES.has(n)) return null
+  const file = path.join(learnedPluginsDir(cwd), `${n}.mjs`)
+  const book = readLearnedPlaybook(file)
+  if (!book) return null
+  if (looksLikeKernel(book.task, book.repair, book.files)) return null
+  return formatPlaybookMd(book, n)
+}

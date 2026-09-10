@@ -59,16 +59,33 @@ function isMicro(klass) {
   return klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL
 }
 
-/** Caller names win; learned extras append. */
+/** Caller names win. Fill repair/files/command from the learned index when the caller object lacks them. */
 function unionPlugins(caller, extra) {
+  const learned = new Map()
+  for (const p of extra || []) {
+    if (p && p.name) learned.set(p.name, p)
+  }
   const out = []
   const seen = new Set()
-  for (const list of [caller, extra]) {
-    for (const p of list || []) {
-      if (!p || !p.name || seen.has(p.name)) continue
-      seen.add(p.name)
+  for (const p of caller || []) {
+    if (!p || !p.name || seen.has(p.name)) continue
+    seen.add(p.name)
+    const hit = learned.get(p.name)
+    if (hit && !p.repair && hit.repair) {
+      out.push({
+        ...p,
+        repair: hit.repair,
+        files: Array.isArray(p.files) && p.files.length ? p.files : hit.files,
+        command: p.command || hit.command,
+      })
+    } else {
       out.push(p)
     }
+  }
+  for (const p of extra || []) {
+    if (!p || !p.name || seen.has(p.name)) continue
+    seen.add(p.name)
+    out.push(p)
   }
   return out
 }

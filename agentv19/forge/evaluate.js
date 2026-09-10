@@ -112,6 +112,37 @@ export function formatSkillPicks(picks = []) {
 }
 
 /**
+ * Compact "use these, in this order" block for repair / execute.
+ * Playbook first (known repair — fast). Then matching skills. Then avoid.
+ * Never dumps the 40-name pack. MICRO callers pass empty plugins.
+ */
+export function formatSteer({ skills = [], plugins = [], avoid = [] } = {}) {
+  const lines = []
+  const books = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
+  if (books.length) {
+    lines.push("TRY FIRST (known repair — apply it, then verify; do not rediscover):")
+    for (const p of books) {
+      const files = (p.files || []).filter(Boolean).slice(0, 3).join(", ")
+      const cmd = String(p.command || "").trim()
+      let s = `- ${p.name}: ${String(p.repair).slice(0, 160)}`
+      if (files) s += ` — ${files}`
+      if (cmd) s += ` — then ${cmd}`
+      lines.push(s)
+    }
+  }
+  const skillNames = (skills || []).map((s) => s && s.name).filter(Boolean).slice(0, 3)
+  if (skillNames.length) {
+    lines.push(`SKILLS (call load_skill before using): ${skillNames.join(", ")}`)
+  }
+  const isolated = (plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name)
+  if (isolated.length && !books.length) {
+    lines.push(`PLUGINS (isolated, matching): ${isolated.slice(0, 4).join(", ")}`)
+  }
+  if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
+  return lines.join("\n")
+}
+
+/**
  * User plugins (isolated === true) are omitted from this-turn schema unless
  * they match. MCP / LSP / anything not isolated always stays.
  * MICRO/SMALL: only a plugin whose name is in the task.
