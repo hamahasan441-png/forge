@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v35.0.0 — "langreason"
+
+### Added (v35.0 — reason in the language you are editing)
+- **Language-specific reasoning** (`langreason.js`). Planner, context, and repair get per-language constraints: Rust ownership/borrowing/unsafe, Python packaging/GIL/imports, JS/TS event loop and types, Go goroutines, C/C++ UB/RAII, JVM nullability, Swift ARC, C# async/LINQ, SQL isolation, shell quoting, Terraform state, Kubernetes reconciliation. Never apply one language's patterns to another.
+- **MICRO/SMALL skip.** A typo does not get a Rust lecture unless the task names the language (`rust`, `cargo`, `pytest`, …).
+- **Native verify, never invented.** `verifyFor(['rust'], { cwd })` is `cargo test` only when `Cargo.toml` exists. 1-arg `detectTestCommand` still prefers `package.json` (v32 frozen). Optional 2nd arg is the v35 path.
+
+Single mutating writer is unchanged. PLAN-v38 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
 ## v34.0.0 — "skills"
 
 ### Added (v34.0 — right skill, right plugin, one integrator)

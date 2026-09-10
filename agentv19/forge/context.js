@@ -23,6 +23,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { estimateTokens } from "./ui.js"
 import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
+import { languagesIn, formatLangReason } from "./langreason.js"
 
 /**
  * `embedder` (v23, optional): an embeddings.js embedder. When supplied,
@@ -202,6 +203,13 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
       const picks = evaluateSkills(task, skillsIndex, { klass: opts.klass })
       const block = formatSkillPicks(picks)
       if (block) sections.push({ name: "skills", text: block })
+    }
+
+    // 4c. v35: language-specific reasoning (Rust ownership ≠ JS event loop)
+    if (opts.includeLang !== false && task) {
+      const langs = languagesIn(task, { cwd, klass: opts.klass, files: opts.files })
+      const block = formatLangReason(langs)
+      if (block) sections.push({ name: "lang", text: block })
     }
 
     // 5. explicitly requested files (the controller decides these from the DAG).

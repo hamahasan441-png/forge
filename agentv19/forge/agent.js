@@ -33,6 +33,7 @@ import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { evaluateSkills, formatSkillPicks, selectPlugins } from "./evaluate.js"
+import { languagesIn, formatLangReason } from "./langreason.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -117,6 +118,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
       const block = formatSkillPicks(picks)
       if (block) lines.push("", block)
     }
+  }
+  if (task) {
+    const klass = (() => { try { return classifyTask(task).class } catch { return null } })()
+    const langBlock = formatLangReason(languagesIn(task, { cwd, klass }))
+    if (langBlock) lines.push("", langBlock)
   }
   return lines.join("\n")
 }

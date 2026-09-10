@@ -39,6 +39,7 @@ import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
 import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
+import { languagesIn, formatLangReason } from "./langreason.js"
 import { classifyTask } from "./classify.js"
 import { saveSession, loadSession, lastSessionFile, listSessions, findSession } from "./sessions.js"
 import { relevantMemory } from "./memory.js"
@@ -288,6 +289,11 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
       const block = formatSkillPicks(picks)
       if (block) lines.push("", block)
     }
+  }
+  if (query) {
+    const klass = (() => { try { return classifyTask(query).class } catch { return null } })()
+    const langBlock = formatLangReason(languagesIn(query, { cwd: process.cwd(), klass }))
+    if (langBlock) lines.push("", langBlock)
   }
   return lines.join("\n")
 }
