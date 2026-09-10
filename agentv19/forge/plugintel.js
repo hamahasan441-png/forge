@@ -7,7 +7,7 @@
  *
  * Zero runtime dependencies. Does not write ~/.forge/tools.
  */
-import { selectPlugins, scoreAgainst, namedIn } from "./evaluate.js"
+import { selectPlugins, scoreAgainst, namedIn, TASK_CLASS } from "./evaluate.js"
 
 /** Playbooks the model can follow without a live plugin-host. */
 export const PLUGIN_PLAYBOOKS = [
@@ -35,7 +35,8 @@ export function scorePlugin(task, plugin) {
 export function pickPlugins(task, plugins = [], opts = {}) {
   const live = selectPlugins(task, plugins, opts)
   const q = String(task ?? "").trim()
-  const micro = opts.klass === "micro" || opts.klass === "small"
+  const klass = opts.klass
+  const micro = klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL || klass === "micro" || klass === "small"
   const books = []
   for (const b of PLUGIN_PLAYBOOKS) {
     const explicit = namedIn(q, b.name)
