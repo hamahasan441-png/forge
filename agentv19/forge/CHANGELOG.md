@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v42.0.0 — "extend"
+
+### Added (v42.0 — isolated plugin / skill self-extension, L5)
+- **Learned isolated plugin.** A successful repair becomes a project-local `learned_*.mjs` under `~/.forge/projects/<hash>/tools/`. Read-only. No `capabilities`. Grants always `{}`.
+- **Repair is data.** `formatPluginMjs` puts user strings in `JSON.stringify`. The template never interpolates repair text as code.
+- **Never the user plugin dir.** `~/.forge/tools` and `plugin-host.js` are not written. Bundled pack is not written. MICRO/SMALL skip. Kernel-looking repairs are refused.
+- **Loader merge.** `mergeLearnedPlugins` appends extras; global names win. Same-run quarantine still skips a plugin authored this task. `allowNewPlugins` stays false.
+
+Single mutating writer is unchanged. PLAN-v45 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v41.0.0 — "compose"
 
 ### Added (v41.0 — v32+ pipeline as one snapshot)

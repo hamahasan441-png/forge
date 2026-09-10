@@ -18,6 +18,7 @@ import { projectDir } from "./memory.js"
 import { validSkillName, indexSkills, loadSkill, skillDescription } from "./skills.js"
 import { writeStateFile } from "./securefs.js"
 import { redact } from "./secrets.js"
+import { authorPlugin } from "./extend.js"
 
 export const RETIRE_BELOW = 0.25
 export const HARD_AVOID_MIN = 0.5
@@ -187,9 +188,10 @@ export function evolveRun({
   const score = scoreRun(gate || {})
   const avoid = hardAvoid(task, { cwd })
   const k = resolvedKlass(task, klass)
-  const out = { score, avoid, skill: { ok: false, skipped: "not-completed" }, promoted: null, retired: false }
+  const out = { score, avoid, skill: { ok: false, skipped: "not-completed" }, plugin: { ok: false, skipped: "not-completed" }, promoted: null, retired: false }
   if (k === TASK_CLASS.MICRO || k === TASK_CLASS.SMALL) {
     out.skill = { ok: false, skipped: "micro" }
+    out.plugin = { ok: false, skipped: "micro" }
     return out
   }
   const hits = relevantLessons(task, { cwd, limit: 1 })
@@ -215,6 +217,15 @@ export function evolveRun({
     files: (les?.files?.length ? les.files : files) || [],
     command,
   })
+  try {
+    out.plugin = authorPlugin({
+      cwd, task, klass: k, repair,
+      files: (les?.files?.length ? les.files : files) || [],
+      command,
+    })
+  } catch {
+    out.plugin = { ok: false, skipped: "write" }
+  }
   return out
 }
 
@@ -227,5 +238,6 @@ export function formatEvolve(result) {
   else if (result.skill?.skipped && result.skill.skipped !== "not-completed" && result.skill.skipped !== "micro") {
     bits.push(`skill skipped (${result.skill.skipped})`)
   }
+  if (result.plugin?.ok && result.plugin.name) bits.push(`plugin=${result.plugin.name}${result.plugin.deduped ? " (exists)" : ""}`)
   return bits.join(" • ")
 }

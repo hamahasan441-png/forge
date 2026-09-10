@@ -45,6 +45,7 @@ import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
 import { savePlan, listPlans, readPlan } from "./plans.js"
 import { loadToolPlugins, PLUGINS_DIR } from "./plugins.js"
+import { mergeLearnedPlugins, learnedPluginsDir } from "./extend.js"
 import { BUILTIN_TOOL_NAMES } from "./tools.js"
 import { createRegistry, registerPlugins, checkWriteClassification, costScore } from "./capabilities.js"
 import { route, describeRoute, planExecution } from "./router.js"
@@ -874,7 +875,11 @@ async function main() {
       // would choose for a task, and how a batch would be scheduled.
       const reg = createRegistry({ config })
       if (config.tools?.plugins !== false) {
-        try { registerPlugins(reg, (await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })).tools) } catch { /* best-effort */ }
+        try {
+          const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+          const merged = await mergeLearnedPlugins(loaded, process.cwd(), { reserved: BUILTIN_TOOL_NAMES })
+          registerPlugins(reg, merged.tools)
+        } catch { /* best-effort */ }
       }
       const cwd = flags.cwd ? path.resolve(String(flags.cwd)) : process.cwd()
 
@@ -941,19 +946,27 @@ async function main() {
     case "plugins": {
       // list user tool plugins loaded from ~/.forge/tools
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
+      const merged = await mergeLearnedPlugins(loaded, process.cwd(), { reserved: BUILTIN_TOOL_NAMES })
       if (JSON_OUT) {
-        emitJson({ dir: PLUGINS_DIR, tools: loaded.tools.map((t) => ({ name: t.name, readOnly: t.readOnly, description: t.def.function.description, source: t.source })), errors: loaded.errors })
+        emitJson({
+          dir: PLUGINS_DIR,
+          learned: learnedPluginsDir(process.cwd()),
+          tools: merged.tools.map((t) => ({ name: t.name, readOnly: t.readOnly, description: t.def.function.description, source: t.source })),
+          errors: merged.errors,
+        })
         return
       }
       console.log(bold(`tool plugins — ${PLUGINS_DIR}`))
-      if (!loaded.tools.length && !loaded.errors.length) {
+      console.log(dim(`learned — ${learnedPluginsDir(process.cwd())}`))
+      if (!merged.tools.length && !merged.errors.length) {
         console.log(dim("  (none) — drop a *.mjs exporting { name, description, parameters, run } here to add a tool"))
       }
-      for (const t of loaded.tools) {
+      for (const t of merged.tools) {
         console.log(`  ${green("✓")} ${cyan(t.name.padEnd(24))} ${t.readOnly ? dim("[read-only] ") : ""}${dim(t.def.function.description.slice(0, 60))}  ${dim("(" + t.source + ")")}`)
       }
-      for (const e of loaded.errors) console.log(`  ${red("✗")} ${dim(e)}`)
-      if (loaded.tools.length) console.log(dim(`  ${loaded.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
+      for (const e of merged.errors) console.log(`  ${red("✗")} ${dim(e)}`)
+      if (merged.tools.length) console.log(dim(`  ${merged.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
+      try { merged.close?.() } catch { /* best-effort */ }
       return
     }
     case "mcp": {
