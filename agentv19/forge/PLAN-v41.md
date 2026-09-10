@@ -53,8 +53,10 @@ plugin-iso or fs-toctou assertions. It does not invent a test command.
 
 ## Bigger map (not this release)
 
-§4 semantic world model beyond the v32 index (still no Tree-sitter
-runtime dep). Edit-transaction rewrite stays explicitly out.
+Shipped next: **v39.0.0 / PLAN-v42** (focused verification: recommended
+command reaches the model; graph-connected test files listed, never
+invented, never auto-run). World-model rewrite, Tree-sitter as a
+runtime dep, edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 

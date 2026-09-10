@@ -11,6 +11,10 @@
  *   critical  build / install) that the agent runs through the normal bash
  *             tool — verification never runs `npm test` behind the user's back
  *
+ * v39: the recommended check is named (`cargo test` vs `npm test`) and the
+ * v33 graph lists the connected test files. The command is shown to the
+ * model. It is never invented and never executed here.
+ *
  * Everything executed here is local, bounded and side-effect free:
  * fs.stat / a bounded read / JSON.parse / `node --check` on a temp copy.
  */
@@ -21,6 +25,8 @@ import { execFile } from "node:child_process"
 import { parsePatch } from "./diffpatch.js"
 import { RISK, riskRank } from "./capabilities.js"
 import { recommendedVerify } from "./langengine.js"
+import { buildCrossGraph } from "./repomap.js"
+import { testsForFiles } from "./xlang.js"
 
 export const CHECK = {
   FILE_EXISTS: "file_exists",
@@ -68,6 +74,22 @@ export function verifyTargets(name, args = {}, cwd = process.cwd()) {
 }
 
 /**
+ * Native test command + graph-connected test files for a mutation.
+ * Never invents a command. Never invents CLI flags. Empty graph → tests [].
+ */
+export function focusedVerify(cwd = process.cwd(), files = []) {
+  const command = recommendedVerify(cwd, files) || ""
+  let tests = []
+  if ((files || []).length) {
+    try {
+      const graph = buildCrossGraph(cwd)
+      tests = testsForFiles(files, graph, { cwd }).slice(0, 8)
+    } catch { /* miss is no tests, not a fake list */ }
+  }
+  return { command, tests }
+}
+
+/**
  * The verification contract for one call.
  * Returns { required, level, checks:[{kind,target,why,executor}], summary }.
  * `executor: "local"` runs here; `executor: "agent"` is a recommendation the
@@ -106,12 +128,13 @@ export function verificationPlan(name, args = {}, { risk = RISK.LOW, registry = 
   // risk-proportional escalation: high/critical mutations need real evidence,
   // which only the agent can produce (it owns the test command).
   if (mutates && riskRank(risk) >= riskRank(RISK.HIGH)) {
-    const command = recommendedVerify(cwd, targets)
+    const focus = focusedVerify(cwd, targets)
     checks.push({
       kind: CHECK.TESTS, target: cwd,
       why: `risk=${risk}: run the focused test/build before declaring success`,
       executor: "agent",
-      ...(command ? { command } : {}),
+      ...(focus.command ? { command: focus.command } : {}),
+      ...(focus.tests.length ? { tests: focus.tests } : {}),
     })
   }
 
@@ -199,7 +222,11 @@ export async function runVerification(plan, { cwd = process.cwd(), timeoutMs = D
   }
   for (const c of plan.checks) {
     if (c.executor !== "local") {
-      out.recommended.push({ kind: c.kind, why: c.why, ...(c.command ? { command: c.command } : {}) })
+      out.recommended.push({
+        kind: c.kind, why: c.why,
+        ...(c.command ? { command: c.command } : {}),
+        ...(c.tests?.length ? { tests: c.tests } : {}),
+      })
       continue
     }
     const t0 = Date.now()
@@ -269,8 +296,20 @@ function shortTarget(t, cwd) {
   return rel && !rel.startsWith("..") ? rel : s
 }
 
-/** One compact line for the model / the run journal. */
+/** One compact line (or two) for the model / the run journal. Never executes recommended. */
 export function formatVerification(result) {
-  if (!result || !result.ran) return ""
-  return result.ok ? `[verified] ${result.summary}` : `[verification FAILED] ${result.summary}`
+  if (!result) return ""
+  const rec = (result.recommended || [])
+    .map((r) => {
+      if (!r?.command) return ""
+      const files = (r.tests || []).slice(0, 4).join(" ")
+      return files ? `${r.command} — ${files}` : r.command
+    })
+    .filter(Boolean)
+  const recLine = rec.length ? `[verify next] ${rec.join("; ")}` : ""
+  const local = result.ran
+    ? (result.ok ? `[verified] ${result.summary}` : `[verification FAILED] ${result.summary}`)
+    : ""
+  if (local && recLine) return `${local}\n${recLine}`
+  return local || recLine
 }
