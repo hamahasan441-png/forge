@@ -24,6 +24,7 @@ import path from "node:path"
 import { estimateTokens } from "./ui.js"
 import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
+import { inspectProject, formatLangEngine } from "./langengine.js"
 
 /**
  * `embedder` (v23, optional): an embeddings.js embedder. When supplied,
@@ -210,6 +211,15 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
       const langs = languagesIn(task, { cwd, klass: opts.klass, files: opts.files })
       const block = formatLangReason(langs)
       if (block) sections.push({ name: "lang", text: block })
+    }
+
+    // 4d. v37: language-aware engine from real manifests (never invented)
+    if (opts.includeEngine !== false && task) {
+      const info = cached("langengine", repoTags(), () => {
+        try { return inspectProject(cwd, { config }) } catch { return { stacks: [], generated: [], lsp: [] } }
+      })
+      const block = formatLangEngine(info, { task, klass: opts.klass })
+      if (block) sections.push({ name: "engine", text: block })
     }
 
     // 5. explicitly requested files (the controller decides these from the DAG).

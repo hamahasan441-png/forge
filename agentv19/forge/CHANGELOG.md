@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v37.0.0 — "langengine"
+
+### Added (v37.0 — language-aware engine from real files)
+- **Project stacks** (`langengine.js`). Language, version, framework, package manager, test/build/lint/format/typecheck, generated-code dirs — from manifests that exist. Mixed npm+cargo reports both. `discoverToolchain` (one test command, first ecosystem) stays frozen.
+- **Optional LSP / compiler.** `binaryOnPath` never executes. Missing `rustc` / configured language server → `UNAVAILABLE`, never faked. No `rustc --version` spawn.
+- **MICRO/SMALL skip.** A typo does not get a toolchain dump unless the task names the language.
+
+Single mutating writer is unchanged. PLAN-v40 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
 ## v36.0.0 — "memgraph"
 
 ### Added (v36.0 — Memory ↔ World Model)
