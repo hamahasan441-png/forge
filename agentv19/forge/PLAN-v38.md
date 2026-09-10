@@ -53,8 +53,8 @@ command for a missing ecosystem.
 
 ## Bigger map (not this release)
 
-§9 graph-aware memory invalidation beyond lesson mtime (Memory ↔ World
-Model). World-model rewrite, Tree-sitter as a runtime dep, edit-transaction
+Shipped next: **v36.0.0 / PLAN-v39** (graph-aware memory invalidation).
+World-model rewrite, Tree-sitter as a runtime dep, edit-transaction
 rewrite stay explicitly out.
 
 ## Non-goals

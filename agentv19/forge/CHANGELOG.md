@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v36.0.0 — "memgraph"
+
+### Added (v36.0 — Memory ↔ World Model)
+- **Graph-aware invalidation** (`memgraph.js`). A project note or lesson about `app.js` is stale when `util.js` (imported) moved — the v33 graph expands the v32 write ledger to importers, consumers, and tests. Empty graph / no files / no asOf → not stale (never invented).
+- **Retrieval drops STALE.** `relevantMemory` / `relevantLearnings` omit project notes whose cited files (or neighbors) are newer than provenance. Global prefs with no file cites stay. Disk is not deleted; history remains, current truth wins in the prompt.
+- **Lessons follow the graph.** `lessonIsStale` uses the same expansion, so the v34 same-file case still fires and a neighbor change now does too.
+
+Single mutating writer is unchanged. PLAN-v39 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
 ## v35.0.0 — "langreason"
 
 ### Added (v35.0 — reason in the language you are editing)

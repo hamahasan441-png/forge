@@ -36,6 +36,7 @@ import crypto from "node:crypto"
 import { DEFAULT_DIR } from "./config.js"
 import { redact } from "./secrets.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
+import { entryIsStale, worldFromCwd } from "./memgraph.js"
 
 export const GLOBAL_MEMORY_PATH = path.join(DEFAULT_DIR, "memory.md")
 export const PROJECTS_DIR = path.join(DEFAULT_DIR, "projects")
@@ -173,12 +174,22 @@ export function writeMemoryFile(file, text) {
 
 /** Both memory tiers as one scored-at-read pool (400 lines per tier cap). */
 export function memoryPool(cwd = process.cwd()) {
-  const global = readLines(GLOBAL_MEMORY_PATH).slice(0, 400)
-  const project = readLines(projectMemoryPath(cwd)).slice(0, 400)
+  const global = memoryEntries("global", cwd).slice(0, 400)
+  const project = memoryEntries("project", cwd).slice(0, 400)
   return [
-    ...global.map((l) => ({ l, tier: "global" })),
-    ...project.map((l) => ({ l, tier: "project" })),
+    ...global.map((e) => ({ l: e.text, tier: "global", provenance: e.provenance || null })),
+    ...project.map((e) => ({ l: e.text, tier: "project", provenance: e.provenance || null })),
   ]
+}
+
+function livePool(pool, cwd, opts = {}) {
+  const writes = opts.writes
+  const graph = opts.graph
+  const world = (writes && typeof writes === "object")
+    ? { writes, graph: graph || { files: [], edges: [] } }
+    : worldFromCwd(cwd)
+  if (!Object.keys(world.writes || {}).length) return pool
+  return pool.filter((e) => e.tier === "global" || !entryIsStale({ text: e.l, l: e.l, provenance: e.provenance }, world))
 }
 
 /** BM25 shortlist over the pool: pool entries ordered by score > 0. */
@@ -218,9 +229,9 @@ function formatMemory(picked, cwd) {
  * Relevant memory for a query from both tiers.
  * Returns a compact string ready for a system prompt ("" when nothing matches).
  */
-export function relevantMemory(query, { cwd = process.cwd(), limit = 10 } = {}) {
+export function relevantMemory(query, { cwd = process.cwd(), limit = 10, writes, graph } = {}) {
   if (!String(query ?? "").trim()) return ""
-  const pool = memoryPool(cwd)
+  const pool = livePool(memoryPool(cwd), cwd, { writes, graph })
   if (!pool.length) return ""
   // v20.2 (P3-2): BM25 relevance instead of raw token overlap
   return formatMemory(dedupePick(bm25Shortlist(query, pool), limit), cwd)
@@ -233,11 +244,11 @@ export function relevantMemory(query, { cwd = process.cwd(), limit = 10 } = {}) 
  * offline embeddings endpoint degrades to exactly the v20.2 behaviour. Every
  * failure path returns the plain BM25 result; this function never throws.
  */
-export async function relevantMemoryAsync(query, { cwd = process.cwd(), limit = 10, embedder = null, alpha, budgetMs = 4000 } = {}) {
+export async function relevantMemoryAsync(query, { cwd = process.cwd(), limit = 10, embedder = null, alpha, budgetMs = 4000, writes, graph } = {}) {
   if (!String(query ?? "").trim()) return ""
-  const pool = memoryPool(cwd)
+  const pool = livePool(memoryPool(cwd), cwd, { writes, graph })
   if (!pool.length) return ""
-  if (!embedder || typeof embedder.embed !== "function") return relevantMemory(query, { cwd, limit })
+  if (!embedder || typeof embedder.embed !== "function") return relevantMemory(query, { cwd, limit, writes, graph })
   try {
     const shortN = Math.max(limit * 4, 24)
     const short = bm25Shortlist(query, pool, shortN)
@@ -249,7 +260,7 @@ export async function relevantMemoryAsync(query, { cwd = process.cwd(), limit = 
     })
     return formatMemory(dedupePick(reranked.map((r) => r.ref), limit), cwd)
   } catch {
-    return relevantMemory(query, { cwd, limit })
+    return relevantMemory(query, { cwd, limit, writes, graph })
   }
 }
 
@@ -439,9 +450,20 @@ export function parseLearnings(cwd = process.cwd()) {
   return learnings
 }
 
+function liveLearnings(cwd, opts = {}) {
+  const writes = opts.writes
+  const graph = opts.graph
+  const world = (writes && typeof writes === "object")
+    ? { writes, graph: graph || { files: [], edges: [] } }
+    : worldFromCwd(cwd)
+  const blocks = memoryEntries("project", cwd).filter((e) => /^\s*LEARNING:/i.test(e.text) || /^LEARNING:/i.test(e.text))
+  if (!Object.keys(world.writes || {}).length) return blocks.map((e) => e.text)
+  return blocks.filter((e) => !entryIsStale(e, world)).map((e) => e.text)
+}
+
 /** Retrieve learned fixes relevant to a query (for the context engine). */
-export function relevantLearnings(query, { cwd = process.cwd(), limit = 3 } = {}) {
-  const learnings = parseLearnings(cwd)
+export function relevantLearnings(query, { cwd = process.cwd(), limit = 3, writes, graph } = {}) {
+  const learnings = liveLearnings(cwd, { writes, graph })
   if (!learnings.length) return ""
   if (!String(query ?? "").trim()) return ""
   // v20.2 (P3-2): BM25 relevance
@@ -457,11 +479,11 @@ export function relevantLearnings(query, { cwd = process.cwd(), limit = 3 } = {}
  * contract as relevantMemoryAsync (embeddings reorder, never widen; failures
  * fall back to the exact BM25 result).
  */
-export async function relevantLearningsAsync(query, { cwd = process.cwd(), limit = 3, embedder = null, alpha, budgetMs = 4000 } = {}) {
+export async function relevantLearningsAsync(query, { cwd = process.cwd(), limit = 3, embedder = null, alpha, budgetMs = 4000, writes, graph } = {}) {
   if (!String(query ?? "").trim()) return ""
-  const learnings = parseLearnings(cwd)
+  const learnings = liveLearnings(cwd, { writes, graph })
   if (!learnings.length) return ""
-  if (!embedder || typeof embedder.embed !== "function") return relevantLearnings(query, { cwd, limit })
+  if (!embedder || typeof embedder.embed !== "function") return relevantLearnings(query, { cwd, limit, writes, graph })
   try {
     const short = rankDocs(query, learnings.map((l, i) => ({ i, text: l })))
       .filter((r) => r.score > 0)
@@ -475,7 +497,7 @@ export async function relevantLearningsAsync(query, { cwd = process.cwd(), limit
     const picked = reranked.slice(0, limit).map((r) => r.ref)
     return picked.length ? "LEARNED FIXES (relevant past failures):\n" + picked.join("\n") : ""
   } catch {
-    return relevantLearnings(query, { cwd, limit })
+    return relevantLearnings(query, { cwd, limit, writes, graph })
   }
 }
 
