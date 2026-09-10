@@ -13,6 +13,7 @@ import path from "node:path"
 import { projectDir } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
 import { extractRecord } from "./lang.js"
+import { extractContracts } from "./xlang.js"
 
 export const INDEX_VERSION = 1
 
@@ -72,7 +73,7 @@ export function cacheHit(cached, st) {
 export function recordFromSource(file, src, fullPath, st) {
   const fp = fingerprint(st)
   const rec = extractRecord(file, src, fullPath)
-  return { ...fp, ...rec }
+  return { ...fp, ...rec, contracts: extractContracts(file, src) }
 }
 
 export function invalidate(root, rels = []) {

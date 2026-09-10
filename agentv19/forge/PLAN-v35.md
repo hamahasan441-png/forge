@@ -51,8 +51,9 @@ cache hit (sandbox.js lesson).
 
 ## Bigger map (not this release)
 
-World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite
-stay explicitly out.
+Shipped next: **v33.0.0 / PLAN-v36** (cross-language graph, UNIFIED §7 +
+§19 test selection). World-model rewrite, Tree-sitter as a runtime dep,
+edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 

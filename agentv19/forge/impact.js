@@ -11,6 +11,8 @@
  */
 import fs from "node:fs"
 import path from "node:path"
+import { buildCrossGraph } from "./repomap.js"
+import { testsForFiles, consumersOf, skipUnchangedTests } from "./xlang.js"
 
 const SCAN_FILES = 400
 const SCAN_BYTES = 80_000
@@ -54,6 +56,16 @@ export function impactRadius(input = {}) {
   let scanned = 0
   let unknown = files.length === 0
 
+  if (files.length && canRead(cwd) && input.graph !== false) {
+    try {
+      const graph = (input.graph && input.graph.files) ? input.graph : buildCrossGraph(cwd)
+      if (graph && graph.files && graph.files.length) {
+        const fromGraph = impactFromGraph(files, cwd, graph, input)
+        if (fromGraph) return fromGraph
+      }
+    } catch { /* fall through to the bounded walk */ }
+  }
+
   const basenames = new Set(files.map((f) => stem(f)))
   const rels = new Set(files.map((f) => rel(cwd, f)))
 
@@ -95,6 +107,38 @@ export function impactRadius(input = {}) {
     scope,
     unknown,
     scanned,
+    skipped: [],
+    graph: false,
+  }
+}
+
+function impactFromGraph(files, cwd, graph, input = {}) {
+  const importers = consumersOf(files, graph, { cwd }).slice(0, 40)
+  const tests = testsForFiles(files, graph, { cwd }).slice(0, 20)
+  if (!importers.length && !tests.length) {
+    // graph didn't connect these files — keep the string-scan fallback
+    return null
+  }
+  const configs = (graph.files || [])
+    .filter((f) => f.isConfig && (f.contracts || []).some((c) => c.kind === "service" || c.kind === "job" || c.kind === "image"))
+    .map((f) => f.path)
+    .slice(0, 12)
+  const { run, skip } = skipUnchangedTests(tests, { graph, ledger: input.ledger, records: graph.files })
+  const radius = files.length + importers.length + tests.length
+  const scope = testingScope({ radius, importers: importers.length, tests: tests.length, files: files.length })
+  return {
+    files,
+    importers,
+    tests: run.length || skip.length ? run : tests,
+    testsAll: tests,
+    configs,
+    radius,
+    scope,
+    unknown: false,
+    scanned: graph.stats?.files ?? graph.files.length,
+    skipped: skip,
+    graph: true,
+    chains: graph.stats || {},
   }
 }
 
