@@ -25,6 +25,7 @@ import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibl
 import { readHealth, recordHealth } from "./health.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
 import { injectPendingVision } from "./vision.js"
+import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { createLspSession } from "./lsp.js"
@@ -268,6 +269,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     subAgent: readonly && !planOnly,
     vision: config.tools?.vision !== false,
     visionProvider: { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl },
+    browser: config.tools?.browser !== false,
     delegateRunner: readOnly && !planOnly
       ? null
       : (subTask, subRole) =>
@@ -540,6 +542,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     for (const c of mcpClients) { try { c.close() } catch {} }
     if (lspSession) { try { lspSession.close() } catch {} }
     if (pluginHost) { try { pluginHost.close() } catch {} }
+    try { await closeBrowserSession(tools.ctx) } catch {}
   }
 }
 

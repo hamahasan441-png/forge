@@ -2,8 +2,8 @@
  * forge — agent tools (zero dependencies, Node built-ins only)
  *
  * bash, read_file, read_image, write_file, edit_file, multi_edit, apply_patch, list_dir, glob_files,
- * grep_files, fetch_url, web_search, todo, think, memory, delegate, load_skill, git_status
- * (18 tools)
+ * grep_files, fetch_url, web_search, browser, todo, think, memory, delegate, load_skill, git_status
+ * (19 tools)
  *
  * v20 hardening:
  *   - safePath: project-boundary enforcement for WRITES, symlink escape checks,
@@ -42,6 +42,9 @@ import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
 } from "./vision.js"
+import {
+  runBrowser, createMockDriver, browserMutatesFilesystem, isPageMutating, isVerifyAction,
+} from "./browser.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -304,6 +307,27 @@ export const TOOL_DEFS = [
   {
     type: "function",
     function: {
+      name: "browser",
+      description: "Drive a real browser to open, snapshot, click, fill, and screenshot pages. Opt-in binary (chromium or agent-browser). Missing binary returns UNAVAILABLE — the turn continues. http(s) URLs are SSRF-guarded; file:// stays inside the project; javascript:/data: refused. Screenshot pixels attach as vision parts when the provider can see.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["open", "snapshot", "click", "fill", "type", "press", "screenshot", "scroll", "back", "reload", "close", "status"], description: "open | snapshot | click | fill | type | press | screenshot | scroll | back | reload | close | status" },
+          url: { type: "string", description: "absolute http(s) URL, file:// inside the project, or about:blank (open)" },
+          ref: { type: "string", description: "interactive ref from snapshot, e.g. @e1" },
+          selector: { type: "string", description: "CSS selector when no ref" },
+          text: { type: "string", description: "fill/type text" },
+          key: { type: "string", description: "key to press (Enter, Tab, Escape, …)" },
+          path: { type: "string", description: "optional project path to save a screenshot" },
+          amount: { type: "number", description: "scroll pixels (default 500)" },
+        },
+        required: ["action"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "multi_edit",
       description: "Apply MULTIPLE exact string replacements to one file atomically. All edits validated first, then written once. Fails if any old string is missing.",
       parameters: { type: "object", properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { old: { type: "string" }, new: { type: "string" }, replace_all: { type: "boolean" } }, required: ["old", "new"] } } }, required: ["path", "edits"] },
@@ -427,6 +451,7 @@ export const VERIFICATION_TOOLS = {
     "bash",            // approved verification commands only (test/build/lint)
     "think",           // reasoning never mutates
     "load_skill",      // read-only skill docs
+    "browser",         // snapshot / screenshot / open / status / close only
   ],
   forbidden: [
     "write_file", "edit_file", "multi_edit", "apply_patch",
@@ -442,6 +467,13 @@ export function verificationAllows(name, args) {
   if (n === "bash") {
     if (isReadOnlyAllowedBash(String(args?.command ?? ""))) return { ok: true }
     return { ok: false, reason: `bash command is not an approved verification command: ${String(args?.command ?? "").slice(0, 80)}` }
+  }
+  if (n === "browser") {
+    const action = String(args?.action ?? "")
+    if (browserMutatesFilesystem(args)) return { ok: false, reason: "browser screenshot with path writes a file" }
+    if (isPageMutating(action)) return { ok: false, reason: `browser ${action} drives the page — verification may snapshot/screenshot/open/status/close only` }
+    if (action && !isVerifyAction(action)) return { ok: false, reason: `browser ${action} is not a verification action` }
+    return { ok: true }
   }
   if (!VERIFICATION_TOOLS.allowed.includes(n)) return { ok: false, reason: `${n} is not in the verification tool set` }
   return { ok: true }
@@ -467,6 +499,7 @@ function getMutationClass(name, args) {
     }
     return MUTATION_CLASS.FORGE_STATE
   }
+  if (name === "browser" && browserMutatesFilesystem(args)) return MUTATION_CLASS.FILESYSTEM
   return MUTATION_CLASS.NONE
 }
 
@@ -516,6 +549,9 @@ export function makeToolContext(opts = {}) {
     plugins = [], // v20.2 P3-5: user tool plugins (from loadToolPlugins().tools)
     vision = true,
     visionProvider = null,
+    browser = true,
+    browserBinary,
+    browserDriver = null,
   } = opts
   // register plugins: write-class ones join WRITE_TOOLS so they are serialized
   // and blocked in read-only sub-agents, exactly like built-in write tools.
@@ -539,6 +575,22 @@ export function makeToolContext(opts = {}) {
     vision: vision !== false,
     visionProvider: visionProvider || null,
     _pendingVision: [],
+    browser: browser !== false,
+    _browserDriver: browserDriver || null,
+    _browser: null,
+  }
+  if (browserBinary !== undefined) ctx.browserBinary = browserBinary
+  ctx.checkPath = (p, opts2) => safePath(ctx, p, opts2)
+  ctx.writeScreenshot = (rel, buf) => {
+    const sp = safePath(ctx, rel, { write: true })
+    if (!sp.ok) return sp
+    try {
+      fs.mkdirSync(path.dirname(sp.abs), { recursive: true })
+      fs.writeFileSync(sp.abs, buf)
+      return { ok: true, abs: sp.abs }
+    } catch (e) {
+      return { ok: false, error: `ERROR: screenshot write failed: ${String(e?.message ?? e).slice(0, 160)}` }
+    }
   }
   const allDefs = plugins.length ? [...TOOL_DEFS, ...plugins.map((p) => p.def)] : TOOL_DEFS
   let filteredDefs = allDefs
@@ -1628,6 +1680,11 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
     results.push({ name: "web_search", ok: null, ms: 0, note: "offline" })
   }
   results.push({ name: "delegate", ok: null, ms: 0, note: "needs a live provider" })
+  {
+    const r = await execTool({ ...ctx, _browserDriver: createMockDriver(), browser: true, vision: false }, "browser", { action: "status" })
+    const bad = typeof r === "string" && r.startsWith("ERROR")
+    results.push({ name: "browser", ok: bad ? false : true, ms: 0, note: String(r).slice(0, 80) })
+  }
   try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {}
   return results
 }
@@ -1637,7 +1694,7 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
 // secret redaction before it reaches the model / sessions / logs.
 // ---------------------------------------------------------------------------
 
-const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "delegate", "git_status", "grep_files", "memory"])
+const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "browser", "delegate", "git_status", "grep_files", "memory"])
 
 export async function execTool(ctx, name, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) args = {}
@@ -1668,6 +1725,7 @@ export async function execTool(ctx, name, args) {
     case "fetch_url": result = await fetch_url(ctx, args); break
     case "glob_files": result = glob_files(ctx, args); break
     case "web_search": result = await web_search(ctx, args); break
+    case "browser": result = await runBrowser(ctx, args); break
     case "multi_edit": result = multi_edit(ctx, args); break
     case "apply_patch": result = apply_patch(ctx, args); break
     case "git_status": result = await git_status(ctx); break

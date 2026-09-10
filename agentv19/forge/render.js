@@ -529,6 +529,7 @@ function verbFor(name) {
     case "bash": return "Running"
     case "grep_files": case "glob_files": case "web_search": return "Searching"
     case "fetch_url": return "Fetching"
+    case "browser": return "Browsing"
     case "delegate": return "Delegating"
     case "list_dir": return "Listing"
     case "git_status": return "Checking git"
@@ -851,7 +852,7 @@ export function renderIdle(info, width, o) {
 
 /** Compact durable line for a finished tool: ✓ shell  npm test   2.8s */
 export function toolLabel(name) {
-  return name === "bash" ? "shell" : name === "web_search" ? "search" : name === "fetch_url" ? "fetch" : name === "glob_files" ? "glob" : name === "grep_files" ? "grep" : name === "list_dir" ? "ls" : name === "git_status" ? "git" : String(name || "")
+  return name === "bash" ? "shell" : name === "web_search" ? "search" : name === "fetch_url" ? "fetch" : name === "browser" ? "browser" : name === "glob_files" ? "glob" : name === "grep_files" ? "grep" : name === "list_dir" ? "ls" : name === "git_status" ? "git" : String(name || "")
 }
 export function renderToolLine(entry, width, o) {
   const kind = entry.ok === false ? "fail" : entry.endedAt ? "ok" : "active"

@@ -45,6 +45,7 @@ export const INTENT = {
   EXECUTE: "execute",
   VERIFY: "verify",
   RESEARCH: "research",
+  BROWSE: "browse",
   RECOVER: "recover",
   EXPLAIN: "explain",
   REMEMBER: "remember",
@@ -57,6 +58,7 @@ const SIGNALS = [
   [INTENT.VERIFY, /\b(test|tests|verify|check|typecheck|lint|build|compile|ci|coverage)\b/],
   [INTENT.EXECUTE, /\b(run|execute|start|install|npm |yarn |pnpm |make |script)\b/],
   [INTENT.RESEARCH, /\b(docs?|documentation|api reference|changelog|release notes|upstream|internet|online|google|latest version)\b/],
+  [INTENT.BROWSE, /\b(in the browser|headless|web\s?ui|click the|fill the (form|input)|type into|snapshot the (page|dom|ui)|screenshot the (page|ui)|navigate to|playwright|chrom(e|ium)|agent-browser)\b|https?:\/\/\S+/i],
   [INTENT.EXPLAIN, /\b(explain|describe|summar|what does|how does|why does|walk me through|understand)\b/],
   [INTENT.INSPECT, /\b(read|show|open|inspect|print|cat|look at|review|view)\b/],
   [INTENT.REMEMBER, /\b(remember|note that|from now on|convention|preference)\b/],
@@ -92,7 +94,7 @@ export function analyzeTask(task, context = {}) {
   while ((m = SYMBOL_RE.exec(text))) if (!STOP_SYMBOLS.has(m[1]) && !files.some((f) => f.includes(m[1]))) symbols.push(m[1])
 
   // primary intent: recovery beats modification beats discovery beats reading
-  const order = [INTENT.RECOVER, INTENT.MODIFY, INTENT.DISCOVER, INTENT.RESEARCH, INTENT.VERIFY, INTENT.EXECUTE, INTENT.EXPLAIN, INTENT.INSPECT, INTENT.REMEMBER]
+  const order = [INTENT.RECOVER, INTENT.MODIFY, INTENT.DISCOVER, INTENT.RESEARCH, INTENT.BROWSE, INTENT.VERIFY, INTENT.EXECUTE, INTENT.EXPLAIN, INTENT.INSPECT, INTENT.REMEMBER]
   const primary = order.find((i) => intents.includes(i)) ?? INTENT.INSPECT
 
   const words = t.split(/\s+/).filter(Boolean).length
@@ -105,7 +107,7 @@ export function analyzeTask(task, context = {}) {
     files: [...new Set(files)].slice(0, 8),
     symbols: [...new Set(symbols)].slice(0, 8),
     complexity,
-    needsNetwork: intents.includes(INTENT.RESEARCH),
+    needsNetwork: intents.includes(INTENT.RESEARCH) || intents.includes(INTENT.BROWSE),
     mutating: intents.includes(INTENT.MODIFY) || intents.includes(INTENT.RECOVER),
     capabilities: capabilitiesFor(primary, intents),
     context: { knownFiles: context.knownFiles ?? [], readFiles: context.readFiles ?? [] },
@@ -124,6 +126,7 @@ function capabilitiesFor(primary, intents) {
     case INTENT.VERIFY: add(CAPABILITY.TEST_EXECUTION); break
     case INTENT.EXECUTE: add(CAPABILITY.COMMAND_EXECUTION); break
     case INTENT.RESEARCH: add(CAPABILITY.WEB_SEARCH, CAPABILITY.NETWORK_FETCH); break
+    case INTENT.BROWSE: add(CAPABILITY.BROWSER); break
     case INTENT.REMEMBER: add(CAPABILITY.MEMORY_WRITE); break
     default: add(CAPABILITY.FILE_READ)
   }
@@ -169,6 +172,9 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
     case INTENT.RESEARCH:
       step("research", CAPABILITY.WEB_SEARCH, "the repository cannot answer this — search the web")
       step("inspect", CAPABILITY.NETWORK_FETCH, "read the most relevant result", { optional: true })
+      break
+    case INTENT.BROWSE:
+      step("browse", CAPABILITY.BROWSER, "drive or verify a real UI in the browser")
       break
     case INTENT.VERIFY:
       step("verify", CAPABILITY.TEST_EXECUTION, "run the project's tests/build and read the real output")
@@ -296,6 +302,8 @@ function avoidPenalty(meta, analysis) {
   if (/\b(fix|tweak|adjust|replace|rename)\b/.test(t) && meta.name === "edit_file") p -= 1
   if (meta.name === "read_image" && !(analysis.files ?? []).some(isImagePath)) p += 3
   if (meta.name === "read_file" && (analysis.files ?? []).some(isImagePath)) p += 3
+  if (meta.name === "browser" && !analysis.needsNetwork && !/\b(browser|page|click|snapshot|screenshot|ui)\b/.test(t)) p += 4
+  if (meta.name === "fetch_url" && /\b(click|snapshot|fill the form)\b/.test(t)) p += 2
   return p
 }
 
@@ -370,6 +378,14 @@ function synthesizeArgs(step, analysis, context) {
     case "list_dir": return { path: "." }
     case "web_search": return { query: analysis.task.slice(0, 200) }
     case "fetch_url": return {}
+    case "browser": {
+      const m = String(analysis.task || "").match(/https?:\/\/[^\s]+/i)
+      const click = /\bclick\b/i.test(analysis.task || "")
+      if (click) return { action: "click", ref: analysis.symbols[0] || "@e1" }
+      if (/\bsnapshot\b/i.test(analysis.task || "")) return { action: "snapshot" }
+      if (/\bscreenshot\b/i.test(analysis.task || "")) return { action: "screenshot" }
+      return { action: "open", url: m ? m[0] : null }
+    }
     case "bash": return { command: detectTestCommand(cwd) }
     case "edit_file": return { path: step.target ?? analysis.files[0] ?? null }
     case "write_file": return { path: step.target ?? analysis.files[0] ?? null }

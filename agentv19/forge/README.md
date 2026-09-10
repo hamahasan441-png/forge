@@ -111,7 +111,7 @@ Edit it any time, or use commands: `forge config set providers.openai.apiKey sk-
 | `forge chat --continue` | resume last session |
 | `forge resume <n\|id>` | resume a saved session — messages + working directory + usage (v20) |
 | `forge --profile fast\|balanced\|deep\|auto` | effort profile: auto gives complex tasks deep thinking (v20) |
-| `forge agent "fix the failing test"` | autonomous coding agent — auto-uses all **18 tools** (bash, files, images, patches, git, web search+fetch, todo, memory, sub-agent, 69 skills); add `--deep` for deep think |
+| `forge agent "fix the failing test"` | autonomous coding agent — auto-uses all **19 tools** (bash, files, images, browser, patches, git, web search+fetch, todo, memory, sub-agent, 69 skills); add `--deep` for deep think |
 | `forge agent --deep "task"` | DEEP THINKING agent — structured reasoning, high reasoning effort, verify-first |
 | `forge agent --plan "task"` | plan first (read-only), confirm, then execute |
 | `forge undo` | restore files changed by the last tool edit (auto-checkpoints; v20 also removes files the edit CREATED) |
@@ -120,7 +120,7 @@ Edit it any time, or use commands: `forge config set providers.openai.apiKey sk-
 | `forge config` | **interactive config menu**: add provider → model → key, switch, test |
 | `forge config set providers.openai.apiKey sk-...` | direct config editing (also: show/path/get/unset) |
 | `forge use deepseek --model deepseek-chat` | switch provider and model in one line |
-| `forge doctor` | config check + provider latency + ✓ tested badge (`--all` every provider, `--tools` self-tests all 18 tools) |
+| `forge doctor` | config check + provider latency + ✓ tested badge (`--all` every provider, `--tools` self-tests all 19 tools) |
 | `forge sessions` | list saved conversations |
 | `forge models [provider]` | list models of any provider (FREE badges + context sizes, no switch needed) |
 | `forge models openrouter --free` | **OpenRouter free tier only** — live, or cached when offline |
@@ -285,7 +285,7 @@ environment variable, or `forge config set providers.<name>.apiKey <KEY>`.
 with the `FREE` badge → paste a key from https://openrouter.ai/keys (a free account key
 works for all `:free` models). List the free tier any time: `forge models openrouter --free`.
 
-## 18 tools, used automatically
+## 19 tools, used automatically
 
 The agent AND the chat can call every tool mid-conversation — the model decides,
 forge executes and streams the result back. Read-only tools run in parallel;
@@ -293,7 +293,7 @@ write tools are serialized; every write is auto-checkpointed:
 
 | group | tools |
 |---|---|
-| web | `web_search` (SearXNG endpoint or DuckDuckGo fallback), `fetch_url` |
+| web | `web_search` (SearXNG endpoint or DuckDuckGo fallback), `fetch_url`, `browser` (opt-in chromium / agent-browser; UNAVAILABLE when absent) |
 | files | `read_file` `read_image` `write_file` `edit_file` `multi_edit` (atomic) `apply_patch` (unified diff, atomic, multi-file) `glob_files` `list_dir` `grep_files` |
 | shell | `bash` (v20: risk-classified — catastrophic refused, destructive-outside-project refused, sudo needs consent), `git_status` (repo snapshot) |
 | agent-brain | `think` (scratchpad) `todo` (task tracking) `memory` (v20: hierarchical global+project, relevance-retrieved, failure learning) `delegate` (v20: read-only sub-agent with roles, timeout + concurrency cap) `load_skill` (v20: traversal-safe) |
@@ -349,7 +349,7 @@ forge tools --capability search --json        # scriptable
 
 A tool you disable is not just refused — it is never offered to the model, and
 `forge doctor` verifies that the registry still agrees with the shipped safety
-classification (`registry: 18 tools, classification matches tools.js`).
+classification (`registry: 19 tools, classification matches tools.js`).
 
 Switches: `tools.intelligence` (master, `false` restores the pre-v20.5 path),
 `tools.verify`, `tools.cache`, `tools.maxRisk`, `tools.explainRouting`,
