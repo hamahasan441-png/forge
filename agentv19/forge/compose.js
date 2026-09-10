@@ -23,6 +23,8 @@
  * compose() stays uncached so a write is visible on the next plain call.
  * The context engine keeps its own generation cache and does not go
  * through composeOnce (mtime invalidation stays there).
+ * v52: persisted tool outcomes join the snapshot as [tools] prefer/avoid.
+ * MICRO/SMALL skip. compose() stays uncached. runCall is unchanged.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
@@ -34,6 +36,7 @@ import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir, parseSkillPlaybook } from "./skills.js"
 import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
 import { relevantLessons } from "./lessons.js"
+import { relevantTools, formatToolMem, emptyTools } from "./toolintel.js"
 
 const RADIUS_SHOW = 16
 const FILE_SHOW = 8
@@ -273,6 +276,7 @@ export function emptyCompose(klass = null) {
     plugins: [],
     know: [],
     verify: { command: "", tests: [] },
+    tools: emptyTools(),
   }
 }
 
@@ -373,6 +377,9 @@ export function compose(task = "", opts = {}) {
   if (opts.includeVerify !== false && world.files.length) {
     try { out.verify = focusedVerify(cwd, world.files) } catch { out.verify = { command: "", tests: [] } }
   }
+  if (opts.includeTools !== false) {
+    try { out.tools = relevantTools(q, { cwd, klass, limit: 4 }) } catch { out.tools = emptyTools() }
+  }
   return out
 }
 
@@ -390,6 +397,7 @@ function onceKey(task, opts = {}) {
     opts.includePlugins !== false ? "p" : "-",
     opts.includeLessons !== false ? "l" : "-",
     opts.includeVerify !== false ? "v" : "-",
+    opts.includeTools !== false ? "t" : "-",
   ].join("")
   const plugs = Array.isArray(opts.plugins)
     ? opts.plugins.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
@@ -506,6 +514,8 @@ export function formatCompose(c) {
     lines.push(s)
     playN++
   }
+  const toolsLine = formatToolMem(c.tools)
+  if (toolsLine) lines.push(toolsLine)
   return lines.join("\n")
 }
 

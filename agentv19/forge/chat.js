@@ -32,7 +32,7 @@ import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
 import { injectPendingVision, stripOldVisionParts } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
-import { createToolIntel } from "./toolintel.js"
+import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
@@ -308,6 +308,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         plugins: composed?.plugins || [],
         avoid: composed?.avoid || [],
         know: composed?.know || [],
+        tools: composed?.tools || null,
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }
@@ -902,6 +903,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // concurrently, mutations serialized, conflicting writes never together)
     // and every call passes the same gate + verification as in agent mode.
     const results = await chatIntel.runBatch(parsed.map(({ tc, args }) => ({ id: tc.id, name: tc.name, args })))
+    try {
+      recordToolRun({
+        cwd: process.cwd(),
+        task: lastUserTask,
+        records: results.map((r) => r?.record).filter(Boolean),
+      })
+    } catch { /* persist is best-effort */ }
     for (let i = 0; i < parsed.length; i++) {
       const { tc } = parsed[i]
       if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
@@ -931,11 +939,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     return { deep: d, notice }
   }
 
+  let lastUserTask = ""
   async function turn(userText) {
     // v20.2 never-lose-work: snapshot the history before this turn mutates it,
     // so an interrupt with no output rolls back cleanly (rather than a fragile
     // pop that can orphan tool messages).
     const preTurnSnapshot = messages.slice()
+    lastUserTask = String(userText ?? "")
     let streamedPartial = "" // visible text streamed so far this turn
     await maybeCompact().catch(() => {}) // v16: auto-compaction check
     // v19 terminal mode: notes from shell commands the user ran since the last

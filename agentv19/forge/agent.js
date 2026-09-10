@@ -29,7 +29,7 @@ import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { createLspSession } from "./lsp.js"
-import { createToolIntel } from "./toolintel.js"
+import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
@@ -146,6 +146,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
         plugins: composed?.plugins || [],
         avoid: composed?.avoid || [],
         know: composed?.know || [],
+        tools: composed?.tools || null,
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }
@@ -581,6 +582,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     else endRun("failed", { error: e?.message ?? String(e), wrote })
     throw e
   } finally {
+    try { recordToolRun({ cwd: process.cwd(), task, klass, records: intel.records() }) } catch { /* persist is best-effort */ }
     for (const c of mcpClients) { try { c.close() } catch {} }
     if (lspSession) { try { lspSession.close() } catch {} }
     if (pluginHost) { try { pluginHost.close() } catch {} }

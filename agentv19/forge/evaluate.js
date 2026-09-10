@@ -119,10 +119,11 @@ export function formatSkillPicks(picks = []) {
 /**
  * Compact "use these, in this order" block for repair / execute.
  * Playbook first (known repair — fast). Then matching skills. Then
- * long-term lessons (v47 know). Then avoid. Never dumps the 40-name pack.
- * MICRO callers pass empty plugins / know.
+ * long-term lessons (v47 know). Then avoid. Then TOOLS prefer/avoid
+ * from persisted toolintel outcomes (v52). Never dumps the 40-name pack.
+ * MICRO callers pass empty plugins / know / tools.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [] } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
@@ -150,6 +151,21 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [] }
     lines.push(`PLUGINS (isolated, matching): ${isolated.slice(0, 4).join(", ")}`)
   }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
+  const pref = Array.isArray(tools?.prefer) ? tools.prefer : []
+  const av = Array.isArray(tools?.avoid) ? tools.avoid : []
+  if (pref.length || av.length) {
+    const p = pref.slice(0, 4).map((t) => (typeof t === "string" ? t : t.tool)).filter(Boolean).join(", ")
+    const a = av.slice(0, 3).map((t) => {
+      const name = typeof t === "string" ? t : t.tool
+      if (!name) return ""
+      const why = typeof t === "object" && t.why ? ` (${t.why})` : ""
+      return `${name}${why}`
+    }).filter(Boolean).join(", ")
+    let line = "TOOLS:"
+    if (p) line += ` prefer ${p}`
+    if (a) line += `${p ? " —" : ""} avoid ${a}`
+    if (line !== "TOOLS:") lines.push(line)
+  }
   return lines.join("\n")
 }
 
