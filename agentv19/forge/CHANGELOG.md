@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v43.0.0 — "pluginpick"
+
+### Added (v43.0 — compose picks learned plugins)
+- **Sync learned-plugin index.** `indexLearnedPlugins` reads `PLAYBOOK` JSON from `~/.forge/projects/<hash>/tools/learned_*.mjs` without executing, spawning, or importing the file. Symlinks, dotfiles, and `~/.forge/tools` are skipped. Cap 24.
+- **Planner sees the pick.** `compose()` unions the index with caller plugins (caller names win) and runs `selectPlugins`. `PLAN_COMPOSE` emits up to 4 isolated names. MICRO/SMALL still skip isolated unless named.
+- **Never a host.** compose stays sync. `plugin-host.js` is not spawned. `allowNewPlugins` stays false. Learned plugins still do not land in `~/.forge/tools`.
+
+Single mutating writer is unchanged. PLAN-v46 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v42.0.0 — "extend"
 
 ### Added (v42.0 — isolated plugin / skill self-extension, L5)

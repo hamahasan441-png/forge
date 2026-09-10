@@ -224,7 +224,8 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     }
 
     // 4e. v41: v32+ pipeline (world → memory count → avoid → skills → verify)
-    //     as one snapshot. Skills descriptions stay in 4b; this is the compact
+    //     as one snapshot. v43: learned plugins join via sync PLAYBOOK index
+    //     (no spawn). Skills descriptions stay in 4b; this is the compact
     //     join the planner was missing. MICRO still gets world/verify if files
     //     are cited. Never auto-runs the recommended command.
     if (opts.includeCompose !== false && task) {
