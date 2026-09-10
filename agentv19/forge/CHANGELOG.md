@@ -3,7 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v28.0.0 — "8-core burst"
+## [Unreleased] — v29.0.0 — "information-gain + FORGE-BENCH"
+
+### Added (v29.0 — smarter experiments, prove it actually works)
+- **Information-gain experiment picker** (`infogain.js`). After Ω names a hypothesis and ∞ names a causal layer, repair picks the next experiment by
+  `(uncertainty + diagnostic + impact + reliability) / (cost + risk + time)`. Cheap read-only inspections beat expensive mutating repairs while the cause is uncertain. An experiment already run twice is excluded. FORGE-origin failures escalate; SAFETY_BLOCK aborts. MICRO/SMALL never get a full-suite experiment. `nextRepair().action` is unchanged (Ω/∞ tests stay green); `experiment` is additive.
+- **Repair prompt gets the experiment.** `repairSegment` injects `Next experiment (id, gain, kind)` and emits `EXPERIMENT_SELECTED`. Avoided ids are listed so the model does not retry an uninformative probe.
+- **FORGE-BENCH** (`bench.js`, `forge bench`). 12 deterministic cases, no live model: simple bug, multi-file, dependency, concurrency, state corruption, architecture change, cross-language, large repo, provider failure, crash recovery, adversarial hidden bug, long-running (9-check gate refuses false COMPLETED; replan keeps completed nodes). Scores correctness, root-cause, time, tokens, tool calls, regressions, false completion, recovery, replanning, resource efficiency. `--list` / `--json`.
+
+Single mutating writer is unchanged. PLAN-v32 is the contract. Vision and browser are not this release. `assumeYes` stays false.
+
+## v28.0.0 — "8-core burst"
 
 ### Added (v28.0 — 13T Pro 8-core / 12GB: faster, smarter)
 - **MemAvailable, not MemFree.** `readAvailableMB()` reads `/proc/meminfo` so an 8-core 12GB phone is not classified low just because the kernel filled RAM with cache. Injected `{ freeMB }` still wins in tests. Starving (`freeMB < 700`) stays low.

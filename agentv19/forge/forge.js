@@ -64,7 +64,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -1130,6 +1130,24 @@ async function main() {
 
       err("usage: forge embeddings [list|test <text> ...]"); process.exit(1); return
     }
+    case "bench": {
+      const { BENCH_CASES, runBench, formatReport } = await import("./bench.js")
+      const list = flags.list === true || positional[1] === "list"
+      if (list) {
+        if (JSON_OUT) {
+          emitJson({ version: VERSION, cases: BENCH_CASES.map((c) => ({ id: c.id, name: c.name })) })
+          return
+        }
+        console.log(bold(`FORGE-BENCH v${VERSION}`) + dim("  12 progressive cases, no live model"))
+        for (const c of BENCH_CASES) console.log(`  ${cyan(c.id.padEnd(22))} ${c.name}`)
+        return
+      }
+      const summary = runBench()
+      if (JSON_OUT) { emitJson(summary); process.exit(summary.failed ? 1 : 0); return }
+      console.log(formatReport(summary))
+      process.exit(summary.failed ? 1 : 0)
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -1183,6 +1201,7 @@ ${bold("usage")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
+  ${cyan("forge bench")}                  FORGE-BENCH — 12 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
