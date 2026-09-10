@@ -63,6 +63,8 @@ const SIGNALS = [
 ]
 
 const FILE_RE = /(?:^|[\s"'`(=])((?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*\.[A-Za-z][\w]{0,7})\b/g
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
+function isImagePath(p) { return IMAGE_EXT.test(String(p ?? "")) }
 // a "symbol" is a token that could not be an ordinary English word: PascalCase
 // with an internal capital, snake_case, or camelCase.
 const SYMBOL_RE = /\b([A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*|[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[a-z]+[A-Z][A-Za-z0-9]*)\b/g
@@ -153,7 +155,11 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
     case INTENT.INSPECT:
     case INTENT.EXPLAIN:
       if (!a.files.length && !fileKnown) step("discover", CAPABILITY.CONTENT_SEARCH, "no concrete file named — locate it before reading")
-      step("inspect", CAPABILITY.FILE_READ, a.files.length ? `read ${a.files[0]}` : "read what discovery found", { target: a.files[0] ?? null })
+      if (a.files[0] && isImagePath(a.files[0])) {
+        step("inspect", CAPABILITY.IMAGE_READ, `read image ${a.files[0]}`, { target: a.files[0] })
+      } else {
+        step("inspect", CAPABILITY.FILE_READ, a.files.length ? `read ${a.files[0]}` : "read what discovery found", { target: a.files[0] ?? null })
+      }
       break
     case INTENT.DISCOVER:
       step("discover", CAPABILITY.CONTENT_SEARCH, "search the repository for the named concept", { args: { pattern: searchPattern(a) } })
@@ -288,6 +294,8 @@ function avoidPenalty(meta, analysis) {
   // creating something new? write_file beats edit_file, and vice versa
   if (/\b(create|new file|scaffold|generate a file)\b/.test(t) && meta.name === "write_file") p -= 2
   if (/\b(fix|tweak|adjust|replace|rename)\b/.test(t) && meta.name === "edit_file") p -= 1
+  if (meta.name === "read_image" && !(analysis.files ?? []).some(isImagePath)) p += 3
+  if (meta.name === "read_file" && (analysis.files ?? []).some(isImagePath)) p += 3
   return p
 }
 
@@ -356,6 +364,7 @@ function synthesizeArgs(step, analysis, context) {
   const cwd = context.cwd || process.cwd()
   switch (step.tool) {
     case "read_file": return { path: step.target ?? analysis.files[0] ?? null }
+    case "read_image": return { path: step.target ?? analysis.files[0] ?? null }
     case "grep_files": return { pattern: step.args?.pattern ?? searchPattern(analysis), path: "." }
     case "glob_files": return { pattern: step.args?.pattern ?? "**/*" }
     case "list_dir": return { path: "." }

@@ -3,7 +3,18 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v29.0.0 — "information-gain + FORGE-BENCH"
+## [Unreleased] — v30.0.0 — "vision"
+
+### Added (v30.0 — see screenshots, diagrams, failing-UI captures)
+- **`read_image` tool** (`vision.js`, 18th built-in). Local raster files only (png/jpeg/gif/webp, magic-byte detect). SVG refused. Remote URLs refused (no fetch, no SSRF). Same `safePath` as `read_file` (`.env` / keys stay blocked). Result is still a string (mime, pixels, bytes); pixels live on `ctx._pendingVision` and are injected as a user message after the tool batch.
+- **Real image parts, only when the provider accepts them.** OpenAI-shaped `image_url` data-URLs on the internal wire; `toAnthropicMessages` converts them to Anthropic `{ type: "image", source: { type: "base64" } }`. Remote `https://` image_url is a text stub, never fetched. Unknown / ollama text models → metadata only. Never invent a description of pixels the model cannot see.
+- **768 KiB cap, 4 pending per turn.** Larger files return dimensions from the header and do not attach. Compaction (`stripOldVisionParts`) stubs all but the last vision message so base64 cannot explode the context.
+- **`tools.vision`** default true. Not privileged — a project `forge.config.json` may set it false. `assumeYes` stays false.
+
+Single mutating writer is unchanged. PLAN-v33 is the contract. Browser is not this release.
+
+## v29.0.0 — "information-gain + FORGE-BENCH"
+
 
 ### Added (v29.0 — smarter experiments, prove it actually works)
 - **Information-gain experiment picker** (`infogain.js`). After Ω names a hypothesis and ∞ names a causal layer, repair picks the next experiment by

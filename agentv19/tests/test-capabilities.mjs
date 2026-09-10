@@ -60,7 +60,7 @@ console.log("== READ/WRITE classification agrees with the shipped WRITE_TOOLS (ย
   for (const n of ["bash", "write_file", "edit_file", "multi_edit", "apply_patch"]) {
     ok(`${n} is write-class`, reg.get(n).read_only === false && WRITE_TOOLS.has(n))
   }
-  for (const n of ["read_file", "grep_files", "glob_files", "list_dir", "git_status", "delegate", "think"]) {
+  for (const n of ["read_file", "read_image", "grep_files", "glob_files", "list_dir", "git_status", "delegate", "think"]) {
     ok(`${n} is read-only`, reg.get(n).read_only === true && !WRITE_TOOLS.has(n))
   }
   ok("delegate is read-only but NOT free (medium baseline risk)", reg.get("delegate").read_only === true && reg.get("delegate").risk === RISK.MEDIUM)
@@ -69,7 +69,7 @@ console.log("== READ/WRITE classification agrees with the shipped WRITE_TOOLS (ย
 
 console.log("== parallel safety metadata (ยง12) ==")
 {
-  ok("independent readers are parallel_safe", ["read_file", "grep_files", "glob_files", "list_dir"].every((n) => reg.get(n).parallel_safe))
+  ok("independent readers are parallel_safe", ["read_file", "read_image", "grep_files", "glob_files", "list_dir"].every((n) => reg.get(n).parallel_safe))
   ok("no write tool is parallel_safe", reg.list({ readOnly: false }).every((m) => m.parallel_safe === false))
   ok("shared-state readers are NOT parallel_safe (todo, memory)", !reg.get("todo").parallel_safe && !reg.get("memory").parallel_safe)
 }
@@ -127,7 +127,7 @@ console.log("== plugin discovery registers through the SAME system (ยง18) ==")
   ok("plugin-declared risk is honoured", r.get("deploy_app").risk === RISK.HIGH && r.get("deploy_app").requires_confirmation === true)
   ok("a plugin without declared capabilities still gets one", r.get("no_name_tool_meta").capabilities.length === 1)
   ok("plugin source is recorded", r.get("jira_issue").source.startsWith("plugin:"))
-  ok("core needs no change for a new tool (17 + 3)", r.size() === BUILTIN_CAPABILITIES.length + 3)
+  ok("core needs no change for a new tool (18 + 3)", r.size() === BUILTIN_CAPABILITIES.length + 3)
 }
 
 console.log("== unknown tools are treated conservatively ==")

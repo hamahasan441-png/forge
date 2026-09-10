@@ -53,7 +53,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v29.0.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v30.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
@@ -135,7 +135,7 @@ out=$(printf 'hello\n/retry\n/exit\n' | $F chat 2>&1)
 n=$(echo "$out" | grep -c "Hello from mock!")
 if [ "${n:-0}" -ge 2 ]; then PASS=$((PASS+1)); echo "  ok  chat /retry regenerates"
 else FAIL=$((FAIL+1)); echo "  FAIL chat /retry regenerates (got $n answers)"; fi
-check "banner v29" "$out" "forge v29"
+check "banner v30" "$out" "forge v30"
 
 # 18. chat /export writes markdown transcript
 mkdir -p "$T/work"
@@ -214,9 +214,9 @@ check "chat inline tool call" "$out" "[chat] bash"
 check "chat inline tool executed" "$out" "forge-e2e-ok"
 check "chat inline final streamed" "$out" "TOOL RESULT RECEIVED"
 
-# 30. /tools lists the 17 tools
+# 30. /tools lists the 18 tools
 out=$(printf '/tools\n/exit\n' | $F chat 2>&1)
-check "/tools lists tools" "$out" "forge tools (17)"
+check "/tools lists tools" "$out" "forge tools (18)"
 check "/tools shows glob" "$out" "glob_files"
 check "/tools shows apply_patch" "$out" "apply_patch"
 
@@ -377,7 +377,7 @@ check "config menu probe ok" "$out" "connection OK"
 
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
-check "autopick banner" "$out" "forge v29"
+check "autopick banner" "$out" "forge v30"
 check "autopick provider" "$out" "provider: custom"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"

@@ -1,5 +1,6 @@
 import { VERSION } from "./version.js"
 import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
+import { toAnthropicContent } from "./vision.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -567,6 +568,8 @@ async function* parseSSE(res, parseLine, guard) {
  *  - role:"tool" -> user message with [{type:"tool_result",...}]
  *  - drops empty text blocks (Anthropic rejects them)
  *  - already-anthropic-shaped blocks pass through unchanged
+ *  - OpenAI-shaped user image parts (image_url data: URLs) become Anthropic
+ *    image blocks; remote http(s) image_url is stubbed, never fetched
  */
 export function toAnthropicMessages(messages) {
   let system = ""
@@ -593,9 +596,9 @@ export function toAnthropicMessages(messages) {
       out.push({ role: "assistant", content: blocks })
       continue
     }
-    if (m.role === "assistant" && Array.isArray(m.content)) {
-      // already anthropic-shaped (tool_use / tool_result blocks) — pass through
-      out.push(m)
+    if (Array.isArray(m.content)) {
+      const converted = toAnthropicContent(m.content)
+      out.push({ role: m.role === "user" ? "user" : "assistant", content: converted })
       continue
     }
     out.push({ role: m.role === "user" ? "user" : "assistant", content: String(m.content ?? "") })

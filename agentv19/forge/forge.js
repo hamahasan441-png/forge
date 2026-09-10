@@ -106,7 +106,7 @@ function resolveProvider(config) {
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
  *  — which working model to use (Enter = default, type any id to switch, ✓
  *  badges from the health cache, FREE badges from the model cache) — then
- *  drops into chat with all 17 tools + skills ON. Non-TTY never prompts. */
+ *  drops into chat with all 18 tools + skills ON. Non-TTY never prompts. */
 async function smartStart(cfg, p) {
   if (!process.stdin.isTTY) return p
   const conf = cfg.providers?.[p.name] ?? {}
@@ -1187,7 +1187,7 @@ ${bold("usage")}
   ${cyan('forge ask "summarize git log"')} quick one-shot answer ${dim('(or: echo q | forge ask)')}
   ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
-  ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 17 tools (bash, files, web, memory, sub-agents)
+  ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 18 tools (bash, files, images, web, memory, sub-agents)
   ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
@@ -1196,7 +1196,7 @@ ${bold("usage")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
   ${cyan("forge config show|path|get|set|unset")}
-  ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 17 tools")}
+  ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 18 tools")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
