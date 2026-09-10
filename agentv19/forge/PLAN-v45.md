@@ -58,6 +58,8 @@ Tree-sitter. It does not patch `plugin-host`. It does not write into
 
 ## Bigger map (not this release)
 
+Shipped next: **v43.0.0 / PLAN-v46** (compose picks learned plugins:
+sync `PLAYBOOK` index, no spawn, planner lists isolated names).
 L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
 a runtime dep, edit-transaction rewrite stay explicitly out.
 

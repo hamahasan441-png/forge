@@ -259,6 +259,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             avoid: (composed.avoid || []).slice(0, 4),
             verify: composed.verify?.command || "",
             skills: (composed.skills || []).map((s) => s.name).slice(0, 3),
+            plugins: (composed.plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name).slice(0, 4),
           })
         }
       } catch { composePrefix = "" }
@@ -612,6 +613,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           files: changedRel,
           includeMemory: false,
           includeSkills: false,
+          includePlugins: false,
         }).verify?.command || "",
       })
       const line = formatEvolve(evo)

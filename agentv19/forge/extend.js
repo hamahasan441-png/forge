@@ -184,3 +184,109 @@ export async function mergeLearnedPlugins(loaded, cwd = process.cwd(), opts = {}
 }
 
 export { TASK_CLASS, NAME_RE, KERNEL_HINT }
+
+const PLAYBOOK_MARK = "const PLAYBOOK"
+const INDEX_CAP = 24
+const PLAYBOOK_MAX_BYTES = 64 * 1024
+
+/**
+ * Pull the JSON object after `const PLAYBOOK =` without executing the file.
+ * Brace-matched with string/escape awareness. Never eval.
+ */
+function extractJsonObject(src, marker = PLAYBOOK_MARK) {
+  const i = String(src || "").indexOf(marker)
+  if (i < 0) return null
+  const eq = src.indexOf("=", i + marker.length)
+  if (eq < 0 || eq > i + marker.length + 24) return null
+  let start = -1
+  for (let j = eq + 1; j < src.length; j++) {
+    const c = src[j]
+    if (c === "{") { start = j; break }
+    if (c !== " " && c !== "\n" && c !== "\r" && c !== "\t") return null
+  }
+  if (start < 0) return null
+  let depth = 0
+  let inStr = false
+  let esc = false
+  for (let j = start; j < src.length; j++) {
+    const c = src[j]
+    if (inStr) {
+      if (esc) { esc = false; continue }
+      if (c === "\\") { esc = true; continue }
+      if (c === "\"") inStr = false
+      continue
+    }
+    if (c === "\"") { inStr = true; continue }
+    if (c === "{") depth++
+    else if (c === "}") {
+      depth--
+      if (depth === 0) return src.slice(start, j + 1)
+    }
+  }
+  return null
+}
+
+/**
+ * Read a learned plugin's PLAYBOOK as data. Never import(), eval, or spawn.
+ * Symlinks, directories, and oversized files return null.
+ */
+export function readLearnedPlaybook(file) {
+  try {
+    const st = fs.lstatSync(file)
+    if (st.isSymbolicLink() || !st.isFile()) return null
+    if (st.size <= 0 || st.size > PLAYBOOK_MAX_BYTES) return null
+    const src = fs.readFileSync(file, "utf8")
+    const json = extractJsonObject(src)
+    if (!json) return null
+    const data = JSON.parse(json)
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Sync catalog of project-local learned plugins. No plugin-host, no import().
+ * Skip dotfiles, symlinks, non-learned_*.mjs, reserved names, and the
+ * global ~/.forge/tools dir. Cap 24. Caller can pass { limit }.
+ */
+export function indexLearnedPlugins(cwd = process.cwd(), opts = {}) {
+  const dir = learnedPluginsDir(cwd)
+  if (underDir(dir, PLUGINS_DIR) || path.resolve(PLUGINS_DIR) === path.resolve(dir)) return []
+  let entries = []
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return [] }
+  const cap = Math.min(64, Math.max(0, Number(opts.limit) || INDEX_CAP))
+  const out = []
+  const seen = new Set()
+  const sorted = entries.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)))
+  for (const e of sorted) {
+    if (out.length >= cap) break
+    const name = String(e.name || "")
+    if (!name || name.startsWith(".")) continue
+    if (!name.endsWith(".mjs")) continue
+    const stem = name.slice(0, -4)
+    if (!stem.startsWith("learned_")) continue
+    if (!NAME_RE.test(stem) || FORBIDDEN_NAMES.has(stem)) continue
+    const full = path.join(dir, name)
+    let st
+    try { st = fs.lstatSync(full) } catch { continue }
+    if (st.isSymbolicLink() || !st.isFile()) continue
+    const book = readLearnedPlaybook(full)
+    if (!book) continue
+    const tool = NAME_RE.test(String(book.tool || "")) ? String(book.tool) : stem
+    if (!NAME_RE.test(tool) || FORBIDDEN_NAMES.has(tool) || seen.has(tool)) continue
+    seen.add(tool)
+    const desc = String(book.description || book.task || "").slice(0, 200)
+    out.push({
+      name: tool,
+      description: desc,
+      desc,
+      isolated: true,
+      readOnly: true,
+      source: "learned",
+      path: full,
+    })
+  }
+  return out
+}
