@@ -5,7 +5,7 @@ import { toAnthropicContent } from "./vision.js"
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
  * Two wire protocols:
- *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 17 providers
+ *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 18 providers
  *   "anthropic" POST {baseUrl}/v1/messages       (x-api-key)  — anthropic
  *
  * streamChat()          → SSE streaming: text / reasoning / tool_calls / usage / done events
@@ -32,6 +32,7 @@ export const CATALOG = [
   { name: "huggingface",   label: "Hugging Face",             protocol: "openai",    baseUrl: "https://router.huggingface.co/v1",                        envKey: "HF_TOKEN",           needsKey: true,  models: ["meta-llama/Llama-3.3-70B-Instruct"], contextWindow: 128000, keyUrl: "https://huggingface.co/settings/tokens" },
   { name: "ollama",        label: "Ollama (local, no key)",   protocol: "openai",    baseUrl: "http://localhost:11434/v1",                               envKey: "",                   needsKey: false, models: ["llama3.2", "qwen2.5-coder"], contextWindow: 128000, keyUrl: "" },
   { name: "custom",        label: "Custom OpenAI-compatible", protocol: "openai",    baseUrl: "",                                                        envKey: "CUSTOM_API_KEY",     needsKey: true,  models: [], contextWindow: 128000, keyUrl: "" },
+  { name: "apinex",        label: "APInex (all models)",      protocol: "openai",    baseUrl: "https://api.apinex.bond/v1",                             envKey: "APINEX_API_KEY",     needsKey: true,  models: ["gpt-5.6-luna", "grok-4.6", "claude-sonnet-5", "free/gemini-3.8-flash"], contextWindow: 1048576, keyUrl: "https://apinex.bond" },
 ]
 
 export function getCatalog(name) {
@@ -306,10 +307,33 @@ function headersFor(proto, apiKey) {
 // v18: listModels also returns `entries` — full metadata when the provider
 // sends it (id, name, context, free) — so pickers can badge FREE models.
 // ---------------------------------------------------------------------------
-export async function listModels({ protocol, baseUrl, apiKey, catalog }) {
+export async function listModels({ protocol, baseUrl, apiKey, catalog, extraModels, publicUrl } = {}) {
+  const extras = Array.isArray(extraModels) ? extraModels : []
   const proto = protocol || "openai"
   const base = (baseUrl || catalog?.baseUrl || "").replace(/\/$/, "")
-  if (!base) return { models: catalog?.models ?? [], live: false }
+  const finish = (models, live, extra = {}) => {
+    const ids = unionModelIds(models, extras)
+    const entries = Array.isArray(extra.entries) ? extra.entries.slice() : []
+    const have = new Set(entries.map((e) => e && e.id))
+    for (const id of extras) {
+      const s = String(id || "").trim()
+      if (s && !have.has(s)) entries.push({ id: s, name: "", context: null, free: isFreeModelId(s) })
+    }
+    const out = { models: ids, live: Boolean(live), entries }
+    if (extra.warning) out.warning = extra.warning
+    if (extra.source) out.source = extra.source
+    return out
+  }
+  if (isApinexProvider(catalog, base)) {
+    const r = await listApinexModels({ baseUrl: base, apiKey, publicUrl, timeoutMs: 8000 })
+    if (r.live && r.all.length) return finish(r.all.map((e) => e.id), true, { entries: r.all, source: r.source })
+    return finish(
+      [...(catalog?.models ?? []), ...APINEX_FREE_FALLBACK.map((e) => e.id)],
+      false,
+      { warning: r.warning, entries: r.free?.length ? r.free : APINEX_FREE_FALLBACK, source: "offline" },
+    )
+  }
+  if (!base) return finish(catalog?.models ?? [], false)
   try {
     const url = proto === "anthropic" ? `${base}/v1/models?limit=100` : `${base}/models`
     const res = await fetch(url, { headers: headersFor(proto, apiKey), signal: AbortSignal.timeout(15000) })
@@ -321,25 +345,65 @@ export async function listModels({ protocol, baseUrl, apiKey, catalog }) {
       .filter((m) => m && m.id)
     const ids = entries.map((m) => m.id).sort()
     if (!ids.length) throw new Error("empty model list")
-    return { models: ids, live: true, entries }
+    return finish(ids, true, { entries })
   } catch (e) {
-    return { models: catalog?.models ?? [], live: false, warning: e.message }
+    return finish(catalog?.models ?? [], false, { warning: e.message })
   }
 }
 
-/** Normalize one /models entry from any OpenAI-compatible or OpenRouter-style
- *  payload: { id, name?, context_length|context?, pricing? } → { id, name,
- *  context, free }. Free = both prices are exactly "0" or the id ends :free. */
+/** Normalize one /models entry from any OpenAI-compatible, OpenRouter-style,
+ *  or APInex public catalog payload. Free = :free suffix, free/ prefix,
+ *  both prices exactly 0, or dollarsPer1M === 0. */
 function normalizeModelEntry(m) {
   if (!m || typeof m !== "object") return null
   const id = String(m.id || m.name || "").trim()
   if (!id) return null
-  const ctxRaw = m.context_length ?? m.context ?? m.top_provider?.context_length
-  const context = Number.isFinite(Number(ctxRaw)) ? Number(ctxRaw) : null
+  const ctxRaw = m.context_length ?? m.context ?? m.contextWindow ?? m.top_provider?.context_length
+  let context = Number.isFinite(Number(ctxRaw)) && Number(ctxRaw) > 1000 ? Number(ctxRaw) : null
+  if (context == null && typeof ctxRaw === "string") {
+    const n = parseFloat(ctxRaw)
+    if (Number.isFinite(n)) {
+      if (/m$/i.test(ctxRaw.trim())) context = Math.round(n * 1_000_000)
+      else if (/k$/i.test(ctxRaw.trim())) context = Math.round(n * 1000)
+    }
+  }
   const price = m.pricing ?? {}
   const pZero = (v) => v !== undefined && Number(v) === 0
-  const free = id.endsWith(":free") || (pZero(price.prompt) && pZero(price.completion))
-  return { id, name: typeof m.name === "string" ? m.name : "", context, free }
+  const dollars = Number(m.dollarsPer1M)
+  const free = id.endsWith(":free") || id.startsWith("free/")
+    || (pZero(price.prompt) && pZero(price.completion))
+    || (Number.isFinite(dollars) && dollars === 0)
+  return {
+    id,
+    name: typeof m.name === "string" ? m.name : "",
+    context,
+    free,
+    dollarsPer1M: Number.isFinite(dollars) ? dollars : null,
+    provider: typeof m.provider === "string" ? m.provider : "",
+  }
+}
+
+export function isFreeModelId(id, entry) {
+  if (entry && entry.free) return true
+  const s = String(id || "")
+  return s.endsWith(":free") || s.startsWith("free/")
+}
+
+function unionModelIds(primary, extra) {
+  const out = []
+  const seen = new Set()
+  for (const id of [...(extra || []), ...(primary || [])]) {
+    const s = String(id || "").trim()
+    if (!s || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+  }
+  return out
+}
+
+export function isApinexProvider(catalog, baseUrl) {
+  if (catalog?.name === "apinex") return true
+  return /apinex\.bond/i.test(String(baseUrl || catalog?.baseUrl || ""))
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +435,66 @@ export async function listOpenRouterModels({ baseUrl, apiKey, timeoutMs = 8000 }
     return { live: true, free, all: entries, total: entries.length }
   } catch (e) {
     return { live: false, free: [], all: [], warning: String(e?.message ?? e) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// APInex — OpenAI-compatible gateway (https://api.apinex.bond/v1).
+// Authenticated GET /v1/models when a key is set. Public live catalog
+// (no key) at https://apinex.bond/api/public/models. Custom model ids
+// still work: listModels extraModels / wizard [m] / `forge use --model`.
+// ---------------------------------------------------------------------------
+export const APINEX_PUBLIC_MODELS_URL = "https://apinex.bond/api/public/models"
+
+export const APINEX_FREE_FALLBACK = [
+  { id: "free/gemini-3.8-flash", name: "Gemini 3.8 Flash", context: 1_000_000, free: true },
+  { id: "free/muse-spark-1.3", name: "Muse Spark 1.3", context: 1_000_000, free: true },
+  { id: "free/glm-5.3-flash", name: "GLM-5.3 Flash", context: 1_000_000, free: true },
+  { id: "free/gemini-3.1-pro", name: "Gemini 3.1 Pro", context: 1_000_000, free: true },
+  { id: "free/gpt-5.6-luna", name: "Gpt 5.6 Luna", context: 1_000_000, free: true },
+  { id: "free/qwen-3.8-max", name: "Qwen 3.8 MAX", context: 1_000_000, free: true },
+  { id: "free/deepseek-v4.1-flash", name: "Deepseek V4.1 Flash", context: 1_000_000, free: true },
+]
+
+export async function listApinexModels({ baseUrl, apiKey, timeoutMs = 8000, publicUrl } = {}) {
+  const base = (baseUrl || "https://api.apinex.bond/v1").replace(/\/$/, "")
+  if (apiKey) {
+    try {
+      const res = await fetch(`${base}/models`, {
+        headers: headersFor("openai", apiKey),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      if (res.ok) {
+        const j = await res.json()
+        const entries = (j?.data ?? j?.models ?? []).map(normalizeModelEntry).filter((m) => m && m.id)
+        if (entries.length) {
+          const free = entries.filter((m) => m.free).sort((a, b) => (b.context ?? 0) - (a.context ?? 0))
+          return { live: true, source: "auth", free, all: entries, total: entries.length }
+        }
+      }
+    } catch { /* public catalog still works without a key */ }
+  }
+  const pub = publicUrl || APINEX_PUBLIC_MODELS_URL
+  try {
+    const res = await fetch(pub, {
+      headers: { "user-agent": `forge-agent/${VERSION}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const j = await res.json()
+    const entries = (j?.models ?? j?.data ?? []).map(normalizeModelEntry).filter((m) => m && m.id)
+    if (!entries.length) throw new Error("empty model list")
+    const free = entries.filter((m) => m.free).sort((a, b) => (b.context ?? 0) - (a.context ?? 0))
+    return { live: true, source: "public", free, all: entries, total: entries.length }
+  } catch (e) {
+    return {
+      live: false,
+      source: "offline",
+      free: APINEX_FREE_FALLBACK,
+      all: APINEX_FREE_FALLBACK,
+      warning: String(e?.message ?? e),
+      total: APINEX_FREE_FALLBACK.length,
+    }
   }
 }
 

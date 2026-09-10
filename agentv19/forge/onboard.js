@@ -32,7 +32,7 @@
  */
 import readline from "node:readline/promises"
 import { saveConfig, maskKey, USER_CONFIG_PATH, pushRecentModel, safeView } from "./config.js"
-import { CATALOG, getCatalog, envKeyFor, listModels, listOpenRouterModels, OPENROUTER_FREE_FALLBACK, probe } from "./providers.js"
+import { CATALOG, getCatalog, envKeyFor, listModels, listOpenRouterModels, OPENROUTER_FREE_FALLBACK, listApinexModels, APINEX_FREE_FALLBACK, probe } from "./providers.js"
 import { writeModelCache, freeFromCache } from "./modelcache.js"
 import { resolveSkillsDir, indexSkills } from "./skills.js"
 import { recordHealth } from "./health.js"
@@ -195,10 +195,28 @@ async function askBaseUrl(rl, prov, current) {
 
 /** v18: free-model detection for a provider.
  *  OpenRouter's /models endpoint is PUBLIC — detection needs NO key and runs
- *  BEFORE the key step. Fallback chain (never fails, never stalls):
+ *  BEFORE the key step. APInex's public catalog is the same (no key).
+ *  Fallback chain (never fails, never stalls):
  *    live fetch → models-cache.json → curated offline list
  *  Returns { entries, source: "live"|"cached"|"offline" } (entries may be []). */
 async function detectFreeEntries(prov, { baseUrl, apiKey } = {}) {
+  if (prov.name === "apinex") {
+    const base = baseUrl || prov.baseUrl || ""
+    info(`detecting APInex models from public catalog (no key needed)…`)
+    const r = await listApinexModels({ baseUrl: base, apiKey })
+    if (r.live && (r.free.length || r.all.length)) {
+      writeModelCache("apinex", r.all)
+      ok(`${r.free.length} free models detected (of ${r.total} total) — listed first below`)
+      return { entries: r.free.length ? r.free : r.all, source: "live" }
+    }
+    const cached = freeFromCache("apinex")
+    if (cached.length) {
+      warn(`live detection unavailable (${r.warning ?? "offline"}) — using last cached list`)
+      return { entries: cached, source: "cached" }
+    }
+    warn(`live detection unavailable (${r.warning ?? "offline"}) — showing built-in free suggestions`)
+    return { entries: APINEX_FREE_FALLBACK, source: "offline" }
+  }
   if (prov.name !== "openrouter") return { entries: [], source: "none" }
   const base = baseUrl || prov.baseUrl || ""
   info(`detecting free models from ${base || "openrouter"}…`)
@@ -351,7 +369,7 @@ export async function wizardProviderSteps(rl, config, prov) {
   //    v18: OpenRouter gets free-model detection FIRST (public endpoint, no
   //    key needed) — free models are listed at the top of the picker.
   let freeEntries = []
-  if (prov.name === "openrouter") {
+  if (prov.name === "openrouter" || prov.name === "apinex") {
     const det = await detectFreeEntries(prov, { baseUrl, apiKey: envKeyFor(prov.name) || "" })
     freeEntries = det.entries
   }

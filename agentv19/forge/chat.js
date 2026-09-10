@@ -26,7 +26,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback } from "./providers.js"
+import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
@@ -1862,10 +1862,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       case "models": {
         info(`fetching models from ${p.name}…`)
-        const { models, live, warning } = await listModels({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, catalog: getCatalog(p.name) })
+        const { models, live, warning } = await listModels({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, catalog: getCatalog(p.name), extraModels: config.providers?.[p.name]?.models })
         if (warning) warn(warning)
         console.log(dim(live ? "(live)" : "(built-in list)"))
-        for (const m of models.slice(0, 50)) console.log("  " + (m === p.model ? green("● " + m) : "  " + m))
+        for (const m of models.slice(0, 50)) {
+          const tag = isFreeModelId(m) ? green("FREE ") : ""
+          console.log("  " + tag + (m === p.model ? green("● " + m) : "  " + m))
+        }
         if (models.length > 50) console.log(dim(`  … ${models.length - 50} more`))
         break
       }
