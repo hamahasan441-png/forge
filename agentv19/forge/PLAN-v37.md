@@ -51,9 +51,9 @@ skills into a typo fix.
 
 ## Bigger map (not this release)
 
-§8 language-specific reasoning (Rust ownership / Python packaging as planner
-constraints). World-model rewrite, Tree-sitter as a runtime dep,
-edit-transaction rewrite stay explicitly out.
+Shipped next: **v35.0.0 / PLAN-v38** (language-specific reasoning). World-model
+rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite stay
+explicitly out.
 
 ## Non-goals
 
