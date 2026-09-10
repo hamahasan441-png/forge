@@ -73,10 +73,10 @@ compose (compose stays read-only).
 
 ## Bigger map (not this release)
 
-L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
-a runtime dep, edit-transaction rewrite stay explicitly out. Dropping
-learned plugins from the live tool schema (they still spawn plugin-host
-if selected) is a follow-on, not this layer.
+Shipped next: **v48.0.0 / PLAN-v51** (hostless: learned plugins are
+playbooks, never a live plugin-host spawn). L6 kernel self-mod is
+explicitly out. World-model rewrite, Tree-sitter as a runtime dep,
+edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 

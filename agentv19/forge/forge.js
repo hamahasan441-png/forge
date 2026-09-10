@@ -45,7 +45,7 @@ import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
 import { savePlan, listPlans, readPlan } from "./plans.js"
 import { loadToolPlugins, PLUGINS_DIR } from "./plugins.js"
-import { mergeLearnedPlugins, learnedPluginsDir } from "./extend.js"
+import { indexLearnedPlugins, learnedPluginsDir } from "./extend.js"
 import { BUILTIN_TOOL_NAMES } from "./tools.js"
 import { createRegistry, registerPlugins, checkWriteClassification, costScore } from "./capabilities.js"
 import { route, describeRoute, planExecution } from "./router.js"
@@ -877,8 +877,7 @@ async function main() {
       if (config.tools?.plugins !== false) {
         try {
           const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
-          const merged = await mergeLearnedPlugins(loaded, process.cwd(), { reserved: BUILTIN_TOOL_NAMES })
-          registerPlugins(reg, merged.tools)
+          registerPlugins(reg, loaded.tools)
         } catch { /* best-effort */ }
       }
       const cwd = flags.cwd ? path.resolve(String(flags.cwd)) : process.cwd()
@@ -944,29 +943,46 @@ async function main() {
       return
     }
     case "plugins": {
-      // list user tool plugins loaded from ~/.forge/tools
+      // list user tool plugins from ~/.forge/tools. Learned playbooks are
+      // data (indexLearnedPlugins, no plugin-host), not live tools.
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
-      const merged = await mergeLearnedPlugins(loaded, process.cwd(), { reserved: BUILTIN_TOOL_NAMES })
+      const playbooks = indexLearnedPlugins(process.cwd())
+      const learnedDir = learnedPluginsDir(process.cwd())
       if (JSON_OUT) {
         emitJson({
           dir: PLUGINS_DIR,
-          learned: learnedPluginsDir(process.cwd()),
-          tools: merged.tools.map((t) => ({ name: t.name, readOnly: t.readOnly, description: t.def.function.description, source: t.source })),
-          errors: merged.errors,
+          learned: learnedDir,
+          tools: loaded.tools.map((t) => ({ name: t.name, readOnly: t.readOnly, description: t.def.function.description, source: t.source })),
+          playbooks: playbooks.map((p) => ({
+            name: p.name,
+            isolated: true,
+            readOnly: true,
+            source: "learned",
+            repair: p.repair || "",
+            files: p.files || [],
+            command: p.command || "",
+          })),
+          errors: loaded.errors,
         })
+        try { loaded.close?.() } catch { /* best-effort */ }
         return
       }
       console.log(bold(`tool plugins — ${PLUGINS_DIR}`))
-      console.log(dim(`learned — ${learnedPluginsDir(process.cwd())}`))
-      if (!merged.tools.length && !merged.errors.length) {
+      console.log(dim(`learned — ${learnedDir}`))
+      if (!loaded.tools.length && !loaded.errors.length && !playbooks.length) {
         console.log(dim("  (none) — drop a *.mjs exporting { name, description, parameters, run } here to add a tool"))
       }
-      for (const t of merged.tools) {
+      for (const t of loaded.tools) {
         console.log(`  ${green("✓")} ${cyan(t.name.padEnd(24))} ${t.readOnly ? dim("[read-only] ") : ""}${dim(t.def.function.description.slice(0, 60))}  ${dim("(" + t.source + ")")}`)
       }
-      for (const e of merged.errors) console.log(`  ${red("✗")} ${dim(e)}`)
-      if (merged.tools.length) console.log(dim(`  ${merged.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
-      try { merged.close?.() } catch { /* best-effort */ }
+      for (const p of playbooks) {
+        const hint = String(p.repair || p.description || "").slice(0, 60)
+        console.log(`  ${dim("○")} ${cyan(p.name.padEnd(24))} ${dim("[playbook] ")}${dim(hint)}  ${dim("(learned)")}`)
+      }
+      for (const e of loaded.errors) console.log(`  ${red("✗")} ${dim(e)}`)
+      if (loaded.tools.length) console.log(dim(`  ${loaded.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
+      if (playbooks.length) console.log(dim(`  ${playbooks.length} learned playbook(s) — data, not a live plugin-host spawn`))
+      try { loaded.close?.() } catch { /* best-effort */ }
       return
     }
     case "mcp": {
@@ -1215,7 +1231,7 @@ ${bold("usage")}
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 12 deterministic eval cases, no live model ${dim("(--list, --json)")}
-  ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools)")}
+  ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
   ${cyan("forge models [provider] [--free]")}    list models — --free = OpenRouter free tier only

@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v48.0.0 — "hostless"
+
+### Added (v48.0 — learned plugins are playbooks, never a live plugin-host spawn)
+- **Execute path is hostless.** `runAgent` / `loadChatPlugins` / `forge tools` load `~/.forge/tools` only. A learned plugin is not a live schema entry, so selecting it cannot spawn `plugin-host`.
+- **List as data.** `forge plugins` lists learned entries via `indexLearnedPlugins` (sync). JSON carries a `playbooks` array. User `~/.forge/tools` still load.
+- **v42 loader kept.** `mergeLearnedPlugins` / `loadLearnedPlugins` still exist for tests. Compose still emits `[plugins] learned_…`. `load_skill` still returns PLAYBOOK markdown.
+
+Single mutating writer is unchanged. PLAN-v51 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v47.0.0 — "know"
 
 ### Added (v47.0 — index + graph + lessons as the knowledge graph)

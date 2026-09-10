@@ -129,7 +129,7 @@ Edit it any time, or use commands: `forge config set providers.openai.apiKey sk-
 | `forge skills --check` | validate every skill: name, description, broken relative links, size budget (v20.2) |
 | `forge memory list\|add\|forget <n>\|clear\|prune` | inspect and curate long-term memory (`--project` / `--all`) (v20.2) |
 | `forge plan list\|show\|apply <n\|slug>` | saved plans from `agent --plan` — review one, or execute it later (v20.2) |
-| `forge plugins` | list user tool plugins from `~/.forge/tools/*.mjs` (+ why any were skipped) (v20.2) |
+| `forge plugins` | list user tool plugins from `~/.forge/tools/*.mjs`; learned playbooks listed as data, not hosted (v20.2, v48) |
 | `forge sessions --search "text"` | find a past conversation by title, summary or message content (v20.2) |
 | any data command `--json` | machine-readable output for scripting: sessions, models, plugins, skills --check, memory list (v20.2) |
 
