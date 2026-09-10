@@ -118,14 +118,16 @@ export function formatSkillPicks(picks = []) {
 
 /**
  * Compact "use these, in this order" block for repair / execute.
- * Playbook first (known repair — fast). Then matching skills. Then avoid.
- * Never dumps the 40-name pack. MICRO callers pass empty plugins.
+ * Playbook first (known repair — fast). Then matching skills. Then
+ * long-term lessons (v47 know). Then avoid. Never dumps the 40-name pack.
+ * MICRO callers pass empty plugins / know.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [] } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [] } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
-  const books = pluginBooks.length ? pluginBooks : skillBooks
+  const knowBooks = (know || []).filter((k) => k && k.repair).slice(0, 2)
+  const books = pluginBooks.length ? pluginBooks : skillBooks.length ? skillBooks : knowBooks
   if (books.length) {
     lines.push("TRY FIRST (known repair — apply it, then verify; do not rediscover):")
     for (const p of books) {

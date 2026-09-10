@@ -15,7 +15,7 @@ import path from "node:path"
 import crypto from "node:crypto"
 import { DEFAULT_DIR } from "./config.js"
 import { isStale, writesFromIndex } from "./evidence.js"
-import { linkRecords, consumersOf, testsForFiles } from "./xlang.js"
+import { linkRecords, consumersOf, testsForFiles, implForFiles } from "./xlang.js"
 
 const INDEX_VER = 1
 const RADIUS_CAP = 48
@@ -115,6 +115,16 @@ export function radiusOf(paths, graph, { max = RADIUS_CAP } = {}) {
     }
   } catch { /* miss → files only */ }
   return [...out].slice(0, max)
+}
+
+/** Implementation files the graph already linked from cited tests. */
+export function implOf(paths, graph, { max = 8 } = {}) {
+  if (!graph?.files?.length) return []
+  try {
+    return [...new Set(implForFiles(paths, graph).map(posix).filter(Boolean))].slice(0, max)
+  } catch {
+    return []
+  }
 }
 
 /**

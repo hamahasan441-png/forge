@@ -16,21 +16,26 @@
  * PLAYBOOK JSON — never imported, never hosted. Matching playbooks cite
  * their files into the world snapshot so the noTools planner sees what
  * worked (repair / files / command) without spawning plugin-host.
- * v46: learned SKILL.md bodies (What worked / Files / Verify) join the
- * same snapshot; MODIFY chains skip rediscovery when those files are known.
+ * v47: long-term lessons and the v32 index locate files; the v33 graph
+ * names the implementation a test already imports. Deterministic-first —
+ * skip rediscovery when the knowledge graph already knows the file.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
-import { worldFromCwd, filesCited, radiusOf } from "./memgraph.js"
+import { worldFromCwd, filesCited, radiusOf, indexSnapshot, implOf } from "./memgraph.js"
 import { relevantMemory } from "./memory.js"
-import { hardAvoid, mergeLearnedSkills, readLearnedSkill } from "./evolve.js"
-import { evaluateSkills, selectPlugins } from "./evaluate.js"
+import { hardAvoid, mergeLearnedSkills, readLearnedSkill, HARD_AVOID_MIN } from "./evolve.js"
+import { evaluateSkills, selectPlugins, scoreAgainst } from "./evaluate.js"
 import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir, parseSkillPlaybook } from "./skills.js"
 import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
+import { relevantLessons } from "./lessons.js"
 
 const RADIUS_SHOW = 16
 const FILE_SHOW = 8
+const INDEX_SCAN = 200
+const INDEX_HITS = 2
+const SKIP_REL = /(?:^|\/)(node_modules|dist|\.next|target|vendor|coverage)(?:\/|$)/i
 
 function posix(p) {
   return String(p || "").replace(/\\/g, "/").replace(/^\.\//, "")
@@ -110,6 +115,76 @@ function filesFromSkills(skills) {
   return uniq(out).slice(0, FILE_SHOW)
 }
 
+function relKnowFile(f) {
+  const s = posix(f).replace(/^\.\//, "").trim()
+  if (!s || s.length > 160) return ""
+  if (s.startsWith("/") || s.startsWith("~") || s.includes("://")) return ""
+  if (s.split("/").some((p) => p === ".." || p === "")) return ""
+  return s
+}
+
+function filesFromKnow(know) {
+  const out = []
+  for (const k of know || []) {
+    if (!k || !k.repair) continue
+    for (const f of k.files || []) out.push(f)
+  }
+  return uniq(out).slice(0, FILE_SHOW)
+}
+
+/** High-confidence lessons with a successful repair + files. Read-only. */
+function indexKnow(cwd, task, klass) {
+  if (isMicro(klass)) return []
+  let hits = []
+  try {
+    hits = relevantLessons(task, { cwd, limit: 4, minConfidence: HARD_AVOID_MIN })
+  } catch { return [] }
+  const out = []
+  for (const l of hits) {
+    if (out.length >= 2) break
+    const repair = String(l.successful_repair || l.solution || "").trim()
+    if (!repair) continue
+    if (KERNEL_HINT.test(repair)) continue
+    const files = (Array.isArray(l.files) ? l.files : []).map(relKnowFile).filter(Boolean).slice(0, 4)
+    if (!files.length) continue
+    const stem = (files[0] || "repair").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 24).toLowerCase()
+    out.push({
+      name: `lesson-${stem || "repair"}`,
+      repair: repair.slice(0, 240),
+      files,
+      command: "",
+      source: "lesson",
+    })
+  }
+  return out
+}
+
+/** Locate indexed files by symbol/basename overlap. MICRO skip. */
+function filesFromIndex(cwd, task, klass) {
+  if (isMicro(klass)) return []
+  const q = String(task || "").trim()
+  if (!q) return []
+  let idx
+  try { idx = indexSnapshot(cwd) } catch { return [] }
+  const files = idx?.files
+  if (!files || typeof files !== "object") return []
+  const scored = []
+  let n = 0
+  for (const [rel, rec] of Object.entries(files)) {
+    if (n >= INDEX_SCAN) break
+    if (!rel || SKIP_REL.test(rel)) continue
+    if (rec && rec.config) continue
+    n++
+    const base = String(rel.split("/").pop() || rel).replace(/\.[^.]+$/, "")
+    const desc = Array.isArray(rec?.symbols) ? rec.symbols.slice(0, 24).join(" ") : ""
+    const score = scoreAgainst(q, base, desc)
+    if (score < 2) continue
+    scored.push({ rel: posix(rel), score })
+  }
+  scored.sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel))
+  return scored.slice(0, INDEX_HITS).map((s) => s.rel)
+}
+
 /** Attach What-worked / files / command from learned SKILL.md. Never bundled pack. */
 function attachSkillBodies(skills, cwd) {
   if (!Array.isArray(skills) || !skills.length) return skills || []
@@ -134,6 +209,8 @@ export function playbookFilesOf(c) {
   return uniq([
     ...filesFromPlugins(c?.plugins),
     ...filesFromSkills(c?.skills),
+    ...filesFromKnow(c?.know),
+    ...(c?.world?.files || []),
   ]).slice(0, FILE_SHOW)
 }
 
@@ -190,6 +267,7 @@ export function emptyCompose(klass = null) {
     skills: [],
     avoid: [],
     plugins: [],
+    know: [],
     verify: { command: "", tests: [] },
   }
 }
@@ -254,9 +332,14 @@ export function compose(task = "", opts = {}) {
       try { attachSkillBodies(out.skills, cwd) } catch { /* body is best-effort */ }
     }
   }
+  if (opts.includeLessons !== false) {
+    try { out.know = indexKnow(cwd, q, klass) } catch { out.know = [] }
+  }
   const extraFiles = uniq([
     ...filesFromPlugins(out.plugins),
     ...filesFromSkills(out.skills),
+    ...filesFromKnow(out.know),
+    ...filesFromIndex(cwd, q, klass),
     ...(Array.isArray(opts.files) ? opts.files : []),
   ])
   try {
@@ -265,6 +348,10 @@ export function compose(task = "", opts = {}) {
       files: extraFiles,
     })
   } catch { /* keep empty world */ }
+  const impl = implOf(out.world.files, out.world.graph, { max: FILE_SHOW })
+  if (impl.length) {
+    out.world.files = uniq([...out.world.files, ...impl]).slice(0, FILE_SHOW)
+  }
   const world = out.world
   if (opts.includeMemory !== false) {
     try {
@@ -325,6 +412,18 @@ export function formatCompose(c) {
     if (cmd) line += ` — ${cmd}`
     lines.push(line)
     skillN++
+  }
+  let knowN = 0
+  for (const k of c.know || []) {
+    if (knowN >= 2) break
+    const repair = String(k.repair || "").trim()
+    if (!repair) continue
+    if (KERNEL_HINT.test(repair)) continue
+    let line = `[know] ${k.name}: ${repair.slice(0, 160)}`
+    const files = (k.files || []).filter(Boolean).slice(0, 3).join(", ")
+    if (files) line += ` — ${files}`
+    lines.push(line)
+    knowN++
   }
   const v = c.verify
   if (v && (v.command || (v.tests || []).length)) {

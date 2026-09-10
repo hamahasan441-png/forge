@@ -71,6 +71,8 @@ put compose into the Ω kernel. It is not kernel self-mod (L6).
 
 ## Bigger map (not this release)
 
+Shipped next: **v47.0.0 / PLAN-v50** (know: index locate + graph impl +
+lesson playbook — deterministic-first, no world-model rewrite).
 L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
 a runtime dep, edit-transaction rewrite stay explicitly out. Dropping
 learned plugins from the live tool schema (they still spawn plugin-host

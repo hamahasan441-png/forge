@@ -142,6 +142,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
         skills: composed?.skills || [],
         plugins: composed?.plugins || [],
         avoid: composed?.avoid || [],
+        know: composed?.know || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }
