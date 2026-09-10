@@ -65,8 +65,10 @@ put compose into the Ω kernel. It is not kernel self-mod (L6).
 
 ## Bigger map (not this release)
 
-L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
-a runtime dep, edit-transaction rewrite stay explicitly out.
+Shipped next: **v46.0.0 / PLAN-v49** (apply: learned SKILL.md body + TRY FIRST
+on the cold execute path; MODIFY honors playbookFiles). L6 kernel self-mod
+is explicitly out. World-model rewrite, Tree-sitter as a runtime dep,
+edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 
