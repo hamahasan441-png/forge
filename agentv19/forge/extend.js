@@ -189,6 +189,14 @@ const PLAYBOOK_MARK = "const PLAYBOOK"
 const INDEX_CAP = 24
 const PLAYBOOK_MAX_BYTES = 64 * 1024
 
+function relFile(f) {
+  const s = String(f || "").replace(/\\/g, "/").replace(/^\.\//, "").trim()
+  if (!s || s.length > 160) return ""
+  if (s.startsWith("/") || s.startsWith("~") || s.includes("://")) return ""
+  if (s.split("/").some((p) => p === ".." || p === "")) return ""
+  return s
+}
+
 /**
  * Pull the JSON object after `const PLAYBOOK =` without executing the file.
  * Brace-matched with string/escape awareness. Never eval.
@@ -274,10 +282,12 @@ export function indexLearnedPlugins(cwd = process.cwd(), opts = {}) {
     if (st.isSymbolicLink() || !st.isFile()) continue
     const book = readLearnedPlaybook(full)
     if (!book) continue
+    if (looksLikeKernel(book.task, book.repair, book.files)) continue
     const tool = NAME_RE.test(String(book.tool || "")) ? String(book.tool) : stem
     if (!NAME_RE.test(tool) || FORBIDDEN_NAMES.has(tool) || seen.has(tool)) continue
     seen.add(tool)
     const desc = String(book.description || book.task || "").slice(0, 200)
+    const files = (Array.isArray(book.files) ? book.files : []).map(relFile).filter(Boolean).slice(0, 4)
     out.push({
       name: tool,
       description: desc,
@@ -286,6 +296,9 @@ export function indexLearnedPlugins(cwd = process.cwd(), opts = {}) {
       readOnly: true,
       source: "learned",
       path: full,
+      repair: String(book.repair || "").slice(0, 240),
+      files,
+      command: String(book.command || "").slice(0, 80),
     })
   }
   return out
