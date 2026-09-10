@@ -37,6 +37,7 @@ import { redact } from "./secrets.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
 import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
+import { generatedBoundary } from "./langengine.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
@@ -117,6 +118,8 @@ function realPathOf(abs) {
  *    escapes to ~/.ssh or .env are caught).
  *  write=true: the target (real path) must stay inside the project root.
  *    tools.allowOutsideProject: true opts out (user decision).
+ *    Generated dirs (dist/.next/target/node_modules/…) are refused unless
+ *    ctx.allowGeneratedWrites is set.
  * Returns { ok, abs, error }.
  */
 export function safePath(ctx, p, { write = false } = {}) {
@@ -131,6 +134,15 @@ export function safePath(ctx, p, { write = false } = {}) {
       return {
         ok: false, abs, real,
         error: `ERROR: write target escapes the project directory (${path.relative(ctx.root ?? ctx.cwd, real).slice(0, 60)}) — keep changes inside ${ctx.root ?? ctx.cwd}, or set tools.allowOutsideProject: true in config to allow it`,
+      }
+    }
+    if (!ctx.allowGeneratedWrites) {
+      const gen = generatedBoundary(abs, ctx.root ?? ctx.cwd) || generatedBoundary(real, ctx.root ?? ctx.cwd)
+      if (gen) {
+        return {
+          ok: false, abs, real,
+          error: `ERROR: write target is inside generated directory ${gen} (${path.relative(ctx.root ?? ctx.cwd, abs).slice(0, 60)}) — edit the source, not ${gen}`,
+        }
       }
     }
     return { ok: true, abs, real }
@@ -166,9 +178,30 @@ function resolveWriteAnchor(ctx, abs) {
   const root = ctx.root ?? ctx.cwd
   let rootReal
   try { rootReal = fs.realpathSync(root) } catch { rootReal = path.resolve(root) }
+  const logical = path.resolve(abs)
+
+  // Trailing symlink: never follow the final component unless the dest is
+  // inside the project (in-project aliases). allowOutsideProject does not
+  // follow a trailing symlink that lands outside — atomicWriteInDir then
+  // refuses ESYMLINK on the logical name, so /etc/hostname is never opened.
+  let trailingLink = false
+  try { trailingLink = fs.lstatSync(logical).isSymbolicLink() } catch {}
+  if (trailingLink) {
+    const dest = realPathOf(logical)
+    if (insideDir(dest, rootReal)) return { root: rootReal, target: dest }
+    const parent = path.dirname(logical)
+    let parentReal
+    try { parentReal = fs.realpathSync(parent) } catch { parentReal = parent }
+    if (insideDir(parentReal, rootReal)) return { root: rootReal, target: logical }
+    if (!ctx.allowOutsideProject) {
+      throw new SecureFsError(`write target escapes the project directory (${path.relative(rootReal, dest).slice(0, 60)})`, "EESCAPE")
+    }
+    return { root: parentReal, target: logical }
+  }
+
   const real = realPathOf(abs)
   if (insideDir(real, rootReal)) return { root: rootReal, target: real }
-  if (insideDir(path.resolve(abs), rootReal) && !fs.existsSync(abs)) return { root: rootReal, target: path.resolve(abs) }
+  if (insideDir(logical, rootReal) && !fs.existsSync(abs)) return { root: rootReal, target: logical }
   if (!ctx.allowOutsideProject) {
     throw new SecureFsError(`write target escapes the project directory (${path.relative(rootReal, real).slice(0, 60)})`, "EESCAPE")
   }
@@ -535,6 +568,7 @@ export function makeToolContext(opts = {}) {
     readOnly = false,
     root,
     allowOutsideProject = false,
+    allowGeneratedWrites = false,
     allowSudo = false,
     assumeYes = false,
     allowNetworkUpload = false, // v21.1: curl -d / wget --post-file / scp … from the model
@@ -567,7 +601,7 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     mode,
-    allowOutsideProject, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, fetchPrivateUrls,
+    allowOutsideProject, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,

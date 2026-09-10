@@ -54,8 +54,9 @@ in a repo with no `Cargo.toml`. It does not run `rustc --version`.
 
 ## Bigger map (not this release)
 
-§4 semantic world model beyond the v32 index (still no Tree-sitter
-runtime dep). Edit-transaction rewrite stays explicitly out.
+Shipped next: **v38.0.0 / PLAN-v41** (gap-fix: trailing-symlink writes,
+generated-dir refuse, language-native HIGH TESTS). World-model rewrite,
+Tree-sitter as a runtime dep, edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 
