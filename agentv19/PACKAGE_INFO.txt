@@ -1,4 +1,4 @@
-forge v29.0.0 — CLI-only build
+forge v30.0.0 — CLI-only build
 - zero-dependency Node CLI (>=18), runs directly against providers (no localhost)
 - 18 providers with per-provider contextWindow + keyUrl docs: openai, anthropic,
   zai, deepseek, groq, openrouter, gemini, mistral, xai, together, cerebras,
@@ -66,14 +66,15 @@ forge v29.0.0 — CLI-only build
 - v19 carryover: AutoPick, terminal-in-chat (cd/export persist, model-visible
   notes), deep think (--deep + provider reasoning params), tiered shrink-then-
   summarize context reduction, lazy wizard import
-- 17 agent tools (auto-used in chat AND agent): bash (risk-classified),
-  read/write/edit, multi_edit (atomic), apply_patch (atomic unified diff,
-  created-file undo), glob_files, grep_files, list_dir, fetch_url (SSRF-guarded)
-  + web_search, todo, think, memory (hierarchical), delegate (roles),
-  load_skill (traversal-safe), git_status; parallel reads, serialized writes,
-  checkpoints + undo; PLAN MODE (--plan) read-only hard-block
+- 18 agent tools (auto-used in chat AND agent): bash (risk-classified),
+  read/write/edit, read_image (local png/jpeg/gif/webp, vision parts when
+  the provider accepts them), multi_edit (atomic), apply_patch (atomic unified
+  diff, created-file undo), glob_files, grep_files, list_dir, fetch_url
+  (SSRF-guarded) + web_search, todo, think, memory (hierarchical), delegate
+  (roles), load_skill (traversal-safe), git_status; parallel reads, serialized
+  writes, checkpoints + undo; PLAN MODE (--plan) read-only hard-block
 - doctor: env self-check (platform/RAM/git/dirs) + provider/context line +
-  ✓ tested badge (--tools probes all 17 tools, offline tools SKIP cleanly)
+  ✓ tested badge (--tools probes all 18 tools, offline tools SKIP cleanly)
 - Tests: `cd forge && npm test` runs every suite (security, providers,
   diffpatch, memory, failover, chat, walk, plans, checkpoint, repomap, plugins,
   retrieval, sessions, skills, json, e2e, clean-room install) and exits non-zero

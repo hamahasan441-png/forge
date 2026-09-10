@@ -30,6 +30,7 @@
  *     model narrative; the tail keeps whole turns only.
  */
 import { estimateTokens } from "./ui.js"
+import { stripOldVisionParts } from "./vision.js"
 
 const FILE_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])
 const KEEP_TURNS_DEFAULT = 3
@@ -206,10 +207,17 @@ export function renderLedger(l, { maxChars = 6000 } = {}) {
  */
 export async function compactHistory(messages, opts = {}) {
   const { window = 128000, force = false, summarize = null, keepTurns = KEEP_TURNS_DEFAULT } = opts
+  const stripped = stripOldVisionParts(messages, { keep: 1 })
+  const visionStripped = stripped !== messages
+  messages = stripped
   const stats = { before: messages.length, after: messages.length, estTokBefore: estimateTokens(JSON.stringify(messages)), estTokAfter: 0, shrunk: 0, folded: 0, summarized: false, stage: "none" }
   const shrinkBudget = Math.floor(window * 0.40)
   const foldBudget = Math.floor(window * 0.55)
-  if (!force && stats.estTokBefore < shrinkBudget) { stats.estTokAfter = stats.estTokBefore; return { messages, changed: false, stats } }
+  if (!force && stats.estTokBefore < shrinkBudget) {
+    stats.estTokAfter = stats.estTokBefore
+    if (visionStripped) stats.stage = "vision-strip"
+    return { messages, changed: visionStripped, stats }
+  }
 
   const { head, turns } = splitTurns(messages)
   if (!turns.length) { stats.estTokAfter = stats.estTokBefore; return { messages, changed: false, stats } }

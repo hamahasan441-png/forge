@@ -24,6 +24,7 @@
 import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
+import { injectPendingVision } from "./vision.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { createLspSession } from "./lsp.js"
@@ -265,6 +266,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     signal,
     subAgent: readonly && !planOnly,
+    vision: config.tools?.vision !== false,
+    visionProvider: { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl },
     delegateRunner: readOnly && !planOnly
       ? null
       : (subTask, subRole) =>
@@ -510,6 +513,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           }
           messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) })
         }
+        injectPendingVision(messages, tools.ctx)
         messages = await compactAgentHistory(messages, p, { onEvent })
         continue
       }

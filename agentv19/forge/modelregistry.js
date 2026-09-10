@@ -6,27 +6,27 @@
  * a cycle: modelstrategy.js imports agent.js for classifyTaskComplexity, so
  * agent.js must never import modelstrategy.js. This file has NO imports.
  *
- * Each entry: capabilities, tags (fast, cheap, coding, reasoning, largectx),
+ * Each entry: capabilities, tags (fast, cheap, coding, reasoning, largectx, vision),
  * contextWindow, latency, cost, tier. Unknown models get no entry — callers
  * fall back to the provider's declared window and conservative heuristics.
  */
 
 export const MODEL_CAPABILITY_REGISTRY = {
   // OpenAI
-  "gpt-4o": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
-  "gpt-4o-mini": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
+  "gpt-4o": { capabilities: ["coding", "reasoning", "vision"], tags: ["coding", "reasoning", "vision"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
+  "gpt-4o-mini": { capabilities: ["coding", "fast", "vision"], tags: ["fast", "cheap", "coding", "vision"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
   "o3-mini": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
   "o1": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
-  "gpt-5": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
+  "gpt-5": { capabilities: ["coding", "reasoning", "largectx", "vision"], tags: ["coding", "reasoning", "largectx", "vision"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
   // Anthropic
-  "claude-sonnet-4-5": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 200000, latency: "normal", cost: "medium", tier: "strong" },
-  "claude-opus-4-1": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
-  "claude-3-5-haiku-latest": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 200000, latency: "fast", cost: "low", tier: "fast" },
-  "claude-3-5-sonnet-latest": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 200000, latency: "normal", cost: "medium", tier: "strong" },
+  "claude-sonnet-4-5": { capabilities: ["coding", "reasoning", "vision"], tags: ["coding", "reasoning", "vision"], contextWindow: 200000, latency: "normal", cost: "medium", tier: "strong" },
+  "claude-opus-4-1": { capabilities: ["coding", "reasoning", "largectx", "vision"], tags: ["coding", "reasoning", "largectx", "vision"], contextWindow: 200000, latency: "slow", cost: "high", tier: "strong" },
+  "claude-3-5-haiku-latest": { capabilities: ["coding", "fast", "vision"], tags: ["fast", "cheap", "coding", "vision"], contextWindow: 200000, latency: "fast", cost: "low", tier: "fast" },
+  "claude-3-5-sonnet-latest": { capabilities: ["coding", "reasoning", "vision"], tags: ["coding", "reasoning", "vision"], contextWindow: 200000, latency: "normal", cost: "medium", tier: "strong" },
   // Google
-  "gemini-2.5-pro": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "slow", cost: "high", tier: "strong" },
-  "gemini-2.5-flash": { capabilities: ["coding", "fast", "largectx"], tags: ["fast", "coding", "largectx"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
-  "gemini-1.5-pro": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "normal", cost: "medium", tier: "strong" },
+  "gemini-2.5-pro": { capabilities: ["coding", "reasoning", "largectx", "vision"], tags: ["coding", "reasoning", "largectx", "vision"], contextWindow: 1048576, latency: "slow", cost: "high", tier: "strong" },
+  "gemini-2.5-flash": { capabilities: ["coding", "fast", "largectx", "vision"], tags: ["fast", "coding", "largectx", "vision"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
+  "gemini-1.5-pro": { capabilities: ["coding", "reasoning", "largectx", "vision"], tags: ["coding", "reasoning", "largectx", "vision"], contextWindow: 1048576, latency: "normal", cost: "medium", tier: "strong" },
   // DeepSeek
   "deepseek-chat": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
   "deepseek-reasoner": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
@@ -40,7 +40,7 @@ export const MODEL_CAPABILITY_REGISTRY = {
   "mistral-large-latest": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },
   "mistral-small-latest": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
   // xAI
-  "grok-4": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 131072, latency: "normal", cost: "medium", tier: "strong" },
+  "grok-4": { capabilities: ["coding", "reasoning", "vision"], tags: ["coding", "reasoning", "vision"], contextWindow: 131072, latency: "normal", cost: "medium", tier: "strong" },
   "grok-3-mini": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 131072, latency: "fast", cost: "low", tier: "fast" },
   // Z.ai
   "glm-4.6": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "medium", tier: "strong" },

@@ -53,7 +53,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v29.0.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v30.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
@@ -214,9 +214,9 @@ check "chat inline tool call" "$out" "[chat] bash"
 check "chat inline tool executed" "$out" "forge-e2e-ok"
 check "chat inline final streamed" "$out" "TOOL RESULT RECEIVED"
 
-# 30. /tools lists the 17 tools
+# 30. /tools lists the 18 tools
 out=$(printf '/tools\n/exit\n' | $F chat 2>&1)
-check "/tools lists tools" "$out" "forge tools (17)"
+check "/tools lists tools" "$out" "forge tools (18)"
 check "/tools shows glob" "$out" "glob_files"
 check "/tools shows apply_patch" "$out" "apply_patch"
 

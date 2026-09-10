@@ -91,6 +91,7 @@ export const CAPABILITY = {
   SKILL_LOADING: "skill_loading",
   DELEGATION: "delegation",
   VERIFICATION: "verification",
+  IMAGE_READ: "image_read",
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +127,7 @@ const CONSERVATIVE = {
 const C = (latency, tokens, output, extra = {}) => ({ latency, tokens, output, cpu: "low", memory: "low", network: false, ...extra })
 
 // ---------------------------------------------------------------------------
-// built-in tool metadata (the 17 shipped tools)
+// built-in tool metadata (the 18 shipped tools)
 // ---------------------------------------------------------------------------
 
 export const BUILTIN_CAPABILITIES = [
@@ -140,6 +141,18 @@ export const BUILTIN_CAPABILITIES = [
     timeout: 20, cost: C(40, 900, 12000), verification_required: false, idempotent: true,
     preferred_for: ["inspect a known file", "read a specific line range", "confirm the exact text before editing"],
     avoid_when: ["the file path is unknown", "you only need to know whether a symbol exists", "the file is huge and a search would answer the question"],
+    mutates: [],
+  },
+  {
+    name: "read_image",
+    description: "Read a local raster image and attach it for vision-capable models (metadata always).",
+    capabilities: [CAPABILITY.IMAGE_READ],
+    klass: CLASS.READ, classes: [CLASS.READ],
+    risk: RISK.LOW, read_only: true, reversible: true, parallel_safe: true,
+    requires_confirmation: false, requires_network: false, requires_filesystem: true,
+    timeout: 20, cost: C(80, 400, 8000), verification_required: false, idempotent: true,
+    preferred_for: ["inspect a screenshot", "read a diagram or failing-UI capture", "describe a local png/jpeg"],
+    avoid_when: ["the file is text (use read_file)", "the path is a URL", "the provider cannot accept image parts and you only needed pixels"],
     mutates: [],
   },
   {
@@ -615,6 +628,7 @@ export function operationRisk(name, args = {}, ctx = {}) {
     case "delegate":
       return { risk: RISK.MEDIUM, reasons: ["spawns a read-only sub-agent (model cost, latency)"], klass: CLASS.READ, network: true, mutation: false }
     case "read_file":
+    case "read_image":
     case "grep_files":
     case "glob_files":
     case "list_dir":

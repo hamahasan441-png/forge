@@ -1,9 +1,9 @@
 /**
  * forge — agent tools (zero dependencies, Node built-ins only)
  *
- * bash, read_file, write_file, edit_file, multi_edit, apply_patch, list_dir, glob_files,
+ * bash, read_file, read_image, write_file, edit_file, multi_edit, apply_patch, list_dir, glob_files,
  * grep_files, fetch_url, web_search, todo, think, memory, delegate, load_skill, git_status
- * (17 tools)
+ * (18 tools)
  *
  * v20 hardening:
  *   - safePath: project-boundary enforcement for WRITES, symlink escape checks,
@@ -38,6 +38,10 @@ import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
 import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
+import {
+  loadLocalImage, formatImageToolResult, queuePendingVision,
+  providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
+} from "./vision.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -228,6 +232,14 @@ export const TOOL_DEFS = [
   {
     type: "function",
     function: {
+      name: "read_image",
+      description: "Read a local raster image (png/jpeg/gif/webp) and attach it for vision-capable models. Returns mime, pixel size, and byte size. Sensitive files are protected. Remote URLs and SVG are refused. When the provider cannot accept image parts, only metadata is returned — pixels are never faked.",
+      parameters: { type: "object", properties: { path: { type: "string", description: "local file path (not a URL)" } }, required: ["path"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "write_file",
       description: "Create or overwrite a file with content (parents auto-created, auto-checkpointed — undo removes created files). Writes must stay inside the project directory.",
       parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
@@ -411,7 +423,7 @@ function isReadOnlyAllowedBash(command) {
 
 export const VERIFICATION_TOOLS = {
   allowed: [
-    "read_file", "list_dir", "glob_files", "grep_files", "git_status",
+    "read_file", "read_image", "list_dir", "glob_files", "grep_files", "git_status",
     "bash",            // approved verification commands only (test/build/lint)
     "think",           // reasoning never mutates
     "load_skill",      // read-only skill docs
@@ -502,6 +514,8 @@ export function makeToolContext(opts = {}) {
     subAgent = false,
     runId = null,
     plugins = [], // v20.2 P3-5: user tool plugins (from loadToolPlugins().tools)
+    vision = true,
+    visionProvider = null,
   } = opts
   // register plugins: write-class ones join WRITE_TOOLS so they are serialized
   // and blocked in read-only sub-agents, exactly like built-in write tools.
@@ -522,6 +536,9 @@ export function makeToolContext(opts = {}) {
     _plugins: pluginMap,
     _delegateActive: 0,
     _delegateMax: Math.max(1, Math.min(AGENT_BUDGETS.maxParallelSubAgents, maxParallelDelegates)),
+    vision: vision !== false,
+    visionProvider: visionProvider || null,
+    _pendingVision: [],
   }
   const allDefs = plugins.length ? [...TOOL_DEFS, ...plugins.map((p) => p.def)] : TOOL_DEFS
   let filteredDefs = allDefs
@@ -538,7 +555,7 @@ export function makeToolContext(opts = {}) {
       return true
     })
   }
-  return { defs: filteredDefs, exec: (name, args) => execTool(ctx, name, args || {}) }
+  return { defs: filteredDefs, exec: (name, args) => execTool(ctx, name, args || {}), ctx }
 }
 
 /** Built-in tool names — used to reject plugins that shadow a built-in. */
@@ -859,6 +876,26 @@ function read_file(ctx, args) {
   else if (eof && total > shown) note = `\n... (${total - shown} more lines; total ${total})`
   else if (!eof) note = "\n... (more lines follow — use offset/limit to continue)"
   return cap(numbered + note, ctx.maxToolOutput)
+}
+
+function read_image(ctx, args) {
+  const rel = String(args.path ?? "").trim()
+  if (isRemotePath(rel)) return "ERROR: read_image is local files only (no remote fetch)"
+  const sp = safePath(ctx, rel)
+  if (!sp.ok) return sp.error
+  const rec = loadLocalImage(sp.abs)
+  if (!rec.ok) return rec.error
+  const visionOn = ctx.vision !== false
+  const capable = visionOn && providerSupportsVision(ctx.visionProvider)
+  let attached = false
+  let reason = ""
+  if (!visionOn) reason = "tools.vision is false (metadata only)"
+  else if (!capable) reason = "provider/model does not accept image parts (metadata only — never fake vision)"
+  else if (rec.tooBig || !rec.buf) reason = `too large to attach (cap ${MAX_IMAGE_BYTES} bytes)`
+  else if ((ctx._pendingVision?.length ?? 0) >= MAX_PENDING) reason = `pending vision cap (${MAX_PENDING} per turn)`
+  else if (queuePendingVision(ctx, rec)) attached = true
+  else reason = "could not queue image part"
+  return formatImageToolResult(rec, { attached, reason })
 }
 
 function write_file(ctx, args) {
@@ -1547,6 +1584,12 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
     return r
   }))
   results.push(await t("read_file", () => execTool(ctx, "write_file", { path: "probe.txt", content: "hello" }).then(() => execTool(ctx, "read_file", { path: "probe.txt" }))))
+  {
+    // 1×1 PNG (IHDR 1x1, IDAT, IEND) — doctor proves read_image without a provider
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478da63000000020001e221bc330000000049454e44ae426082", "hex")
+    fs.writeFileSync(path.join(tmp, "probe.png"), png)
+    results.push(await t("read_image", () => execTool(ctx, "read_image", { path: "probe.png" })))
+  }
   results.push(await t("write_file", () => execTool(ctx, "write_file", { path: "probe.txt", content: "v2" })))
   results.push(await t("edit_file", () => execTool(ctx, "edit_file", { path: "probe.txt", old: "v2", new: "v3" })))
   results.push(await t("multi_edit", () => execTool(ctx, "multi_edit", { path: "probe.txt", edits: [{ old: "v3", new: "a" }].slice(0, 1) })))
@@ -1594,7 +1637,7 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
 // secret redaction before it reaches the model / sessions / logs.
 // ---------------------------------------------------------------------------
 
-const REDACTED_TOOLS = new Set(["bash", "read_file", "fetch_url", "web_search", "delegate", "git_status", "grep_files", "memory"])
+const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "delegate", "git_status", "grep_files", "memory"])
 
 export async function execTool(ctx, name, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) args = {}
@@ -1616,6 +1659,7 @@ export async function execTool(ctx, name, args) {
   switch (name) {
     case "bash": result = await runBash(ctx, String(args.command ?? ""), args.timeout_sec); break
     case "read_file": result = read_file(ctx, args); break
+    case "read_image": result = read_image(ctx, args); break
     case "write_file": result = write_file(ctx, args); break
     case "edit_file": result = edit_file(ctx, args); break
     case "list_dir": result = list_dir(ctx, args); break

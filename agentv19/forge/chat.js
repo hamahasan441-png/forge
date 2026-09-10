@@ -30,6 +30,7 @@ import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyF
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { injectPendingVision, stripOldVisionParts } from "./vision.js"
 import { createToolIntel } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
@@ -78,7 +79,7 @@ export const COMMANDS = [
   ["models", "", "list models of active provider (live)"],
   ["key", "<api-key>", "set API key for active provider"],
   ["skills", "[name]", "list skills, or load one into the conversation"],
-  ["tools", "[on|off]", "list the 17 agent tools, or toggle auto-tools in chat"],
+  ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
   ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
   ["compact", "", "force context compaction (older turns → summary)"],
@@ -136,7 +137,7 @@ ${bold("setup")}
   /models               list models of active provider (live)
   /key <api-key>        set API key for active provider
   /skills [name]        list skills, or load one into the conversation
-  /tools [on|off]       list the 17 agent tools, or toggle auto-tools in chat
+  /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
   /deep                 toggle DEEP THINKING (high reasoning effort + bigger budgets)
@@ -307,7 +308,7 @@ function compact(messages, maxMessages) {
   const cap = maxMessages ?? 40
   let out = messages.length <= cap ? messages.slice() : messages.slice(messages.length - cap)
   while (out.length && out[0].role !== "user") out.shift()
-  return out
+  return stripOldVisionParts(out, { keep: 1 })
 }
 
 /** Piped (non-TTY) stdin: slurp ONCE with a short grace timer so an
@@ -500,6 +501,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
+    vision: config.tools?.vision !== false,
+    visionProvider: { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl },
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
         runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
@@ -875,6 +878,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // canonical history: ONE assistant tool_calls message, then one tool result each
     messages.push({ role: "assistant", content: "", tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })) })
     for (let i = 0; i < parsed.length; i++) messages.push({ role: "tool", tool_call_id: parsed[i].tc.id, content: String(results[i].result) })
+    injectPendingVision(messages, tools.ctx)
   }
 
   /** v20: resolve effort for this turn. Explicit --deep/chat.deep wins; the
@@ -1863,7 +1867,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
         console.log(bold(`forge tools (${toolCount()}) — auto-use ${chatToolsEnabled() ? "ON" : "OFF"}`))
         console.log(`  ${dim("web").padEnd(13)} web_search, fetch_url`)
-        console.log(`  ${dim("files").padEnd(13)} read_file, write_file, edit_file, multi_edit, apply_patch, glob_files, list_dir, grep_files`)
+        console.log(`  ${dim("files").padEnd(13)} read_file, read_image, write_file, edit_file, multi_edit, apply_patch, glob_files, list_dir, grep_files`)
         console.log(`  ${dim("shell").padEnd(13)} bash, git_status`)
         console.log(`  ${dim("agent-brain").padEnd(13)} think, todo, memory, delegate, load_skill`)
         console.log(dim("  /tools off = plain chat • /tools on = model auto-calls tools mid-chat • writes auto-checkpointed (/undo restores)"))
