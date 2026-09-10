@@ -155,6 +155,7 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
   const steps = []
   const step = (phase, capability, why, extra = {}) => steps.push({ phase, capability, why, optional: false, ...extra })
   const fileKnown = a.files.some((f) => known.has(f)) || a.files.some((f) => existsRel(f, context.cwd))
+  const playFiles = [...new Set((context.playbookFiles || []).filter(Boolean))].slice(0, 4)
 
   switch (a.primary) {
     case INTENT.INSPECT:
@@ -188,7 +189,6 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
       step("remember", CAPABILITY.MEMORY_WRITE, "persist the fact for future sessions")
       break
     case INTENT.RECOVER: {
-      const playFiles = [...new Set((context.playbookFiles || []).filter(Boolean))].slice(0, 4)
       if (playFiles.length) {
         step("inspect", CAPABILITY.FILE_READ, `playbook file ${playFiles[0]} — skip rediscovery`, { target: playFiles[0] })
         step("modify", CAPABILITY.CODE_MODIFICATION, "apply the known playbook repair (do not rediscover)")
@@ -205,12 +205,19 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
       break
     }
     case INTENT.MODIFY:
-    default:
+    default: {
+      if (playFiles.length) {
+        step("inspect", CAPABILITY.FILE_READ, `playbook file ${playFiles[0]} — skip rediscovery`, { target: playFiles[0] })
+        step("modify", CAPABILITY.CODE_MODIFICATION, "apply the known playbook repair (do not rediscover)")
+        step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success")
+        break
+      }
       if (!fileKnown) step("discover", CAPABILITY.CONTENT_SEARCH, "locate the code to change", { args: { pattern: searchPattern(a) } })
       step("inspect", CAPABILITY.FILE_READ, "read the exact text before replacing it", { target: a.files[0] ?? null })
       step("modify", CAPABILITY.CODE_MODIFICATION, "apply a minimal, surgical edit")
       step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success")
       break
+    }
   }
 
   // §11: drop steps whose answer is already in context

@@ -34,10 +34,10 @@ import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
-import { evaluateSkills, formatSkillPicks, selectPlugins } from "./evaluate.js"
+import { evaluateSkills, formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
-import { compose, formatCompose } from "./compose.js"
+import { compose, formatCompose, playbookFilesOf } from "./compose.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -91,15 +91,12 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   let composed = null
   if (task) {
     try {
-      composed = compose(task, { cwd, config, klass, includeMemory: false, includeSkills: false, plugins })
+      composed = compose(task, { cwd, config, klass, includeMemory: false, plugins })
     } catch { composed = null }
   }
   if (registry) {
-    const playbookFiles = []
-    for (const p of composed?.plugins || []) {
-      for (const f of p.files || []) if (f) playbookFiles.push(f)
-    }
-    const guidance = toolGuidance(task, { registry, cwd, readOnly: readOnly || planOnly, playbookFiles: playbookFiles.slice(0, 8) })
+    const playbookFiles = playbookFilesOf(composed)
+    const guidance = toolGuidance(task, { registry, cwd, readOnly: readOnly || planOnly, playbookFiles })
     if (guidance) lines.push("", guidance)
   }
   if (role && ROLE_DIRECTIVES[role]) lines.push("", ROLE_DIRECTIVES[role])
@@ -140,6 +137,14 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     if (engineBlock) lines.push("", engineBlock)
     const composeBlock = formatCompose(composed)
     if (composeBlock) lines.push("", composeBlock)
+    try {
+      const steer = formatSteer({
+        skills: composed?.skills || [],
+        plugins: composed?.plugins || [],
+        avoid: composed?.avoid || [],
+      })
+      if (steer) lines.push("", steer)
+    } catch { /* steer is best-effort */ }
   }
   return lines.join("\n")
 }

@@ -98,7 +98,12 @@ export function evaluateSkills(task, skills = [], opts = {}) {
     const explicit = namedIn(q, s.name)
     if (micro && !explicit) continue
     const score = scoreAgainst(q, s.name, s.desc || "")
-    if (explicit || score >= min) scored.push({ name: s.name, desc: String(s.desc ?? "").slice(0, 160), score })
+    if (explicit || score >= min) scored.push({
+      name: s.name,
+      desc: String(s.desc ?? "").slice(0, 160),
+      score,
+      ...(s.learned === true ? { learned: true } : {}),
+    })
   }
   scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
   return scored.slice(0, topK)
@@ -118,7 +123,9 @@ export function formatSkillPicks(picks = []) {
  */
 export function formatSteer({ skills = [], plugins = [], avoid = [] } = {}) {
   const lines = []
-  const books = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
+  const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
+  const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
+  const books = pluginBooks.length ? pluginBooks : skillBooks
   if (books.length) {
     lines.push("TRY FIRST (known repair — apply it, then verify; do not rediscover):")
     for (const p of books) {
@@ -130,12 +137,14 @@ export function formatSteer({ skills = [], plugins = [], avoid = [] } = {}) {
       lines.push(s)
     }
   }
-  const skillNames = (skills || []).map((s) => s && s.name).filter(Boolean).slice(0, 3)
-  if (skillNames.length) {
-    lines.push(`SKILLS (call load_skill before using): ${skillNames.join(", ")}`)
+  const named = (skills || []).map((s) => s && s.name).filter(Boolean).slice(0, 3)
+  if (named.length && !skillBooks.length) {
+    lines.push(`SKILLS (call load_skill before using): ${named.join(", ")}`)
+  } else if (named.length && pluginBooks.length) {
+    lines.push(`SKILLS (call load_skill before using): ${named.join(", ")}`)
   }
   const isolated = (plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name)
-  if (isolated.length && !books.length) {
+  if (isolated.length && !pluginBooks.length) {
     lines.push(`PLUGINS (isolated, matching): ${isolated.slice(0, 4).join(", ")}`)
   }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)

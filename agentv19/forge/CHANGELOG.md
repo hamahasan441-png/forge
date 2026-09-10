@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v46.0.0 — "apply"
+
+### Added (v46.0 — skill body + TRY FIRST on execute, MODIFY honors playbookFiles)
+- **Skill snapshot.** `parseSkillPlaybook` reads What worked / Files / Verify from a learned SKILL.md. `compose` attaches the body; `formatCompose` emits `[skill]`. Skill files cite into the world. Kernel-looking bodies are skipped. Bundled pack is not dumped.
+- **TRY FIRST on execute.** `formatSteer` joins the agent / chat system prompt, not only repair. A skill with a body ranks as TRY FIRST when no plugin playbook is present. Plugin playbooks still win.
+- **MODIFY short chain.** When playbook files are known: inspect → edit → focused verify. No grep. DISCOVER and cold MODIFY/RECOVER stay frozen.
+
+Single mutating writer is unchanged. PLAN-v49 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v45.0.0 — "steer"
 
 ### Added (v45.0 — playbook first, skip rediscovery)
