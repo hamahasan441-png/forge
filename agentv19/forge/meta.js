@@ -36,6 +36,7 @@ import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrat
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
+import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
@@ -100,7 +101,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     cwd: process.cwd(),
     config,
     embedder,
-    skillsIndex: (config.skills?.enabled !== false) ? indexSkills(resolveSkillsDir(config.skills?.dir)) : null,
+    skillsIndex: (config.skills?.enabled !== false) ? mergeLearnedSkills(indexSkills(resolveSkillsDir(config.skills?.dir)), process.cwd()) : null,
   })
   if (embedder) {
     emit({ type: "RETRIEVAL_MODE", taskId, runId: taskRunId, segmentId: null, nodeId: null, mode: "semantic", provider: embCfg.provider, model: embCfg.model, alpha: embCfg.alpha })
@@ -225,6 +226,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const planLessons = (!restoredDAG && !fastPath && !recoveryPath)
       ? lessonsForPlan(state.objective, { cwd: process.cwd() })
       : { text: "", avoided: [], count: 0 }
+    if (planLessons && !fastPath && !recoveryPath) {
+      const extra = hardAvoid(state.objective, { cwd: process.cwd() })
+      if (extra.length) planLessons.avoided = [...new Set([...(planLessons.avoided || []), ...extra])]
+    }
     const lessonPrefix = planLessonsPrefix(planLessons)
     if (planLessons.count || planLessons.avoided.length) {
       emit({ type: "PLAN_LESSONS", taskId, runId: taskRunId, count: planLessons.count, avoided: planLessons.avoided.slice(0, 4) })
@@ -574,6 +579,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     ts.setNextAction(null)
     ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
     emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, text: String(finalText).slice(0, 400), verification: vv.status, finalRisk: fr.risk, gate: gate.checks })
+    try {
+      const evo = evolveRun({
+        cwd: process.cwd(),
+        task: state.objective,
+        klass: classified.class,
+        gate,
+        files: changedRel,
+      })
+      const line = formatEvolve(evo)
+      if (line) emit({ type: "STRATEGY_EVOLVED", taskId, runId: taskRunId, segmentId, nodeId, score: evo.score, skill: evo.skill?.name || null, skipped: evo.skill?.skipped || null, avoid: (evo.avoid || []).slice(0, 4), text: line })
+    } catch { /* evolution is best-effort — never block COMPLETED */ }
     return { done: true, gate }
   }
 

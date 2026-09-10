@@ -38,6 +38,7 @@ import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
+import { mergeLearnedSkills } from "./evolve.js"
 import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
@@ -286,7 +287,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
     const idx = indexSkills(skillsDir)
     if (idx.length) {
       const klass = query ? (() => { try { return classifyTask(query).class } catch { return null } })() : null
-      const picks = evaluateSkills(query, idx, { klass, skillsDir })
+      const picks = evaluateSkills(query, mergeLearnedSkills(idx, process.cwd()), { klass, skillsDir })
       const block = formatSkillPicks(picks)
       if (block) lines.push("", block)
     }

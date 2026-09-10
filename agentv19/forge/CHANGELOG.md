@@ -3,6 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v40.0.0 — "evolve"
+
+### Added (v40.0 — strategy evolution, L4)
+- **9-check score.** After COMPLETED, `scoreRun` counts the nine gate checks. `STRATEGY_EVOLVED` is best-effort and never blocks COMPLETED.
+- **Hard-avoid.** Strategies with lesson confidence ≥ 0.5 join the planner's avoid list (`hardAvoid`). Below that they stay advisory.
+- **Promote / demote.** A successful run raises the relevant lesson by 0.1; a failed run lowers it. Confidence below 0.25 is retired. Disk is not deleted.
+- **Learned SKILL.md.** A successful repair becomes a project-local playbook under `~/.forge/projects/<hash>/skills/learned-…/`. MICRO/SMALL skip. Kernel-looking repairs (`classifyTaskComplexity`, `assumeYes`, `plugin-host`, `securefs`) are refused. The bundled pack is never written.
+- **Evaluator + `load_skill`.** Learned skills merge into the v34 evaluator (bundled names win). `load_skill` falls back to the learned dir when the bundled SKILL.md is missing.
+
+Single mutating writer is unchanged. PLAN-v43 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v39.0.0 — "focusverify"
 
 ### Added (v39.0 — focused verification reaches the model)

@@ -190,6 +190,17 @@ function clamp01(n) {
   return Math.max(0, Math.min(1, v))
 }
 
+/** v40: promote / retire a lesson by id. Disk is not deleted. */
+export function setLessonConfidence(id, value, cwd = process.cwd()) {
+  const lessons = loadLessons(cwd)
+  const l = lessons.find((x) => x.id === id)
+  if (!l) return { ok: false }
+  l.confidence = clamp01(value)
+  l.lastUsed = Date.now()
+  save(cwd, lessons)
+  return { ok: true, id: l.id, confidence: l.confidence }
+}
+
 /**
  * Strategies already proven ineffective for a task/context. Returns lessons
  * whose failed strategy matches, relevance-ranked, so the controller can avoid

@@ -49,8 +49,11 @@ It does not invent `npm test -- file.test.js` flags.
 
 ## Bigger map (not this release)
 
-§4 semantic world model beyond the v32 index (still no Tree-sitter
-runtime dep). Edit-transaction rewrite stays explicitly out.
+Shipped next: **v40.0.0 / PLAN-v43** (strategy evolution: score the
+9-check, hard-avoid failed strategies, author a project SKILL.md from a
+successful repair — never the kernel, never the bundled pack).
+World-model rewrite, Tree-sitter as a runtime dep, edit-transaction
+rewrite stay explicitly out. L6 kernel self-mod is explicitly out.
 
 ## Non-goals
 
