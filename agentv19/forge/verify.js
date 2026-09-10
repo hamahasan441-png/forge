@@ -20,6 +20,7 @@ import path from "node:path"
 import { execFile } from "node:child_process"
 import { parsePatch } from "./diffpatch.js"
 import { RISK, riskRank } from "./capabilities.js"
+import { recommendedVerify } from "./langengine.js"
 
 export const CHECK = {
   FILE_EXISTS: "file_exists",
@@ -105,7 +106,13 @@ export function verificationPlan(name, args = {}, { risk = RISK.LOW, registry = 
   // risk-proportional escalation: high/critical mutations need real evidence,
   // which only the agent can produce (it owns the test command).
   if (mutates && riskRank(risk) >= riskRank(RISK.HIGH)) {
-    checks.push({ kind: CHECK.TESTS, target: cwd, why: `risk=${risk}: run the focused test/build before declaring success`, executor: "agent" })
+    const command = recommendedVerify(cwd, targets)
+    checks.push({
+      kind: CHECK.TESTS, target: cwd,
+      why: `risk=${risk}: run the focused test/build before declaring success`,
+      executor: "agent",
+      ...(command ? { command } : {}),
+    })
   }
 
   const local = checks.filter((c) => c.executor === "local")
@@ -191,7 +198,10 @@ export async function runVerification(plan, { cwd = process.cwd(), timeoutMs = D
     return out
   }
   for (const c of plan.checks) {
-    if (c.executor !== "local") { out.recommended.push({ kind: c.kind, why: c.why }); continue }
+    if (c.executor !== "local") {
+      out.recommended.push({ kind: c.kind, why: c.why, ...(c.command ? { command: c.command } : {}) })
+      continue
+    }
     const t0 = Date.now()
     const r = await runCheck(c, { cwd, timeoutMs })
     out.checks.push({ kind: c.kind, target: shortTarget(c.target, cwd), ...r, ms: Date.now() - t0 })

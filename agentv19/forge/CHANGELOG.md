@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v38.0.0 — "gaps"
+
+### Added (v38.0 — close real holes, do not weaken tests)
+- **Trailing-symlink writes.** `allowOutsideProject` no longer realpath's a final-component symlink onto the host (`OUT/hostlink` → `/etc/hostname`). In-project aliases still follow. `atomicWriteInDir` then refuses ESYMLINK. fs-toctou assertion is unchanged.
+- **Generated-dir refuse.** `dist` / `.next` / `target` / `node_modules` / … listed by the v37 engine are now blocked as write targets (`generatedBoundary` in `safePath`). `ctx.allowGeneratedWrites` opts out. A file *named* `dist.js` is not a generated dir.
+- **Language-native HIGH TESTS.** `verificationPlan` recommends `cargo test` for a rust file in a mixed npm+cargo repo. 1-arg `detectTestCommand` stays first-wins. Empty stack → no invented command.
+
+Single mutating writer is unchanged. PLAN-v41 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
 ## v37.0.0 — "langengine"
 
 ### Added (v37.0 — language-aware engine from real files)

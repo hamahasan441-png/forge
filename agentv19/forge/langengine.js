@@ -1,5 +1,5 @@
 /**
- * forge — language-aware engine (v37, zero dependencies)
+ * forge — language-aware engine (v37 + v38, zero dependencies)
  *
  * UNIFIED §6: determine language, version, framework, package manager,
  * compiler, formatter, linter, typechecker, generated-code boundaries
@@ -13,10 +13,10 @@ import fs from "node:fs"
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { namedLangIn } from "./langreason.js"
-import { discoverToolchain } from "./lang.js"
+import { discoverToolchain, detectLanguage } from "./lang.js"
 import { serverForFile } from "./lsp.js"
 
-const GENERATED = Object.freeze([
+export const GENERATED_DIRS = Object.freeze([
   "dist", "build", "target", "out", ".next", "__pycache__", "node_modules",
   "vendor", "generated", "gen", ".tox", ".venv", "coverage",
 ])
@@ -71,7 +71,45 @@ export function lspAvailability(config = {}) {
 }
 
 function generatedDirs(cwd) {
-  return GENERATED.filter((d) => has(cwd, d))
+  return GENERATED_DIRS.filter((d) => has(cwd, d))
+}
+
+/** First generated-dir component in a project-relative path, or "". */
+export function generatedBoundary(abs, cwd) {
+  let rel
+  try { rel = path.relative(path.resolve(cwd || process.cwd()), path.resolve(abs)) } catch { return "" }
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return ""
+  const parts = rel.split(/[\\/]/)
+  for (const p of parts.slice(0, -1)) {
+    if (GENERATED_DIRS.includes(p)) return p
+  }
+  return ""
+}
+
+/**
+ * Native test/typecheck for the files' language, from manifests that exist.
+ * Empty when no stack matches. Never invents a command.
+ */
+export function recommendedVerify(cwd = process.cwd(), files = []) {
+  let info
+  try { info = inspectProject(cwd) } catch { return "" }
+  const stacks = info.stacks || []
+  if (!stacks.length) return ""
+  const langs = new Set()
+  for (const f of files || []) {
+    try {
+      const id = detectLanguage(f).id
+      if (id && id !== "unknown") langs.add(id)
+    } catch {}
+  }
+  const hit = langs.size
+    ? stacks.find((s) => langs.has(s.id) || langs.has(s.language)
+      || (s.id === "javascript" && langs.has("typescript"))
+      || (s.id === "typescript" && langs.has("javascript")))
+    : null
+  const s = hit || (langs.size === 0 ? stacks[0] : null)
+  if (!s) return ""
+  return s.test || s.typecheck || s.build || ""
 }
 
 function npmPm(cwd) {
