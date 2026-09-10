@@ -35,8 +35,9 @@ import { createContextEngine } from "./context.js"
 import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
-import { compose, formatCompose } from "./compose.js"
+import { composeOnce, clearComposeOnce, formatCompose } from "./compose.js"
 import { formatSteer } from "./evaluate.js"
+import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
@@ -188,6 +189,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const classified = classifyTask(state.objective, { resume: Boolean(resumeRec) })
   const omega = createKernel({ cwd: process.cwd() })
   omega.classify(state.objective, { resume: Boolean(resumeRec) })
+  clearComposeOnce()
+  let composedSnap = null
+  const takeCompose = ({ refresh = false } = {}) => {
+    if (composedSnap && !refresh) return composedSnap
+    composedSnap = composeOnce(state.objective, {
+      cwd: process.cwd(), config, klass: classified.class, includeMemory: true, refresh,
+    })
+    return composedSnap
+  }
   ts.transition(TASK_STATUS.PLANNING, { reason: "building plan" })
   emit({ type: "TASK_STARTED", taskId, runId: taskRunId, objective: state.objective, risk: riskLevel, taskClass: classified.class, strategy: classified.strategy.class })
   emit({
@@ -248,9 +258,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     let composePrefix = ""
     if (!restoredDAG && !fastPath && !recoveryPath) {
       try {
-        const composed = compose(state.objective, {
-          cwd: process.cwd(), config, klass: classified.class, includeMemory: true,
-        })
+        const composed = takeCompose()
         composePrefix = formatCompose(composed)
         if (composePrefix) {
           emit({
@@ -609,14 +617,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         klass: classified.class,
         gate,
         files: changedRel,
-        command: compose(state.objective, {
-          cwd: process.cwd(),
-          klass: classified.class,
-          files: changedRel,
-          includeMemory: false,
-          includeSkills: false,
-          includePlugins: false,
-        }).verify?.command || "",
+        command: (focusedVerify(process.cwd(), changedRel || []).command
+          || composedSnap?.verify?.command
+          || ""),
       })
       const line = formatEvolve(evo)
       if (line) emit({ type: "STRATEGY_EVOLVED", taskId, runId: taskRunId, segmentId, nodeId, score: evo.score, skill: evo.skill?.name || null, skipped: evo.skill?.skipped || null, avoid: (evo.avoid || []).slice(0, 4), text: line })
@@ -721,9 +724,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const engineBlock = engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
     let composeBlock = ""
     try {
-      composeBlock = formatCompose(compose(state.objective, {
-        cwd: process.cwd(), config, klass: classified.class, includeMemory: true,
-      }))
+      composeBlock = formatCompose(takeCompose({ refresh: true }))
     } catch { composeBlock = "" }
     const prompt = replanPrompt({
       objective: state.objective,
@@ -1569,7 +1570,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
   }
   let steerHint = ""
   try {
-    const composed = compose(state.objective, {
+    const composed = composeOnce(state.objective, {
       cwd: process.cwd(), config, includeMemory: false, includeSkills: true,
     })
     const block = formatSteer({

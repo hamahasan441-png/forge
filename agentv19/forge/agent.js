@@ -36,7 +36,7 @@ import { mergeLearnedSkills } from "./evolve.js"
 import { evaluateSkills, formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
-import { compose, formatCompose, playbookFilesOf } from "./compose.js"
+import { composeOnce, formatCompose, playbookFilesOf } from "./compose.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -90,7 +90,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   let composed = null
   if (task) {
     try {
-      composed = compose(task, { cwd, config, klass, includeMemory: false, plugins })
+      composed = composeOnce(task, { cwd, config, klass, includeMemory: false, plugins })
     } catch { composed = null }
   }
   if (registry) {

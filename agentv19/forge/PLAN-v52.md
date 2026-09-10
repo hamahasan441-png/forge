@@ -67,10 +67,10 @@ not kernel self-mod (L6). It does not invent `npm test --` flags.
 
 ## Bigger map (not this release)
 
-L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
-a runtime dep, edit-transaction rewrite stay explicitly out. A
-compose-once cache (meta currently composes the snapshot more than once
-per run) is a follow-on, not this layer.
+Shipped next: **v50.0.0 / PLAN-v53** (once: compose snapshot reused for
+identical args; `compose()` stays uncached). L6 kernel self-mod is
+explicitly out. World-model rewrite, Tree-sitter as a runtime dep,
+edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 

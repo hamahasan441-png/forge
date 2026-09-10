@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v50.0.0 — "once"
+
+### Added (v50.0 — compose snapshot reused for identical args)
+- **`composeOnce`.** Identical args return the same snapshot (`===`). Cap 8, LRU bump on hit, `refresh: true` recomputes. `compose()` stays uncached so a write is visible on the next plain call. `clearComposeOnce()` drops the store.
+- **Meta walks the pipeline once.** Plan hits `takeCompose`. Mid-task replan refreshes. Evolve reads `focusedVerify(cwd, changedRel)` instead of recomposing. `repairSegment` (top-level) calls `composeOnce` with its original opts — it cannot close over `takeCompose`.
+- **Execute path.** `agent.js` / `chat.js` use `composeOnce` so segments of the same query reuse. The context engine keeps its generation cache and still calls `compose()`.
+
+Single mutating writer is unchanged. PLAN-v53 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v49.0.0 — "check"
 
 ### Added (v49.0 — INTENT.VERIFY uses focusedVerify)

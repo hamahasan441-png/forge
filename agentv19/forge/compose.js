@@ -1,5 +1,5 @@
 /**
- * forge — compose pipeline (v41, v43 learned-plugin index, v44 playbook, zero dependencies)
+ * forge — compose pipeline (v41, v43 learned-plugin index, v44 playbook, v50 once-cache, zero dependencies)
  *
  * v32+ as one pass, one snapshot:
  *   index (v32) → world (v33 graph + v36 writes)
@@ -19,6 +19,10 @@
  * v47: long-term lessons and the v32 index locate files; the v33 graph
  * names the implementation a test already imports. Deterministic-first —
  * skip rediscovery when the knowledge graph already knows the file.
+ * v50: composeOnce() reuses the snapshot for identical args (cap 8).
+ * compose() stays uncached so a write is visible on the next plain call.
+ * The context engine keeps its own generation cache and does not go
+ * through composeOnce (mtime invalidation stays there).
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
@@ -370,6 +374,62 @@ export function compose(task = "", opts = {}) {
     try { out.verify = focusedVerify(cwd, world.files) } catch { out.verify = { command: "", tests: [] } }
   }
   return out
+}
+
+const ONCE_CAP = 8
+const onceStore = new Map()
+
+function onceKey(task, opts = {}) {
+  const cwd = path.resolve(opts.cwd || process.cwd())
+  const q = String(task ?? "").trim()
+  const klass = opts.klass == null ? "" : String(opts.klass)
+  const files = Array.isArray(opts.files) ? opts.files.map(String).filter(Boolean).slice(0, 16).join("\n") : ""
+  const flags = [
+    opts.includeMemory !== false ? "m" : "-",
+    opts.includeSkills !== false ? "s" : "-",
+    opts.includePlugins !== false ? "p" : "-",
+    opts.includeLessons !== false ? "l" : "-",
+    opts.includeVerify !== false ? "v" : "-",
+  ].join("")
+  const plugs = Array.isArray(opts.plugins)
+    ? opts.plugins.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
+    : ""
+  const skillsDir = opts.config?.skills?.dir ? String(opts.config.skills.dir) : ""
+  return `${cwd}\0${q}\0${klass}\0${flags}\0${files}\0${plugs}\0${skillsDir}`
+}
+
+/** Drop the in-process snapshot cache. Tests / a new task call this. */
+export function clearComposeOnce() {
+  onceStore.clear()
+}
+
+/**
+ * Same as compose(), but identical args reuse the snapshot. refresh:true
+ * recomputes. compose() itself stays uncached so a write is visible on the
+ * next plain call. Cap 8. LRU bump on hit. Never spawns, never writes.
+ */
+export function composeOnce(task = "", opts = {}) {
+  const refresh = opts && opts.refresh === true
+  const clean = opts && typeof opts === "object" ? { ...opts } : {}
+  delete clean.refresh
+  const key = onceKey(task, clean)
+  if (!refresh) {
+    const hit = onceStore.get(key)
+    if (hit) {
+      onceStore.delete(key)
+      onceStore.set(key, hit)
+      return hit
+    }
+  }
+  const snap = compose(task, clean)
+  onceStore.delete(key)
+  onceStore.set(key, snap)
+  while (onceStore.size > ONCE_CAP) {
+    const oldest = onceStore.keys().next().value
+    if (oldest === undefined || oldest === key) break
+    onceStore.delete(oldest)
+  }
+  return snap
 }
 
 export function formatWorld(world) {
