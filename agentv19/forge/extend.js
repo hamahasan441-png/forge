@@ -141,6 +141,10 @@ export function authorPlugin({
 /**
  * Load isolated plugins from the project-local learned dir.
  * Grants are always {} — learned plugins never inherit user pluginGrants.
+ *
+ * v48: the execute path (agent / chat / forge tools+plugins) must not call
+ * this. Learned plugins are playbooks — compose indexes them, load_skill
+ * returns markdown. Kept so v42 tests can still prove isolation-on load.
  */
 export async function loadLearnedPlugins(cwd = process.cwd(), opts = {}) {
   const dir = learnedPluginsDir(cwd)
@@ -155,6 +159,9 @@ export async function loadLearnedPlugins(cwd = process.cwd(), opts = {}) {
 
 /**
  * Global ~/.forge/tools names win. Learned extras append. Close both hosts.
+ *
+ * v48: execute path must not call this — a learned plugin is a playbook,
+ * not a live tool schema entry. Kept for tests (v42 merge contract).
  */
 export async function mergeLearnedPlugins(loaded, cwd = process.cwd(), opts = {}) {
   const base = loaded && typeof loaded === "object"
