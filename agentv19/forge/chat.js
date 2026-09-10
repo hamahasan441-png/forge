@@ -38,9 +38,11 @@ import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
+import { mergeLearnedSkills } from "./evolve.js"
 import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
+import { compose, formatCompose } from "./compose.js"
 import { classifyTask } from "./classify.js"
 import { saveSession, loadSession, lastSessionFile, listSessions, findSession } from "./sessions.js"
 import { relevantMemory } from "./memory.js"
@@ -286,7 +288,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
     const idx = indexSkills(skillsDir)
     if (idx.length) {
       const klass = query ? (() => { try { return classifyTask(query).class } catch { return null } })() : null
-      const picks = evaluateSkills(query, idx, { klass, skillsDir })
+      const picks = evaluateSkills(query, mergeLearnedSkills(idx, process.cwd()), { klass, skillsDir })
       const block = formatSkillPicks(picks)
       if (block) lines.push("", block)
     }
@@ -297,6 +299,11 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
     if (langBlock) lines.push("", langBlock)
     const engineBlock = engineFor(query, { cwd: process.cwd(), config, klass })
     if (engineBlock) lines.push("", engineBlock)
+    try {
+      const composed = compose(query, { cwd: process.cwd(), config, klass, includeMemory: false, includeSkills: false })
+      const composeBlock = formatCompose(composed)
+      if (composeBlock) lines.push("", composeBlock)
+    } catch { /* compose is best-effort */ }
   }
   return lines.join("\n")
 }

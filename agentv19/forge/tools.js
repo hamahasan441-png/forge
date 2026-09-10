@@ -38,6 +38,7 @@ import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
 import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
 import { generatedBoundary } from "./langengine.js"
+import { readLearnedSkill } from "./evolve.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
@@ -1171,7 +1172,11 @@ function load_skill(ctx, args) {
   if (!sp.ok) return sp.error
   const real = realPathOf(target)
   if (!insideDir(real, base)) return `ERROR: skill path escapes the skills directory`
-  if (!fs.existsSync(target)) return `ERROR: skill not found: ${name}`
+  if (!fs.existsSync(target)) {
+    const learned = ctx.cwd ? readLearnedSkill(ctx.cwd, name) : null
+    if (learned) return learned
+    return `ERROR: skill not found: ${name}`
+  }
   const md = fs.readFileSync(target, "utf8")
   return md.length > 24000 ? md.slice(0, 24000) + "\n... (truncated)" : md
 }

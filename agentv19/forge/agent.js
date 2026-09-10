@@ -32,9 +32,11 @@ import { createLspSession } from "./lsp.js"
 import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
+import { mergeLearnedSkills } from "./evolve.js"
 import { evaluateSkills, formatSkillPicks, selectPlugins } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
+import { compose, formatCompose } from "./compose.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -115,7 +117,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     const idx = indexSkills(skillsDir)
     if (idx.length) {
       const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
-      const picks = evaluateSkills(task || "", idx, { klass, skillsDir })
+      const picks = evaluateSkills(task || "", mergeLearnedSkills(idx, cwd), { klass, skillsDir })
       const block = formatSkillPicks(picks)
       if (block) lines.push("", block)
     }
@@ -126,6 +128,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     if (langBlock) lines.push("", langBlock)
     const engineBlock = engineFor(task, { cwd, config, klass })
     if (engineBlock) lines.push("", engineBlock)
+    try {
+      const composed = compose(task, { cwd, config, klass, includeMemory: false, includeSkills: false })
+      const composeBlock = formatCompose(composed)
+      if (composeBlock) lines.push("", composeBlock)
+    } catch { /* compose is best-effort */ }
   }
   return lines.join("\n")
 }
