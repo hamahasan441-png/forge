@@ -1,5 +1,5 @@
 /**
- * forge — compose pipeline (v41, v43 learned-plugin index, zero dependencies)
+ * forge — compose pipeline (v41, v43 learned-plugin index, v44 playbook, zero dependencies)
  *
  * v32+ as one pass, one snapshot:
  *   index (v32) → world (v33 graph + v36 writes)
@@ -13,7 +13,9 @@
  * is the missing join. It does not spawn a second writer. It does not run
  * tests. It does not invent a toolchain. MICRO/SMALL still get zero auto
  * skill/plugin picks unless named. Learned plugins are indexed by reading
- * PLAYBOOK JSON — never imported, never hosted.
+ * PLAYBOOK JSON — never imported, never hosted. Matching playbooks cite
+ * their files into the world snapshot so the noTools planner sees what
+ * worked (repair / files / command) without spawning plugin-host.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
@@ -23,7 +25,7 @@ import { hardAvoid, mergeLearnedSkills } from "./evolve.js"
 import { evaluateSkills, selectPlugins } from "./evaluate.js"
 import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
-import { indexLearnedPlugins } from "./extend.js"
+import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
 
 const RADIUS_SHOW = 16
 const FILE_SHOW = 8
@@ -69,6 +71,15 @@ function unionPlugins(caller, extra) {
     }
   }
   return out
+}
+
+function filesFromPlugins(plugins) {
+  const out = []
+  for (const p of plugins || []) {
+    if (!p || p.isolated !== true) continue
+    for (const f of p.files || []) out.push(f)
+  }
+  return uniq(out).slice(0, FILE_SHOW)
 }
 
 function langOfFile(file) {
@@ -165,7 +176,23 @@ export function compose(task = "", opts = {}) {
   const klass = resolvedKlass(q, opts.klass)
   const out = emptyCompose(klass)
   if (!q) return out
-  try { out.world = composeWorld(cwd, { task: q, files: opts.files }) } catch { /* keep empty world */ }
+  if (opts.includePlugins !== false) {
+    let catalog = Array.isArray(opts.plugins) ? opts.plugins : []
+    try {
+      const learned = indexLearnedPlugins(cwd)
+      if (learned.length) catalog = unionPlugins(catalog, learned)
+    } catch { /* keep caller catalog */ }
+    if (catalog.length) {
+      try { out.plugins = selectPlugins(q, catalog, { klass }) } catch { out.plugins = [] }
+    }
+  }
+  const extraFiles = filesFromPlugins(out.plugins)
+  try {
+    out.world = composeWorld(cwd, {
+      task: q,
+      files: [...(Array.isArray(opts.files) ? opts.files : []), ...extraFiles],
+    })
+  } catch { /* keep empty world */ }
   const world = out.world
   if (opts.includeMemory !== false) {
     try {
@@ -192,16 +219,6 @@ export function compose(task = "", opts = {}) {
     }
   }
   try { out.avoid = hardAvoid(q, { cwd, limit: 6 }) } catch { out.avoid = [] }
-  if (opts.includePlugins !== false) {
-    let catalog = Array.isArray(opts.plugins) ? opts.plugins : []
-    try {
-      const learned = indexLearnedPlugins(cwd)
-      if (learned.length) catalog = unionPlugins(catalog, learned)
-    } catch { /* keep caller catalog */ }
-    if (catalog.length) {
-      try { out.plugins = selectPlugins(q, catalog, { klass }) } catch { out.plugins = [] }
-    }
-  }
   if (opts.includeVerify !== false && world.files.length) {
     try { out.verify = focusedVerify(cwd, world.files) } catch { out.verify = { command: "", tests: [] } }
   }
@@ -240,8 +257,22 @@ export function formatCompose(c) {
     const tests = (v.tests || []).slice(0, 4).join(", ")
     lines.push(`[verify next] ${v.command || "(none)"}${tests ? " — " + tests : ""}`)
   }
-  const isolated = (c.plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name)
-  if (isolated.length) lines.push(`[plugins] ${isolated.slice(0, 4).join(", ")}`)
+  const isolated = (c.plugins || []).filter((p) => p && p.isolated && p.name)
+  if (isolated.length) lines.push(`[plugins] ${isolated.map((p) => p.name).slice(0, 4).join(", ")}`)
+  let playN = 0
+  for (const p of isolated) {
+    if (playN >= 2) break
+    const repair = String(p.repair || "").trim()
+    if (!repair) continue
+    if (KERNEL_HINT.test(repair)) continue
+    let s = `[playbook] ${p.name}: ${repair.slice(0, 160)}`
+    const files = (p.files || []).filter(Boolean).slice(0, 3).join(", ")
+    if (files) s += ` — ${files}`
+    const cmd = String(p.command || "").trim().slice(0, 80)
+    if (cmd) s += ` — ${cmd}`
+    lines.push(s)
+    playN++
+  }
   return lines.join("\n")
 }
 

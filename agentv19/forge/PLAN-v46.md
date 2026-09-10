@@ -64,8 +64,11 @@ learned plugin from `compose()`. It is not kernel self-mod (L6).
 
 ## Bigger map (not this release)
 
-L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
-a runtime dep, edit-transaction rewrite stay explicitly out.
+Shipped next: **v44.0.0 / PLAN-v47** (playbook snapshot: keep repair/files/command
+on the learned index, cite those files into the world, `[playbook]` reaches
+the noTools planner — never spawn). L6 kernel self-mod is explicitly out.
+World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite
+stay explicitly out.
 
 ## Non-goals
 

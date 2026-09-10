@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v44.0.0 — "playbook"
+
+### Added (v44.0 — playbook snapshot)
+- **Index keeps the body.** `indexLearnedPlugins` now carries `repair`, `files`, and `command` from `PLAYBOOK` JSON. Absolute / `..` / `~` files are dropped. Kernel-looking playbooks are skipped.
+- **Planner sees what worked.** `formatCompose` emits `[playbook] learned_…: <repair> — <files> — <command>`. The plan path is `noTools` — it cannot call the plugin — so the snapshot has to carry the body. `PLAN_COMPOSE` includes `playbook`.
+- **Playbook files join the world.** Matching learned plugins cite their files into `composeWorld`, so `[world]` / `[verify next]` fire even when the task text has no filename. `[verify next]` is still `focusedVerify` (current stack), not the recorded command. The recorded command is never auto-run.
+
+Single mutating writer is unchanged. PLAN-v47 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v43.0.0 — "pluginpick"
 
 ### Added (v43.0 — compose picks learned plugins)
