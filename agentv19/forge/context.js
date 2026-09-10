@@ -25,6 +25,7 @@ import { estimateTokens } from "./ui.js"
 import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { inspectProject, formatLangEngine } from "./langengine.js"
+import { compose, formatCompose } from "./compose.js"
 
 /**
  * `embedder` (v23, optional): an embeddings.js embedder. When supplied,
@@ -220,6 +221,29 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
       })
       const block = formatLangEngine(info, { task, klass: opts.klass })
       if (block) sections.push({ name: "engine", text: block })
+    }
+
+    // 4e. v41: v32+ pipeline (world → memory count → avoid → skills → verify)
+    //     as one snapshot. Skills descriptions stay in 4b; this is the compact
+    //     join the planner was missing. MICRO still gets world/verify if files
+    //     are cited. Never auto-runs the recommended command.
+    if (opts.includeCompose !== false && task) {
+      const built = cached(`compose:${bucket(task)}:${precise ? "p" : "n"}`, repoTags(), () => {
+        try {
+          return compose(task, {
+            cwd,
+            klass: opts.klass,
+            files: opts.files || opts.extraFiles,
+            config,
+            skillsIndex,
+            includeMemory: false,
+            includeSkills: false,
+            plugins: opts.plugins,
+          })
+        } catch { return null }
+      })
+      const block = formatCompose(built)
+      if (block) { sections.push({ name: "compose", text: block }); sources.compose = true }
     }
 
     // 5. explicitly requested files (the controller decides these from the DAG).

@@ -35,6 +35,7 @@ import { createContextEngine } from "./context.js"
 import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
+import { compose, formatCompose } from "./compose.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
@@ -243,9 +244,28 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ? engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
       : ""
     if (enginePrefix) emit({ type: "PLAN_ENGINE", taskId, runId: taskRunId })
+    let composePrefix = ""
+    if (!restoredDAG && !fastPath && !recoveryPath) {
+      try {
+        const composed = compose(state.objective, {
+          cwd: process.cwd(), config, klass: classified.class, includeMemory: true,
+        })
+        composePrefix = formatCompose(composed)
+        if (composePrefix) {
+          emit({
+            type: "PLAN_COMPOSE",
+            taskId, runId: taskRunId,
+            files: (composed.world?.files || []).slice(0, 8),
+            avoid: (composed.avoid || []).slice(0, 4),
+            verify: composed.verify?.command || "",
+            skills: (composed.skills || []).map((s) => s.name).slice(0, 3),
+          })
+        }
+      } catch { composePrefix = "" }
+    }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -586,6 +606,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         klass: classified.class,
         gate,
         files: changedRel,
+        command: compose(state.objective, {
+          cwd: process.cwd(),
+          klass: classified.class,
+          files: changedRel,
+          includeMemory: false,
+          includeSkills: false,
+        }).verify?.command || "",
       })
       const line = formatEvolve(evo)
       if (line) emit({ type: "STRATEGY_EVOLVED", taskId, runId: taskRunId, segmentId, nodeId, score: evo.score, skill: evo.skill?.name || null, skipped: evo.skill?.skipped || null, avoid: (evo.avoid || []).slice(0, 4), text: line })
@@ -688,13 +715,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const planL = lessonsForPlan(state.objective, { cwd: process.cwd() })
     const langBlock = formatLangReason(languagesIn(state.objective, { cwd: process.cwd(), klass: classified.class }))
     const engineBlock = engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
+    let composeBlock = ""
+    try {
+      composeBlock = formatCompose(compose(state.objective, {
+        cwd: process.cwd(), config, klass: classified.class, includeMemory: true,
+      }))
+    } catch { composeBlock = "" }
     const prompt = replanPrompt({
       objective: state.objective,
       reason,
       evidence,
       completed,
       failed,
-      lessons: [planL.text, langBlock, engineBlock].filter(Boolean).join("\n\n"),
+      lessons: [planL.text, langBlock, engineBlock, composeBlock].filter(Boolean).join("\n\n"),
       avoided: planL.avoided,
       causal: causalHint,
     })
