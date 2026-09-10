@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v49.0.0 — "check"
+
+### Added (v49.0 — INTENT.VERIFY uses focusedVerify)
+- **VERIFY chain.** `planChain("run the tests")` / `verify src/lib.rs` now carry the native command (`cargo test` vs `npm test`) from `focusedVerify`. Graph-connected tests join the why-string. Never auto-run. Never invent flags.
+- **Verify-phase bash.** `synthesizeArgs` prefers `step.args.command` / `context.verifyCommand` on the verify step. EXECUTE and regress stay on `detectTestCommand` (1-arg frozen).
+- **Guidance.** `toolGuidance` passes compose's `[verify next]` command into the suggested chain.
+
+Single mutating writer is unchanged. PLAN-v52 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false.
+
 ## v48.0.0 — "hostless"
 
 ### Added (v48.0 — learned plugins are playbooks, never a live plugin-host spawn)

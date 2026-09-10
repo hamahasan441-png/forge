@@ -205,8 +205,8 @@ console.log("== runBash still classifies before wrapping (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 48.0.0", VERSION, "48.0.0")
-  eq("package.json is 48.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "48.0.0")
+  eq("VERSION is 49.0.0", VERSION, "49.0.0")
+  eq("package.json is 49.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "49.0.0")
 }
 
 console.log(`\n== v27 suite: ${PASS} passed, ${FAIL} failed ==`)
