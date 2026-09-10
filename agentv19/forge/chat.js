@@ -38,6 +38,8 @@ import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
+import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
+import { classifyTask } from "./classify.js"
 import { saveSession, loadSession, lastSessionFile, listSessions, findSession } from "./sessions.js"
 import { relevantMemory } from "./memory.js"
 import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
@@ -281,8 +283,10 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
   if (config.skills?.enabled !== false && skillsDir) {
     const idx = indexSkills(skillsDir)
     if (idx.length) {
-      lines.push("", `INSTALLED SKILLS (${idx.length}) — if the user's request matches one, mention it and offer: /skills <name>`)
-      for (const s of idx.slice(0, 40)) lines.push(`- ${s.name}: ${s.desc}`)
+      const klass = query ? (() => { try { return classifyTask(query).class } catch { return null } })() : null
+      const picks = evaluateSkills(query, idx, { klass, skillsDir })
+      const block = formatSkillPicks(picks)
+      if (block) lines.push("", block)
     }
   }
   return lines.join("\n")

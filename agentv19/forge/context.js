@@ -22,6 +22,7 @@ import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import fs from "node:fs"
 import path from "node:path"
 import { estimateTokens } from "./ui.js"
+import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
 
 /**
  * `embedder` (v23, optional): an embeddings.js embedder. When supplied,
@@ -194,6 +195,13 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
         ? pre.lessons
         : lessonsForPrompt(task, { cwd, limit: precise ? 2 : 3 })
       if (les) sections.push({ name: "lessons", text: les })
+    }
+
+    // 4b. v34: only the skills that match this task (not a 40-name dump)
+    if (opts.includeSkills !== false && Array.isArray(skillsIndex) && skillsIndex.length && task) {
+      const picks = evaluateSkills(task, skillsIndex, { klass: opts.klass })
+      const block = formatSkillPicks(picks)
+      if (block) sections.push({ name: "skills", text: block })
     }
 
     // 5. explicitly requested files (the controller decides these from the DAG).

@@ -3,7 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v33.0.0 — "xlang"
+## v34.0.0 — "skills"
+
+### Added (v34.0 — right skill, right plugin, one integrator)
+- **Skill evaluator** (`evaluate.js`). Score `name + description` against the task. Inject top 3. MICRO/SMALL get none unless the skill is named. `ok: false` hygiene failures are never selected. Fortune / gaokao / gift-evaluator no longer sit in a coding prompt. `load_skill("coding-agent")` still works when you name it. `FORGE_SKILLS_ALL=1` restores the dump.
+- **Plugin selector.** Isolated user plugins join this-turn schema only when they match the task or are named. MCP and LSP always pass through. No implicit grants. Isolation / symlink refusal / same-run quarantine unchanged.
+- **Integrator** (`integrate.js`, new read-only role). After 2+ upstream workers, one merge node produces a single apply list. The main coder writes. Empty reports → empty list (never invented). Conflicts recorded; later report wins. Fan-out short-circuits the integrator to this function — it is not a second model writer.
+- **Stale lessons.** A lesson that cites files whose v32 index mtime is newer than `lastUsed` is dropped from retrieval. No files / no index → not stale.
+
+Single mutating writer is unchanged. PLAN-v37 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
+## v33.0.0 — "xlang"
 
 ### Added (v33.0 — one connected system, not per-language silos)
 - **Cross-language graph** (`xlang.js`). Contracts from regex (HTTP routes, SQL tables, proto/GraphQL, OpenAPI paths, Docker services, CI jobs). Edges: IMPLEMENTS (same contract, different languages), CONSUMES (fetch/requests → producer), TEST, DEPLOY. `{id}` and `:id` routes normalize to one key. Built from the v32 index — unchanged files are not re-read.

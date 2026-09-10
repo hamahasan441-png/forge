@@ -26,6 +26,8 @@
  *                       └→ blocked └→ failed / cancelled
  */
 
+import { ensureIntegrator } from "./integrate.js"
+
 export const NODE_STATUS = {
   PENDING: "pending",
   READY: "ready",
@@ -978,7 +980,7 @@ export function parsePlanToDAG(text) {
           priority: n.priority ?? (arr.length - i),
           risk: n.risk,
           role: n.role ?? inferRole(n.objective ?? n.task ?? ""),
-          read_only: n.read_only ?? /research|investigat|review|read|analy|find|search|inspect/i.test(String(n.objective ?? n.task ?? "")),
+          read_only: n.read_only ?? /research|investigat|review|read|analy|find|search|inspect|integrat/i.test(String(n.objective ?? n.task ?? "")),
           required_capabilities: n.required_capabilities ?? [],
           targetFiles: n.targetFiles ?? n.target_files ?? [],
           targetSymbols: n.targetSymbols ?? n.target_symbols ?? [],
@@ -989,7 +991,7 @@ export function parsePlanToDAG(text) {
         }))
         const v = validatePlan(defs)
         if (!v.ok && !v.recoverable) throw new Error(`plan validation failed: ${v.errors.join("; ")}`)
-        return defs
+        return withIntegrator(defs)
       }
     } catch { }
   }
@@ -1018,7 +1020,7 @@ export function parsePlanToDAG(text) {
       dependencies: deps,
       priority: 100 - idx,
       role: inferRole(body),
-      read_only: /research|investigat|review|read|analy|find|search|inspect|explore|locate/i.test(body),
+      read_only: /research|investigat|review|read|analy|find|search|inspect|explore|locate|integrat/i.test(body),
       targetFiles: [],
       targetSymbols: [],
       targetDirs: [],
@@ -1028,11 +1030,22 @@ export function parsePlanToDAG(text) {
   }
   const v = validatePlan(defs)
   if (!v.ok && !v.recoverable) throw new Error(`plan validation failed: ${v.errors.join("; ")}`)
+  return withIntegrator(defs)
+}
+
+function withIntegrator(defs) {
+  try {
+    const next = ensureIntegrator(defs)
+    if (!next || next === defs || next.length === defs.length) return defs
+    const v = validatePlan(next)
+    if (v.ok) return next
+  } catch { }
   return defs
 }
 
 function inferRole(text) {
   const t = String(text ?? "").toLowerCase()
+  if (/integrat|merge findings|combine findings|reconcile workers/.test(t)) return "integrator"
   if (/research|investigat|find|search|inspect|explore|locate|read/.test(t)) return "researcher"
   if (/review|audit/.test(t)) return "reviewer"
   if (/security|vulnerab|injection|auth/.test(t)) return "security"

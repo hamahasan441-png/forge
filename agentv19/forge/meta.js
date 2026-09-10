@@ -32,6 +32,8 @@ import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./reso
 import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
+import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
+import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
@@ -92,7 +94,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // Off by default; a failed resolution simply leaves embedder = null (BM25).
   const embCfg = resolveEmbeddingsConfig(config)
   const embedder = embCfg.ok ? createEmbedder(embCfg) : null
-  const ctxEngine = createContextEngine({ cwd: process.cwd(), config, embedder })
+  const ctxEngine = createContextEngine({
+    cwd: process.cwd(),
+    config,
+    embedder,
+    skillsIndex: (config.skills?.enabled !== false) ? indexSkills(resolveSkillsDir(config.skills?.dir)) : null,
+  })
   if (embedder) {
     emit({ type: "RETRIEVAL_MODE", taskId, runId: taskRunId, segmentId: null, nodeId: null, mode: "semantic", provider: embCfg.provider, model: embCfg.model, alpha: embCfg.alpha })
   }
@@ -820,6 +827,24 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           emit({ type: "DAG_DISPATCH", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, nodes: batch.map((n) => n.id), parallel: batch.length })
           const jobs = batch.map((n) => {
             dagLib.markRunning(dag, n.id)
+            if (isIntegratorRole(n.role)) {
+              const merged = integrateResults({ objective: state.objective, reports: reportsFromGraph(dag) })
+              const rec = ledger.add({
+                verification_id: `ver-worker-${n.id}-integrate`,
+                taskId, nodeId: n.id, segmentId,
+                verificationEpoch: state.verification_epoch ?? 0,
+                affectedFiles: merged.apply.map((a) => a.file).filter(Boolean).slice(0, 32),
+                scope: "node", type: "acceptance",
+                passed: true, exitCode: 0, exitCodeKnown: true,
+                evidence: merged.text.slice(0, 300),
+                timestamp: Date.now(), command: "worker:integrator", output: merged.text.slice(0, 500),
+              })
+              ts.noteVerification(rec)
+              dagLib.markCompleted(dag, n.id, merged.text.slice(0, 2000), { verification: rec })
+              dagFindings += `\n\n${merged.text}`
+              persistDAG()
+              return Promise.resolve()
+            }
             const job = manager.spawn({
               role: n.role,
               // P0 worker identity: every worker carries taskId/nodeId/segmentId
