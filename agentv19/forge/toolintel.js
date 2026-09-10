@@ -1,5 +1,5 @@
 /**
- * forge — tool execution intelligence (v20.5, zero dependencies)
+ * forge — tool execution intelligence (v20.5, v52 toolmem, zero dependencies)
  *
  * The pipeline every autonomous tool call goes through (§20):
  *
@@ -26,6 +26,11 @@
  *
  * Everything it adds is additive: with `tools.intelligence: false` the call
  * path is exactly the pre-v20.5 one (execute, return the string).
+ *
+ * v52: per-run stats() / records() used to die with the process. Outcomes
+ * now persist under ~/.forge/projects/<hash>/toolstats.json (0600) and
+ * surface as compose [tools] prefer/avoid + formatSteer TOOLS. runCall,
+ * cheaperAlternative, nextAction, recoveryPlan, and the kernel are unchanged.
  */
 import crypto from "node:crypto"
 import fs from "node:fs"
@@ -36,6 +41,9 @@ import { classifyFailure, recoveryPlan, formatDiagnosis, shouldEscalate, FAILURE
 import { verificationPlan, runVerification, formatVerification, verifyTargets } from "./verify.js"
 import { redact } from "./secrets.js"
 import { listCheckpoints } from "./checkpoint.js"
+import { writeStateFile } from "./securefs.js"
+import { projectDir } from "./memory.js"
+import { TASK_CLASS } from "./classify.js"
 
 /** Structured events (§16) — the UI renders them, the tests assert them. */
 export const TOOL_EVENTS = [
@@ -601,6 +609,223 @@ function summarizeArgs(name, args) {
 function rel(p, cwd) {
   const r = path.relative(cwd, p)
   return r && !r.startsWith("..") ? r : p
+}
+
+// ---------------------------------------------------------------------------
+// v52 — persist tool outcomes across runs (modelstrategy.recordOutcome pattern)
+// ---------------------------------------------------------------------------
+//
+// createToolIntel.stats() / records() stay per-run. This layer writes
+// aggregates (never result text) to ~/.forge/projects/<hash>/toolstats.json
+// so the next compose / formatSteer can prefer tools that worked and avoid
+// tools that repeatedly failed in this project. Damped: one sample cannot
+// flip routing. Noise tools (think/todo/memory) are skipped. Cap 32.
+
+export const TOOL_STATS_NAME = "toolstats.json"
+const NOISE_TOOLS = new Set(["think", "todo", "memory"])
+const MAX_TOOLS_TRACKED = 32
+const TOOL_PRIOR_WEIGHT = 5
+const TOOL_PRIOR_OK = 0.7
+const TOOL_PRIOR_BLOCK = 0.05
+
+export function toolStatsPath(cwd) {
+  return path.join(projectDir(cwd || process.cwd()), TOOL_STATS_NAME)
+}
+
+export function emptyTools() {
+  return { prefer: [], avoid: [] }
+}
+
+export function loadToolStats(cwd) {
+  try {
+    const j = JSON.parse(fs.readFileSync(toolStatsPath(cwd), "utf8"))
+    if (!j || typeof j !== "object" || Array.isArray(j)) return { v: 1, tools: {} }
+    const tools = j.tools && typeof j.tools === "object" && !Array.isArray(j.tools) ? j.tools : {}
+    return { v: 1, tools, updated: j.updated ?? null }
+  } catch {
+    return { v: 1, tools: {} }
+  }
+}
+
+function saveToolStats(cwd, data) {
+  try {
+    writeStateFile(toolStatsPath(cwd), JSON.stringify(data, null, 1))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function clearToolStats(cwd) {
+  try { fs.rmSync(toolStatsPath(cwd), { force: true }); return true } catch { return false }
+}
+
+function blankTool(name) {
+  return {
+    tool: name,
+    samples: 0, ok: 0, failed: 0, blocked: 0, cached: 0, ms: 0,
+    byFailure: {},
+    byClass: {},
+    firstSeen: Date.now(),
+    lastUsed: Date.now(),
+  }
+}
+
+function shrink(num, den, prior) {
+  const n = (num ?? 0) + TOOL_PRIOR_WEIGHT * prior
+  const d = (den ?? 0) + TOOL_PRIOR_WEIGHT
+  return d > 0 ? n / d : prior
+}
+
+function round4(x) { return Math.round(Number(x) * 10000) / 10000 }
+
+function topFailure(byFailure) {
+  let best = "", n = 0
+  for (const [k, v] of Object.entries(byFailure || {})) {
+    if (v > n) { n = v; best = k }
+  }
+  return best
+}
+
+function taskHitsTool(task, tool) {
+  const t = String(task || "").toLowerCase()
+  const n = String(tool || "").toLowerCase().replace(/_/g, " ")
+  if (!t || !n) return 0
+  if (t.includes(n)) return 4
+  for (const part of n.split(/\s+/)) {
+    if (part.length >= 4 && t.includes(part)) return 2
+  }
+  return 0
+}
+
+/**
+ * Record what this run's tool calls actually did. Aggregates only — no
+ * result text, no arguments. Called from agent.js (finally) and chat.js
+ * (per batch). Best-effort: a broken stats file never breaks the CLI.
+ *
+ * @param {object} o  { cwd, task, klass, records }
+ */
+export function recordToolRun({ cwd, task = "", klass = null, records = [] } = {}) {
+  void task
+  if (!cwd || !Array.isArray(records) || !records.length) return null
+  const cls = klass ? String(klass) : "general"
+  const all = loadToolStats(cwd)
+  const tools = all.tools || (all.tools = {})
+  let added = 0
+  for (const r of records) {
+    const name = String(r?.tool || "")
+    if (!name || NOISE_TOOLS.has(name)) continue
+    const rec = tools[name] && typeof tools[name] === "object" ? tools[name] : blankTool(name)
+    rec.tool = name
+    rec.samples = (rec.samples ?? 0) + 1
+    if (r.status === "ok") rec.ok = (rec.ok ?? 0) + 1
+    else if (r.status === "blocked" || r.failure === FAILURE.SAFETY_BLOCK) rec.blocked = (rec.blocked ?? 0) + 1
+    else rec.failed = (rec.failed ?? 0) + 1
+    if (r.cached) rec.cached = (rec.cached ?? 0) + 1
+    rec.ms = (rec.ms ?? 0) + (Number(r.duration_ms ?? 0) || 0)
+    if (!rec.byFailure || typeof rec.byFailure !== "object") rec.byFailure = {}
+    if (r.failure) rec.byFailure[r.failure] = (rec.byFailure[r.failure] ?? 0) + 1
+    if (!rec.byClass || typeof rec.byClass !== "object") rec.byClass = {}
+    rec.byClass[cls] = rec.byClass[cls] ?? { samples: 0, ok: 0, failed: 0, blocked: 0 }
+    rec.byClass[cls].samples++
+    if (r.status === "ok") rec.byClass[cls].ok++
+    else if (r.status === "blocked" || r.failure === FAILURE.SAFETY_BLOCK) rec.byClass[cls].blocked++
+    else rec.byClass[cls].failed++
+    rec.lastUsed = Date.now()
+    if (!rec.firstSeen) rec.firstSeen = Date.now()
+    tools[name] = rec
+    added++
+  }
+  if (!added) return all
+  const names = Object.keys(tools)
+  if (names.length > MAX_TOOLS_TRACKED) {
+    names.sort((a, b) => (tools[b].samples ?? 0) - (tools[a].samples ?? 0) || (tools[b].lastUsed ?? 0) - (tools[a].lastUsed ?? 0))
+    for (const k of names.slice(MAX_TOOLS_TRACKED)) delete tools[k]
+  }
+  all.v = 1
+  all.updated = Date.now()
+  all.tools = tools
+  saveToolStats(cwd, all)
+  return all
+}
+
+/**
+ * Tools this project has evidence for, ranked for the current task class.
+ * MICRO/SMALL skip (recording is cheap; steering a typo is not). Damped
+ * so 0/1 cannot blacklist. Empty when nothing has been observed.
+ */
+export function relevantTools(task = "", { cwd, klass = null, limit = 4 } = {}) {
+  const empty = emptyTools()
+  if (!cwd) return empty
+  if (klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL) return empty
+  const all = loadToolStats(cwd)
+  const tools = all.tools || {}
+  const names = Object.keys(tools)
+  if (!names.length) return empty
+  const cls = klass ? String(klass) : null
+  const scored = []
+  for (const name of names) {
+    const rec = tools[name]
+    if (!rec || typeof rec !== "object") continue
+    const classSlice = cls && rec.byClass?.[cls]?.samples >= 3 ? rec.byClass[cls] : rec
+    const n = Number(classSlice.samples ?? 0) || 0
+    if (n < 1) continue
+    const ok = Number(classSlice.ok ?? 0) || 0
+    const blocked = Number(classSlice.blocked ?? 0) || 0
+    const failed = Number(classSlice.failed ?? Math.max(0, n - ok - blocked)) || 0
+    const rate = shrink(ok, n, TOOL_PRIOR_OK)
+    const blockRate = n > 0 ? blocked / n : 0
+    scored.push({
+      tool: name,
+      rate,
+      samples: n,
+      ok, failed, blocked, blockRate,
+      why: topFailure(rec.byFailure),
+      hit: taskHitsTool(task, name),
+    })
+  }
+  const cap = Math.max(0, Number(limit) || 4)
+  const prefer = scored
+    .filter((s) => s.rate >= 0.8 && s.samples >= 3 && s.blockRate < 0.4)
+    .sort((a, b) => (b.hit - a.hit) || (b.rate - a.rate) || (b.samples - a.samples) || a.tool.localeCompare(b.tool))
+    .slice(0, cap)
+    .map((s) => ({ tool: s.tool, rate: round4(s.rate), samples: s.samples }))
+  const preferSet = new Set(prefer.map((p) => p.tool))
+  const avoid = scored
+    .filter((s) => !preferSet.has(s.tool) && s.samples >= 3 && (s.rate <= 0.5 || s.blockRate >= 0.4))
+    .sort((a, b) => (a.rate - b.rate) || (b.samples - a.samples) || a.tool.localeCompare(b.tool))
+    .slice(0, Math.min(3, cap))
+    .map((s) => ({
+      tool: s.tool,
+      rate: round4(s.rate),
+      samples: s.samples,
+      why: s.blockRate >= 0.4 ? (s.why || "blocked") : (s.why || "failed"),
+    }))
+  return { prefer, avoid }
+}
+
+/** Compact compose line. Empty prefer+avoid → "". */
+export function formatToolMem(tools) {
+  if (!tools) return ""
+  const pref = Array.isArray(tools.prefer) ? tools.prefer : []
+  const av = Array.isArray(tools.avoid) ? tools.avoid : []
+  if (!pref.length && !av.length) return ""
+  const p = pref.slice(0, 4).map((t) => {
+    const name = typeof t === "string" ? t : t.tool
+    if (!name) return ""
+    const pct = typeof t === "object" && Number.isFinite(t.rate) ? ` (${Math.round(t.rate * 100)}%)` : ""
+    return `${name}${pct}`
+  }).filter(Boolean).join(", ")
+  const a = av.slice(0, 3).map((t) => {
+    const name = typeof t === "string" ? t : t.tool
+    if (!name) return ""
+    const why = typeof t === "object" && t.why ? ` ${t.why}` : ""
+    return `${name}${why}`
+  }).filter(Boolean).join(", ")
+  let s = "[tools]"
+  if (p) s += ` prefer ${p}`
+  if (a) s += `${p ? ";" : ""} avoid ${a}`
+  return s === "[tools]" ? "" : s
 }
 
 export { FAILURE, RISK, STATUS, maxRisk }

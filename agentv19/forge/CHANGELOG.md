@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v52.0.0 — "toolmem"
+
+### Added (v52.0 — persist tool outcomes into compose / steer)
+- **Persist.** `recordToolRun` writes aggregates to `~/.forge/projects/<hash>/toolstats.json` (0600, no result text). `think` / `todo` / `memory` skipped. Cap 32. Damped (PRIOR_WEIGHT=5): one sample cannot prefer or avoid.
+- **Compose.** `emptyCompose.tools` + `relevantTools` → `[tools] prefer grep_files (91%); avoid bash SAFETY_BLOCK`. MICRO/SMALL skip. `includeTools` joins the composeOnce key.
+- **Steer.** `formatSteer({ tools })` adds an additive `TOOLS:` line. Empty steer is still empty. Agent / chat / repair pass `composed.tools`.
+- **Record path.** `runAgent` persists in `finally`; chat persists each `runBatch`. `runCall` / cheaperAlternative / nextAction unchanged.
+
+Single mutating writer is unchanged. PLAN-v55 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v51.0.0 — "apinex"
 
 ### Added (v51.0 — APInex provider, live catalog, custom model ids)
