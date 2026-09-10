@@ -204,3 +204,40 @@ export function loadSkill(dir, name, maxLen = 24000) {
   const md = fs.readFileSync(skillFile, "utf8")
   return md.length > maxLen ? md.slice(0, maxLen) + "\n... (truncated)" : md
 }
+
+/**
+ * Compact playbook from a SKILL.md (v40 learned format: What worked / Files / Verify).
+ * Bundled packs without those headings return empty repair. Never executes.
+ */
+export function parseSkillPlaybook(md) {
+  const src = String(md ?? "")
+  if (!src.trim()) return { repair: "", files: [], command: "" }
+  const section = (name) => {
+    const re = new RegExp(`^##\\s+${name}\\s*$`, "im")
+    const m = src.match(re)
+    if (!m) return ""
+    const start = m.index + m[0].length
+    const rest = src.slice(start)
+    const next = rest.search(/^##\s+/m)
+    return (next < 0 ? rest : rest.slice(0, next)).trim()
+  }
+  let repair = section("What worked")
+  if (/^\(unspecified\)\s*$/i.test(repair)) repair = ""
+  repair = repair.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).join(" ").slice(0, 800)
+  const files = []
+  for (const line of section("Files").split("\n")) {
+    let t = line.replace(/^\s*[-*]\s*/, "").trim()
+    t = t.replace(/^`([^`]+)`$/, "$1").trim()
+    if (!t || t.startsWith("#")) continue
+    const s = t.replace(/\\/g, "/").replace(/^\.\//, "")
+    if (!s || s.length > 160) continue
+    if (s.startsWith("/") || s.startsWith("~") || s.includes("://")) continue
+    if (s.split("/").some((p) => p === ".." || p === "")) continue
+    files.push(s)
+  }
+  let command = ""
+  const tick = section("Verify").match(/`([^`]+)`/)
+  if (tick) command = tick[1].trim().slice(0, 80)
+  return { repair, files: files.slice(0, 8), command }
+}
+

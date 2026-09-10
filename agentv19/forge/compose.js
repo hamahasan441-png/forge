@@ -16,15 +16,17 @@
  * PLAYBOOK JSON — never imported, never hosted. Matching playbooks cite
  * their files into the world snapshot so the noTools planner sees what
  * worked (repair / files / command) without spawning plugin-host.
+ * v46: learned SKILL.md bodies (What worked / Files / Verify) join the
+ * same snapshot; MODIFY chains skip rediscovery when those files are known.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { worldFromCwd, filesCited, radiusOf } from "./memgraph.js"
 import { relevantMemory } from "./memory.js"
-import { hardAvoid, mergeLearnedSkills } from "./evolve.js"
+import { hardAvoid, mergeLearnedSkills, readLearnedSkill } from "./evolve.js"
 import { evaluateSkills, selectPlugins } from "./evaluate.js"
 import { focusedVerify } from "./verify.js"
-import { indexSkills, resolveSkillsDir } from "./skills.js"
+import { indexSkills, resolveSkillsDir, parseSkillPlaybook } from "./skills.js"
 import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
 
 const RADIUS_SHOW = 16
@@ -59,16 +61,33 @@ function isMicro(klass) {
   return klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL
 }
 
-/** Caller names win; learned extras append. */
+/** Caller names win. Fill repair/files/command from the learned index when the caller object lacks them. */
 function unionPlugins(caller, extra) {
+  const learned = new Map()
+  for (const p of extra || []) {
+    if (p && p.name) learned.set(p.name, p)
+  }
   const out = []
   const seen = new Set()
-  for (const list of [caller, extra]) {
-    for (const p of list || []) {
-      if (!p || !p.name || seen.has(p.name)) continue
-      seen.add(p.name)
+  for (const p of caller || []) {
+    if (!p || !p.name || seen.has(p.name)) continue
+    seen.add(p.name)
+    const hit = learned.get(p.name)
+    if (hit && !p.repair && hit.repair) {
+      out.push({
+        ...p,
+        repair: hit.repair,
+        files: Array.isArray(p.files) && p.files.length ? p.files : hit.files,
+        command: p.command || hit.command,
+      })
+    } else {
       out.push(p)
     }
+  }
+  for (const p of extra || []) {
+    if (!p || !p.name || seen.has(p.name)) continue
+    seen.add(p.name)
+    out.push(p)
   }
   return out
 }
@@ -80,6 +99,42 @@ function filesFromPlugins(plugins) {
     for (const f of p.files || []) out.push(f)
   }
   return uniq(out).slice(0, FILE_SHOW)
+}
+
+function filesFromSkills(skills) {
+  const out = []
+  for (const s of skills || []) {
+    if (!s || !s.repair) continue
+    for (const f of s.files || []) out.push(f)
+  }
+  return uniq(out).slice(0, FILE_SHOW)
+}
+
+/** Attach What-worked / files / command from learned SKILL.md. Never bundled pack. */
+function attachSkillBodies(skills, cwd) {
+  if (!Array.isArray(skills) || !skills.length) return skills || []
+  for (const s of skills) {
+    if (!s || !s.name || s.learned !== true || s.repair) continue
+    let md = null
+    try { md = readLearnedSkill(cwd, s.name) } catch { md = null }
+    if (!md) continue
+    let parsed
+    try { parsed = parseSkillPlaybook(md) } catch { continue }
+    const repair = String(parsed.repair || "").trim()
+    if (!repair) continue
+    if (KERNEL_HINT.test(repair)) continue
+    s.repair = repair.slice(0, 240)
+    s.files = Array.isArray(parsed.files) ? parsed.files.slice(0, 4) : []
+    s.command = String(parsed.command || "").slice(0, 80)
+  }
+  return skills
+}
+
+export function playbookFilesOf(c) {
+  return uniq([
+    ...filesFromPlugins(c?.plugins),
+    ...filesFromSkills(c?.skills),
+  ]).slice(0, FILE_SHOW)
 }
 
 function langOfFile(file) {
@@ -186,11 +241,28 @@ export function compose(task = "", opts = {}) {
       try { out.plugins = selectPlugins(q, catalog, { klass }) } catch { out.plugins = [] }
     }
   }
-  const extraFiles = filesFromPlugins(out.plugins)
+  if (opts.includeSkills !== false) {
+    let idx = opts.skillsIndex
+    if (!Array.isArray(idx)) {
+      try {
+        const dir = resolveSkillsDir(opts.config?.skills?.dir)
+        idx = mergeLearnedSkills(dir ? indexSkills(dir) : [], cwd)
+      } catch { idx = [] }
+    }
+    if (Array.isArray(idx) && idx.length) {
+      try { out.skills = evaluateSkills(q, idx, { klass }) } catch { out.skills = [] }
+      try { attachSkillBodies(out.skills, cwd) } catch { /* body is best-effort */ }
+    }
+  }
+  const extraFiles = uniq([
+    ...filesFromPlugins(out.plugins),
+    ...filesFromSkills(out.skills),
+    ...(Array.isArray(opts.files) ? opts.files : []),
+  ])
   try {
     out.world = composeWorld(cwd, {
       task: q,
-      files: [...(Array.isArray(opts.files) ? opts.files : []), ...extraFiles],
+      files: extraFiles,
     })
   } catch { /* keep empty world */ }
   const world = out.world
@@ -205,18 +277,6 @@ export function compose(task = "", opts = {}) {
       out.memory = mem || ""
       out.memoryCount = (out.memory || "").split("\n").filter((l) => l.startsWith("- ")).length
     } catch { /* miss is no memory */ }
-  }
-  if (opts.includeSkills !== false) {
-    let idx = opts.skillsIndex
-    if (!Array.isArray(idx)) {
-      try {
-        const dir = resolveSkillsDir(opts.config?.skills?.dir)
-        idx = mergeLearnedSkills(dir ? indexSkills(dir) : [], cwd)
-      } catch { idx = [] }
-    }
-    if (Array.isArray(idx) && idx.length) {
-      try { out.skills = evaluateSkills(q, idx, { klass }) } catch { out.skills = [] }
-    }
   }
   try { out.avoid = hardAvoid(q, { cwd, limit: 6 }) } catch { out.avoid = [] }
   if (opts.includeVerify !== false && world.files.length) {
@@ -252,6 +312,20 @@ export function formatCompose(c) {
   if (c.memoryCount) lines.push(`[memory] ${c.memoryCount} note${c.memoryCount === 1 ? "" : "s"}`)
   if (c.avoid?.length) lines.push(`[avoid] ${c.avoid.slice(0, 4).join("; ")}`)
   if (c.skills?.length) lines.push(`[skills] ${c.skills.map((s) => s.name).filter(Boolean).slice(0, 3).join(", ")}`)
+  let skillN = 0
+  for (const s of c.skills || []) {
+    if (skillN >= 2) break
+    const repair = String(s.repair || "").trim()
+    if (!repair) continue
+    if (KERNEL_HINT.test(repair)) continue
+    let line = `[skill] ${s.name}: ${repair.slice(0, 160)}`
+    const files = (s.files || []).filter(Boolean).slice(0, 3).join(", ")
+    if (files) line += ` — ${files}`
+    const cmd = String(s.command || "").trim().slice(0, 80)
+    if (cmd) line += ` — ${cmd}`
+    lines.push(line)
+    skillN++
+  }
   const v = c.verify
   if (v && (v.command || (v.tests || []).length)) {
     const tests = (v.tests || []).slice(0, 4).join(", ")

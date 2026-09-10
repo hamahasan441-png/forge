@@ -63,6 +63,8 @@ command. It is not kernel self-mod (L6).
 
 ## Bigger map (not this release)
 
+Shipped next: **v45.0.0 / PLAN-v48** (steer: apply the snapshot on repair,
+load_skill, and the RECOVER chain — playbook first, skip rediscovery).
 L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
 a runtime dep, edit-transaction rewrite stay explicitly out.
 

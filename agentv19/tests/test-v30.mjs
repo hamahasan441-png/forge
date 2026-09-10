@@ -270,8 +270,8 @@ console.log("== router: text stays read_file; a png is read_image ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 44.0.0", VERSION, "44.0.0")
-  eq("package.json is 44.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "44.0.0")
+  eq("VERSION is 46.0.0", VERSION, "46.0.0")
+  eq("package.json is 46.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "46.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8"))
   ok("files includes vision.js", pkg.files.includes("vision.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

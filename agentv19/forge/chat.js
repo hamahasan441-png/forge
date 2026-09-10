@@ -40,7 +40,7 @@ import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
-import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
+import { evaluateSkills, formatSkillPicks, formatSteer } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
 import { compose, formatCompose } from "./compose.js"
@@ -301,9 +301,15 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
     const engineBlock = engineFor(query, { cwd: process.cwd(), config, klass })
     if (engineBlock) lines.push("", engineBlock)
     try {
-      const composed = compose(query, { cwd: process.cwd(), config, klass, includeMemory: false, includeSkills: false })
+      const composed = compose(query, { cwd: process.cwd(), config, klass, includeMemory: false })
       const composeBlock = formatCompose(composed)
       if (composeBlock) lines.push("", composeBlock)
+      const steer = formatSteer({
+        skills: composed?.skills || [],
+        plugins: composed?.plugins || [],
+        avoid: composed?.avoid || [],
+      })
+      if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }
   }
   return lines.join("\n")

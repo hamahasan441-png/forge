@@ -120,6 +120,8 @@ const suites = [
   ["v42", "node", ["test-v42.mjs"]],
   ["v43", "node", ["test-v43.mjs"]],
   ["v44", "node", ["test-v44.mjs"]],
+  ["v45", "node", ["test-v45.mjs"]],
+  ["v46", "node", ["test-v46.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

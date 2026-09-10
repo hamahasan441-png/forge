@@ -39,6 +39,7 @@ import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "
 import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
 import { generatedBoundary } from "./langengine.js"
 import { readLearnedSkill } from "./evolve.js"
+import { readLearnedPlaybookByName } from "./extend.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
@@ -1175,6 +1176,8 @@ function load_skill(ctx, args) {
   if (!fs.existsSync(target)) {
     const learned = ctx.cwd ? readLearnedSkill(ctx.cwd, name) : null
     if (learned) return learned
+    const play = ctx.cwd ? readLearnedPlaybookByName(ctx.cwd, name) : null
+    if (play) return play
     return `ERROR: skill not found: ${name}`
   }
   const md = fs.readFileSync(target, "utf8")

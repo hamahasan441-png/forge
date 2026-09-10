@@ -36,6 +36,7 @@ import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrat
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
 import { compose, formatCompose } from "./compose.js"
+import { formatSteer } from "./evaluate.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
@@ -1566,7 +1567,29 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       hypoHint += `\nRejected causes (do not retry): ${rejected.map((h) => h.description).slice(0, 4).join("; ")}`
     }
   }
-  const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${failText.slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}${hypoHint}\n\nInspect the relevant files first, then make a minimal surgical fix, then run verification.`
+  let steerHint = ""
+  try {
+    const composed = compose(state.objective, {
+      cwd: process.cwd(), config, includeMemory: false, includeSkills: true,
+    })
+    const block = formatSteer({
+      skills: composed.skills,
+      plugins: composed.plugins,
+      avoid: composed.avoid,
+    })
+    if (block) {
+      steerHint = `\n\n${block}`
+      emit({
+        type: "REPAIR_STEER",
+        taskId, runId: taskRunId, segmentId, nodeId,
+        skills: (composed.skills || []).map((s) => s.name).slice(0, 3),
+        plugins: (composed.plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name).slice(0, 4),
+        playbook: String((composed.plugins || []).find((p) => p && p.isolated && p.repair)?.repair || "").slice(0, 160),
+        avoid: (composed.avoid || []).slice(0, 4),
+      })
+    }
+  } catch { steerHint = "" }
+  const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${failText.slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}${hypoHint}${steerHint}\n\nIf TRY FIRST is present, apply that known repair to the named files, then verify. Otherwise inspect the relevant files first, then make a minimal surgical fix, then run verification.`
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
     const r = await agent({ config, provider, signal, task: diag, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })

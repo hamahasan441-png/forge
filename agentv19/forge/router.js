@@ -155,6 +155,7 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
   const steps = []
   const step = (phase, capability, why, extra = {}) => steps.push({ phase, capability, why, optional: false, ...extra })
   const fileKnown = a.files.some((f) => known.has(f)) || a.files.some((f) => existsRel(f, context.cwd))
+  const playFiles = [...new Set((context.playbookFiles || []).filter(Boolean))].slice(0, 4)
 
   switch (a.primary) {
     case INTENT.INSPECT:
@@ -187,7 +188,13 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
     case INTENT.REMEMBER:
       step("remember", CAPABILITY.MEMORY_WRITE, "persist the fact for future sessions")
       break
-    case INTENT.RECOVER:
+    case INTENT.RECOVER: {
+      if (playFiles.length) {
+        step("inspect", CAPABILITY.FILE_READ, `playbook file ${playFiles[0]} — skip rediscovery`, { target: playFiles[0] })
+        step("modify", CAPABILITY.CODE_MODIFICATION, "apply the known playbook repair (do not rediscover)")
+        step("verify", CAPABILITY.TEST_EXECUTION, "re-run the FOCUSED test first (fast signal)")
+        break
+      }
       if (!a.files.length) step("discover", CAPABILITY.FILE_DISCOVERY, "no test file named — locate the failing test first", { args: { pattern: searchPattern(a) } })
       step("inspect", CAPABILITY.FILE_READ, "read the failing test to learn what it asserts", { target: a.files[0] ?? null })
       step("discover", CAPABILITY.CONTENT_SEARCH, "locate the implementation under test", { args: { pattern: searchPattern(a) } })
@@ -196,13 +203,21 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
       step("verify", CAPABILITY.TEST_EXECUTION, "re-run the FOCUSED test first (fast signal)")
       step("regress", CAPABILITY.TEST_EXECUTION, "then the wider suite, to prove nothing else broke")
       break
+    }
     case INTENT.MODIFY:
-    default:
+    default: {
+      if (playFiles.length) {
+        step("inspect", CAPABILITY.FILE_READ, `playbook file ${playFiles[0]} — skip rediscovery`, { target: playFiles[0] })
+        step("modify", CAPABILITY.CODE_MODIFICATION, "apply the known playbook repair (do not rediscover)")
+        step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success")
+        break
+      }
       if (!fileKnown) step("discover", CAPABILITY.CONTENT_SEARCH, "locate the code to change", { args: { pattern: searchPattern(a) } })
       step("inspect", CAPABILITY.FILE_READ, "read the exact text before replacing it", { target: a.files[0] ?? null })
       step("modify", CAPABILITY.CODE_MODIFICATION, "apply a minimal, surgical edit")
       step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success")
       break
+    }
   }
 
   // §11: drop steps whose answer is already in context
@@ -666,7 +681,7 @@ function alternativeFor(tool, { registry, failure } = {}) {
  * verification contract, the parallelism rule, and the concrete chain this
  * task suggests. Bounded to a dozen lines — a prompt, not a manual.
  */
-export function toolGuidance(task, { registry, cwd = process.cwd(), readOnly = false, maxLines = 14 } = {}) {
+export function toolGuidance(task, { registry, cwd = process.cwd(), readOnly = false, maxLines = 14, playbookFiles = [] } = {}) {
   if (!registry) return ""
   const lines = ["TOOL POLICY (capability-first — pick the smallest effective chain):"]
   lines.push("- Ask 'what capability do I need?', not 'which tool do I have'. One tool per capability, cheapest first.")
@@ -680,7 +695,7 @@ export function toolGuidance(task, { registry, cwd = process.cwd(), readOnly = f
   if (deprecated.length) lines.push(`- Deprecated (only if nothing else provides the capability): ${deprecated.join(", ")}.`)
   if (task) {
     try {
-      const chain = planChain(task, { registry, context: { cwd }, constraints: { readOnly } })
+      const chain = planChain(task, { registry, context: { cwd, playbookFiles }, constraints: { readOnly } })
       const active = chain.active.map((s) => `${s.tool ?? s.capability}`).join(" → ")
       if (active) lines.push(`- Suggested chain for this task (${chain.intent}): ${active}. Deviate when the evidence says otherwise.`)
     } catch { /* guidance is best-effort */ }

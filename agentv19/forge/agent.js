@@ -34,10 +34,10 @@ import { createToolIntel } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
-import { evaluateSkills, formatSkillPicks, selectPlugins } from "./evaluate.js"
+import { evaluateSkills, formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
-import { compose, formatCompose } from "./compose.js"
+import { compose, formatCompose, playbookFilesOf } from "./compose.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -65,7 +65,7 @@ const ROLE_DIRECTIVES = {
   integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [] }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -87,8 +87,16 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "- Read-only research that would flood context: `delegate` it (role=tuner: researcher/reviewer/tester/security/coder).",
     "- Facts worth remembering later: `memory` append (scope=project for repo conventions, global for user preferences).",
   ]
+  const klass = task ? (() => { try { return classifyTask(task).class } catch { return null } })() : null
+  let composed = null
+  if (task) {
+    try {
+      composed = compose(task, { cwd, config, klass, includeMemory: false, plugins })
+    } catch { composed = null }
+  }
   if (registry) {
-    const guidance = toolGuidance(task, { registry, cwd, readOnly: readOnly || planOnly })
+    const playbookFiles = playbookFilesOf(composed)
+    const guidance = toolGuidance(task, { registry, cwd, readOnly: readOnly || planOnly, playbookFiles })
     if (guidance) lines.push("", guidance)
   }
   if (role && ROLE_DIRECTIVES[role]) lines.push("", ROLE_DIRECTIVES[role])
@@ -117,23 +125,26 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   if (skillsEnabled && skillsDir) {
     const idx = indexSkills(skillsDir)
     if (idx.length) {
-      const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
       const picks = evaluateSkills(task || "", mergeLearnedSkills(idx, cwd), { klass, skillsDir })
       const block = formatSkillPicks(picks)
       if (block) lines.push("", block)
     }
   }
   if (task) {
-    const klass = (() => { try { return classifyTask(task).class } catch { return null } })()
     const langBlock = formatLangReason(languagesIn(task, { cwd, klass }))
     if (langBlock) lines.push("", langBlock)
     const engineBlock = engineFor(task, { cwd, config, klass })
     if (engineBlock) lines.push("", engineBlock)
+    const composeBlock = formatCompose(composed)
+    if (composeBlock) lines.push("", composeBlock)
     try {
-      const composed = compose(task, { cwd, config, klass, includeMemory: false, includeSkills: false })
-      const composeBlock = formatCompose(composed)
-      if (composeBlock) lines.push("", composeBlock)
-    } catch { /* compose is best-effort */ }
+      const steer = formatSteer({
+        skills: composed?.skills || [],
+        plugins: composed?.plugins || [],
+        avoid: composed?.avoid || [],
+      })
+      if (steer) lines.push("", steer)
+    } catch { /* steer is best-effort */ }
   }
   return lines.join("\n")
 }
@@ -272,8 +283,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // would also permit outside-project rm, sudo, metadata, apt-get, npm publish.
   const autonomous = !readonly && config.agent?.autonomous !== false
   const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
+  const pickedPlugins = selectPlugins(task || "", plugins, { klass })
   const tools = makeToolContext({
-    plugins: selectPlugins(task || "", plugins, { klass }),
+    plugins: pickedPlugins,
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec,
@@ -372,7 +384,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   }
 
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
 
