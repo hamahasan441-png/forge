@@ -12,7 +12,7 @@
  * and `forge doctor` reported the HTML-200 case as a WORKING provider.
  */
 import http from "node:http"
-import { chatOnce, streamChat, streamChatResilient, toAnthropicMessages, probe, ProviderError, CATALOG, getCatalog, envKeyFor, listModels, OPENROUTER_FREE_FALLBACK, listOpenRouterModels } from "../forge/providers.js"
+import { chatOnce, streamChat, streamChatResilient, toAnthropicMessages, probe, ProviderError, CATALOG, getCatalog, envKeyFor, listModels, OPENROUTER_FREE_FALLBACK, listOpenRouterModels, isFreeModelId, isApinexProvider } from "../forge/providers.js"
 
 let PASS = 0, FAIL = 0
 const ok = (name, cond) => { if (cond) { PASS++; console.log("  ok  ", name) } else { FAIL++; console.log("  FAIL", name) } }
@@ -132,6 +132,12 @@ console.log("== catalog and model listing ==")
 {
   ok("CATALOG is populated array", Array.isArray(CATALOG) && CATALOG.length >= 10)
   ok("getCatalog finds openai", getCatalog("openai")?.name === "openai")
+  ok("getCatalog finds apinex", getCatalog("apinex")?.name === "apinex")
+  ok("custom stays wizard pick 18", CATALOG[17]?.name === "custom")
+  ok("apinex is after custom", CATALOG[18]?.name === "apinex")
+  ok("apinex is OpenAI-compatible", getCatalog("apinex")?.protocol === "openai" && /apinex\.bond/.test(getCatalog("apinex")?.baseUrl))
+  ok("isApinexProvider", isApinexProvider(getCatalog("apinex")) === true)
+  ok("isFreeModelId free/ prefix", isFreeModelId("free/gemini-3.8-flash") === true)
   ok("getCatalog returns null for unknown", getCatalog("nonexistent_provider") === null)
   ok("envKeyFor returns null when env unset", envKeyFor("openai") === (process.env.OPENAI_API_KEY || null))
   ok("OPENROUTER_FREE_FALLBACK contains free models", Array.isArray(OPENROUTER_FREE_FALLBACK) && OPENROUTER_FREE_FALLBACK.length > 0)

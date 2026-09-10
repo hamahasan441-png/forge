@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v51.0.0 — "apinex"
+
+### Added (v51.0 — APInex provider, live catalog, custom model ids)
+- **Provider.** `apinex` talks to `https://api.apinex.bond/v1` (OpenAI Chat Completions). Env `APINEX_API_KEY` (`sk-apx…`). Appended after `custom` so wizard pick **18 stays custom** (e2e/cleanroom).
+- **Auto models.** `forge models apinex` / onboard / `/models` fetch `GET /v1/models` when a key is set, else the public catalog `GET https://apinex.bond/api/public/models` (no key). `free/…` ids badge FREE. Offline fallback is a curated free list.
+- **Custom ids.** Wizard `[m]`, `/model <id>`, `forge use apinex --model <id>`, and `providers.apinex.models[]` still add any id. Extra ids are unioned onto the live list.
+
+Single mutating writer is unchanged. Kernel, `assumeYes`, `allowNewPlugins` unchanged. Not L6.
+
 ## v50.0.0 — "once"
 
 ### Added (v50.0 — compose snapshot reused for identical args)

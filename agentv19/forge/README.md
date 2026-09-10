@@ -280,6 +280,9 @@ environment variable, or `forge config set providers.<name>.apiKey <KEY>`.
 | huggingface | `HF_TOKEN` | https://huggingface.co/settings/tokens | openai |
 | ollama (local) | — no key needed | — | openai |
 | custom | `CUSTOM_API_KEY` | your gateway's console | openai |
+| **apinex** | `APINEX_API_KEY` | https://apinex.bond | openai |
+
+**APInex quick start (all models, one key):** `forge onboard` → pick `apinex` → FREE ids (`free/…`) are listed first from the public catalog (no key needed to browse) → paste a key from https://apinex.bond (`sk-apx…`). List any time: `forge models apinex` / `forge models apinex --free`. Add a custom id: wizard `[m]`, `/model <id>`, or `forge use apinex --model <id>`.
 
 **OpenRouter quick start (free):** `forge onboard` → pick `openrouter` → pick any model
 with the `FREE` badge → paste a key from https://openrouter.ai/keys (a free account key

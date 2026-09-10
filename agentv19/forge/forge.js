@@ -27,7 +27,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS } from "./config.js"
-import { CATALOG, getCatalog, envKeyFor, listModels, probe } from "./providers.js"
+import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
 // v19 performance: onboard.js (readline + probing — the heaviest module) is
@@ -631,7 +631,7 @@ async function main() {
       if (!t.baseUrl) { err(`no baseUrl known for ${t.name} — set it: forge config set providers.${t.name}.baseUrl <url>`); process.exit(1); return }
       const activeModel = config.providers?.[t.name]?.model || t.cat?.models?.[0] || ""
       if (!JSON_OUT) info(`fetching models from ${t.name} (${t.baseUrl})…`)
-      const { models, live, warning, entries } = await listModels({ protocol: t.protocol, baseUrl: t.baseUrl, apiKey: t.apiKey, catalog: t.cat })
+      const { models, live, warning, entries } = await listModels({ protocol: t.protocol, baseUrl: t.baseUrl, apiKey: t.apiKey, catalog: t.cat, extraModels: config.providers?.[t.name]?.models })
       if (live && entries?.length) writeModelCache(t.name, entries)
       const metaById = new Map((entries || []).map((e) => [e.id, e]))
       let listed = models
@@ -647,17 +647,17 @@ async function main() {
       }
       if (JSON_OUT) {
         const rows = listed
-          .filter((m) => flags.free !== true || metaById.get(m)?.free || m.endsWith(":free"))
-          .map((m) => { const e = metaById.get(m); return { id: m, free: !!(e?.free || m.endsWith(":free")), context: e?.context ?? null, active: m === activeModel } })
+          .filter((m) => flags.free !== true || isFreeModelId(m, metaById.get(m)))
+          .map((m) => { const e = metaById.get(m); return { id: m, free: isFreeModelId(m, e), context: e?.context ?? null, active: m === activeModel } })
         emitJson({ provider: t.name, live: !!live, count: rows.length, models: rows })
         return
       }
       if (flags.free === true) {
         const shown = listed
-          .filter((m) => metaById.get(m)?.free || m.endsWith(":free"))
+          .filter((m) => isFreeModelId(m, metaById.get(m)))
           .sort((a, b) => (metaById.get(b)?.context ?? 0) - (metaById.get(a)?.context ?? 0))
         if (!shown.length) {
-          warn(`no free models detected for ${t.name} — on OpenRouter free ids end with ":free" (see: forge models ${t.name})`)
+          warn(`no free models detected for ${t.name} — on OpenRouter free ids end with ":free"; on APInex they start with "free/" (see: forge models ${t.name})`)
           return
         }
         console.log(bold(`free models — ${t.name}`) + dim(live ? "  (live)" : "  (cached)"))
@@ -672,7 +672,7 @@ async function main() {
       }
       for (const m of listed) {
         const e = metaById.get(m)
-        const freeTag = e?.free || m.endsWith(":free") ? green("FREE ") : ""
+        const freeTag = isFreeModelId(m, e) ? green("FREE ") : ""
         const ctxTag = e?.context ? dim(`  ~${Math.round(e.context / 1000)}k`) : ""
         console.log((m === activeModel ? green("● ") : "  ") + freeTag + m + (m === activeModel ? dim("  (active)") : "") + ctxTag)
       }

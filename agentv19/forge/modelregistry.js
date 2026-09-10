@@ -49,6 +49,21 @@ export const MODEL_CAPABILITY_REGISTRY = {
   // Qwen
   "qwen-max": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 131072, latency: "normal", cost: "medium", tier: "strong" },
   "qwen-plus": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 131072, latency: "normal", cost: "medium", tier: "strong" },
+  // APInex (1M-class ids; lookupRegistry also matches free/<id>)
+  "gpt-5.6-luna": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
+  "gpt-5.6-sol": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 1048576, latency: "normal", cost: "medium", tier: "strong" },
+  "gpt-5.6-terra": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
+  "gpt-6-astra": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "normal", cost: "medium", tier: "strong" },
+  "grok-4.6": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 500000, latency: "normal", cost: "low", tier: "strong" },
+  "claude-opus-5": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "slow", cost: "medium", tier: "strong" },
+  "claude-sonnet-5": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "normal", cost: "medium", tier: "strong" },
+  "gemini-3.8-flash": { capabilities: ["coding", "fast", "largectx"], tags: ["fast", "cheap", "coding", "largectx"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
+  "gemini-3.1-pro": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "normal", cost: "low", tier: "strong" },
+  "deepseek-v4-flash": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
+  "deepseek-v4-pro": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 1048576, latency: "normal", cost: "low", tier: "strong" },
+  "glm-5.3-flash": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 1048576, latency: "fast", cost: "low", tier: "fast" },
+  "glm-5.3": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 1048576, latency: "normal", cost: "low", tier: "strong" },
+  "kimi-k3": { capabilities: ["coding", "reasoning", "largectx"], tags: ["coding", "reasoning", "largectx"], contextWindow: 1048576, latency: "normal", cost: "low", tier: "strong" },
   // Ollama local
   "llama3.2": { capabilities: ["coding", "fast"], tags: ["fast", "cheap", "coding"], contextWindow: 128000, latency: "fast", cost: "low", tier: "fast" },
   "qwen2.5-coder": { capabilities: ["coding", "reasoning"], tags: ["coding", "reasoning"], contextWindow: 128000, latency: "normal", cost: "low", tier: "strong" },
