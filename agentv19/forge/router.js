@@ -32,7 +32,7 @@ import {
   CLASS, RISK, RISK_ORDER, riskRank, maxRisk, STATUS, CAPABILITY,
   operationRisk, classifyCall, costScore,
 } from "./capabilities.js"
-import { verificationPlan } from "./verify.js"
+import { verificationPlan, focusedVerify } from "./verify.js"
 import { discoverToolchain } from "./lang.js"
 import { languagesIn, verifyFor } from "./langreason.js"
 
@@ -156,6 +156,8 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
   const step = (phase, capability, why, extra = {}) => steps.push({ phase, capability, why, optional: false, ...extra })
   const fileKnown = a.files.some((f) => known.has(f)) || a.files.some((f) => existsRel(f, context.cwd))
   const playFiles = [...new Set((context.playbookFiles || []).filter(Boolean))].slice(0, 4)
+  let _focus
+  const focusOf = () => (_focus ??= focusedHint(context, a))
 
   switch (a.primary) {
     case INTENT.INSPECT:
@@ -179,9 +181,16 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
     case INTENT.BROWSE:
       step("browse", CAPABILITY.BROWSER, "drive or verify a real UI in the browser")
       break
-    case INTENT.VERIFY:
-      step("verify", CAPABILITY.TEST_EXECUTION, "run the project's tests/build and read the real output")
+    case INTENT.VERIFY: {
+      const focus = focusOf()
+      const why = focus.command
+        ? (focus.tests.length
+          ? `run focused verify: ${focus.command} (${focus.tests.slice(0, 3).join(", ")})`
+          : `run focused verify: ${focus.command}`)
+        : "run the project's tests/build and read the real output"
+      step("verify", CAPABILITY.TEST_EXECUTION, why, focus.command ? { args: { command: focus.command } } : {})
       break
+    }
     case INTENT.EXECUTE:
       step("execute", CAPABILITY.COMMAND_EXECUTION, "run the requested command")
       break
@@ -189,10 +198,11 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
       step("remember", CAPABILITY.MEMORY_WRITE, "persist the fact for future sessions")
       break
     case INTENT.RECOVER: {
+      const focus = focusOf()
       if (playFiles.length) {
         step("inspect", CAPABILITY.FILE_READ, `playbook file ${playFiles[0]} — skip rediscovery`, { target: playFiles[0] })
         step("modify", CAPABILITY.CODE_MODIFICATION, "apply the known playbook repair (do not rediscover)")
-        step("verify", CAPABILITY.TEST_EXECUTION, "re-run the FOCUSED test first (fast signal)")
+        step("verify", CAPABILITY.TEST_EXECUTION, "re-run the FOCUSED test first (fast signal)", focus.command ? { args: { command: focus.command } } : {})
         break
       }
       if (!a.files.length) step("discover", CAPABILITY.FILE_DISCOVERY, "no test file named — locate the failing test first", { args: { pattern: searchPattern(a) } })
@@ -200,22 +210,23 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
       step("discover", CAPABILITY.CONTENT_SEARCH, "locate the implementation under test", { args: { pattern: searchPattern(a) } })
       step("analyze", CAPABILITY.FILE_READ, "inspect the implementation and its dependencies")
       step("modify", CAPABILITY.CODE_MODIFICATION, "apply the smallest fix that can work")
-      step("verify", CAPABILITY.TEST_EXECUTION, "re-run the FOCUSED test first (fast signal)")
+      step("verify", CAPABILITY.TEST_EXECUTION, "re-run the FOCUSED test first (fast signal)", focus.command ? { args: { command: focus.command } } : {})
       step("regress", CAPABILITY.TEST_EXECUTION, "then the wider suite, to prove nothing else broke")
       break
     }
     case INTENT.MODIFY:
     default: {
+      const focus = focusOf()
       if (playFiles.length) {
         step("inspect", CAPABILITY.FILE_READ, `playbook file ${playFiles[0]} — skip rediscovery`, { target: playFiles[0] })
         step("modify", CAPABILITY.CODE_MODIFICATION, "apply the known playbook repair (do not rediscover)")
-        step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success")
+        step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success", focus.command ? { args: { command: focus.command } } : {})
         break
       }
       if (!fileKnown) step("discover", CAPABILITY.CONTENT_SEARCH, "locate the code to change", { args: { pattern: searchPattern(a) } })
       step("inspect", CAPABILITY.FILE_READ, "read the exact text before replacing it", { target: a.files[0] ?? null })
       step("modify", CAPABILITY.CODE_MODIFICATION, "apply a minimal, surgical edit")
-      step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success")
+      step("verify", CAPABILITY.TEST_EXECUTION, "verify with a real command before claiming success", focus.command ? { args: { command: focus.command } } : {})
       break
     }
   }
@@ -259,6 +270,28 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
 
 function existsRel(f, cwd) {
   try { return fs.existsSync(path.resolve(cwd || process.cwd(), f)) } catch { return false }
+}
+
+/** Native command + graph tests. Caller hint wins. Never invents flags. Never runs. */
+function focusedHint(context = {}, analysis = {}) {
+  const hinted = String(context.verifyCommand || "").trim()
+  const hintedTests = [...new Set((context.verifyTests || []).filter(Boolean))].slice(0, 8)
+  if (hinted) return { command: hinted, tests: hintedTests }
+  const cwd = context.cwd || process.cwd()
+  const files = [...new Set([
+    ...(context.playbookFiles || []),
+    ...(analysis.files || []),
+    ...(context.knownFiles || []),
+  ].filter(Boolean))].slice(0, 8)
+  try {
+    const focus = focusedVerify(cwd, files)
+    return {
+      command: String(focus.command || "").trim(),
+      tests: [...new Set([...(focus.tests || []), ...hintedTests].filter(Boolean))].slice(0, 8),
+    }
+  } catch {
+    return { command: "", tests: hintedTests }
+  }
 }
 
 function isSatisfied(step, analysis, context) {
@@ -340,7 +373,11 @@ export function route({ task, state = {}, availableTools = null, constraints = {
   const reg = registry ?? context.registry ?? null
   const cons = { ...constraints, availableTools, maxRisk: risk ?? constraints.maxRisk ?? null }
   const analysis = analyzeTask(task, { ...state, cwd: context.cwd })
-  const chain = planChain(analysis, { registry: reg, context: { ...state, cwd: context.cwd }, constraints: cons })
+  const chain = planChain(analysis, {
+    registry: reg,
+    context: { ...context, ...state, cwd: context.cwd },
+    constraints: cons,
+  })
   const next = chain.active[0] ?? null
 
   if (!next || !next.tool) {
@@ -403,7 +440,15 @@ function synthesizeArgs(step, analysis, context) {
       if (/\bscreenshot\b/i.test(analysis.task || "")) return { action: "screenshot" }
       return { action: "open", url: m ? m[0] : null }
     }
-    case "bash": return { command: detectTestCommand(cwd, languagesIn(analysis.task || "", { cwd, files: analysis.files })) }
+    case "bash": {
+      if (step.phase === "verify") {
+        const hinted = String(step.args?.command || context.verifyCommand || "").trim()
+        if (hinted) return { command: hinted }
+        const focus = focusedHint(context, analysis)
+        if (focus.command) return { command: focus.command }
+      }
+      return { command: detectTestCommand(cwd, languagesIn(analysis.task || "", { cwd, files: analysis.files })) }
+    }
     case "edit_file": return { path: step.target ?? analysis.files[0] ?? null }
     case "write_file": return { path: step.target ?? analysis.files[0] ?? null }
     case "memory": return { action: "append", text: analysis.task.slice(0, 200) }
@@ -681,7 +726,7 @@ function alternativeFor(tool, { registry, failure } = {}) {
  * verification contract, the parallelism rule, and the concrete chain this
  * task suggests. Bounded to a dozen lines — a prompt, not a manual.
  */
-export function toolGuidance(task, { registry, cwd = process.cwd(), readOnly = false, maxLines = 14, playbookFiles = [] } = {}) {
+export function toolGuidance(task, { registry, cwd = process.cwd(), readOnly = false, maxLines = 14, playbookFiles = [], verifyCommand = "", verifyTests = [] } = {}) {
   if (!registry) return ""
   const lines = ["TOOL POLICY (capability-first — pick the smallest effective chain):"]
   lines.push("- Ask 'what capability do I need?', not 'which tool do I have'. One tool per capability, cheapest first.")
@@ -695,7 +740,7 @@ export function toolGuidance(task, { registry, cwd = process.cwd(), readOnly = f
   if (deprecated.length) lines.push(`- Deprecated (only if nothing else provides the capability): ${deprecated.join(", ")}.`)
   if (task) {
     try {
-      const chain = planChain(task, { registry, context: { cwd, playbookFiles }, constraints: { readOnly } })
+      const chain = planChain(task, { registry, context: { cwd, playbookFiles, verifyCommand, verifyTests }, constraints: { readOnly } })
       const active = chain.active.map((s) => `${s.tool ?? s.capability}`).join(" → ")
       if (active) lines.push(`- Suggested chain for this task (${chain.intent}): ${active}. Deviate when the evidence says otherwise.`)
     } catch { /* guidance is best-effort */ }

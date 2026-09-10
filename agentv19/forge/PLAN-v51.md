@@ -67,8 +67,11 @@ does not auto-run the recorded command. It does not put compose into the
 
 ## Bigger map (not this release)
 
-L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
-a runtime dep, edit-transaction rewrite stay explicitly out.
+Shipped next: **v49.0.0 / PLAN-v52** (check: INTENT.VERIFY uses focusedVerify —
+native command + graph tests, never auto-run). L6 kernel self-mod is
+explicitly out. World-model rewrite, Tree-sitter as a runtime dep,
+edit-transaction rewrite stay explicitly out. A compose-once cache is a
+follow-on, not this layer.
 
 ## Non-goals
 

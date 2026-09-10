@@ -95,7 +95,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   }
   if (registry) {
     const playbookFiles = playbookFilesOf(composed)
-    const guidance = toolGuidance(task, { registry, cwd, readOnly: readOnly || planOnly, playbookFiles })
+    const guidance = toolGuidance(task, {
+      registry, cwd, readOnly: readOnly || planOnly, playbookFiles,
+      verifyCommand: composed?.verify?.command || "",
+      verifyTests: composed?.verify?.tests || [],
+    })
     if (guidance) lines.push("", guidance)
   }
   if (role && ROLE_DIRECTIVES[role]) lines.push("", ROLE_DIRECTIVES[role])
