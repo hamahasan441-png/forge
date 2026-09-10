@@ -3,7 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## [Unreleased] — v31.0.0 — "browser"
+## [Unreleased] — v32.0.0 — "index"
+
+### Added (v32.0 — skip unchanged reads, map more languages)
+- **Incremental code index** (`index.js`). Persist file fingerprints (size + mtime) plus extracted symbols under `~/.forge/projects/<hash>/index.json` via `writeStateFile`. Unchanged files are not re-read. Missing / corrupt / wrong-version cache → full parse, never a throw. `FORGE_INDEX=0` disables persist+reuse (always parse). A fingerprint without a `symbols` array is not a hit.
+- **Language adapters** (`lang.js`). Regex adapters, no Tree-sitter. JS / Python / Go / Rust extractors moved here unchanged so `test-repomap` stays green. Extra adapters: Java, Kotlin, Ruby, PHP, C/C++, C#, Swift, Dart, Zig, Elixir, Shell, SQL, Terraform, Docker, Make. Unknown language is discovered (ext / basename / shebang), not refused. Extensionless shebang files are not opened on the walk (Termux-speed).
+- **Project-native toolchain** (`discoverToolchain`). `detectTestCommand` is now `test || build` from real manifests, including Gemfile / composer / pom / gradle, still never invented. `package.json` with only `scripts.build` is still `npm run build`.
+
+Single mutating writer is unchanged. PLAN-v35 is the contract. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite are not this release. `assumeYes` stays false.
+
+## v31.0.0 — "browser"
 
 ### Added (v31.0 — drive and verify real UIs)
 - **`browser` tool** (`browser.js`, 19th built-in). Actions: open, snapshot, click, fill, type, press, screenshot, scroll, back, reload, close, status. Opt-in binary: `agent-browser` or chromium/chrome (`FORGE_BROWSER` pins). Missing binary → `UNAVAILABLE`, the turn continues — never a fake browser (sandbox.js lesson).

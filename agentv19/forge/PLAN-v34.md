@@ -52,8 +52,10 @@ flip `assumeYes`. It does not fetch a page when no browser binary exists
 
 ## Bigger map (not this release)
 
-PLAN-v24 leftovers after v31: **none.** World-model rewrite, Tree-sitter as a
-runtime dep, edit-transaction rewrite stay explicitly out.
+PLAN-v24 leftovers after v31: **none.** Shipped next: **v32.0.0 / PLAN-v35**
+(incremental code index + language adapters, UNIFIED §23 / §32). World-model
+rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite stay
+explicitly out.
 
 ## Non-goals
 

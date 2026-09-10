@@ -78,9 +78,11 @@ console.log("== the real HTTP header carries the real version ==")
     await ctx.exec("web_search", { query: "forge agent" })
   } catch { }
   srv.close()
-  const withUa = seen.filter((s) => s.ua)
+  // Ignore foreign hits on the ephemeral port (preview probes, scanners).
+  const ours = seen.filter((s) => s.url === "/x" || String(s.url || "").startsWith("/search"))
+  const withUa = ours.filter((s) => s.ua)
   ok("an outbound request was made", withUa.length > 0)
-  ok("every request advertised a user-agent", seen.every((s) => s.ua))
+  ok("every request advertised a user-agent", ours.every((s) => s.ua))
   ok(`the version in the header is real (${withUa[0]?.ua})`, withUa.every((s) => String(s.ua).includes(VERSION)))
   ok("no header advertises another version", withUa.every((s) => !/forge-agent\/\d+\.\d+/.test(String(s.ua).replace(VERSION, ""))))
 }
