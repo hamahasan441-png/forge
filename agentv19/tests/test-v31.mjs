@@ -203,8 +203,8 @@ console.log("== router: UI tasks pick browser; file reads stay read_file ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 41.0.0", VERSION, "41.0.0")
-  eq("package.json is 41.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "41.0.0")
+  eq("VERSION is 42.0.0", VERSION, "42.0.0")
+  eq("package.json is 42.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "42.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8"))
   ok("files includes browser.js", pkg.files.includes("browser.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

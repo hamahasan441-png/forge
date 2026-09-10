@@ -34,6 +34,7 @@ import { injectPendingVision, stripOldVisionParts } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { createToolIntel } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
+import { mergeLearnedPlugins } from "./extend.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
@@ -452,9 +453,14 @@ export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt =
         startedAt,
         allowNewPlugins: config.tools?.allowNewPlugins === true,
       })
-      out.plugins = loaded.tools
-      out.pluginHost = loaded
-      out.errors.push(...(loaded.errors || []))
+      const merged = await mergeLearnedPlugins(loaded, cwd, {
+        reserved: BUILTIN_TOOL_NAMES,
+        startedAt,
+        allowNewPlugins: config.tools?.allowNewPlugins === true,
+      })
+      out.plugins = merged.tools
+      out.pluginHost = merged
+      out.errors.push(...(merged.errors || []))
     } catch { /* best-effort */ }
   }
   if (config?.tools?.mcp !== false) {

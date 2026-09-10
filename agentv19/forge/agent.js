@@ -27,6 +27,7 @@ import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection }
 import { injectPendingVision } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
+import { mergeLearnedPlugins } from "./extend.js"
 import { loadMcpTools } from "./mcp.js"
 import { createLspSession } from "./lsp.js"
 import { createToolIntel } from "./toolintel.js"
@@ -231,11 +232,16 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         startedAt: pluginStartedAt,
         allowNewPlugins: config.tools?.allowNewPlugins === true,
       })
-      plugins = loaded.tools
-      pluginHost = loaded
+      const merged = await mergeLearnedPlugins(loaded, process.cwd(), {
+        reserved: BUILTIN_TOOL_NAMES,
+        startedAt: pluginStartedAt,
+        allowNewPlugins: config.tools?.allowNewPlugins === true,
+      })
+      plugins = merged.tools
+      pluginHost = merged
       if (!isDelegatedSubAgent) {
         for (const pp of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${pp.name}${pp.readOnly ? " (read-only)" : ""} — ${pp.source}`, ...identityMeta() })
-        for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}`, ...identityMeta() })
+        for (const e of merged.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}`, ...identityMeta() })
       }
     } catch { }
   }

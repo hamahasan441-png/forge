@@ -56,9 +56,11 @@ into `agentv19/forge/skills/`. It is not kernel self-mod (L6).
 
 ## Bigger map (not this release)
 
-L5 isolated plugin / skill self-extension is not this release. L6 kernel
-self-mod is explicitly out. World-model rewrite, Tree-sitter as a runtime
-dep, edit-transaction rewrite stay explicitly out.
+Shipped next: **v42.0.0 / PLAN-v45** (L5 isolated plugin / skill
+self-extension: author a project-local read-only plugin from a successful
+repair — never `~/.forge/tools`, never the kernel, never auto-grants).
+L6 kernel self-mod is explicitly out. World-model rewrite, Tree-sitter as
+a runtime dep, edit-transaction rewrite stay explicitly out.
 
 ## Non-goals
 
