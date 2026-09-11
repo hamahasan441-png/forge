@@ -375,6 +375,27 @@ export function replaceMemory(tierOrFile, text, cwd = process.cwd(), provenance 
   }
 }
 
+/** Merge exact-duplicate bullets. Keep first provenance. */
+export function consolidateMemory(tier, cwd = process.cwd()) {
+  try {
+    return withMemoryLock(memoryFileFor(tier, cwd), () => {
+      const entries = memoryEntries(tier, cwd)
+      const seen = new Set()
+      const kept = []
+      for (const e of entries) {
+        const key = String(e.text || "").trim()
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        kept.push(e)
+      }
+      writeEntries(tier, kept, cwd)
+      return { ok: true, before: entries.length, after: kept.length }
+    })
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
 /** Trim a tier to the newest MEMORY_MAX_ENTRIES entries. Returns count removed. */
 export function pruneMemory(tier, cwd = process.cwd(), max = MEMORY_MAX_ENTRIES) {
   try {

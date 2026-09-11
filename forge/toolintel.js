@@ -774,10 +774,13 @@ export function relevantTools(task = "", { cwd, klass = null, limit = 4 } = {}) 
     const blocked = Number(classSlice.blocked ?? 0) || 0
     const failed = Number(classSlice.failed ?? Math.max(0, n - ok - blocked)) || 0
     const rate = shrink(ok, n, TOOL_PRIOR_OK)
+    const age = Date.now() - Number(rec.lastUsed || 0)
+    const recency = age < 86_400_000 ? 1.15 : age < 7 * 86_400_000 ? 1 : 0.85
     const blockRate = n > 0 ? blocked / n : 0
     scored.push({
       tool: name,
-      rate,
+      rate: Math.max(0, Math.min(1, rate * recency)),
+      rawRate: rate,
       samples: n,
       ok, failed, blocked, blockRate,
       why: topFailure(rec.byFailure),

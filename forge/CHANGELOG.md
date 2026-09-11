@@ -3,6 +3,22 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v79.0.0 — "complete"
+
+### Added (v79.0 — remaining feature TODOs, kernel still frozen)
+- **ZIP/folder ingest.** `forge skill ingest <zip|folder|SKILL.md>` extracts `SKILL.md` only (store or deflate). URL downloads that are zips extract the same way. CANDIDATE. Never `~/.forge/tools`. Never ACTIVE.
+- **Strategy 2.0.** `strategy.json` evidence scores. Compose `[STRAT]` is read-only.
+- **Toolintel 2.0.** Recency-weighted prefer/avoid.
+- **Model empirics.** `FORGE_HOME/model-outcomes.json`. `forge empirics`. Not the static registry.
+- **Consolidate.** `forge memory consolidate` merges duplicate lessons and memory bullets. Provenance kept.
+- **Gap tests.** Mapped `npm test` / `cargo test` / … are skipped unless `--command` is explicit.
+- **Bench 2.0.** Cases 13–16 (no-invent, planner role, explicit command, coder is the writer).
+- **Planner role.** Read-only. `forge roles`. One mutating writer.
+- **Knowledge on `/status`.** Idle chat prints the dock line without a live omega task.
+- **Node 22 `--allow-net`.** Passed only when the runtime exposes the flag and the plugin grant is on.
+
+Kernel evolution (L6), the Never list, and the chat-compact flake stay unchecked. `assumeYes` stays false. TODO.md is the living list.
+
 ## v78.0.0 — "experiment"
 
 ### Added (v78.0 — gap experiment → outcome → CANDIDATE skill)

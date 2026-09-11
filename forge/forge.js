@@ -906,7 +906,17 @@ async function main() {
           : `rolled back ${r.name} → SUPERSEDED, restored ${r.restored}`)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name>`)
+      if (sub === "ingest") {
+        const src = positional[2]
+        if (!src) { err("usage: forge skill ingest <zip|folder|SKILL.md>"); process.exit(1); return }
+        const { ingestLocal, formatDownloadReport } = await import("./skilldl.js")
+        const r = ingestLocal(src)
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        console.log(formatDownloadReport(r))
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder>`)
       process.exit(1)
       return
     }
@@ -1099,7 +1109,16 @@ async function main() {
         ok(r.removed ? `pruned ${r.removed} oldest entr${r.removed === 1 ? "y" : "ies"} from ${tier} memory` : `${tier} memory already within limit`)
         return
       }
-      err(`unknown: forge memory ${sub} — use list | add | forget <n> | clear | prune`)
+      if (sub === "consolidate") {
+        const { consolidateMemory } = await import("./memory.js")
+        const { consolidateLessons } = await import("./lessons.js")
+        const mem = consolidateMemory(tier, cwd)
+        const les = consolidateLessons(cwd)
+        if (JSON_OUT) { emitJson({ memory: mem, lessons: les }); return }
+        ok(`memory ${mem.before}→${mem.after}  lessons ${les.before}→${les.after} (provenance kept)`)
+        return
+      }
+      err(`unknown: forge memory ${sub} — use list | add | forget <n> | clear | prune | consolidate`)
       process.exit(1)
       return
     }
@@ -1547,6 +1566,23 @@ async function main() {
       if (!r.ok && !r.skipped) process.exit(1)
       return
     }
+    case "empirics": {
+      const { loadEmpirics, pickModelEmpiric, formatEmpiric } = await import("./empirics.js")
+      const rows = pickModelEmpiric({ limit: 12 })
+      if (JSON_OUT) { emitJson({ path: (await import("./empirics.js")).empiricPath(), items: loadEmpirics().items, pick: rows }); return }
+      console.log(bold("model empirics") + dim("  (real outcomes, not the static registry)"))
+      if (!rows.length) console.log(dim("  none yet — outcomes record after runs"))
+      else console.log(formatEmpiric(rows))
+      return
+    }
+    case "roles": {
+      const { roleCatalog } = await import("./agentmanager.js")
+      const rows = roleCatalog()
+      if (JSON_OUT) { emitJson({ roles: rows }); return }
+      console.log(bold("agent roles"))
+      for (const r of rows) console.log(`  ${r.role.padEnd(12)} ${r.readOnly ? "read-only" : "writer (main only)"}`)
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -1609,9 +1645,12 @@ ${bold("usage")}
   ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
   ${cyan("forge decisions [add]")}        architecture decision log  ${dim("~/.forge/projects/<hash>/decisions.json")}
   ${cyan("forge knowledge")}              knowledge pane             ${dim("claims + decisions + gaps + downloads")}
+  ${cyan("forge skill ingest <path>")}     ZIP / folder / SKILL.md → CANDIDATE ${dim("(extracts SKILL.md only; DOWNLOAD ≠ TRUST)")}
+  ${cyan("forge empirics")}               model outcomes from real runs ${dim("not the static registry")}
+  ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
-  ${cyan("forge bench")}                  FORGE-BENCH — 12 deterministic eval cases, no live model ${dim("(--list, --json)")}
+  ${cyan("forge bench")}                  FORGE-BENCH — 16 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

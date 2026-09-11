@@ -63,6 +63,8 @@ import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
 import { listClaims, pickClaims, formatClaimLines } from "./claims.js"
 import { listDecisions, pickDecisions, formatDecisionLines } from "./decisions.js"
 import { blastFromWorld, emptyBlast, formatBlast } from "./impact.js"
+import { pickStrategy } from "./strategy.js"
+import { pickModelEmpiric } from "./empirics.js"
 
 const RADIUS_SHOW = 16
 const FILE_SHOW = 8
@@ -465,6 +467,8 @@ export function compose(task = "", opts = {}) {
   if (opts.includeDecisions !== false) {
     try { out.decisions = pickDecisions(q, listDecisions(cwd), { klass, limit: 3 }) } catch { out.decisions = [] }
   }
+  try { out.strategy = pickStrategy(q, { cwd, klass, limit: 3 }) } catch { out.strategy = [] }
+  try { out.models = pickModelEmpiric({ limit: 3 }) } catch { out.models = [] }
   return out
 }
 
