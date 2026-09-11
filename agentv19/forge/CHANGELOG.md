@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v54.0.0 — "knowgap"
+
+### Added (v54.0 — required vs known vs skippable into compose / planner)
+- **Gaps.** `detectGaps` ranks engineering domains the task requires against memory / world / skills / lessons / prior verified state. CRITICAL/HIGH unknowns surface as `[gaps]` + `GAPS:` (research+verify before implementation). LOW unknowns are `[skip]`. MICRO/SMALL stay empty unless a domain is named.
+- **Store.** `persistGaps` writes aggregates to `~/.forge/projects/<hash>/knowgap.json` (0600, task hashed, never stored). `recordGapOutcome` is the only path to VERIFIED. Compose never writes. Meta persists after PLAN_COMPOSE. Existing `FORGE_HOME` is the single data root — no second store, nothing in the user project.
+- **CLI.** `forge data status | gaps | reset gaps` inspects the Forge-owned root.
+- **Steer.** `formatSteer({ gaps })` adds additive `GAPS:` / `SKIP:` lines. Empty steer is still empty.
+
+Single mutating writer is unchanged. PLAN-v57 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, research engine, and L6 kernel self-mod are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`. Lexical evidence is never claimed VERIFIED.
+
 ## v53.0.0 — "rank"
 
 ### Added (v53.0 — ranked skills / playbooks / MCP into compose and the planner)

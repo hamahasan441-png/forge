@@ -870,6 +870,49 @@ async function main() {
       process.exit(1)
       return
     }
+    case "data": {
+      // forge data [status] | gaps | reset gaps
+      // Inspect the Forge-owned data root (FORGE_HOME / ~/.forge). Never walks
+      // the user project. Does not invent a second store.
+      const { dataStatus, formatDataStatus, loadGapStats, clearGapStats, gapStatsPath } = await import("./knowgap.js")
+      const cwd = process.cwd()
+      const sub = (positional[1] || "status").toLowerCase()
+      if (sub === "status") {
+        const s = dataStatus(cwd)
+        if (JSON_OUT) { emitJson(s); return }
+        console.log(formatDataStatus(s))
+        console.log(dim("  gaps: forge data gaps  •  reset gaps: forge data reset gaps"))
+        return
+      }
+      if (sub === "gaps") {
+        const g = loadGapStats(cwd)
+        const domains = Object.values(g.domains || {})
+        if (JSON_OUT) { emitJson({ project: g, count: domains.length }); return }
+        if (!domains.length) {
+          console.log(dim("no gap assessments stored for this project"))
+          return
+        }
+        console.log(bold(`knowgap`) + dim(`  (${domains.length}) — ${gapStatsPath(cwd)}`))
+        for (const d of domains.sort((a, b) => (b.lastSeen ?? 0) - (a.lastSeen ?? 0)).slice(0, 16)) {
+          console.log(`  ${bold(d.id)}  ${d.impact || "?"}  ${d.status || "?"}  ${dim(d.lifecycle || "")}  ${dim(d.evidence || "")}`)
+        }
+        return
+      }
+      if (sub === "reset") {
+        const what = (positional[2] || "").toLowerCase()
+        if (what !== "gaps") {
+          err("forge data reset gaps  — only gap-domain reset is implemented (not cache / memory / all)")
+          process.exit(1)
+          return
+        }
+        clearGapStats(cwd)
+        ok("cleared project knowgap.json")
+        return
+      }
+      err(`unknown: forge data ${sub} — use status | gaps | reset gaps`)
+      process.exit(1)
+      return
+    }
     case "tools": {
       // v20.5: the capability registry — what every tool IS, what the router
       // would choose for a task, and how a batch would be scheduled.
@@ -1229,6 +1272,7 @@ ${bold("usage")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
+  ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 12 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}

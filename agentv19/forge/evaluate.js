@@ -121,10 +121,11 @@ export function formatSkillPicks(picks = []) {
  * Playbook first (known repair — fast). Then matching skills. Then
  * hostless first-party playbooks (v53). Then long-term lessons (v47 know).
  * Then avoid. Then MCP names (configured, matching). Then TOOLS prefer/avoid
- * from persisted toolintel outcomes (v52). Never dumps the 40-name pack.
- * MICRO callers pass empty plugins / know / tools / playbooks / mcp.
+ * from persisted toolintel outcomes (v52). Then GAPS / SKIP from the
+ * knowledge-gap ranking (v54). Never dumps the 40-name pack.
+ * MICRO callers pass empty plugins / know / tools / playbooks / mcp / gaps.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [] } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
@@ -158,6 +159,19 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
   const namedMcp = (mcp || []).map((p) => p && p.name).filter(Boolean).slice(0, 4)
   if (namedMcp.length) {
     lines.push(`MCP: ${namedMcp.join(", ")}`)
+  }
+  const gapRows = Array.isArray(gaps?.gaps) ? gaps.gaps.filter((x) => x && x.id).slice(0, 4) : []
+  if (gapRows.length) {
+    const body = gapRows.map((x) => {
+      let s = `${x.id} (${x.impact}, ${String(x.status || "").toLowerCase()}`
+      if (x.learn) s += " — research+verify before implementation"
+      return s + ")"
+    }).join("; ")
+    lines.push(`GAPS: ${body}`)
+  }
+  const skipRows = Array.isArray(gaps?.skip) ? gaps.skip.filter((x) => x && x.id).slice(0, 2) : []
+  if (skipRows.length) {
+    lines.push(`SKIP: ${skipRows.map((x) => `${x.id} (low impact)`).join(", ")}`)
   }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
   const pref = Array.isArray(tools?.prefer) ? tools.prefer : []
