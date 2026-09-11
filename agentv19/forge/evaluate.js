@@ -119,11 +119,12 @@ export function formatSkillPicks(picks = []) {
 /**
  * Compact "use these, in this order" block for repair / execute.
  * Playbook first (known repair — fast). Then matching skills. Then
- * long-term lessons (v47 know). Then avoid. Then TOOLS prefer/avoid
+ * hostless first-party playbooks (v53). Then long-term lessons (v47 know).
+ * Then avoid. Then MCP names (configured, matching). Then TOOLS prefer/avoid
  * from persisted toolintel outcomes (v52). Never dumps the 40-name pack.
- * MICRO callers pass empty plugins / know / tools.
+ * MICRO callers pass empty plugins / know / tools / playbooks / mcp.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [] } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
@@ -149,6 +150,14 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
   const isolated = (plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name)
   if (isolated.length && !pluginBooks.length) {
     lines.push(`PLUGINS (isolated, matching): ${isolated.slice(0, 4).join(", ")}`)
+  }
+  const namedPlay = (playbooks || []).map((p) => p && p.name).filter(Boolean).slice(0, 3)
+  if (namedPlay.length) {
+    lines.push(`PLAYBOOKS: ${namedPlay.join(", ")} (follow steps, do not spawn plugin-host)`)
+  }
+  const namedMcp = (mcp || []).map((p) => p && p.name).filter(Boolean).slice(0, 4)
+  if (namedMcp.length) {
+    lines.push(`MCP: ${namedMcp.join(", ")}`)
   }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
   const pref = Array.isArray(tools?.prefer) ? tools.prefer : []

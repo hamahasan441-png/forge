@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v53.0.0 — "rank"
+
+### Added (v53.0 — ranked skills / playbooks / MCP into compose and the planner)
+- **Skills.** `pickSkills` (tags + aliases, still top-k 3) replaces lexical-only `evaluateSkills` at compose / agent / chat / context. MICRO/SMALL still skip unless named. 11 first-party `skills/forge-*` playbooks. Community pack stays on disk — not dumped.
+- **Playbooks.** `pickPlugins` hostless playbooks join compose as `[playbooks]` and `formatSteer` as `PLAYBOOKS:`. Never spawn `plugin-host`.
+- **MCP.** `rankMcp` / `mcpCatalog` rank configured or already-loaded MCP names into `[mcp]` (cap 4). Compose never connects a server. Live tools beat config stubs.
+- **Planner.** MEDIUM+ `formatCompose` prefix already existed; the snapshot now carries ranked skills, playbooks, and MCP so the noTools plan names what to use. MICRO synthesise unchanged.
+
+Single mutating writer is unchanged. PLAN-v56 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. World-model rewrite, Tree-sitter as a runtime dep, edit-transaction rewrite, and L6 kernel self-mod are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`. `evaluateSkills` itself is unchanged.
+
 ## v52.0.0 — "toolmem"
 
 ### Added (v52.0 — persist tool outcomes into compose / steer)
