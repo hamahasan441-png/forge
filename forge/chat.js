@@ -88,7 +88,7 @@ export const COMMANDS = [
   ["models", "", "list models of active provider (live)"],
   ["key", "<api-key>", "set API key for active provider"],
   ["skills", "[name]", "list skills, or load one into the conversation"],
-  ["skill", "download|verify|learn", "download, verify, or extract procedures from a skill"],
+  ["skill", "download|verify|learn|ingest", "download, verify, extract, or ingest a skill ZIP/folder"],
   ["claims", "[subject]", "project claims (not a second memory)"],
   ["decisions", "[add title reason]", "architecture decision log"],
   ["knowledge", "", "knowledge pane: claims, decisions, gaps, downloads"],
@@ -333,6 +333,8 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         blast: composed?.blast || null,
         claims: composed?.claims || [],
         decisions: composed?.decisions || [],
+        strategy: composed?.strategy || [],
+        models: composed?.models || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }
@@ -1791,6 +1793,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
         console.log(`  safety:     writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")} • sudo ${config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")}`)
+        try {
+          const { snapshotKnowledge } = await import("./decisions.js")
+          const { knowledgeDockText } = await import("./render.js")
+          const snap = snapshotKnowledge(process.cwd())
+          dispatchUI({ type: "KNOWLEDGE_UPDATED", ...snap })
+          const know = knowledgeDockText(snap)
+          if (know) console.log(`  knowledge:  ${know}`)
+        } catch { /* dock is best-effort */ }
         {
           // v20.5: what the tool intelligence layer did in THIS session
           const ts = chatIntel.stats()
@@ -1976,6 +1986,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           else err(formatTtlReport(r).trim())
           break
         }
+        if (sub === "ingest") {
+          const src = parts.slice(1).join(" ")
+          if (!src) { err("usage: /skill ingest <zip|folder|SKILL.md>"); break }
+          const { ingestLocal, formatDownloadReport } = await import("./skilldl.js")
+          const r = ingestLocal(src)
+          if (r.ok) console.log(formatDownloadReport(r))
+          else err(r.error)
+          break
+        }
         if (!sub || sub === "list") {
           const { listDownloads, skillDownloadsDir } = await import("./skilldl.js")
           const have = listDownloads()
@@ -1996,7 +2015,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
             : `rolled back ${r.name} → SUPERSEDED, restored ${r.restored}`)
           break
         }
-        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>] | /skill promote <name> | /skill rollback <name>`)
+        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>] | /skill promote <name> | /skill rollback <name> | /skill ingest <zip|folder>`)
         break
       }
       case "claims": {

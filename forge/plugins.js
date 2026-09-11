@@ -226,6 +226,9 @@ class PluginWorker {
     for (const r of this.grants.read) argv.push(`--allow-fs-read=${r}`)
     for (const w of this.grants.write) argv.push(`--allow-fs-write=${w}`)
     if (this.grants.childProcess) argv.push("--allow-child-process")
+    if (this.grants.network && process.allowedNodeEnvironmentFlags?.has("--allow-net")) {
+      argv.push("--allow-net")
+    }
     return argv
   }
 

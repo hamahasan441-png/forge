@@ -201,6 +201,33 @@ export function setLessonConfidence(id, value, cwd = process.cwd()) {
   return { ok: true, id: l.id, confidence: l.confidence }
 }
 
+/** Merge duplicate failure+strategy rows. Keep provenance ids. Disk not dropped. */
+export function consolidateLessons(cwd = process.cwd()) {
+  const lessons = loadLessons(cwd)
+  const map = new Map()
+  for (const l of lessons) {
+    const key = `${l.failure || ""}|${l.failed_strategy || ""}|${l.cause || ""}`
+    if (!map.has(key)) {
+      map.set(key, { ...l, provenance: Array.isArray(l.provenance) ? [...l.provenance] : [l.id] })
+      continue
+    }
+    const e = map.get(key)
+    const ids = new Set([...(e.provenance || []), l.id, ...(l.provenance || [])])
+    e.provenance = [...ids].slice(0, 12)
+    e.uses = (e.uses || 0) + (l.uses || 0) + 1
+    e.successCount = (e.successCount || 0) + (l.successCount || 0)
+    e.failureCount = (e.failureCount || 0) + (l.failureCount || 0)
+    e.confidence = Math.max(Number(e.confidence || 0), Number(l.confidence || 0))
+    e.solution = e.solution || l.solution
+    e.successful_repair = e.successful_repair || l.successful_repair
+    for (const f of l.files || []) if (!(e.files || []).includes(f)) (e.files ??= []).push(f)
+    if ((l.lastUsed || 0) > (e.lastUsed || 0)) e.lastUsed = l.lastUsed
+  }
+  const next = [...map.values()]
+  save(cwd, next)
+  return { ok: true, before: lessons.length, after: next.length }
+}
+
 /**
  * Strategies already proven ineffective for a task/context. Returns lessons
  * whose failed strategy matches, relevance-ranked, so the controller can avoid

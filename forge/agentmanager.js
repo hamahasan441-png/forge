@@ -41,6 +41,7 @@
 
 export const ROLES = {
   RESEARCHER: "researcher",
+  PLANNER: "planner",
   CODER: "coder",
   TESTER: "tester",
   REVIEWER: "reviewer",
@@ -50,7 +51,7 @@ export const ROLES = {
   INTEGRATOR: "integrator",
 }
 
-const READ_ONLY_ROLES = new Set([ROLES.RESEARCHER, ROLES.REVIEWER, ROLES.SECURITY, ROLES.TESTER, ROLES.ARCHITECT, ROLES.INTEGRATOR])
+const READ_ONLY_ROLES = new Set([ROLES.RESEARCHER, ROLES.PLANNER, ROLES.REVIEWER, ROLES.SECURITY, ROLES.TESTER, ROLES.ARCHITECT, ROLES.INTEGRATOR])
 
 /** Is a role permitted to mutate? Only the coder/main agent — and even that is
  *  funnelled through the single mutating context, never a parallel worker. */
@@ -59,7 +60,11 @@ export function roleIsReadOnly(role) {
 }
 
 const ROLE_CONFLICT_WEIGHT = {
-  security: 4, reviewer: 3, integrator: 3, debugger: 3, architect: 2, tester: 2, coder: 2, researcher: 1,
+  security: 4, reviewer: 3, integrator: 3, debugger: 3, architect: 2, planner: 2, tester: 2, coder: 2, researcher: 1,
+}
+
+export function roleCatalog() {
+  return Object.values(ROLES).map((role) => ({ role, readOnly: roleIsReadOnly(role) }))
 }
 
 /** Worker lifecycle states. */

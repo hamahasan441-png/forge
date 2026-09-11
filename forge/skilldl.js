@@ -44,6 +44,7 @@ import { validSkillName, skillDescription, parseSkillPlaybook } from "./skills.j
 import { SKILL_LIFE, supersedeSkill } from "./evolve.js"
 import { classifyCommand } from "./shellguard.js"
 import { recordClaim } from "./claims.js"
+import { extractSkillMdFromZip, readSkillFromFolder, isZipBuffer } from "./zipingest.js"
 
 export const SKILL_DOWNLOADS = "skill-downloads"
 export const TOOL_DOWNLOADS = "tool-downloads"
@@ -551,7 +552,13 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
   const named = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(disp)
   const filename = safeFilename(named?.[1] ? decodeURIComponent(named[1].trim()) : fromUrl, fromUrl)
 
-  const kinded = kind === "tool" ? detectToolArtifact(body, filename) : detectSkillArtifact(body, filename)
+  const kinded0 = kind === "tool" ? detectToolArtifact(body, filename) : detectSkillArtifact(body, filename)
+  let kinded = kinded0
+  if (kind === "skill" && (kinded.type === "archive" || isZipBuffer(body))) {
+    const extracted = extractSkillMdFromZip(body)
+    if (!extracted.ok) return { ok: false, error: extracted.error || "zip has no SKILL.md", url: checked.url }
+    kinded = { type: "markdown", text: extracted.text }
+  }
   if (!kinded.type) return { ok: false, error: kinded.error, url: checked.url }
 
   const hash = sha256(body)
@@ -629,6 +636,74 @@ export async function downloadSkill(url, opts = {}) {
 
 export async function downloadTool(url, opts = {}) {
   return downloadArtifact(url, { ...opts, kind: "tool" })
+}
+
+/**
+ * Local ZIP or folder → CANDIDATE skill. Never ~/.forge/tools. Never ACTIVE.
+ */
+export function ingestLocal(src, { env = process.env, now = Date.now } = {}) {
+  const raw = String(src || "").trim()
+  if (!raw) return { ok: false, error: "usage: forge skill ingest <zip|folder>" }
+  const p = path.resolve(raw)
+  if (p.includes("\0")) return { ok: false, error: "invalid path" }
+  let st
+  try { st = fs.statSync(p) } catch { return { ok: false, error: `not found: ${p}` } }
+  let text = ""
+  let filename = "SKILL.md"
+  if (st.isDirectory()) {
+    const got = readSkillFromFolder(p)
+    if (!got.ok) return { ok: false, error: got.error, path: p }
+    text = got.text
+  } else {
+    let buf
+    try { buf = fs.readFileSync(p) } catch (e) { return { ok: false, error: e.message, path: p } }
+    if (isZipBuffer(buf) || /\.zip$/i.test(p)) {
+      const got = extractSkillMdFromZip(buf)
+      if (!got.ok) return { ok: false, error: got.error, path: p }
+      text = got.text
+      filename = "skill.zip"
+    } else {
+      const det = detectSkillArtifact(buf, path.basename(p))
+      if (det.type !== "markdown") return { ok: false, error: det.error || "not a SKILL.md", path: p }
+      text = det.text
+    }
+  }
+  if (KERNEL_HINT.test(text)) return { ok: false, error: "kernel path / assumeYes / plugin-host — refused", path: p }
+  const name = nameFromMarkdown(text) || slugName(path.basename(p).replace(/\.(md|skill|zip)$/i, "")) || "ingested"
+  const man = loadDownloadManifest(env, "skill")
+  const id = uniqueId(name, man, "skill")
+  const dest = path.join(skillDownloadsDir(env), id)
+  ensureDir(dest)
+  try {
+    writeStateFile(path.join(dest, "SKILL.md"), text, { mode: 0o600 })
+    const rec = {
+      id,
+      kind: "skill",
+      sourceUrl: `file://${p}`,
+      downloadedAt: new Date(now()).toISOString(),
+      filename,
+      sha256: sha256(Buffer.from(text)),
+      size: Buffer.byteLength(text),
+      status: DOWNLOAD_STATUS.DOWNLOADED,
+      lifecycle: SKILL_LIFE.CANDIDATE,
+      detectedType: "markdown",
+      skillName: id,
+      ingested: true,
+    }
+    const desc = skillDescription(text)
+    if (desc) rec.description = desc.slice(0, 240)
+    writeStateFile(path.join(dest, "meta.json"), JSON.stringify(rec, null, 1), { mode: 0o600 })
+    man.v = 1
+    man.updated = now()
+    man.items = man.items || {}
+    man.items[id] = rec
+    saveManifest(man, env, "skill")
+    recordCandidate(id, env, "skill")
+    return { ok: true, record: rec, lifecycle: SKILL_LIFE.CANDIDATE, path: p }
+  } catch (e) {
+    try { fs.rmSync(dest, { recursive: true, force: true }) } catch { /* best-effort */ }
+    return { ok: false, error: e?.message || "write failed", path: p }
+  }
 }
 
 export async function downloadSkills(urls, opts = {}) {

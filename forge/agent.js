@@ -153,6 +153,8 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
         blast: composed?.blast || null,
         claims: composed?.claims || [],
         decisions: composed?.decisions || [],
+        strategy: composed?.strategy || [],
+        models: composed?.models || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }

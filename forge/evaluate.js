@@ -136,7 +136,7 @@ export function formatSkillPicks(picks = []) {
  * page dump). Never dumps the 40-name pack.
  * MICRO callers pass empty plugins / know / tools / playbooks / mcp / gaps.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null, claims = [], decisions = [] } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null, claims = [], decisions = [], strategy = [], models = [] } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
@@ -211,6 +211,14 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
   const namedDec = (decisions || []).map((d) => d && d.title).filter(Boolean).slice(0, 3)
   if (namedDec.length) {
     lines.push(`DECISIONS: ${namedDec.join(", ")} — honor accepted architecture`)
+  }
+  const strat = Array.isArray(strategy) ? strategy.filter((s) => s && s.name).slice(0, 3) : []
+  if (strat.length) {
+    lines.push(`STRAT: ${strat.map((s) => `${s.name} (${Math.round((s.rate || 0) * 100)}%)`).join(", ")}`)
+  }
+  const mods = Array.isArray(models) ? models.filter((s) => s && s.model).slice(0, 3) : []
+  if (mods.length) {
+    lines.push(`MODELS: ${mods.map((s) => `${s.model} (${Math.round((s.rate || 0) * 100)}%)`).join(", ")}`)
   }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
   const pref = Array.isArray(tools?.prefer) ? tools.prefer : []

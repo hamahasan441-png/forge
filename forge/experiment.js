@@ -12,17 +12,28 @@ import { recordGapOutcome, loadGapStats, LIFECYCLE, domainIds } from "./knowgap.
 import { authorSkill, SKILL_LIFE } from "./evolve.js"
 import { parseSkillPlaybook } from "./skills.js"
 import { TASK_CLASS } from "./classify.js"
+import { recordStrategy } from "./strategy.js"
 
 const TEST_TIMEOUT_MS = 15_000
 const REFUSE = new Set(["block", "danger", "confirm"])
+
+const INVENTED = /^(npm test|yarn test|pnpm test|cargo test|pytest|go test)\b/i
 
 export function generateGapTest(gap, { command, blast } = {}) {
   const explicit = String(command || "").trim()
   if (explicit) return { ok: true, command: explicit.slice(0, 200), source: "explicit" }
   const mapped = (blast?.tests || gap?.acquire?.tests || []).map((t) => String(t || "").trim()).find(Boolean)
-  if (mapped) return { ok: true, command: mapped.slice(0, 200), source: "graph" }
+  if (mapped) {
+    if (INVENTED.test(mapped)) {
+      return { ok: false, skipped: "no-focused-test", reason: "mapped toolchain is invented — pass --command to run it" }
+    }
+    return { ok: true, command: mapped.slice(0, 200), source: "graph" }
+  }
   const q = String(gap?.acquire?.query || "").trim()
   if (gap?.acquire?.method === "verify" && q && !/^verify\s/i.test(q) && q !== "verify with a focused test, do not re-search") {
+    if (INVENTED.test(q)) {
+      return { ok: false, skipped: "no-focused-test", reason: "acquire query invents a toolchain — pass --command" }
+    }
     return { ok: true, command: q.slice(0, 200), source: "acquire" }
   }
   return {
@@ -87,6 +98,7 @@ export function runExperiment({
       evidence: `experiment ${hypo.command} ${passed ? "pass" : timed ? "timeout" : `exit ${r.status}`}`,
     })
   } catch { /* persist is best-effort */ }
+  try { recordStrategy({ cwd, name: "experiment", ok: passed }) } catch { /* best-effort */ }
   let skill = { ok: false, skipped: passed ? "not-requested" : "not-verified" }
   if (passed && generateSkill) {
     try {

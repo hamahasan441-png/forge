@@ -21,6 +21,8 @@ import { XID } from "./infogain.js"
 import { canCompleteTask, GATE_STATUS } from "./completion.js"
 import { buildDAG, replanRemaining, NODE_STATUS, markCompleted } from "./dag.js"
 import { VERSION } from "./version.js"
+import { generateGapTest } from "./experiment.js"
+import { ROLES, roleIsReadOnly, roleCatalog } from "./agentmanager.js"
 
 export const BENCH_CASES = [
   {
@@ -124,6 +126,46 @@ export const BENCH_CASES = [
     longRunning: true,
     expect: { notCompleted: true },
   },
+  {
+    id: "13-gap-no-invent",
+    name: "gap test never invents a toolchain",
+    task: "fix a typo in README",
+    classifyOnly: true,
+    expect: {
+      class: TASK_CLASS.MICRO,
+      custom: () => generateGapTest({ id: "auth" }, { blast: { tests: ["npm test"] } }).ok === false,
+    },
+  },
+  {
+    id: "14-planner-role",
+    name: "planner role is read-only",
+    task: "fix a typo in README",
+    classifyOnly: true,
+    expect: {
+      class: TASK_CLASS.MICRO,
+      custom: () => roleIsReadOnly(ROLES.PLANNER) && roleCatalog().some((r) => r.role === "planner"),
+    },
+  },
+  {
+    id: "15-explicit-command",
+    name: "explicit experiment command is allowed",
+    task: "fix a typo in README",
+    classifyOnly: true,
+    expect: {
+      class: TASK_CLASS.MICRO,
+      custom: () => generateGapTest({ id: "auth" }, { command: "true" }).command === "true",
+    },
+  },
+  {
+    id: "16-coder-is-writer",
+    name: "coder role may mutate (main only)",
+    task: "fix a typo in README",
+    classifyOnly: true,
+    expect: {
+      class: TASK_CLASS.MICRO,
+      custom: () => roleIsReadOnly(ROLES.CODER) === false,
+    },
+  },
 ]
 
 const METRIC_KEYS = [
@@ -158,6 +200,7 @@ function scoreCase(c, got) {
   if (e.noFalseComplete || e.notCompleted) {
     checks.falseCompletion = pass(got.completed !== true)
   }
+  if (typeof e.custom === "function") checks.toolCalls = pass(e.custom() === true)
   if (c.id === "10-crash-recovery") checks.recovery = pass(got.class === TASK_CLASS.RECOVERY)
   if (c.id === "12-long-running") {
     checks.replanning = pass(got.replanKept === true)
