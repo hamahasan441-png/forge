@@ -90,6 +90,8 @@ export const COMMANDS = [
   ["skills", "[name]", "list skills, or load one into the conversation"],
   ["skill", "download|verify|learn", "download, verify, or extract procedures from a skill"],
   ["claims", "[subject]", "project claims (not a second memory)"],
+  ["decisions", "[add title reason]", "architecture decision log"],
+  ["knowledge", "", "knowledge pane: claims, decisions, gaps, downloads"],
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
@@ -154,6 +156,8 @@ ${bold("setup")}
   /skill learn <name>   extract procedures from a VERIFIED skill (indexing is not learned)
   /skill ttl <name> [ms] per-skill TTL override (omit ms to print)
   /claims [subject]     list project claims, or one subject (not a second memory)
+  /decisions [add …]    architecture decision log
+  /knowledge            knowledge pane (claims / decisions / gaps / downloads)
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
@@ -323,6 +327,8 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         mcp: composed?.mcp || [],
         gaps: composed?.gaps || null,
         blast: composed?.blast || null,
+        claims: composed?.claims || [],
+        decisions: composed?.decisions || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }
@@ -1916,8 +1922,16 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const urls = parts.slice(1)
           if (!urls.length) { err("usage: /skill download <https-url> [<url>…]"); break }
           const { downloadSkills, formatDownloadReport } = await import("./skilldl.js")
-          info("downloading…")
-          const results = await downloadSkills(urls)
+          info("download started")
+          const results = await downloadSkills(urls, {
+            onProgress: (p) => {
+              if (p.phase === "read" && p.received) {
+                const tot = p.total ? `${p.received}/${p.total}` : `${p.received} B`
+                const pct = p.pct == null ? "" : ` ${p.pct}%`
+                info(`download ${tot}${pct}`)
+              }
+            },
+          })
           for (const r of results) {
             if (r.ok) console.log(formatDownloadReport(r))
             else err(formatDownloadReport(r).trim())
@@ -1979,6 +1993,45 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         const rows = listClaims(cwd)
         console.log(bold(`claims`) + dim(`  ${claimsPath(cwd)}`))
         console.log(formatClaims(rows).trimEnd())
+        break
+      }
+      case "decisions": {
+        const { listDecisions, getDecision, recordDecision, formatDecisions, decisionsPath } = await import("./decisions.js")
+        const cwd = process.cwd()
+        const parts = arg.split(/\s+/).filter(Boolean)
+        if (parts[0] === "add") {
+          const title = parts[1]
+          const reason = parts.slice(2).join(" ")
+          if (!title || !reason) { err("usage: /decisions add <title> <reason>"); break }
+          const r = recordDecision({ cwd, title, reason })
+          if (!r.ok) err(r.error)
+          else ok(`decision ${r.title} recorded`)
+          break
+        }
+        if (parts[0]) {
+          const d = getDecision(cwd, parts[0])
+          if (!d) { err(`no decision for ${parts[0]}`); break }
+          console.log(formatDecisions([d]).trimEnd())
+          break
+        }
+        const rows = listDecisions(cwd)
+        console.log(bold(`decisions`) + dim(`  ${decisionsPath(cwd)}`))
+        console.log(formatDecisions(rows).trimEnd())
+        break
+      }
+      case "knowledge": {
+        const { listClaims } = await import("./claims.js")
+        const { listDecisions, formatKnowledgePane } = await import("./decisions.js")
+        const { loadGapStats } = await import("./knowgap.js")
+        const { listDownloads } = await import("./skilldl.js")
+        const cwd = process.cwd()
+        const stats = loadGapStats(cwd)
+        console.log(formatKnowledgePane({
+          claims: listClaims(cwd),
+          decisions: listDecisions(cwd),
+          gaps: { gaps: Object.values(stats.domains || {}) },
+          downloads: listDownloads(),
+        }).trimEnd())
         break
       }
       case "tool": {

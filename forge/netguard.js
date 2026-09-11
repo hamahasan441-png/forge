@@ -325,7 +325,7 @@ function isConnError(e) {
  * One HTTP(S) request pinned to `target.addresses`. Resolves with
  * { status, headers, body, address } — body capped at maxBytes.
  */
-function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, signal, onSocket, onLookup, hop }) {
+function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, signal, onSocket, onLookup, hop, onBytes }) {
   return new Promise((resolve, reject) => {
     const u = target.url
     const allowed = new Set(target.addresses.map((a) => a.address.toLowerCase()))
@@ -379,10 +379,19 @@ function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, sign
           return done(reject, new PinnedFetchError(`response too large (> ${Math.round(maxBytes / 1024)}KB)`, { code: "ETOOLARGE", url: u.href, hop }))
         }
         chunks.push(c)
+        try {
+          const total = Number(res.headers?.["content-length"]) || 0
+          const pct = total > 0 ? Math.min(99, Math.floor((size / total) * 100)) : null
+          onBytes?.({ received: size, total, pct, done: false })
+        } catch { /* progress is best-effort */ }
       })
       res.on("error", (e) => { cleanup(); done(reject, e) })
       res.on("end", () => {
         cleanup()
+        try {
+          const total = Number(res.headers?.["content-length"]) || size
+          onBytes?.({ received: size, total, pct: 100, done: true })
+        } catch { /* progress is best-effort */ }
         done(resolve, { status: res.statusCode ?? 0, statusText: res.statusMessage ?? "", headers: res.headers, body: Buffer.concat(chunks), address: res.socket?.remoteAddress ?? null })
       })
     })
@@ -411,7 +420,7 @@ export async function pinnedFetch(url, opts = {}) {
   const {
     method = "GET", headers = {}, timeoutMs = 15000, totalTimeoutMs = 30000, maxRedirects = 5,
     maxBytes = 2 * 1024 * 1024, allowPrivate = false, resolver, policy, tls = {}, signal,
-    onSocket, onLookup, retries = 1,
+    onSocket, onLookup, retries = 1, onBytes,
   } = opts
   const started = Date.now()
   const hops = []
@@ -431,7 +440,7 @@ export async function pinnedFetch(url, opts = {}) {
     let res
     for (let attempt = 0; ; attempt++) {
       try {
-        res = await requestPinned(target, { method: curMethod, headers: hopHeaders, timeoutMs: Math.min(timeoutMs, remaining), maxBytes, tls, signal, onSocket, onLookup, hop })
+        res = await requestPinned(target, { method: curMethod, headers: hopHeaders, timeoutMs: Math.min(timeoutMs, remaining), maxBytes, tls, signal, onSocket, onLookup, hop, onBytes })
         break
       } catch (e) {
         if (attempt < retries && isConnError(e) && !signal?.aborted) continue // same pinned set

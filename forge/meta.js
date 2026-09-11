@@ -1588,6 +1588,8 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       mcp: composed.mcp,
       gaps: composed.gaps,
       blast: composed.blast,
+      claims: composed.claims,
+      decisions: composed.decisions,
     })
     if (block) {
       steerHint = `\n\n${block}`

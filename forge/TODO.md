@@ -7,7 +7,7 @@ and tests are green. Never mark complete because a model wrote a spec.
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
 v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence, v68 stale,
-v70 ttl, v71 drift, v72 claims (per-claim subject store under the project hash).
+v72 claims, v73 cite, v74 cockpit (steer from claims, decisions.json, knowledge pane, honest download progress).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -26,7 +26,7 @@ DOWNLOAD ≠ TRUST.
 
 ## Knowledge
 
-- [ ] Claim lookup in compose [world] (still read-only; compose never writes claims)
+- [ ] Claims/decisions in the omega TUI dock (still never writes)
 
 ## Strategy / tools / models
 
@@ -39,9 +39,7 @@ DOWNLOAD ≠ TRUST.
 ## Tests / architecture
 
 - [ ] Test generation for a blocking gap (still never skip tests without a ledger)
-- [ ] Architecture decision log (`decisions.json` under the project hash)
-- [ ] TUI knowledge pane (gaps / blast / candidate skills)
-- [ ] TUI download progress (`/skill download` status line; not a fake 100%)
+- [ ] TUI download progress for tools (`/tool download` status line)
 
 ## Bench / agents / kernel
 

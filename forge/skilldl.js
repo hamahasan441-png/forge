@@ -503,9 +503,12 @@ async function defaultFetch(url, opts) {
  * Download one skill or tool URL. `fetchFn` is injectable for tests.
  * Returns { ok, error, reused, record } — never throws for expected failures.
  */
-async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, env = process.env, now = Date.now } = {}) {
+async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, env = process.env, now = Date.now, onProgress } = {}) {
   const checked = validateDownloadUrl(url)
   if (!checked.ok) return { ok: false, error: checked.error, url: String(url ?? "") }
+
+  const progress = (p) => { try { onProgress?.(p) } catch { /* UI only */ } }
+  progress({ phase: "start", url: checked.url, received: 0, total: 0, pct: null, done: false })
 
   let res
   try {
@@ -516,9 +519,11 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
       totalTimeoutMs: 45000,
       maxBytes: MAX_SKILL_BYTES,
       allowPrivate: false,
+      onBytes: (p) => progress({ phase: "read", url: checked.url, ...p, done: false, pct: p?.pct == null ? null : Math.min(99, p.pct) }),
     })
   } catch (e) {
     const blocked = e instanceof PinnedFetchError && e.blocked
+    progress({ phase: "error", url: checked.url, received: 0, total: 0, pct: null, done: false })
     return {
       ok: false,
       error: blocked ? `refused (${e.message})` : (e?.message || "download failed"),
@@ -528,10 +533,14 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
   }
   if (!res || res.ok === false) {
     const status = res?.status
+    progress({ phase: "error", url: checked.url, received: 0, total: 0, pct: null, done: false })
     return { ok: false, error: status ? `HTTP ${status}` : "download failed", url: checked.url }
   }
   const body = Buffer.isBuffer(res.body) ? res.body : Buffer.from(res.body || [])
-  if (!body.length) return { ok: false, error: "empty download", url: checked.url }
+  if (!body.length) {
+    progress({ phase: "error", url: checked.url, received: 0, total: 0, pct: null, done: false })
+    return { ok: false, error: "empty download", url: checked.url }
+  }
 
   const fallback = kind === "tool" ? "tool.mjs" : "skill.bin"
   const fromUrl = safeFilename(new URL(checked.url).pathname, fallback)
@@ -546,6 +555,7 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
   const manifest = loadDownloadManifest(env, kind)
   const existing = findByHash(manifest, hash)
   if (existing) {
+    progress({ phase: "done", url: checked.url, received: body.length, total: body.length, pct: 100, done: true })
     return {
       ok: true,
       reused: true,
@@ -602,6 +612,7 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
     manifest.items[id] = rec
     saveManifest(manifest, env, kind)
     recordCandidate(id, env, kind)
+    progress({ phase: "done", url: checked.url, received: body.length, total: body.length, pct: 100, done: true })
     return { ok: true, reused: false, record: rec, lifecycle: SKILL_LIFE.CANDIDATE, url: checked.url }
   } catch (e) {
     try { fs.rmSync(dest, { recursive: true, force: true }) } catch { /* best-effort */ }
