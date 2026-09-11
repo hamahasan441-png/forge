@@ -6,8 +6,9 @@ and tests are green. Never mark complete because a model wrote a spec.
 
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl
-(`forge skill download` → `FORGE_HOME/skill-downloads`, CANDIDATE only).
-See CHANGELOG.
+(`forge skill download` → CANDIDATE), v63 verify
+(`forge skill|tool verify` → VERIFIED or INACTIVE; tool-downloads
+are hostless playbooks, never `~/.forge/tools`). See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
 `assumeYes` stays false, compose never writes. `FORGE_DATA_DIR` aliases
@@ -16,11 +17,9 @@ DOWNLOAD ≠ TRUST.
 
 ## Skill forge 2.0
 
-- [ ] `/skill verify <name> [name…]` and `/skill verify all` — existing skilllife CANDIDATE → VERIFIED only after parse + tests, never because it downloaded
-- [ ] Failed verify stays INACTIVE; one failure does not fail siblings
 - [ ] `/skill learn <name>` — extract procedures/patterns into FORGE_HOME knowledge; indexing is not "learned"
 - [ ] Research → implement a new skill from a gap (not only `authorSkill` from a repair)
-- [ ] Validate a CANDIDATE with generated tests before VERIFIED
+- [ ] Validate a CANDIDATE with generated tests before VERIFIED (v63 is structural only)
 - [ ] Benchmark a playbook vs the repair it came from
 - [ ] Deprecate / supersede a learned skill when CONTRADICTED
 - [ ] Versioned skills (v2 is a new CANDIDATE; v1 stays ACTIVE until v2 beats it)
@@ -52,7 +51,7 @@ DOWNLOAD ≠ TRUST.
 - [ ] Bench 2.0
 - [ ] Multi-agent roles
 - [ ] Kernel evolution **only** in an isolated worktree (L6 — not now)
-- [ ] Land v38–v62 stack on `main` (separate merge, not an enhancement)
+- [ ] Land v38–v63 stack on `main` (separate merge, not an enhancement)
 
 ## Known reds (not features)
 

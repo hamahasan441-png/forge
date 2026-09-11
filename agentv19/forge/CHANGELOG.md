@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v63.0.0 — "verify"
+
+### Added (v63.0 — tool download + structural verify)
+- **Tools.** `forge tool download <https-url>` stores a CANDIDATE under `~/.forge/tool-downloads/` (same FORGE_HOME root). Never `~/.forge/tools`, never plugin-host.
+- **Verify.** `forge skill verify <name|all>` and `forge tool verify <name|all>` (TUI `/skill verify`, `/tool verify`). Parse + validate only. Pass → VERIFIED. Fail → INACTIVE. One failure does not fail siblings. DOWNLOAD ≠ VERIFY.
+- **Planner.** `pickSkills` / `pickPlugins` see VERIFIED downloads only (hostless playbooks). CANDIDATE stays out.
+
+Single mutating writer is unchanged. TODO.md is the living list. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Deep learn, generated tests, rollback, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v62.0.0 — "skilldl"
 
 ### Added (v62.0 — native skill download, CANDIDATE only)

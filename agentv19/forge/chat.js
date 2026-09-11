@@ -88,7 +88,8 @@ export const COMMANDS = [
   ["models", "", "list models of active provider (live)"],
   ["key", "<api-key>", "set API key for active provider"],
   ["skills", "[name]", "list skills, or load one into the conversation"],
-  ["skill", "download <url>", "download a skill (CANDIDATE only — DOWNLOAD ≠ VERIFY)"],
+  ["skill", "download|verify", "download a skill (CANDIDATE) or structurally verify it"],
+  ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
   ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
@@ -148,6 +149,9 @@ ${bold("setup")}
   /key <api-key>        set API key for active provider
   /skills [name]        list skills, or load one into the conversation
   /skill download <url> download a skill to ~/.forge/skill-downloads (CANDIDATE, not trusted)
+  /skill verify <name>  structurally verify a downloaded skill (pass → VERIFIED)
+  /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
+  /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
@@ -1234,7 +1238,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (cmd === "settings") return part.includes("=") ? null : pick(["dock", "thinking", "ascii", "a11y", "collapse"])
       if (cmd === "provider") return pick(CATALOG.map((c) => c.name))
       if (cmd === "skills") { try { return pick(indexSkills(resolveSkillsDir(config.skills?.dir)).map((x) => x.name)) } catch { return null } }
-      if (cmd === "skill") return pick(["download"])
+      if (cmd === "skill" || cmd === "tool") return pick(["download", "verify"])
       if (cmd === "undo") return pick(["--run"])
       if (cmd === "diff") return pathCandidates(part, from)
       return null
@@ -1916,6 +1920,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           }
           break
         }
+        if (sub === "verify") {
+          const names = parts.slice(1)
+          if (!names.length) { err("usage: /skill verify <name> [<name>…] | all"); break }
+          const { verifySkills, formatVerifyReport } = await import("./skilldl.js")
+          console.log(formatVerifyReport(verifySkills(names), "SKILL"))
+          break
+        }
         if (!sub || sub === "list") {
           const { listDownloads, skillDownloadsDir } = await import("./skilldl.js")
           const have = listDownloads()
@@ -1925,7 +1936,41 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           if (have.length) console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
           break
         }
-        err(`unknown: /skill ${sub} — use: /skill download <https-url>`)
+        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all>`)
+        break
+      }
+      case "tool": {
+        const parts = arg.split(/\s+/).filter(Boolean)
+        const sub = (parts[0] || "").toLowerCase()
+        if (sub === "download") {
+          const urls = parts.slice(1)
+          if (!urls.length) { err("usage: /tool download <https-url> [<url>…]"); break }
+          const { downloadTools, formatDownloadReport } = await import("./skilldl.js")
+          info("downloading…")
+          const results = await downloadTools(urls)
+          for (const r of results) {
+            if (r.ok) console.log(formatDownloadReport(r))
+            else err(formatDownloadReport(r).trim())
+          }
+          break
+        }
+        if (sub === "verify") {
+          const names = parts.slice(1)
+          if (!names.length) { err("usage: /tool verify <name> [<name>…] | all"); break }
+          const { verifyTools, formatVerifyReport } = await import("./skilldl.js")
+          console.log(formatVerifyReport(verifyTools(names), "TOOL"))
+          break
+        }
+        if (!sub || sub === "list") {
+          const { listToolDownloads, toolDownloadsDir } = await import("./skilldl.js")
+          const have = listToolDownloads()
+          console.log(bold(`tool downloads (${have.length})`) + dim(`  ${toolDownloadsDir()}`))
+          if (!have.length) console.log(dim("  none — /tool download <https-url>"))
+          for (const r of have) console.log(`  ${cyan((r.skillName || r.id).padEnd(28))} ${r.lifecycle || "CANDIDATE"}  ${dim(r.sourceUrl || "")}`)
+          if (have.length) console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not live tools. Never ~/.forge/tools."))
+          break
+        }
+        err(`unknown: /tool ${sub} — use: /tool download <https-url> | /tool verify <name|all>`)
         break
       }
       case "skills": {
