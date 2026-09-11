@@ -22,7 +22,8 @@ import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import fs from "node:fs"
 import path from "node:path"
 import { estimateTokens } from "./ui.js"
-import { evaluateSkills, formatSkillPicks } from "./evaluate.js"
+import { formatSkillPicks } from "./evaluate.js"
+import { pickSkills } from "./skillforge.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { inspectProject, formatLangEngine } from "./langengine.js"
 import { compose, formatCompose } from "./compose.js"
@@ -200,9 +201,9 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
       if (les) sections.push({ name: "lessons", text: les })
     }
 
-    // 4b. v34: only the skills that match this task (not a 40-name dump)
-    if (opts.includeSkills !== false && Array.isArray(skillsIndex) && skillsIndex.length && task) {
-      const picks = evaluateSkills(task, skillsIndex, { klass: opts.klass })
+    // 4b. v34/v53: only the skills that match this task (not a 40-name dump)
+    if (opts.includeSkills !== false && task) {
+      const picks = pickSkills(task, Array.isArray(skillsIndex) ? skillsIndex : [], { klass: opts.klass })
       const block = formatSkillPicks(picks)
       if (block) sections.push({ name: "skills", text: block })
     }

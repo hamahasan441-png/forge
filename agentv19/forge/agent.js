@@ -33,7 +33,8 @@ import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
-import { evaluateSkills, formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
+import { formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
+import { pickSkills } from "./skillforge.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
 import { composeOnce, formatCompose, playbookFilesOf } from "./compose.js"
@@ -125,13 +126,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     const learnings = learningsBlock !== null ? learningsBlock : relevantLearnings(task, { cwd })
     if (learnings) lines.push("", learnings)
   }
-  if (skillsEnabled && skillsDir) {
-    const idx = indexSkills(skillsDir)
-    if (idx.length) {
-      const picks = evaluateSkills(task || "", mergeLearnedSkills(idx, cwd), { klass, skillsDir })
-      const block = formatSkillPicks(picks)
-      if (block) lines.push("", block)
-    }
+  if (skillsEnabled) {
+    const idx = skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), cwd) : []
+    const picks = pickSkills(task || "", idx, { klass, skillsDir })
+    const block = formatSkillPicks(picks)
+    if (block) lines.push("", block)
   }
   if (task) {
     const langBlock = formatLangReason(languagesIn(task, { cwd, klass }))
@@ -147,6 +146,8 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
         avoid: composed?.avoid || [],
         know: composed?.know || [],
         tools: composed?.tools || null,
+        playbooks: composed?.playbooks || [],
+        mcp: composed?.mcp || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }

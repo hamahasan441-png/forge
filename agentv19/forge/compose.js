@@ -25,13 +25,18 @@
  * through composeOnce (mtime invalidation stays there).
  * v52: persisted tool outcomes join the snapshot as [tools] prefer/avoid.
  * MICRO/SMALL skip. compose() stays uncached. runCall is unchanged.
+ * v53: pickSkills (tags/aliases) + hostless playbooks + ranked MCP names
+ * join the same snapshot. Planner and execute share it. No skill dump.
+ * compose never connects an MCP server.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { worldFromCwd, filesCited, radiusOf, indexSnapshot, implOf } from "./memgraph.js"
 import { relevantMemory } from "./memory.js"
 import { hardAvoid, mergeLearnedSkills, readLearnedSkill, HARD_AVOID_MIN } from "./evolve.js"
-import { evaluateSkills, selectPlugins, scoreAgainst } from "./evaluate.js"
+import { selectPlugins, scoreAgainst } from "./evaluate.js"
+import { pickSkills } from "./skillforge.js"
+import { pickPlugins, rankMcp, mcpCatalog, isMcpTool } from "./plugintel.js"
 import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir, parseSkillPlaybook } from "./skills.js"
 import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
@@ -274,6 +279,8 @@ export function emptyCompose(klass = null) {
     skills: [],
     avoid: [],
     plugins: [],
+    playbooks: [],
+    mcp: [],
     know: [],
     verify: { command: "", tests: [] },
     tools: emptyTools(),
@@ -335,8 +342,8 @@ export function compose(task = "", opts = {}) {
         idx = mergeLearnedSkills(dir ? indexSkills(dir) : [], cwd)
       } catch { idx = [] }
     }
-    if (Array.isArray(idx) && idx.length) {
-      try { out.skills = evaluateSkills(q, idx, { klass }) } catch { out.skills = [] }
+    if (Array.isArray(idx)) {
+      try { out.skills = pickSkills(q, idx, { klass }) } catch { out.skills = [] }
       try { attachSkillBodies(out.skills, cwd) } catch { /* body is best-effort */ }
     }
   }
@@ -380,6 +387,18 @@ export function compose(task = "", opts = {}) {
   if (opts.includeTools !== false) {
     try { out.tools = relevantTools(q, { cwd, klass, limit: 4 }) } catch { out.tools = emptyTools() }
   }
+  if (opts.includePlaybooks !== false) {
+    try {
+      const picked = pickPlugins(q, [], { klass })
+      out.playbooks = picked.playbooks || []
+    } catch { out.playbooks = [] }
+  }
+  if (opts.includeMcp !== false) {
+    try {
+      const live = Array.isArray(opts.mcp) ? opts.mcp : (opts.plugins || []).filter(isMcpTool)
+      out.mcp = rankMcp(q, mcpCatalog(opts.config, live), { klass, limit: 4 })
+    } catch { out.mcp = [] }
+  }
   return out
 }
 
@@ -398,12 +417,19 @@ function onceKey(task, opts = {}) {
     opts.includeLessons !== false ? "l" : "-",
     opts.includeVerify !== false ? "v" : "-",
     opts.includeTools !== false ? "t" : "-",
+    opts.includePlaybooks !== false ? "b" : "-",
+    opts.includeMcp !== false ? "c" : "-",
   ].join("")
   const plugs = Array.isArray(opts.plugins)
     ? opts.plugins.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
     : ""
+  const mcp = Array.isArray(opts.mcp)
+    ? opts.mcp.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
+    : (opts.config?.mcp?.servers && typeof opts.config.mcp.servers === "object"
+      ? Object.keys(opts.config.mcp.servers).slice(0, 8).join(",")
+      : "")
   const skillsDir = opts.config?.skills?.dir ? String(opts.config.skills.dir) : ""
-  return `${cwd}\0${q}\0${klass}\0${flags}\0${files}\0${plugs}\0${skillsDir}`
+  return `${cwd}\0${q}\0${klass}\0${flags}\0${files}\0${plugs}\0${mcp}\0${skillsDir}`
 }
 
 /** Drop the in-process snapshot cache. Tests / a new task call this. */
@@ -467,6 +493,7 @@ export function formatCompose(c) {
   if (c.memoryCount) lines.push(`[memory] ${c.memoryCount} note${c.memoryCount === 1 ? "" : "s"}`)
   if (c.avoid?.length) lines.push(`[avoid] ${c.avoid.slice(0, 4).join("; ")}`)
   if (c.skills?.length) lines.push(`[skills] ${c.skills.map((s) => s.name).filter(Boolean).slice(0, 3).join(", ")}`)
+  if (c.playbooks?.length) lines.push(`[playbooks] ${c.playbooks.map((p) => p.name).filter(Boolean).slice(0, 3).join(", ")}`)
   let skillN = 0
   for (const s of c.skills || []) {
     if (skillN >= 2) break
@@ -516,6 +543,8 @@ export function formatCompose(c) {
   }
   const toolsLine = formatToolMem(c.tools)
   if (toolsLine) lines.push(toolsLine)
+  const mcpNames = (c.mcp || []).map((m) => m && m.name).filter(Boolean).slice(0, 4)
+  if (mcpNames.length) lines.push(`[mcp] ${mcpNames.join(", ")}`)
   return lines.join("\n")
 }
 

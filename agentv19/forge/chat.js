@@ -39,7 +39,8 @@ import { classifyCommand, userMayRun } from "./shellguard.js"
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
-import { evaluateSkills, formatSkillPicks, formatSteer } from "./evaluate.js"
+import { formatSkillPicks, formatSteer } from "./evaluate.js"
+import { pickSkills } from "./skillforge.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
 import { composeOnce, formatCompose } from "./compose.js"
@@ -284,14 +285,12 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
   }
   if (config.chat?.system) lines.push("", "USER INSTRUCTIONS: " + config.chat.system)
   const skillsDir = resolveSkillsDir(config.skills?.dir)
-  if (config.skills?.enabled !== false && skillsDir) {
-    const idx = indexSkills(skillsDir)
-    if (idx.length) {
-      const klass = query ? (() => { try { return classifyTask(query).class } catch { return null } })() : null
-      const picks = evaluateSkills(query, mergeLearnedSkills(idx, process.cwd()), { klass, skillsDir })
-      const block = formatSkillPicks(picks)
-      if (block) lines.push("", block)
-    }
+  if (config.skills?.enabled !== false) {
+    const idx = skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), process.cwd()) : []
+    const klass = query ? (() => { try { return classifyTask(query).class } catch { return null } })() : null
+    const picks = pickSkills(query, idx, { klass, skillsDir })
+    const block = formatSkillPicks(picks)
+    if (block) lines.push("", block)
   }
   if (query) {
     const klass = (() => { try { return classifyTask(query).class } catch { return null } })()
@@ -309,6 +308,8 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         avoid: composed?.avoid || [],
         know: composed?.know || [],
         tools: composed?.tools || null,
+        playbooks: composed?.playbooks || [],
+        mcp: composed?.mcp || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }

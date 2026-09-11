@@ -270,6 +270,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             skills: (composed.skills || []).map((s) => s.name).slice(0, 3),
             plugins: (composed.plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name).slice(0, 4),
             playbook: String((composed.plugins || []).find((p) => p && p.isolated && p.repair)?.repair || "").slice(0, 160),
+            playbooks: (composed.playbooks || []).map((p) => p.name).slice(0, 3),
+            mcp: (composed.mcp || []).map((m) => m.name).slice(0, 4),
           })
         }
       } catch { composePrefix = "" }
@@ -1579,6 +1581,8 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       avoid: composed.avoid,
       know: composed.know,
       tools: composed.tools,
+      playbooks: composed.playbooks,
+      mcp: composed.mcp,
     })
     if (block) {
       steerHint = `\n\n${block}`
