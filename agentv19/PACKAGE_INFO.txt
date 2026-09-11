@@ -1,4 +1,4 @@
-forge v60.0.0 — CLI-only build
+forge v61.0.0 — CLI-only build
 - zero-dependency Node CLI (>=18), runs directly against providers (no localhost)
 - 18 providers with per-provider contextWindow + keyUrl docs: openai, anthropic,
   zai, deepseek, groq, openrouter, gemini, mistral, xai, together, cerebras,
@@ -80,5 +80,4 @@ forge v60.0.0 — CLI-only build
   retrieval, sessions, skills, json, e2e, clean-room install) and exits non-zero
   on any failure. Per-suite counts are intentionally not duplicated here — the
   runner prints them. CI runs the same command on Node 20 and 22.
-- change plans inside: forge/PLAN-v15.md … forge/PLAN-v20.md,
-  plus forge/PLAN-v21.md (v20.1+ roadmap: P0/P1/P2/P3)
+- leftover work: forge/TODO.md (unchecked until shipped; completed PLAN-vN.md are deleted)
