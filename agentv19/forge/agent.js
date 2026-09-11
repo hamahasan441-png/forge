@@ -148,6 +148,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
         tools: composed?.tools || null,
         playbooks: composed?.playbooks || [],
         mcp: composed?.mcp || [],
+        gaps: composed?.gaps || null,
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }

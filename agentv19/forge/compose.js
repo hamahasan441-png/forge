@@ -28,6 +28,9 @@
  * v53: pickSkills (tags/aliases) + hostless playbooks + ranked MCP names
  * join the same snapshot. Planner and execute share it. No skill dump.
  * compose never connects an MCP server.
+ * v54: knowledge-gap ranking (required vs known vs skippable) joins the
+ * snapshot as [gaps]/[skip]. Compose never writes knowgap.json — persist
+ * is meta/CLI. MICRO/SMALL skip unless a domain is named. No second data root.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
@@ -42,6 +45,7 @@ import { indexSkills, resolveSkillsDir, parseSkillPlaybook } from "./skills.js"
 import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
 import { relevantLessons } from "./lessons.js"
 import { relevantTools, formatToolMem, emptyTools } from "./toolintel.js"
+import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
 
 const RADIUS_SHOW = 16
 const FILE_SHOW = 8
@@ -284,6 +288,7 @@ export function emptyCompose(klass = null) {
     know: [],
     verify: { command: "", tests: [] },
     tools: emptyTools(),
+    gaps: emptyGaps(),
   }
 }
 
@@ -399,6 +404,18 @@ export function compose(task = "", opts = {}) {
       out.mcp = rankMcp(q, mcpCatalog(opts.config, live), { klass, limit: 4 })
     } catch { out.mcp = [] }
   }
+  if (opts.includeGaps !== false) {
+    try {
+      out.gaps = detectGaps(q, {
+        cwd, klass,
+        memory: out.memory,
+        skills: out.skills,
+        know: out.know,
+        world: out.world,
+        playbooks: out.playbooks,
+      })
+    } catch { out.gaps = emptyGaps() }
+  }
   return out
 }
 
@@ -419,6 +436,7 @@ function onceKey(task, opts = {}) {
     opts.includeTools !== false ? "t" : "-",
     opts.includePlaybooks !== false ? "b" : "-",
     opts.includeMcp !== false ? "c" : "-",
+    opts.includeGaps !== false ? "g" : "-",
   ].join("")
   const plugs = Array.isArray(opts.plugins)
     ? opts.plugins.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
@@ -545,6 +563,8 @@ export function formatCompose(c) {
   if (toolsLine) lines.push(toolsLine)
   const mcpNames = (c.mcp || []).map((m) => m && m.name).filter(Boolean).slice(0, 4)
   if (mcpNames.length) lines.push(`[mcp] ${mcpNames.join(", ")}`)
+  const gapBlock = formatGaps(c.gaps)
+  if (gapBlock) lines.push(gapBlock)
   return lines.join("\n")
 }
 

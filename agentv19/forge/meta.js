@@ -37,6 +37,7 @@ import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
 import { composeOnce, clearComposeOnce, formatCompose } from "./compose.js"
 import { formatSteer } from "./evaluate.js"
+import { persistGaps } from "./knowgap.js"
 import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve } from "./evolve.js"
@@ -272,8 +273,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             playbook: String((composed.plugins || []).find((p) => p && p.isolated && p.repair)?.repair || "").slice(0, 160),
             playbooks: (composed.playbooks || []).map((p) => p.name).slice(0, 3),
             mcp: (composed.mcp || []).map((m) => m.name).slice(0, 4),
+            gaps: (composed.gaps?.gaps || []).map((g) => g.id).slice(0, 4),
           })
         }
+        try { persistGaps(process.cwd(), composed.gaps, { task: state.objective }) } catch { /* persist is best-effort */ }
       } catch { composePrefix = "" }
     }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
@@ -1583,6 +1586,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       tools: composed.tools,
       playbooks: composed.playbooks,
       mcp: composed.mcp,
+      gaps: composed.gaps,
     })
     if (block) {
       steerHint = `\n\n${block}`
