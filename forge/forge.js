@@ -1527,6 +1527,26 @@ async function main() {
       console.log(formatKnowledgePane(pane).trimEnd())
       return
     }
+    case "experiment": {
+      const { runExperiment, formatExperimentReport, benchmarkPlaybook } = await import("./experiment.js")
+      const cwd = process.cwd()
+      const sub = (positional[1] || "").trim()
+      if (sub === "bench") {
+        const playbook = positional.slice(2).join("\n")
+        const r = benchmarkPlaybook({ playbook, repair: flags.repair || "" })
+        if (JSON_OUT) { emitJson(r); return }
+        console.log(`benchmark  winner=${r.winner}  playbook=${r.playbookScore}  repair=${r.repairScore}`)
+        return
+      }
+      const id = sub
+      if (!id) { err("usage: forge experiment <domain> [--command <cmd>] | forge experiment bench"); process.exit(1); return }
+      const command = typeof flags.command === "string" ? flags.command : ""
+      const r = runExperiment({ cwd, id, command, task: flags.task || `close knowledge gap ${id}` })
+      if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+      console.log(formatExperimentReport(r).trimEnd())
+      if (!r.ok && !r.skipped) process.exit(1)
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -1589,6 +1609,7 @@ ${bold("usage")}
   ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
   ${cyan("forge decisions [add]")}        architecture decision log  ${dim("~/.forge/projects/<hash>/decisions.json")}
   ${cyan("forge knowledge")}              knowledge pane             ${dim("claims + decisions + gaps + downloads")}
+  ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 12 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
