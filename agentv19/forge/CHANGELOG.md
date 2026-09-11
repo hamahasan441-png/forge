@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v56.0.0 — "ingest"
+
+### Added (v56.0 — record real acquire-tool runs as UNCERTAIN, never VERIFIED)
+- **Ingest.** `ingestAcquire` runs after `recordToolRun` in agent/chat. Successful `load_skill` / `grep_files` / `glob_files` / `read_file` / `web_search` / `fetch_url` matching a domain append the method to `tried[]` and set status UNCERTAIN (confidence ≤ 0.5). Failed/blocked/write tools ignored.
+- **Skip tried.** Next `planAcquire` skips methods already run. All tried → `verify` hint, do not re-search. `persistGaps` will not demote UNCERTAIN → UNKNOWN.
+- **No dump.** Evidence is `${tool} ${id}` only. No result text, no URLs, no task text. Compose still never writes. `recordGapOutcome` stays the only VERIFIED path. Cache bust via `clearComposeOnce` after a real ingest.
+
+Single mutating writer is unchanged. PLAN-v59 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Research crawler, skill-forge 2.0, L6, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v55.0.0 — "acquire"
 
 ### Added (v55.0 — cheapest-source acquisition plan into compose / planner)

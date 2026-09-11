@@ -196,8 +196,8 @@ console.log("== safety + wiring (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 55.0.0", VERSION, "55.0.0")
-  eq("package.json is 55.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "55.0.0")
+  eq("VERSION is 56.0.0", VERSION, "56.0.0")
+  eq("package.json is 56.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version, "56.0.0")
 }
 
 console.log(`\n== v28 suite: ${PASS} passed, ${FAIL} failed ==`)

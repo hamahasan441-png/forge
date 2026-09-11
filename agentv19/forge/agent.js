@@ -37,7 +37,8 @@ import { formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
 import { pickSkills } from "./skillforge.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
-import { composeOnce, formatCompose, playbookFilesOf } from "./compose.js"
+import { composeOnce, clearComposeOnce, formatCompose, playbookFilesOf } from "./compose.js"
+import { ingestAcquire } from "./knowgap.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -585,6 +586,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     throw e
   } finally {
     try { recordToolRun({ cwd: process.cwd(), task, klass, records: intel.records() }) } catch { /* persist is best-effort */ }
+    try {
+      if (ingestAcquire({ cwd: process.cwd(), task, klass, records: intel.records() })) clearComposeOnce()
+    } catch { /* ingest is best-effort */ }
     for (const c of mcpClients) { try { c.close() } catch {} }
     if (lspSession) { try { lspSession.close() } catch {} }
     if (pluginHost) { try { pluginHost.close() } catch {} }
