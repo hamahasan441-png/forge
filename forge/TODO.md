@@ -6,8 +6,8 @@ and tests are green. Never mark complete because a model wrote a spec.
 
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
-v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence
-(`## Tests` run through shellguard; no tests → structural VERIFIED).
+v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence, v68 stale
+(VERIFIED past TTL → STALE, not CONTRADICTED; re-verify restores).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -26,9 +26,9 @@ DOWNLOAD ≠ TRUST.
 
 ## Knowledge
 
-- [ ] STALE-by-age (VERIFIED past a TTL without re-verify → STALE, not CONTRADICTED)
 - [ ] Per-claim subject store (still under `FORGE_HOME/projects/<hash>/`, not a second memory)
 - [ ] Drift detector (index/graph vs last verified claim)
+- [ ] Configurable per-skill TTL / STALE→CONTRADICTED after N failed re-verifies
 
 ## Strategy / tools / models
 

@@ -203,8 +203,8 @@ console.log("== router: UI tasks pick browser; file reads stay read_file ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 67.0.0", VERSION, "67.0.0")
-  eq("package.json is 67.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "67.0.0")
+  eq("VERSION is 68.0.0", VERSION, "68.0.0")
+  eq("package.json is 68.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "68.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
   ok("files includes browser.js", pkg.files.includes("browser.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

@@ -1,25 +1,26 @@
 #!/usr/bin/env node
 /**
- * forge — v67 evidence: ## Tests run through shellguard.
+ * forge — v68 stale: VERIFIED past TTL → STALE, not CONTRADICTED.
  *
- * No ## Tests → structural VERIFIED. Fail/refused → INACTIVE. Not ACTIVE.
- * ## Verify is not executed. Never ~/.forge/tools. Compose never fetches.
+ * Re-verify restores VERIFIED. Hidden from pick/load. Never ACTIVE.
+ * Compose never fetches. Never ~/.forge/tools.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v67-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v68-"))
 process.env.FORGE_HOME = HOME
+process.env.FORGE_SKILL_TTL_MS = "1000"
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v67-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v68-work-"))
 process.chdir(WORK)
 
 const {
-  downloadSkill, verifySkill, formatVerifyReport, extractTestCommands,
-  readSkillEvidence, indexVerifiedSkills,
+  downloadSkill, verifySkill, sweepStale, indexVerifiedSkills,
+  readDownloadedSkill, listDownloads, STALE, skillTtlMs,
 } = await import("../skilldl.js")
 const { SKILL_LIFE } = await import("../evolve.js")
 const { evaluateSkills } = await import("../evaluate.js")
@@ -52,46 +53,10 @@ description: Responsive layout playbook
 
 # Web Design
 
-## Layout
-Set a fluid grid.
+A layout playbook.
 
 ## Verify
 \`npm test\`
-`
-
-const PASSING = `---
-name: echo-ok
-description: A skill with a safe test
----
-
-# Echo Ok
-
-Does one thing.
-
-## Tests
-- \`echo ok\`
-`
-
-const FAILING = `---
-name: always-fail
-description: A skill whose test fails
----
-
-# Always Fail
-
-## Tests
-- \`false\`
-`
-
-const EVIL = `---
-name: wipe-root
-description: A skill that tries to wipe the disk
----
-
-# Wipe Root
-
-## Tests
-- \`rm -rf /\`
 `
 
 function mockFetch(body, { filename = "artifact.bin" } = {}) {
@@ -103,71 +68,72 @@ function mockFetch(body, { filename = "artifact.bin" } = {}) {
   })
 }
 
-console.log("== extractTestCommands ==")
+function manPath() { return path.join(HOME, "skill-downloads", "manifest.json") }
+function loadMan() { return JSON.parse(fs.readFileSync(manPath(), "utf8")) }
+function saveMan(j) { fs.writeFileSync(manPath(), JSON.stringify(j, null, 1)) }
+
+console.log("== TTL helper ==")
 {
-  eq("no Tests heading", extractTestCommands(STRUCT).length, 0)
-  eq("bullet tick", extractTestCommands(PASSING).join("|"), "echo ok")
-  const fenced = extractTestCommands("# X\n\n## Tests\n```sh\necho a\n# skip\necho b\n```\n")
-  ok("fenced two", fenced.includes("echo a") && fenced.includes("echo b"))
-  eq("cap 4", extractTestCommands("# X\n\n## Tests\n- `a`\n- `b`\n- `c`\n- `d`\n- `e`\n").length, 4)
+  eq("env ttl", skillTtlMs(process.env), 1000)
+  eq("default 30d", skillTtlMs({}), 30 * 24 * 60 * 60 * 1000)
 }
 
-console.log("== no ## Tests is structural VERIFIED; ## Verify is not run ==")
+console.log("== VERIFIED past TTL → STALE, not CONTRADICTED; re-verify restores ==")
 {
   await downloadSkill("https://example.com/web-design.skill", {
     fetchFn: mockFetch(STRUCT, { filename: "web-design.skill" }),
   })
-  const r = verifySkill("web-design")
-  eq("ok", r.ok, true)
-  eq("VERIFIED", r.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("structural", r.evidence?.kind, "structural")
-  const ev = readSkillEvidence("web-design")
-  eq("evidence file", ev?.kind, "structural")
-  ok("report names evidence", /evidence: structural/.test(formatVerifyReport(r)))
-  eq("indexed evidence", indexVerifiedSkills().find((s) => s.name === "web-design")?.evidence, "structural")
+  const v = verifySkill("web-design")
+  eq("verified", v.lifecycle, SKILL_LIFE.VERIFIED)
+  ok("body readable", !!readDownloadedSkill("web-design"))
+  eq("indexed", indexVerifiedSkills().some((s) => s.name === "web-design"), true)
+
+  const man = loadMan()
+  man.items["web-design"].verifiedAt = Date.now() - 5000
+  saveMan(man)
+  const demoted = sweepStale()
+  ok("sweep names it", demoted.includes("web-design"), String(demoted))
+  eq("STALE", listDownloads().find((d) => d.id === "web-design")?.lifecycle, STALE)
+  eq("not CONTRADICTED", listDownloads().find((d) => d.id === "web-design")?.lifecycle === "CONTRADICTED", false)
+  eq("hidden from pick", indexVerifiedSkills().some((s) => s.name === "web-design"), false)
+  eq("load hidden", readDownloadedSkill("web-design"), null)
+
+  const again = verifySkill("web-design")
+  eq("re-verify VERIFIED", again.lifecycle, SKILL_LIFE.VERIFIED)
+  eq("not ACTIVE", again.lifecycle === SKILL_LIFE.ACTIVE, false)
+  eq("indexed again", indexVerifiedSkills().some((s) => s.name === "web-design"), true)
+  ok("body back", !!readDownloadedSkill("web-design"))
 }
 
-console.log("== ## Tests echo ok → behavioral VERIFIED ==")
+console.log("== missing verifiedAt is stamped, not instantly STALE; CANDIDATE stays ==")
 {
-  await downloadSkill("https://example.com/echo-ok.skill", {
-    fetchFn: mockFetch(PASSING, { filename: "echo-ok.skill" }),
+  await downloadSkill("https://example.com/fresh-name.skill", {
+    fetchFn: mockFetch(STRUCT.replace("web-design", "fresh-name"), { filename: "fresh-name.skill" }),
   })
-  const r = verifySkill("echo-ok")
-  eq("ok", r.ok, true)
-  eq("VERIFIED", r.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("not ACTIVE", r.lifecycle === SKILL_LIFE.ACTIVE, false)
-  eq("behavioral", r.evidence?.kind, "behavioral")
-  eq("test ran", r.evidence?.results?.[0]?.ok, true)
-  ok("evidence.json", fs.existsSync(path.join(HOME, "skill-downloads", "echo-ok", "evidence.json")))
-}
+  verifySkill("fresh-name")
+  const man = loadMan()
+  delete man.items["fresh-name"].verifiedAt
+  saveMan(man)
+  const demoted = sweepStale()
+  eq("fresh not demoted", demoted.includes("fresh-name"), false)
+  eq("still VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
+  ok("clock stamped", Number(loadMan().items["fresh-name"].verifiedAt) > 0)
 
-console.log("== failing / refused tests → INACTIVE; siblings independent ==")
-{
-  await downloadSkill("https://example.com/always-fail.skill", {
-    fetchFn: mockFetch(FAILING, { filename: "always-fail.skill" }),
+  await downloadSkill("https://example.com/cand-name.skill", {
+    fetchFn: mockFetch(STRUCT.replace("web-design", "cand-name"), { filename: "cand-name.skill" }),
   })
-  await downloadSkill("https://example.com/wipe-root.skill", {
-    fetchFn: mockFetch(EVIL, { filename: "wipe-root.skill" }),
-  })
-  const fail = verifySkill("always-fail")
-  eq("fail not ok", fail.ok, false)
-  eq("fail INACTIVE", fail.lifecycle, "INACTIVE")
-  ok("fail issue", (fail.issues || []).some((i) => /false/.test(i)), String(fail.issues))
-  const evil = verifySkill("wipe-root")
-  eq("evil not ok", evil.ok, false)
-  eq("evil INACTIVE", evil.lifecycle, "INACTIVE")
-  ok("evil refused not executed", evil.evidence?.results?.[0]?.skipped === true, JSON.stringify(evil.evidence?.results?.[0]))
-  eq("echo-ok still VERIFIED", verifySkill("echo-ok").lifecycle, SKILL_LIFE.VERIFIED)
-  eq("web-design still VERIFIED", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
-  eq("fail not indexed", indexVerifiedSkills().some((s) => s.name === "always-fail"), false)
+  const man2 = loadMan()
+  man2.items["cand-name"].verifiedAt = Date.now() - 999999
+  saveMan(man2)
+  sweepStale()
+  eq("CANDIDATE not STALE", listDownloads().find((d) => d.id === "cand-name")?.lifecycle, SKILL_LIFE.CANDIDATE)
 }
 
 console.log("== compose never fetches ==")
 {
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no extractTestCommands", !/extractTestCommands/.test(composeSrc))
-  ok("compose has no runSkillTests", !/runSkillTests/.test(composeSrc))
+  ok("compose has no sweepStale", !/sweepStale/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -198,7 +164,7 @@ console.log("== no side writes / frozen kernel + package ==")
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v67 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v68 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)

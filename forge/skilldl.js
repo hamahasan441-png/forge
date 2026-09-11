@@ -15,6 +15,9 @@
  * v67: ## Tests run through shellguard (block/danger/confirm refused).
  * No ## Tests → structural VERIFIED + evidence.json. Fail → INACTIVE.
  * Never ACTIVE. Compose never fetches. Never ~/.forge/tools.
+ *
+ * v68: VERIFIED past FORGE_SKILL_TTL_MS (default 30d) → STALE, not
+ * CONTRADICTED. Re-verify restores VERIFIED. STALE is hidden from pick.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -42,6 +45,13 @@ export const DOWNLOAD_STATUS = Object.freeze({
 })
 export const MAX_SKILL_BYTES = 8 * 1024 * 1024
 export const INACTIVE = "INACTIVE"
+export const STALE = "STALE"
+export const DEFAULT_SKILL_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+export function skillTtlMs(env = process.env) {
+  const n = Number(env?.FORGE_SKILL_TTL_MS)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_SKILL_TTL_MS
+}
 
 const KERNEL_HINT = /(?:^|[^A-Za-z0-9])(agentv19[\\/]forge|classifyTaskComplexity|assumeYes|plugin-host|securefs)\b/i
 const TOOL_NAME_RE = /^[a-z][a-z0-9_]{1,40}$/
@@ -148,6 +158,7 @@ function setLifecycle(name, lifecycle, env, kind = "skill") {
   rec.lifecycle = lifecycle
   rec.lastSeen = Date.now()
   rec.samples = rec.samples || 1
+  if (lifecycle === SKILL_LIFE.VERIFIED) rec.verifiedAt = Date.now()
   bucket[name] = rec
   all.v = 1
   all.updated = Date.now()
@@ -156,6 +167,7 @@ function setLifecycle(name, lifecycle, env, kind = "skill") {
   const man = loadDownloadManifest(env, kind)
   if (man.items?.[name]) {
     man.items[name].lifecycle = lifecycle
+    if (lifecycle === SKILL_LIFE.VERIFIED) man.items[name].verifiedAt = rec.verifiedAt
     man.updated = Date.now()
     saveManifest(man, env, kind)
     const meta = path.join(rootFor(kind, env), name, "meta.json")
@@ -164,7 +176,34 @@ function setLifecycle(name, lifecycle, env, kind = "skill") {
   return rec
 }
 
+/**
+ * VERIFIED past TTL → STALE (not CONTRADICTED, not INACTIVE).
+ * Missing verifiedAt is stamped now (TTL starts; no instant demote).
+ */
+export function sweepStale(env = process.env, kind = "skill") {
+  const man = loadDownloadManifest(env, kind)
+  const ttl = skillTtlMs(env)
+  const now = Date.now()
+  const demoted = []
+  for (const [id, rec] of Object.entries(man.items || {})) {
+    if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) continue
+    const at = Number(rec.verifiedAt) || 0
+    if (!at) {
+      rec.verifiedAt = now
+      man.items[id] = rec
+      man.updated = now
+      saveManifest(man, env, kind)
+      continue
+    }
+    if (now - at <= ttl) continue
+    setLifecycle(id, STALE, env, kind)
+    demoted.push(id)
+  }
+  return demoted
+}
+
 export function listDownloads(env = process.env, kind = "skill") {
+  sweepStale(env, kind)
   const items = Object.values(loadDownloadManifest(env, kind).items || {})
   return items.sort((a, b) => (b.downloadedAt || "").localeCompare(a.downloadedAt || ""))
 }
@@ -650,11 +689,9 @@ export function verifySkill(name, { env = process.env } = {}) {
   if (!commands.length) {
     const evidence = { v: 1, kind: "structural", commands: [], results: [], at: Date.now() }
     saveEvidence(id, evidence, env)
-    if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
-      return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [], evidence }
-    }
+    const already = rec.lifecycle === SKILL_LIFE.VERIFIED
     setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
-    return { ok: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [], evidence }
+    return { ok: true, already, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [], evidence }
   }
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-ev-"))
   let results = []
@@ -676,7 +713,7 @@ export function verifySkill(name, { env = process.env } = {}) {
   const evidence = { v: 1, kind: "behavioral", ok: true, commands, results, at: Date.now() }
   saveEvidence(id, evidence, env)
   const already = rec.lifecycle === SKILL_LIFE.VERIFIED
-  if (!already) setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
+  setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
   return { ok: true, already, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [], evidence }
 }
 
@@ -735,7 +772,7 @@ export function formatVerifyReport(results, label = "SKILL") {
   return lines.join("\n") + "\n"
 }
 
-/** VERIFIED downloads only — CANDIDATE/INACTIVE stay out of pickSkills. */
+/** VERIFIED downloads only — CANDIDATE/INACTIVE/STALE stay out of pickSkills. */
 export function indexVerifiedSkills(env = process.env) {
   const out = []
   for (const rec of listDownloads(env, "skill")) {
@@ -774,12 +811,13 @@ export function indexVerifiedToolPlaybooks(env = process.env) {
 }
 
 /**
- * Body of a VERIFIED downloaded skill. CANDIDATE/INACTIVE return null.
+ * Body of a VERIFIED downloaded skill. CANDIDATE/INACTIVE/STALE return null.
  * Sync. No fetch. No plugin-host.
  */
 export function readDownloadedSkill(name, env = process.env) {
   const n = validSkillName(name)
   if (!n) return null
+  sweepStale(env, "skill")
   const rec = loadDownloadManifest(env, "skill").items?.[n]
   if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
   const file = skillMdPath(n, env)
@@ -810,6 +848,7 @@ export function readDownloadedSkill(name, env = process.env) {
 export function readDownloadedToolPlaybook(name, env = process.env) {
   const n = String(name || "").trim()
   if (!TOOL_NAME_RE.test(n) || TOOL_FORBIDDEN.has(n)) return null
+  sweepStale(env, "tool")
   const rec = loadDownloadManifest(env, "tool").items?.[n]
   if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
   const desc = String(rec.description || n).slice(0, 240)
