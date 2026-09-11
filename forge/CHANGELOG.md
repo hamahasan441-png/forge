@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v76.0.0 — "live"
+
+### Added (v76.0 — dock refresh without PLAN_COMPOSE)
+- **Live dock.** `/claims`, `/decisions`, `/knowledge`, and `/skill learn` push `KNOWLEDGE_UPDATED` from `snapshotKnowledge(cwd)`. No new compose pass. Compose still never writes.
+- Never ACTIVE. Never `~/.forge/tools`.
+
+Tool-download progress, generated tests, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v75.0.0 — "dock"
 
 ### Added (v75.0 — claims/decisions on the omega TUI dock)

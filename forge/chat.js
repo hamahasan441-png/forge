@@ -1956,6 +1956,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
             if (r.ok) console.log(formatLearnReport(r))
             else err(formatLearnReport(r).trim())
           }
+          try {
+            const { snapshotKnowledge } = await import("./decisions.js")
+            dispatchUI({ type: "KNOWLEDGE_UPDATED", ...snapshotKnowledge(process.cwd()) })
+          } catch { /* dock is best-effort */ }
           break
         }
         if (sub === "ttl") {
@@ -1988,15 +1992,19 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const c = getClaim(cwd, subject)
           if (!c) { err(`no claim for ${subject}`); break }
           console.log(formatClaims([c], { subject }).trimEnd())
-          break
+        } else {
+          const rows = listClaims(cwd)
+          console.log(bold(`claims`) + dim(`  ${claimsPath(cwd)}`))
+          console.log(formatClaims(rows).trimEnd())
         }
-        const rows = listClaims(cwd)
-        console.log(bold(`claims`) + dim(`  ${claimsPath(cwd)}`))
-        console.log(formatClaims(rows).trimEnd())
+        try {
+          const { snapshotKnowledge } = await import("./decisions.js")
+          dispatchUI({ type: "KNOWLEDGE_UPDATED", ...snapshotKnowledge(cwd) })
+        } catch { /* dock is best-effort */ }
         break
       }
       case "decisions": {
-        const { listDecisions, getDecision, recordDecision, formatDecisions, decisionsPath } = await import("./decisions.js")
+        const { listDecisions, getDecision, recordDecision, formatDecisions, decisionsPath, snapshotKnowledge } = await import("./decisions.js")
         const cwd = process.cwd()
         const parts = arg.split(/\s+/).filter(Boolean)
         if (parts[0] === "add") {
@@ -2004,19 +2012,20 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const reason = parts.slice(2).join(" ")
           if (!title || !reason) { err("usage: /decisions add <title> <reason>"); break }
           const r = recordDecision({ cwd, title, reason })
-          if (!r.ok) err(r.error)
-          else ok(`decision ${r.title} recorded`)
-          break
-        }
-        if (parts[0]) {
+          if (!r.ok) { err(r.error); break }
+          ok(`decision ${r.title} recorded`)
+        } else if (parts[0]) {
           const d = getDecision(cwd, parts[0])
           if (!d) { err(`no decision for ${parts[0]}`); break }
           console.log(formatDecisions([d]).trimEnd())
-          break
+        } else {
+          const rows = listDecisions(cwd)
+          console.log(bold(`decisions`) + dim(`  ${decisionsPath(cwd)}`))
+          console.log(formatDecisions(rows).trimEnd())
         }
-        const rows = listDecisions(cwd)
-        console.log(bold(`decisions`) + dim(`  ${decisionsPath(cwd)}`))
-        console.log(formatDecisions(rows).trimEnd())
+        try {
+          dispatchUI({ type: "KNOWLEDGE_UPDATED", ...snapshotKnowledge(cwd) })
+        } catch { /* dock is best-effort */ }
         break
       }
       case "knowledge": {
@@ -2032,6 +2041,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           gaps: { gaps: Object.values(stats.domains || {}) },
           downloads: listDownloads(),
         }).trimEnd())
+        try {
+          const { snapshotKnowledge } = await import("./decisions.js")
+          dispatchUI({ type: "KNOWLEDGE_UPDATED", ...snapshotKnowledge(cwd) })
+        } catch { /* dock is best-effort */ }
         break
       }
       case "tool": {

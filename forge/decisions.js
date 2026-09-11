@@ -10,6 +10,7 @@ import { writeStateFile } from "./securefs.js"
 import { projectDir } from "./memory.js"
 import { scoreAgainst, namedIn } from "./evaluate.js"
 import { TASK_CLASS } from "./classify.js"
+import { listClaims } from "./claims.js"
 
 export const DECISIONS_FILE = "decisions.json"
 export const MAX_DECISIONS = 32
@@ -143,4 +144,14 @@ export function formatKnowledgePane({ claims = [], decisions = [], gaps = null, 
   }
   if (claimN + decN + gapRows.length + dl.length === 0) lines.push("  (empty — learn a skill, record a decision, or run a task)")
   return lines.join("\n") + "\n"
+}
+
+/**
+ * Read-only dock snapshot. Never writes. Cap 3 each.
+ */
+export function snapshotKnowledge(cwd) {
+  return {
+    claims: listClaims(cwd).slice(0, 3),
+    decisions: listDecisions(cwd).slice(0, 3),
+  }
 }
