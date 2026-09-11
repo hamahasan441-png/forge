@@ -12,22 +12,30 @@
  *
  * v63: tool download (`FORGE_HOME/tool-downloads`) and structural verify.
  * VERIFY ≠ DOWNLOAD. Failed verify is INACTIVE; siblings stay independent.
- * Verified tools are hostless playbooks — never ~/.forge/tools, never plugin-host.
+ * v67: ## Tests run through shellguard (block/danger/confirm refused).
+ * No ## Tests → structural VERIFIED + evidence.json. Fail → INACTIVE.
+ * Never ACTIVE. Compose never fetches. Never ~/.forge/tools.
  */
 import fs from "node:fs"
 import path from "node:path"
+import os from "node:os"
 import crypto from "node:crypto"
+import { spawnSync } from "node:child_process"
 import { resolveDataDir } from "./config.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { writeStateFile } from "./securefs.js"
 import { validSkillName, skillDescription, parseSkillPlaybook } from "./skills.js"
 import { SKILL_LIFE } from "./evolve.js"
+import { classifyCommand } from "./shellguard.js"
 
 export const SKILL_DOWNLOADS = "skill-downloads"
 export const TOOL_DOWNLOADS = "tool-downloads"
 export const MANIFEST_FILE = "manifest.json"
 export const LIFE_FILE = "skilllife.json"
 export const KNOWLEDGE_FILE = "knowledge.json"
+export const EVIDENCE_FILE = "evidence.json"
+export const TEST_TIMEOUT_MS = 8000
+export const MAX_TEST_COMMANDS = 4
 export const DOWNLOAD_STATUS = Object.freeze({
   DOWNLOADED: "DOWNLOADED",
   FAILED: "FAILED",
@@ -484,6 +492,95 @@ function skillMdPath(id, env) {
   return path.join(skillDownloadsDir(env), id, "SKILL.md")
 }
 
+function evidencePath(id, env) {
+  return path.join(skillDownloadsDir(env), id, EVIDENCE_FILE)
+}
+
+/**
+ * Commands under a `## Tests` heading only (not ## Verify — that's playbook
+ * advice). Fenced sh/bash blocks and `- \`cmd\`` bullets. Cap 4.
+ */
+export function extractTestCommands(md) {
+  const text = String(md || "")
+  const m = text.match(/^##\s+Tests\s*$/im)
+  if (!m) return []
+  const start = m.index + m[0].length
+  const rest = text.slice(start)
+  const next = rest.search(/^##\s+/m)
+  const body = next === -1 ? rest : rest.slice(0, next)
+  const cmds = []
+  const fence = /```(?:sh|bash|shell)?\n([\s\S]*?)```/gi
+  let fm
+  while ((fm = fence.exec(body))) {
+    for (const line of String(fm[1] || "").split("\n")) {
+      const c = line.trim()
+      if (c && !c.startsWith("#")) cmds.push(c)
+    }
+  }
+  for (const line of body.split("\n")) {
+    const tick = line.trim().match(/^(?:[-*]\s+)?`([^`]+)`\s*$/)
+    if (tick) cmds.push(tick[1].trim())
+  }
+  const seen = new Set()
+  const out = []
+  for (const c of cmds) {
+    if (!c || c.length > 200 || seen.has(c)) continue
+    seen.add(c)
+    out.push(c)
+    if (out.length >= MAX_TEST_COMMANDS) break
+  }
+  return out
+}
+
+function refuseTestLevel(level) {
+  return level === "block" || level === "danger" || level === "confirm"
+}
+
+export function runSkillTests(commands, { cwd, env = process.env } = {}) {
+  const dir = cwd || fs.mkdtempSync(path.join(os.tmpdir(), "forge-ev-"))
+  const results = []
+  for (const cmd of commands) {
+    const cls = classifyCommand(cmd, { cwd: dir, root: dir, env })
+    if (refuseTestLevel(cls.level)) {
+      results.push({
+        cmd, ok: false, skipped: true, level: cls.level,
+        reason: (cls.reasons && cls.reasons[0]) || cls.level,
+      })
+      continue
+    }
+    const r = spawnSync("sh", ["-c", cmd], {
+      cwd: dir,
+      env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: dir, LANG: "C" },
+      timeout: TEST_TIMEOUT_MS,
+      encoding: "utf8",
+    })
+    const timed = r.error?.code === "ETIMEDOUT" || r.signal === "SIGTERM"
+    results.push({
+      cmd,
+      ok: r.status === 0 && !timed,
+      code: r.status,
+      level: cls.level,
+      timed: !!timed,
+    })
+  }
+  return results
+}
+
+export function readSkillEvidence(name, env = process.env) {
+  try {
+    const j = JSON.parse(fs.readFileSync(evidencePath(name, env), "utf8"))
+    return j && typeof j === "object" ? j : null
+  } catch {
+    return null
+  }
+}
+
+function saveEvidence(id, evidence, env) {
+  try {
+    writeStateFile(evidencePath(id, env), JSON.stringify(evidence, null, 1), { mode: 0o600 })
+  } catch { /* best-effort */ }
+}
+
 function toolMjsPath(id, env) {
   return path.join(toolDownloadsDir(env), id, `${id}.mjs`)
 }
@@ -532,8 +629,9 @@ function issuesForTool(id, rec, env) {
 }
 
 /**
- * Structural verify. Never fetches, never spawns plugin-host, never writes
+ * Structural + optional ## Tests. Never fetches, never plugin-host, never
  * ~/.forge/tools. Pass → VERIFIED. Fail → INACTIVE. Missing → not ok.
+ * No ## Tests → structural evidence. Dangerous commands are not executed.
  */
 export function verifySkill(name, { env = process.env } = {}) {
   const id = String(name || "").trim()
@@ -543,13 +641,43 @@ export function verifySkill(name, { env = process.env } = {}) {
   const issues = issuesForSkill(id, rec, env)
   if (issues.length) {
     setLifecycle(id, INACTIVE, env, "skill")
+    saveEvidence(id, { v: 1, kind: "failed", issues, at: Date.now() }, env)
     return { ok: false, name: id, lifecycle: INACTIVE, issues }
   }
-  if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
-    return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
+  let md = ""
+  try { md = fs.readFileSync(skillMdPath(id, env), "utf8") } catch { /* issuesForSkill already read */ }
+  const commands = extractTestCommands(md)
+  if (!commands.length) {
+    const evidence = { v: 1, kind: "structural", commands: [], results: [], at: Date.now() }
+    saveEvidence(id, evidence, env)
+    if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
+      return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [], evidence }
+    }
+    setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
+    return { ok: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [], evidence }
   }
-  setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
-  return { ok: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-ev-"))
+  let results = []
+  try {
+    results = runSkillTests(commands, { cwd: work, env })
+  } finally {
+    try { fs.rmSync(work, { recursive: true, force: true }) } catch { /* tmp */ }
+  }
+  const failed = results.filter((r) => !r.ok)
+  if (failed.length) {
+    const why = failed.map((r) => r.skipped
+      ? `test refused (${r.level}): ${r.cmd}`
+      : `test failed (${r.timed ? "timeout" : r.code}): ${r.cmd}`)
+    const evidence = { v: 1, kind: "behavioral", ok: false, commands, results, at: Date.now() }
+    saveEvidence(id, evidence, env)
+    setLifecycle(id, INACTIVE, env, "skill")
+    return { ok: false, name: id, lifecycle: INACTIVE, issues: why, evidence }
+  }
+  const evidence = { v: 1, kind: "behavioral", ok: true, commands, results, at: Date.now() }
+  saveEvidence(id, evidence, env)
+  const already = rec.lifecycle === SKILL_LIFE.VERIFIED
+  if (!already) setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
+  return { ok: true, already, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [], evidence }
 }
 
 export function verifyTool(name, { env = process.env } = {}) {
@@ -596,6 +724,7 @@ export function formatVerifyReport(results, label = "SKILL") {
     if (r.ok) {
       passed++
       lines.push(`✓ ${name.padEnd(20)} ${r.lifecycle || SKILL_LIFE.VERIFIED}`)
+      if (r.evidence?.kind) lines.push(`    evidence: ${r.evidence.kind}`)
     } else {
       failed++
       lines.push(`✗ ${name.padEnd(20)} ${r.lifecycle || INACTIVE}`)
@@ -620,6 +749,7 @@ export function indexVerifiedSkills(env = process.env) {
       downloaded: true,
       lifecycle: SKILL_LIFE.VERIFIED,
       extracted: rec.learned === true,
+      evidence: readSkillEvidence(rec.id, env)?.kind || "structural",
     })
   }
   return out

@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v67.0.0 — "evidence"
+
+### Added (v67.0 — ## Tests are executed; DOWNLOAD still ≠ TRUST)
+- **Evidence.** `forge skill verify` writes `evidence.json` next to the download. No `## Tests` heading → `kind: structural` and VERIFIED (same as v63). A `## Tests` block runs up to 4 commands through **shellguard** (`block`/`danger`/`confirm` refused, not executed). Non-zero or timeout → INACTIVE. Never ACTIVE. Never `~/.forge/tools`.
+- **## Verify is not a test.** Playbook "how to verify in a project" is not executed. Compose still never fetches.
+
+Generated tests from a gap, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## Layout (PR 68) — still v66.0.0
 
 Repo is one folder: `forge/` (CLI + `tests/` + `skills/`). `agentv19/` is gone.
