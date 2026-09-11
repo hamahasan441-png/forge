@@ -15,8 +15,7 @@ import os from "node:os"
 import path from "node:path"
 import { execFileSync, spawnSync } from "node:child_process"
 
-const ROOT = path.resolve(process.cwd(), "..")
-const FORGE_DIR = path.join(ROOT, "forge")
+const FORGE_DIR = path.resolve(process.cwd(), "..")
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "forge-cleanroom-"))
 const CLEAN_HOME = path.join(TMP, "home")
 fs.mkdirSync(CLEAN_HOME, { recursive: true })
