@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v59.0.0 — "contradict"
+
+### Added (v59.0 — failed evidence on a VERIFIED domain is CONTRADICTED)
+- **Contradict.** A failed acquire tool matching a VERIFIED/KNOWN domain sets status CONTRADICTED (confidence 0.2). Failed records on unverified domains stay ignored. Successful ingest still never VERIFIED and still skips VERIFIED.
+- **Steer.** `evidenceFor` ranks CONTRADICTED above VERIFIED. `planAcquire` on CONTRADICTED is `verify`, not web. formatSteer `CONTRADICT:` is additive. `recordGapOutcome(VERIFIED)` is the only way back to KNOWN. persistGaps will not promote CONTRADICTED from a filename.
+
+Single mutating writer is unchanged. PLAN-v62 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. STALE-by-age, skill research, crawler, L6, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v58.0.0 — "skilllife"
 
 ### Added (v58.0 — learned skills are CANDIDATE until a second verified run)

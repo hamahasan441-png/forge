@@ -5,7 +5,7 @@
  *        ↓
  * CURRENT knowledge (memory / world / skills / lessons / prior verified)
  *        ↓
- * GAPS:  UNKNOWN | UNCERTAIN | PROBABLE | KNOWN | SKIPPABLE
+ * GAPS:  UNKNOWN | UNCERTAIN | PROBABLE | KNOWN | SKIPPABLE | CONTRADICTED
  *
  * Compose is read-only: detectGaps() never writes.
  * persistGaps() writes ~/.forge/projects/<hash>/knowgap.json via writeStateFile
@@ -18,6 +18,8 @@
  * UNCERTAIN (never VERIFIED). Next plan skips tried methods. No page dump.
  * v57: priorityOf() ranks which blocking gap is worth LEARN this turn.
  * Cap 1 (2 only if both CRITICAL). Lower-score gaps stay on [gaps].
+ * v59: a failed acquire on a VERIFIED domain is CONTRADICTED, not KNOWN.
+ * recordGapOutcome(VERIFIED) is the only way back. No fake verification.
  *
  * This is not a second memory, graph, or skill system. It ranks what the
  * existing snapshot does not yet cover and stores that ranking in the
@@ -40,6 +42,7 @@ export const STATUS = {
   UNCERTAIN: "UNCERTAIN",
   UNKNOWN: "UNKNOWN",
   SKIPPABLE: "SKIPPABLE",
+  CONTRADICTED: "CONTRADICTED",
 }
 export const IMPACT = {
   CRITICAL: "CRITICAL",
@@ -53,6 +56,7 @@ export const LIFECYCLE = {
   VERIFIED: "VERIFIED",
   STALE: "STALE",
   DEPRECATED: "DEPRECATED",
+  CONTRADICTED: "CONTRADICTED",
 }
 
 /** Cheapest reliable source first. Compose never executes these. */
@@ -89,8 +93,8 @@ const SKILL_FOR = {
 }
 
 const IMPACT_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }
-const STATUS_RANK = { UNKNOWN: 4, UNCERTAIN: 3, PROBABLE: 2, KNOWN: 1, SKIPPABLE: 0 }
-const UNCERTAINTY_RANK = { UNKNOWN: 4, UNCERTAIN: 2, PROBABLE: 1, KNOWN: 0, SKIPPABLE: 0 }
+const STATUS_RANK = { CONTRADICTED: 5, UNKNOWN: 4, UNCERTAIN: 3, PROBABLE: 2, KNOWN: 1, SKIPPABLE: 0 }
+const UNCERTAINTY_RANK = { CONTRADICTED: 5, UNKNOWN: 4, UNCERTAIN: 2, PROBABLE: 1, KNOWN: 0, SKIPPABLE: 0 }
 const METHOD_COST = { skill: 1, repo: 1, docs: 2, web: 4, verify: 3 }
 const METHOD_RISK = { skill: 1, repo: 1, docs: 1, web: 4, verify: 2 }
 const METHOD_TIME = { skill: 1, repo: 1, docs: 1, web: 3, verify: 2 }
@@ -229,6 +233,16 @@ export function planAcquire(gap, opts = {}) {
   if (!gap || !gap.id || gap.learn === false) return null
   if (gap.status === STATUS.KNOWN || gap.status === STATUS.SKIPPABLE) return null
   const tried = new Set((opts.tried || gap.tried || []).map(String))
+  if (gap.status === STATUS.CONTRADICTED && !tried.has(METHOD.VERIFY)) {
+    return {
+      method: METHOD.VERIFY,
+      tool: "bash",
+      query: `verify ${gap.id}`,
+      cost: 3,
+      id: gap.id,
+      why: "contradicted — re-verify, do not trust prior",
+    }
+  }
   const q = bestQuery(gap)
   const files = (opts.world?.files || []).map((f) => String(f || "")).filter(Boolean).slice(0, 2)
   const skillName = SKILL_FOR[gap.id]
@@ -354,6 +368,9 @@ function evidenceFor(domain, blob, prior) {
   const d = DOMAIN_BY_ID.get(domain.id) || domain
   const tags = [d.id, ...(d.tags || [])]
   const hits = []
+  if (prior && (prior.lifecycle === LIFECYCLE.CONTRADICTED || prior.status === STATUS.CONTRADICTED)) {
+    return { status: STATUS.CONTRADICTED, confidence: 0.2, evidence: String(prior.evidence || "contradicted").slice(0, 80), provenance: "system-generated" }
+  }
   if (prior && prior.lifecycle === LIFECYCLE.VERIFIED) {
     return { status: STATUS.KNOWN, confidence: 0.9, evidence: "verified", provenance: "experimentally-verified" }
   }
@@ -535,6 +552,9 @@ export function persistGaps(cwd, assessment, { task = "" } = {}) {
     }
     if (rec.lifecycle === LIFECYCLE.VERIFIED) {
       rec.status = STATUS.KNOWN
+    } else if (rec.status === STATUS.CONTRADICTED || rec.lifecycle === LIFECYCLE.CONTRADICTED) {
+      rec.status = STATUS.CONTRADICTED
+      rec.lifecycle = LIFECYCLE.CONTRADICTED
     } else if (rec.lifecycle === LIFECYCLE.DEPRECATED || rec.lifecycle === LIFECYCLE.STALE) {
       rec.status = row.status || rec.status
     } else if (rec.status === STATUS.UNCERTAIN && rec.tried?.length && row.status === STATUS.UNKNOWN) {
@@ -575,8 +595,11 @@ export function recordGapOutcome({ cwd, id, status = LIFECYCLE.VERIFIED, evidenc
   rec.lifecycle = life
   rec.status = life === LIFECYCLE.VERIFIED ? STATUS.KNOWN
     : life === LIFECYCLE.STALE ? STATUS.UNCERTAIN
+    : life === LIFECYCLE.CONTRADICTED ? STATUS.CONTRADICTED
     : rec.status || STATUS.UNKNOWN
-  rec.confidence = life === LIFECYCLE.VERIFIED ? 0.9 : rec.confidence || 0.3
+  rec.confidence = life === LIFECYCLE.VERIFIED ? 0.9
+    : life === LIFECYCLE.CONTRADICTED ? 0.2
+    : rec.confidence || 0.3
   rec.evidence = String(evidence || rec.evidence || "outcome").slice(0, 80)
   rec.provenance = life === LIFECYCLE.VERIFIED ? "experimentally-verified" : "system-generated"
   rec.lastSeen = Date.now()
@@ -643,10 +666,29 @@ export function ingestAcquire({ cwd, records = [], task = "", klass = null } = {
     const query = queryOf(r)
     const method = methodOf(tool, query)
     if (!method) continue
-    if (r.status && r.status !== "ok") continue
+    const failed = r.status && r.status !== "ok"
+    if (failed) {
+      for (const id of Object.keys(domains)) {
+        const rec = domains[id]
+        if (!rec) continue
+        const trusted = rec.lifecycle === LIFECYCLE.VERIFIED || rec.status === STATUS.KNOWN
+        if (!trusted) continue
+        const planned = rec.acquire && rec.acquire.tool === tool
+        if (!planned && !recordMatchesDomain(id, tool, query)) continue
+        rec.status = STATUS.CONTRADICTED
+        rec.lifecycle = LIFECYCLE.CONTRADICTED
+        rec.confidence = 0.2
+        rec.evidence = `failed:${tool} ${id}`.slice(0, 80)
+        rec.provenance = "system-generated"
+        rec.lastSeen = now
+        rec.samples = (rec.samples ?? 0) + 1
+        hits++
+      }
+      continue
+    }
     for (const id of Object.keys(domains)) {
       const rec = domains[id]
-      if (!rec || rec.lifecycle === LIFECYCLE.VERIFIED) continue
+      if (!rec || rec.lifecycle === LIFECYCLE.VERIFIED || rec.status === STATUS.CONTRADICTED) continue
       const planned = rec.acquire && rec.acquire.tool === tool
       if (!planned && !recordMatchesDomain(id, tool, query)) continue
       rec.tried = Array.isArray(rec.tried) ? rec.tried : []
@@ -717,6 +759,10 @@ export function formatGapSteer(g) {
       if (x.then && x.then.tool) s += ` then ${x.then.tool}`
       return s + ")"
     }).join("; ")} — cheapest source, do not dump pages`)
+  }
+  const contra = (g.gaps || []).filter((x) => x && x.status === STATUS.CONTRADICTED)
+  if (contra.length) {
+    lines.push(`CONTRADICT: ${contra.slice(0, 3).map((x) => x.id).join(", ")} — re-verify, do not trust prior`)
   }
   return lines.join("\n")
 }
