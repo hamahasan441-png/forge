@@ -7,7 +7,7 @@ and tests are green. Never mark complete because a model wrote a spec.
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
 v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence, v68 stale,
-v73 cite, v74 cockpit, v75 dock (claims/decisions on the omega TUI dock).
+v74 cockpit, v75 dock, v76 live (knowledge dock refresh on /claims without PLAN_COMPOSE).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -26,7 +26,7 @@ DOWNLOAD ≠ TRUST.
 
 ## Knowledge
 
-- [ ] Knowledge dock live-refresh on `/claims` without a new PLAN_COMPOSE
+- [ ] Knowledge dock in the idle header (still never writes)
 
 ## Strategy / tools / models
 

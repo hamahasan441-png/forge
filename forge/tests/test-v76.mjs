@@ -1,27 +1,24 @@
 #!/usr/bin/env node
 /**
- * forge — v66 learn: extract procedures from VERIFIED downloads.
- *
- * LEARN ≠ INDEX. CANDIDATE refused. Not ACTIVE. Never ~/.forge/tools.
+ * forge — v76 live: /claims refreshes the dock without PLAN_COMPOSE.
+ * Compose never writes.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v66-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v76-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v66-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v76-work-"))
 process.chdir(WORK)
 
-const {
-  downloadSkill, verifySkill, learnSkill, formatLearnReport,
-  extractKnowledge, readSkillKnowledge, readDownloadedSkill, indexVerifiedSkills,
-} = await import("../skilldl.js")
-const { SKILL_LIFE } = await import("../evolve.js")
-const { execTool } = await import("../tools.js")
+const { recordClaim } = await import("../claims.js")
+const { recordDecision, snapshotKnowledge } = await import("../decisions.js")
+const { reduce, initialState } = await import("../uistate.js")
+const { knowledgeDockText } = await import("../render.js")
 const { evaluateSkills } = await import("../evaluate.js")
 const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../classify.js")
 const { defaultConfig, sanitizeProjectConfig } = await import("../config.js")
@@ -45,94 +42,30 @@ function listGlobalTools() {
   try { return fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".mjs") || f.endsWith(".js")) } catch { return [] }
 }
 
-const RICH = `---
-name: web-design
-description: Responsive layout playbook
----
-
-# Web Design
-
-You will produce accessible, responsive layouts.
-
-## Layout
-Set a fluid grid and test at 390px.
-
-## What worked
-Use clamp() for type and a 12-column grid.
-
-## Files
-- src/styles.css
-
-## Verify
-\`npm test\`
-`
-
-const THIN = `---
-name: thin-name
-description: Just a label
----
-
-# Thin Name
-`
-
-function mockFetch(body, { filename = "artifact.bin" } = {}) {
-  const buf = Buffer.from(String(body), "utf8")
-  return async (href) => ({
-    ok: true, status: 200, statusText: "OK",
-    headers: { "content-disposition": `filename="${filename}"` },
-    body: buf, url: href,
-  })
+console.log("== snapshotKnowledge folds store → dock without PLAN_COMPOSE ==")
+{
+  recordClaim({ cwd: WORK, subject: "web-design", text: "Use a 12-column grid.", source: "skill" })
+  recordDecision({ cwd: WORK, title: "use-postgres", reason: "billing rows need SQL." })
+  const snap = snapshotKnowledge(WORK)
+  eq("claim in snap", snap.claims.some((c) => c.subject === "web-design"), true)
+  eq("decision in snap", snap.decisions.some((d) => d.title === "use-postgres"), true)
+  const s1 = reduce(initialState({ cwd: WORK }), { type: "KNOWLEDGE_UPDATED", ...snap })
+  const line = knowledgeDockText(s1.knowledge)
+  ok("dock claims", /web-design/.test(line), line)
+  ok("dock decisions", /use-postgres/.test(line), line)
 }
 
-console.log("== extractKnowledge ==")
+console.log("== TUI commands dispatch KNOWLEDGE_UPDATED; compose never writes ==")
 {
-  const k = extractKnowledge(RICH)
-  ok("layout procedure", k.procedures.some((p) => /layout/i.test(p.title)))
-  ok("repair from What worked", /clamp/.test(k.repair))
-  ok("file", k.files.includes("src/styles.css"))
-  const thin = extractKnowledge(THIN)
-  eq("thin no procedures", thin.procedures.length, 0)
-}
-
-console.log("== CANDIDATE learn fails; VERIFIED extracts; thin fails ==")
-{
-  await downloadSkill("https://example.com/web-design.skill", {
-    fetchFn: mockFetch(RICH, { filename: "web-design.skill" }),
-  })
-  const before = learnSkill("web-design")
-  ok("CANDIDATE refused", before.ok === false && /not verified|indexing/.test(before.error), before.error)
-  verifySkill("web-design")
-  const r = learnSkill("web-design")
-  eq("learn ok", r.ok, true)
-  eq("still VERIFIED", r.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("not ACTIVE", r.lifecycle === SKILL_LIFE.ACTIVE, false)
-  ok("knowledge.json", fs.existsSync(path.join(HOME, "skill-downloads", "web-design", "knowledge.json")))
-  const know = readSkillKnowledge("web-design")
-  ok("procedures stored", (know?.procedures || []).length >= 1)
-  ok("report", /Learned/.test(formatLearnReport(r)) && /Not ACTIVE/.test(formatLearnReport(r)))
-  const loaded = await execTool({ cwd: WORK, skillsDir: null }, "load_skill", { name: "web-design" })
-  ok("load_skill appends procedures", /Learned procedures/.test(String(loaded)), String(loaded).slice(0, 200))
-  const listed = indexVerifiedSkills()
-  eq("extracted flag", listed.find((s) => s.name === "web-design")?.extracted, true)
-
-  await downloadSkill("https://example.com/thin-name.skill", {
-    fetchFn: mockFetch(THIN, { filename: "thin-name.skill" }),
-  })
-  verifySkill("thin-name")
-  const thin = learnSkill("thin-name")
-  ok("thin refused", thin.ok === false && /indexing is not learned/.test(thin.error), thin.error)
-  eq("thin not learned", readSkillKnowledge("thin-name"), null)
-}
-
-console.log("== CLI/TUI wired; compose never fetches ==")
-{
-  const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
-  ok("CLI learn", /forge skill learn/.test(forgeSrc) && /runLearn/.test(forgeSrc))
   const chatSrc = fs.readFileSync(path.join(FORGE, "chat.js"), "utf8")
-  ok("TUI /skill learn", /\/skill learn/.test(chatSrc) && /sub === "learn"/.test(chatSrc))
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
+  ok("/claims dispatch", /case "claims"/.test(chatSrc) && /KNOWLEDGE_UPDATED/.test(chatSrc) && /snapshotKnowledge/.test(chatSrc))
+  ok("/decisions dispatch", /case "decisions"/.test(chatSrc))
+  ok("/knowledge dispatch", /case "knowledge"[\s\S]*KNOWLEDGE_UPDATED/.test(chatSrc))
+  ok("/skill learn dispatch", /skill learn[\s\S]{0,400}snapshotKnowledge/.test(chatSrc) || /learnSkill[\s\S]{0,500}snapshotKnowledge/.test(chatSrc))
+  ok("compose has no snapshotKnowledge", !/snapshotKnowledge/.test(composeSrc))
+  ok("compose has no recordClaim", !/recordClaim/.test(composeSrc))
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no learnSkill", !/learnSkill\(/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -163,7 +96,7 @@ console.log("== no side writes / frozen kernel + package ==")
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v66 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v76 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)
