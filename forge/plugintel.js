@@ -1,0 +1,140 @@
+/**
+ * forge — plugin intelligence (v53 rank).
+ *
+ * Rank isolated user plugins + first-party plugin *playbooks* (markdown,
+ * never spawned) against the task. Rank configured MCP names the same
+ * way — top-k into compose, never a dump, never a live connect from
+ * compose. Learned plugins stay hostless. User ~/.forge/tools still
+ * load through plugins.js isolation.
+ *
+ * Zero runtime dependencies. Does not write ~/.forge/tools.
+ */
+import { selectPlugins, scoreAgainst, namedIn, TASK_CLASS } from "./evaluate.js"
+import { configuredServers } from "./mcp.js"
+import { indexVerifiedToolPlaybooks } from "./skilldl.js"
+
+/** Playbooks the model can follow without a live plugin-host. */
+export const PLUGIN_PLAYBOOKS = [
+  { name: "repo_map", description: "Walk the repo map and name the files that matter", readOnly: true, tags: ["map", "index", "symbols"] },
+  { name: "focused_verify", description: "Run the stack-native test command on changed files", readOnly: true, tags: ["test", "verify", "cargo", "npm", "failing", "debug"] },
+  { name: "secret_scan", description: "Scan the diff for keys, tokens, and private URLs", readOnly: true, tags: ["secret", "security", "redact"] },
+  { name: "impact_trace", description: "Follow importers, tests, and deploy edges for a file", readOnly: true, tags: ["impact", "graph", "depend", "module"] },
+  { name: "patch_apply", description: "Apply one atomic unified diff and checkpoint", readOnly: false, tags: ["patch", "edit", "apply"] },
+  { name: "pr_notes", description: "Draft a PR summary from the verify ledger", readOnly: true, tags: ["pr", "review", "summary"] },
+]
+
+export function scorePlugin(task, plugin) {
+  const p = plugin || {}
+  const desc = p.def?.function?.description || p.description || ""
+  const tags = (p.tags || []).join(" ")
+  let score = scoreAgainst(task, p.name, `${desc} ${tags}`)
+  if (namedIn(task, p.name)) score += 10
+  return score
+}
+
+/**
+ * Isolated plugins via selectPlugins + matching playbooks (not live tools).
+ * MICRO/SMALL: only named. Playbooks never become executable tools.
+ */
+export function pickPlugins(task, plugins = [], opts = {}) {
+  const live = selectPlugins(task, plugins, opts)
+  const q = String(task ?? "").trim()
+  const klass = opts.klass
+  const micro = klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL || klass === "micro" || klass === "small"
+  const books = []
+  const catalog = [...PLUGIN_PLAYBOOKS]
+  try { catalog.push(...indexVerifiedToolPlaybooks()) } catch { /* downloads are best-effort */ }
+  for (const b of catalog) {
+    const explicit = namedIn(q, b.name)
+    if (micro && !explicit) continue
+    const score = scorePlugin(q, b)
+    if (explicit || score >= (opts.minScore ?? 2)) books.push({ ...b, score, playbook: true })
+  }
+  books.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+  return { tools: live, playbooks: books.slice(0, opts.topK ?? 3) }
+}
+
+export function formatPluginPicks({ tools = [], playbooks = [] } = {}) {
+  const lines = []
+  if (playbooks.length) {
+    lines.push(`PLUGIN PLAYBOOKS (${playbooks.length}) — follow the steps, do not spawn plugin-host:`)
+    for (const p of playbooks) lines.push(`- ${p.name}: ${p.description}`)
+  }
+  const isolated = tools.filter((t) => t && t.isolated)
+  if (isolated.length) {
+    lines.push(`ISOLATED PLUGINS (${isolated.length}) — already granted this turn:`)
+    for (const t of isolated) lines.push(`- ${t.name}`)
+  }
+  return lines.join("\n")
+}
+
+/** True for namespaced MCP tools (mcp__server__tool) or source mcp:*. */
+export function isMcpTool(p) {
+  if (!p || !p.name) return false
+  if (p.source && String(p.source).startsWith("mcp:")) return true
+  return String(p.name).startsWith("mcp__")
+}
+
+/**
+ * Live MCP tools if the caller already loaded them; otherwise server
+ * stubs from config. Never connects. Never spawns.
+ */
+export function mcpCatalog(config, live = []) {
+  const liveList = Array.isArray(live) ? live.filter(isMcpTool) : []
+  if (liveList.length) {
+    return liveList.map((t) => ({
+      name: t.name,
+      description: t.def?.function?.description || t.description || "",
+      source: t.source || "mcp",
+    }))
+  }
+  const out = []
+  for (const [name, spec] of configuredServers(config)) {
+    out.push({
+      name: `mcp__${name}`,
+      description: spec?.description || `MCP server ${name}`,
+      server: name,
+      source: `mcp:${name}`,
+    })
+  }
+  return out
+}
+
+/**
+ * Rank MCP names against the task. MICRO/SMALL empty unless named.
+ * Default top-k 4 — same cap as toolmem prefer. Does not connect.
+ */
+export function rankMcp(task, tools = [], opts = {}) {
+  const list = Array.isArray(tools) ? tools : []
+  const q = String(task ?? "").trim()
+  if (!q || !list.length) return []
+  const klass = opts.klass
+  const micro = klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL || klass === "micro" || klass === "small"
+  const topK = Math.max(0, Number(opts.topK ?? opts.limit) || 4)
+  const min = opts.minScore == null ? 2 : Number(opts.minScore)
+  const scored = []
+  for (const t of list) {
+    if (!t || !t.name) continue
+    const desc = t.def?.function?.description || t.description || ""
+    const server = t.server || ""
+    const explicit = namedIn(q, t.name) || (server && namedIn(q, server))
+    if (micro && !explicit) continue
+    const score = scoreAgainst(q, t.name, `${desc} ${server}`.trim())
+    if (explicit || score >= min) {
+      scored.push({
+        name: t.name,
+        description: String(desc).slice(0, 160),
+        score: explicit ? score + 10 : score,
+        source: t.source || "mcp",
+      })
+    }
+  }
+  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+  return scored.slice(0, topK)
+}
+
+export function formatMcpPicks(picks = []) {
+  const names = (Array.isArray(picks) ? picks : []).map((p) => p && p.name).filter(Boolean).slice(0, 4)
+  if (!names.length) return ""
+  return `MCP (configured, matching): ${names.join(", ")}`
+}

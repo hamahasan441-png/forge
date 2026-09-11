@@ -25,8 +25,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Run Node unit suites (offline)
-        working-directory: agentv19/forge
-        run: FORGE_FAST=1 node ../tests/run-all.mjs
+        working-directory: forge
+        run: FORGE_FAST=1 node tests/run-all.mjs
 
   # Full lane: node suites + e2e (mock provider) + clean-room npm install.
   full-suite:
@@ -38,8 +38,8 @@ jobs:
         with:
           node-version: 20
       - name: Run all suites
-        working-directory: agentv19/forge
-        run: node ../tests/run-all.mjs
+        working-directory: forge
+        run: node tests/run-all.mjs
 
   # Non-blocking: reports how many exported symbols are named by a test.
   # Informational for now — it never fails the build.
@@ -53,5 +53,5 @@ jobs:
         with:
           node-version: 20
       - name: Export coverage report
-        working-directory: agentv19/forge
+        working-directory: forge
         run: npm run coverage
