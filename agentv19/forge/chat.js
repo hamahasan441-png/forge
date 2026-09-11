@@ -88,6 +88,7 @@ export const COMMANDS = [
   ["models", "", "list models of active provider (live)"],
   ["key", "<api-key>", "set API key for active provider"],
   ["skills", "[name]", "list skills, or load one into the conversation"],
+  ["skill", "download <url>", "download a skill (CANDIDATE only — DOWNLOAD ≠ VERIFY)"],
   ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
   ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
@@ -146,6 +147,7 @@ ${bold("setup")}
   /models               list models of active provider (live)
   /key <api-key>        set API key for active provider
   /skills [name]        list skills, or load one into the conversation
+  /skill download <url> download a skill to ~/.forge/skill-downloads (CANDIDATE, not trusted)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
@@ -1232,6 +1234,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (cmd === "settings") return part.includes("=") ? null : pick(["dock", "thinking", "ascii", "a11y", "collapse"])
       if (cmd === "provider") return pick(CATALOG.map((c) => c.name))
       if (cmd === "skills") { try { return pick(indexSkills(resolveSkillsDir(config.skills?.dir)).map((x) => x.name)) } catch { return null } }
+      if (cmd === "skill") return pick(["download"])
       if (cmd === "undo") return pick(["--run"])
       if (cmd === "diff") return pathCandidates(part, from)
       return null
@@ -1896,6 +1899,33 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         p.apiKey = arg.trim()
         saveConfig(config)
         ok(`key saved for ${p.name} (${maskKey(p.apiKey)})`)
+        break
+      }
+      case "skill": {
+        const parts = arg.split(/\s+/).filter(Boolean)
+        const sub = (parts[0] || "").toLowerCase()
+        if (sub === "download") {
+          const urls = parts.slice(1)
+          if (!urls.length) { err("usage: /skill download <https-url> [<url>…]"); break }
+          const { downloadSkills, formatDownloadReport } = await import("./skilldl.js")
+          info("downloading…")
+          const results = await downloadSkills(urls)
+          for (const r of results) {
+            if (r.ok) console.log(formatDownloadReport(r))
+            else err(formatDownloadReport(r).trim())
+          }
+          break
+        }
+        if (!sub || sub === "list") {
+          const { listDownloads, skillDownloadsDir } = await import("./skilldl.js")
+          const have = listDownloads()
+          console.log(bold(`skill downloads (${have.length})`) + dim(`  ${skillDownloadsDir()}`))
+          if (!have.length) console.log(dim("  none — /skill download <https-url>"))
+          for (const r of have) console.log(`  ${cyan((r.skillName || r.id).padEnd(28))} ${r.lifecycle || "CANDIDATE"}  ${dim(r.sourceUrl || "")}`)
+          if (have.length) console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
+          break
+        }
+        err(`unknown: /skill ${sub} — use: /skill download <https-url>`)
         break
       }
       case "skills": {
