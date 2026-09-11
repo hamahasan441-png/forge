@@ -25,6 +25,9 @@
  *
  * v70: per-skill `ttlMs` on the download record overrides FORGE_SKILL_TTL_MS.
  * Missing/invalid ttlMs still uses the env default. Never ACTIVE.
+ *
+ * v71: VERIFIED body sha mismatch vs last verifiedSha → DRIFT (not STALE,
+ * not CONTRADICTED). Hidden from pick. Re-verify restores. Never ACTIVE.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -54,6 +57,7 @@ export const MAX_SKILL_BYTES = 8 * 1024 * 1024
 export const INACTIVE = "INACTIVE"
 export const STALE = "STALE"
 export const CONTRADICTED = "CONTRADICTED"
+export const DRIFT = "DRIFT"
 export const DEFAULT_SKILL_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const DEFAULT_STALE_FAILS = 2
 export const MAX_SKILL_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000
@@ -183,6 +187,8 @@ function setLifecycle(name, lifecycle, env, kind = "skill", extra = {}) {
   if (lifecycle === SKILL_LIFE.VERIFIED) {
     rec.verifiedAt = Date.now()
     rec.failCount = 0
+    const sha = bodySha(name, kind, env)
+    if (sha) rec.verifiedSha = sha
   }
   if (extra.failCount != null) rec.failCount = extra.failCount
   bucket[name] = rec
@@ -196,6 +202,7 @@ function setLifecycle(name, lifecycle, env, kind = "skill", extra = {}) {
     if (lifecycle === SKILL_LIFE.VERIFIED) {
       man.items[name].verifiedAt = rec.verifiedAt
       man.items[name].failCount = 0
+      if (rec.verifiedSha) man.items[name].verifiedSha = rec.verifiedSha
     }
     if (extra.failCount != null) man.items[name].failCount = extra.failCount
     man.updated = Date.now()
@@ -244,6 +251,43 @@ export function sweepStale(env = process.env, kind = "skill") {
   return demoted
 }
 
+function bodyPath(id, kind, env) {
+  return kind === "tool"
+    ? path.join(toolDownloadsDir(env), id, `${id}.mjs`)
+    : skillMdPath(id, env)
+}
+
+function bodySha(id, kind, env) {
+  try { return sha256(fs.readFileSync(bodyPath(id, kind, env))) } catch { return "" }
+}
+
+/**
+ * VERIFIED body no longer matches verifiedSha → DRIFT (not STALE).
+ * Missing verifiedSha is stamped now — no instant demote.
+ */
+export function sweepDrift(env = process.env, kind = "skill") {
+  const man = loadDownloadManifest(env, kind)
+  const demoted = []
+  for (const [id, rec] of Object.entries(man.items || {})) {
+    if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) continue
+    const now = bodySha(id, kind, env)
+    const was = String(rec.verifiedSha || "")
+    if (!was) {
+      if (now) {
+        rec.verifiedSha = now
+        man.items[id] = rec
+        man.updated = Date.now()
+        saveManifest(man, env, kind)
+      }
+      continue
+    }
+    if (now && now === was) continue
+    setLifecycle(id, DRIFT, env, kind)
+    demoted.push(id)
+  }
+  return demoted
+}
+
 export function setSkillTtl(name, ttlMs, { env = process.env, kind = "skill" } = {}) {
   const id = String(name || "").trim()
   const man = loadDownloadManifest(env, kind)
@@ -278,6 +322,7 @@ export function formatTtlReport(r) {
 }
 
 export function listDownloads(env = process.env, kind = "skill") {
+  sweepDrift(env, kind)
   sweepStale(env, kind)
   const items = Object.values(loadDownloadManifest(env, kind).items || {})
   return items.sort((a, b) => (b.downloadedAt || "").localeCompare(a.downloadedAt || ""))
@@ -847,7 +892,7 @@ export function formatVerifyReport(results, label = "SKILL") {
   return lines.join("\n") + "\n"
 }
 
-/** VERIFIED downloads only — CANDIDATE/INACTIVE/STALE/CONTRADICTED stay out of pickSkills. */
+/** VERIFIED downloads only — CANDIDATE/INACTIVE/STALE/CONTRADICTED/DRIFT stay out of pickSkills. */
 export function indexVerifiedSkills(env = process.env) {
   const out = []
   for (const rec of listDownloads(env, "skill")) {
@@ -886,12 +931,13 @@ export function indexVerifiedToolPlaybooks(env = process.env) {
 }
 
 /**
- * Body of a VERIFIED downloaded skill. CANDIDATE/INACTIVE/STALE/CONTRADICTED return null.
+ * Body of a VERIFIED downloaded skill. CANDIDATE/INACTIVE/STALE/CONTRADICTED/DRIFT return null.
  * Sync. No fetch. No plugin-host.
  */
 export function readDownloadedSkill(name, env = process.env) {
   const n = validSkillName(name)
   if (!n) return null
+  sweepDrift(env, "skill")
   sweepStale(env, "skill")
   const rec = loadDownloadManifest(env, "skill").items?.[n]
   if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
@@ -923,6 +969,7 @@ export function readDownloadedSkill(name, env = process.env) {
 export function readDownloadedToolPlaybook(name, env = process.env) {
   const n = String(name || "").trim()
   if (!TOOL_NAME_RE.test(n) || TOOL_FORBIDDEN.has(n)) return null
+  sweepDrift(env, "tool")
   sweepStale(env, "tool")
   const rec = loadDownloadManifest(env, "tool").items?.[n]
   if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
