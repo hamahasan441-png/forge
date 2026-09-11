@@ -136,7 +136,7 @@ out=$(printf 'hello\n/retry\n/exit\n' | $F chat 2>&1)
 n=$(echo "$out" | grep -c "Hello from mock!")
 if [ "${n:-0}" -ge 2 ]; then PASS=$((PASS+1)); echo "  ok  chat /retry regenerates"
 else FAIL=$((FAIL+1)); echo "  FAIL chat /retry regenerates (got $n answers)"; fi
-check "banner v30" "$out" "forge v66"
+check "banner v30" "$out" "forge v67"
 
 # 18. chat /export writes markdown transcript
 mkdir -p "$T/work"
@@ -378,7 +378,7 @@ check "config menu probe ok" "$out" "connection OK"
 
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
-check "autopick banner" "$out" "forge v66"
+check "autopick banner" "$out" "forge v67"
 check "autopick provider" "$out" "provider: custom"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"
