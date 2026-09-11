@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v64.0.0 — "wire"
+
+### Fixed (v64.0 — verified downloads actually load)
+- **load_skill.** VERIFIED skill-downloads and hostless tool playbooks resolve even when the bundled skills dir is missing. CANDIDATE/INACTIVE still 404. Never returns `.mjs` source. Never writes `~/.forge/tools`.
+- **Compose.** `evaluateSkills` keeps `downloaded` + `path`. `attachSkillBodies` reads `SKILL.md` under `skill-downloads` so `[skills]` carries repair/files/command. Compose still never imports skilldl and never fetches.
+- **Data CLI.** `forge data status` lists skill/tool download counts. Empty `verify all` says there are no candidates.
+
+Single mutating writer is unchanged. TODO.md is the living list. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Deep learn, generated tests, rollback, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v63.0.0 — "verify"
 
 ### Added (v63.0 — tool download + structural verify)

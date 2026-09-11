@@ -814,6 +814,12 @@ export function dataStatus(cwd = process.cwd()) {
   try { checkpoints = fs.readdirSync(path.join(root, "checkpoints")).length } catch {}
   const gaps = loadGapStats(cwd)
   const domainCount = Object.keys(gaps.domains || {}).length
+  const countDirs = (sub) => {
+    try {
+      return fs.readdirSync(path.join(root, sub), { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith(".")).length
+    } catch { return 0 }
+  }
   return {
     root,
     via,
@@ -824,6 +830,8 @@ export function dataStatus(cwd = process.cwd()) {
     rootFiles,
     projectFiles,
     gaps: domainCount,
+    skillDownloads: countDirs("skill-downloads"),
+    toolDownloads: countDirs("tool-downloads"),
   }
 }
 
@@ -833,6 +841,7 @@ export function formatDataStatus(s) {
     `forge data  root ${s.root}  (${s.via})`,
     `project     ${s.project}  ${s.projectDir}`,
     `sessions    ${s.sessions}   checkpoints ${s.checkpoints}   gap-domains ${s.gaps}`,
+    `downloads   skills ${s.skillDownloads ?? 0}   tools ${s.toolDownloads ?? 0}  (CANDIDATE until verify)`,
   ]
   const files = [...(s.rootFiles || []).map((f) => `root/${f.name}`), ...(s.projectFiles || []).map((f) => `project/${f.name}`)]
   if (files.length) lines.push(`files       ${files.join(", ")}`)
