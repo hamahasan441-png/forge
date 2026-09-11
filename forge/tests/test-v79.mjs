@@ -21,7 +21,9 @@ const { recordStrategy, pickStrategy, loadStrategies } = await import("../strate
 const { recordModelOutcome, pickModelEmpiric } = await import("../empirics.js")
 const { recordLesson, consolidateLessons, loadLessons } = await import("../lessons.js")
 const { appendMemory, consolidateMemory, memoryEntries } = await import("../memory.js")
-const { generateGapTest } = await import("../experiment.js")
+const { generateGapTest, runExperiment } = await import("../experiment.js")
+const { relevantTools } = await import("../toolintel.js")
+const { recordToolRun } = await import("../toolintel.js")
 const { ROLES, roleIsReadOnly, roleCatalog } = await import("../agentmanager.js")
 const { formatSteer } = await import("../evaluate.js")
 const { BENCH_CASES, runBench } = await import("../bench.js")
@@ -108,6 +110,21 @@ console.log("== gap tests never invent; steer STRAT; bench 2.0 ==")
 {
   eq("npm test skipped", generateGapTest({ id: "auth" }, { blast: { tests: ["npm test"] } }).ok, false)
   eq("explicit true", generateGapTest({ id: "auth" }, { command: "true" }).command, "true")
+  const tdir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v79-tools-"))
+  recordToolRun({
+    cwd: tdir, klass: TASK_CLASS.MEDIUM,
+    records: [
+      { tool: "bash", status: "failed", failure: "NOT_FOUND", duration_ms: 1 },
+      { tool: "bash", status: "failed", failure: "NOT_FOUND", duration_ms: 1 },
+      { tool: "bash", status: "failed", failure: "NOT_FOUND", duration_ms: 1 },
+    ],
+  })
+  const avoided = relevantTools("debug the failing authentication module", { cwd: tdir, klass: TASK_CLASS.MEDIUM })
+  ok("3-fail bash still avoided", avoided.avoid.some((t) => t.tool === "bash"), JSON.stringify(avoided))
+  try { fs.rmSync(tdir, { recursive: true, force: true }) } catch {}
+  const exp = runExperiment({ cwd: WORK, id: "testing", command: "true", generateSkill: false })
+  eq("experiment pass", exp.ok, true)
+  ok("experiment scored strategy", (loadStrategies(WORK).items?.experiment?.ok ?? 0) >= 1)
   const steer = formatSteer({ strategy: [{ name: "playbook-first", rate: 1 }], models: [{ model: "grok-4", rate: 1 }] })
   ok("STRAT line", /STRAT:/.test(steer) && /playbook-first/.test(steer), steer)
   ok("MODELS line", /MODELS:/.test(steer) && /grok-4/.test(steer), steer)

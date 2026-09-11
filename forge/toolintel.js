@@ -779,8 +779,8 @@ export function relevantTools(task = "", { cwd, klass = null, limit = 4 } = {}) 
     const blockRate = n > 0 ? blocked / n : 0
     scored.push({
       tool: name,
-      rate: Math.max(0, Math.min(1, rate * recency)),
-      rawRate: rate,
+      rate,
+      recency,
       samples: n,
       ok, failed, blocked, blockRate,
       why: topFailure(rec.byFailure),
@@ -788,15 +788,16 @@ export function relevantTools(task = "", { cwd, klass = null, limit = 4 } = {}) 
     })
   }
   const cap = Math.max(0, Number(limit) || 4)
+  const rank = (a, b) => (b.hit - a.hit) || ((b.rate * b.recency) - (a.rate * a.recency)) || (b.samples - a.samples) || a.tool.localeCompare(b.tool)
   const prefer = scored
     .filter((s) => s.rate >= 0.8 && s.samples >= 3 && s.blockRate < 0.4)
-    .sort((a, b) => (b.hit - a.hit) || (b.rate - a.rate) || (b.samples - a.samples) || a.tool.localeCompare(b.tool))
+    .sort(rank)
     .slice(0, cap)
     .map((s) => ({ tool: s.tool, rate: round4(s.rate), samples: s.samples }))
   const preferSet = new Set(prefer.map((p) => p.tool))
   const avoid = scored
     .filter((s) => !preferSet.has(s.tool) && s.samples >= 3 && (s.rate <= 0.5 || s.blockRate >= 0.4))
-    .sort((a, b) => (a.rate - b.rate) || (b.samples - a.samples) || a.tool.localeCompare(b.tool))
+    .sort((a, b) => (a.rate * a.recency - b.rate * b.recency) || (b.samples - a.samples) || a.tool.localeCompare(b.tool))
     .slice(0, Math.min(3, cap))
     .map((s) => ({
       tool: s.tool,

@@ -12,6 +12,7 @@ import { recordGapOutcome, loadGapStats, LIFECYCLE, domainIds } from "./knowgap.
 import { authorSkill, SKILL_LIFE } from "./evolve.js"
 import { parseSkillPlaybook } from "./skills.js"
 import { TASK_CLASS } from "./classify.js"
+import { recordStrategy } from "./strategy.js"
 
 const TEST_TIMEOUT_MS = 15_000
 const REFUSE = new Set(["block", "danger", "confirm"])
@@ -97,6 +98,7 @@ export function runExperiment({
       evidence: `experiment ${hypo.command} ${passed ? "pass" : timed ? "timeout" : `exit ${r.status}`}`,
     })
   } catch { /* persist is best-effort */ }
+  try { recordStrategy({ cwd, name: "experiment", ok: passed }) } catch { /* best-effort */ }
   let skill = { ok: false, skipped: passed ? "not-requested" : "not-verified" }
   if (passed && generateSkill) {
     try {
