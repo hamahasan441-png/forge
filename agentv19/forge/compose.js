@@ -232,8 +232,12 @@ function attachSkillBodies(skills, cwd) {
     }
     if (!md) continue
     let parsed
-    try { parsed = parseSkillPlaybook(md) } catch { continue }
-    const repair = String(parsed.repair || "").trim()
+    try { parsed = parseSkillPlaybook(md) } catch { parsed = { repair: "", files: [], command: "" } }
+    let repair = String(parsed.repair || "").trim()
+    if (!repair && s.downloaded) {
+      const first = md.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#") && !l.startsWith("---") && !l.startsWith("-") && !/^name:|^description:/.test(l))
+      if (first) repair = first.slice(0, 240)
+    }
     if (!repair) continue
     if (KERNEL_HINT.test(repair)) continue
     s.repair = repair.slice(0, 240)
@@ -421,7 +425,11 @@ export function compose(task = "", opts = {}) {
   if (opts.includePlaybooks !== false) {
     try {
       const picked = pickPlugins(q, [], { klass })
-      out.playbooks = picked.playbooks || []
+      out.playbooks = (picked.playbooks || []).map((p) => (
+        p?.downloaded && !p.repair
+          ? { ...p, repair: String(p.description || "").slice(0, 240) }
+          : p
+      ))
     } catch { out.playbooks = [] }
   }
   if (opts.includeMcp !== false) {
@@ -543,6 +551,15 @@ export function formatCompose(c) {
     return s.lifecycle === "CANDIDATE" ? `${s.name} (candidate)` : s.name
   }).filter(Boolean).slice(0, 3).join(", ")}`)
   if (c.playbooks?.length) lines.push(`[playbooks] ${c.playbooks.map((p) => p.name).filter(Boolean).slice(0, 3).join(", ")}`)
+  let bookN = 0
+  for (const p of c.playbooks || []) {
+    if (bookN >= 2) break
+    if (!p?.downloaded) continue
+    const hint = String(p.description || p.repair || "").trim()
+    if (!hint) continue
+    lines.push(`[playbook] ${p.name}: ${hint.slice(0, 160)}`)
+    bookN++
+  }
   let skillN = 0
   for (const s of c.skills || []) {
     if (skillN >= 2) break

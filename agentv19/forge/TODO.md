@@ -6,7 +6,7 @@ and tests are green. Never mark complete because a model wrote a spec.
 
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
-v63 verify, v64 wire (`load_skill` + compose attach VERIFIED downloads).
+v63 verify, v64 wire, v65 discover (lists + `forge skills <name>`).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -50,7 +50,7 @@ DOWNLOAD ≠ TRUST.
 - [ ] Bench 2.0
 - [ ] Multi-agent roles
 - [ ] Kernel evolution **only** in an isolated worktree (L6 — not now)
-- [ ] Land v38–v64 stack on `main` (separate merge, not an enhancement)
+- [ ] Land v38–v65 stack on `main` (separate merge, not an enhancement)
 
 ## Known reds (not features)
 

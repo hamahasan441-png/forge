@@ -871,12 +871,15 @@ async function main() {
         if (code) process.exit(code)
         return
       }
+      const { indexVerifiedSkills, readDownloadedSkill } = await import("./skilldl.js")
+      const extra = indexVerifiedSkills()
       const dir = resolveSkillsDir(config.skills?.dir)
-      if (!dir) { err("no skills directory found (looked in ./skills, repo root, cli/forge/skills, ~/.forge/skills)"); process.exit(1); return }
+      if (!dir && !extra.length) { err("no skills directory found (looked in ./skills, repo root, cli/forge/skills, ~/.forge/skills)"); process.exit(1); return }
       // v20.2 (P2-5): forge skills --check | forge skills check — validate all skills
       if (flags.check !== undefined || positional[1] === "check") {
+        if (!dir) { err("no skills directory found"); process.exit(1); return }
         const rep = checkSkills(dir)
-        if (JSON_OUT) { emitJson({ dir, ...rep }); process.exit(rep.failed ? 1 : 0); return }
+        if (JSON_OUT) { emitJson({ dir, ...rep, downloads: extra }); process.exit(rep.failed ? 1 : 0); return }
         console.log(bold(`skill check (${rep.total}) — ${dir}`))
         for (const s of rep.skills) {
           if (s.ok) console.log(`  ${green("✓")} ${cyan(s.name.padEnd(30))} ${dim(s.sizeKB + " KB")}`)
@@ -885,20 +888,29 @@ async function main() {
             for (const iss of s.issues) console.log(`      ${red("•")} ${iss}`)
           }
         }
+        if (extra.length) {
+          console.log(dim(`  ${extra.length} verified download(s) — forge skill verify already passed`))
+          for (const s of extra) console.log(`  ${green("✓")} ${cyan((s.name || "").padEnd(30))} ${dim("verified download")}`)
+        }
         if (rep.failed) { err(`${rep.failed} of ${rep.total} skill(s) have issues`); process.exit(1); return }
         ok(`all ${rep.total} skills valid`)
         return
       }
       const sub = positional[1]
       if (sub && sub !== "list") {
-        const md = loadSkill(dir, sub)
-        if (!md) { err(`skill "${sub}" not found in ${dir}`); process.exit(1); return }
+        const md = (dir ? loadSkill(dir, sub) : null) || readDownloadedSkill(sub)
+        if (!md) { err(`skill "${sub}" not found`); process.exit(1); return }
         console.log(md)
         return
       }
-      const idx = indexSkills(dir)
-      console.log(bold(`skills (${idx.length}) — ${dir}`))
+      const idx = dir ? indexSkills(dir) : []
+      if (JSON_OUT) { emitJson({ dir, skills: idx, downloads: extra }); return }
+      console.log(bold(`skills (${idx.length})`) + (dir ? dim(`  — ${dir}`) : ""))
       for (const s of idx) console.log(`  ${cyan(s.name.padEnd(32))} ${dim(s.desc)}`)
+      if (extra.length) {
+        console.log(dim(`verified downloads (${extra.length}) — load_skill / forge skills <name>`))
+        for (const s of extra) console.log(`  ${cyan((s.name || "").padEnd(32))} ${dim((s.desc || "verified download").slice(0, 60))}`)
+      }
       return
     }
     case "plan": {
@@ -1082,6 +1094,11 @@ async function main() {
 
       // forge tools <name> → one capability card
       const one = positional[1] && positional[1] !== "list" ? positional[1] : null
+      if (one === "download" || one === "verify") {
+        err(`did you mean: forge tool ${one} …  (singular — DOWNLOAD ≠ live ~/.forge/tools)`)
+        process.exit(1)
+        return
+      }
       if (one) {
         const m = reg.get(one)
         if (!m) { err(`unknown tool "${one}" — run ${cyan("forge tools")} to list them`); process.exit(1); return }
@@ -1136,6 +1153,8 @@ async function main() {
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
       const playbooks = indexLearnedPlugins(process.cwd())
       const learnedDir = learnedPluginsDir(process.cwd())
+      const { indexVerifiedToolPlaybooks } = await import("./skilldl.js")
+      const downloaded = indexVerifiedToolPlaybooks()
       if (JSON_OUT) {
         emitJson({
           dir: PLUGINS_DIR,
@@ -1150,6 +1169,7 @@ async function main() {
             files: p.files || [],
             command: p.command || "",
           })),
+          downloads: downloaded.map((p) => ({ name: p.name, source: "downloaded", playbook: true, description: p.description || "" })),
           errors: loaded.errors,
         })
         try { loaded.close?.() } catch { /* best-effort */ }
@@ -1157,7 +1177,7 @@ async function main() {
       }
       console.log(bold(`tool plugins — ${PLUGINS_DIR}`))
       console.log(dim(`learned — ${learnedDir}`))
-      if (!loaded.tools.length && !loaded.errors.length && !playbooks.length) {
+      if (!loaded.tools.length && !loaded.errors.length && !playbooks.length && !downloaded.length) {
         console.log(dim("  (none) — drop a *.mjs exporting { name, description, parameters, run } here to add a tool"))
       }
       for (const t of loaded.tools) {
@@ -1167,9 +1187,14 @@ async function main() {
         const hint = String(p.repair || p.description || "").slice(0, 60)
         console.log(`  ${dim("○")} ${cyan(p.name.padEnd(24))} ${dim("[playbook] ")}${dim(hint)}  ${dim("(learned)")}`)
       }
+      for (const p of downloaded) {
+        const hint = String(p.description || "").slice(0, 60)
+        console.log(`  ${dim("○")} ${cyan(p.name.padEnd(24))} ${dim("[downloaded playbook] ")}${dim(hint)}`)
+      }
       for (const e of loaded.errors) console.log(`  ${red("✗")} ${dim(e)}`)
       if (loaded.tools.length) console.log(dim(`  ${loaded.tools.length} plugin tool(s) available to the agent • disable all with: forge config set tools.plugins false`))
       if (playbooks.length) console.log(dim(`  ${playbooks.length} learned playbook(s) — data, not a live plugin-host spawn`))
+      if (downloaded.length) console.log(dim(`  ${downloaded.length} verified download(s) — hostless, never ~/.forge/tools`))
       try { loaded.close?.() } catch { /* best-effort */ }
       return
     }

@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v65.0.0 — "discover"
+
+### Fixed (v65.0 — verified downloads show up in lists and `forge skills <name>`)
+- **CLI.** `forge skills <name>` prints a VERIFIED download. `forge skills` / `check` list them. `forge plugins` lists hostless downloaded playbooks. `forge tools download|verify` hints at `forge tool …`.
+- **TUI.** `/skills` lists verified downloads. `/skills download|verify` aliases `/skill`. Empty `verify all` says download first.
+- **Compose.** Downloaded playbooks get a `[playbook]` line. Skills without `## What worked` still attach the first paragraph. Context compose now includes skill bodies.
+- **Re-verify.** Already-VERIFIED is re-checked; missing/kernel SKILL.md demotes to INACTIVE.
+
+Single mutating writer is unchanged. TODO.md is the living list. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Deep learn, generated tests, rollback, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v64.0.0 — "wire"
 
 ### Fixed (v64.0 — verified downloads actually load)

@@ -239,7 +239,7 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
             config,
             skillsIndex,
             includeMemory: false,
-            includeSkills: false,
+            includeSkills: true,
             plugins: opts.plugins,
           })
         } catch { return null }
