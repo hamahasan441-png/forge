@@ -1924,7 +1924,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const names = parts.slice(1)
           if (!names.length) { err("usage: /skill verify <name> [<name>…] | all"); break }
           const { verifySkills, formatVerifyReport } = await import("./skilldl.js")
-          console.log(formatVerifyReport(verifySkills(names), "SKILL"))
+          const results = verifySkills(names)
+          if (!results.length) { err("no skill candidates to verify — download first"); break }
+          console.log(formatVerifyReport(results, "SKILL"))
           break
         }
         if (!sub || sub === "list") {
@@ -1958,7 +1960,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const names = parts.slice(1)
           if (!names.length) { err("usage: /tool verify <name> [<name>…] | all"); break }
           const { verifyTools, formatVerifyReport } = await import("./skilldl.js")
-          console.log(formatVerifyReport(verifyTools(names), "TOOL"))
+          const results = verifyTools(names)
+          if (!results.length) { err("no tool candidates to verify — download first"); break }
+          console.log(formatVerifyReport(results, "TOOL"))
           break
         }
         if (!sub || sub === "list") {
@@ -1974,20 +1978,59 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       }
       case "skills": {
-        const dir = resolveSkillsDir(config.skills?.dir)
-        if (!dir && !arg) { err("no skills dir found"); break }
-        if (arg) {
-          let md = dir ? loadSkill(dir, arg) : null
-          if (!md) {
-            try { md = (await import("./skilldl.js")).readDownloadedSkill(arg) } catch { md = null }
+        const raw = (arg || "").trim()
+        const head = raw.split(/\s+/)[0]?.toLowerCase() || ""
+        if (head === "download" || head === "verify") {
+          // /skills download|verify → same as /skill
+          const rest = raw.slice(head.length).trim()
+          const fake = rest ? `${head} ${rest}` : head
+          const parts = fake.split(/\s+/).filter(Boolean)
+          const sub = (parts[0] || "").toLowerCase()
+          if (sub === "download") {
+            const urls = parts.slice(1)
+            if (!urls.length) { err("usage: /skill download <https-url> [<url>…]"); break }
+            const { downloadSkills, formatDownloadReport } = await import("./skilldl.js")
+            info("downloading…")
+            const results = await downloadSkills(urls)
+            for (const r of results) {
+              if (r.ok) console.log(formatDownloadReport(r))
+              else err(formatDownloadReport(r).trim())
+            }
+            break
           }
-          if (!md) { err(`skill "${arg}" not found`); break }
-          messages.push({ role: "user", content: `Use this skill for my next requests. Acknowledge briefly.\n\n<skill name="${arg}">\n${md}\n</skill>` })
-          ok(`skill "${arg}" loaded (${md.length} chars)`)
-        } else {
-          const idx = indexSkills(dir)
+          if (sub === "verify") {
+            const names = parts.slice(1)
+            if (!names.length) { err("usage: /skill verify <name> [<name>…] | all"); break }
+            const { verifySkills, formatVerifyReport } = await import("./skilldl.js")
+            const results = verifySkills(names)
+            if (!results.length) { err("no skill candidates to verify — download first"); break }
+            console.log(formatVerifyReport(results, "SKILL"))
+            break
+          }
+        }
+        const dir = resolveSkillsDir(config.skills?.dir)
+        if (!raw || head === "list") {
+          if (!dir && !raw) { /* still try downloads */ }
+          const idx = dir ? indexSkills(dir) : []
+          let extra = []
+          try { extra = (await import("./skilldl.js")).indexVerifiedSkills() } catch { extra = [] }
+          if (!dir && !extra.length) { err("no skills dir found"); break }
           console.log(bold(`skills (${idx.length}) — /skills <name> to load one`))
           for (const s of idx) console.log(`  ${cyan(s.name.padEnd(30))} ${dim(s.desc)}`)
+          if (extra.length) {
+            console.log(dim(`verified downloads (${extra.length})`))
+            for (const s of extra) console.log(`  ${cyan((s.name || "").padEnd(30))} ${dim((s.desc || "verified download").slice(0, 60))}`)
+          }
+          break
+        }
+        if (raw) {
+          let md = dir ? loadSkill(dir, raw) : null
+          if (!md) {
+            try { md = (await import("./skilldl.js")).readDownloadedSkill(raw) } catch { md = null }
+          }
+          if (!md) { err(`skill "${raw}" not found`); break }
+          messages.push({ role: "user", content: `Use this skill for my next requests. Acknowledge briefly.\n\n<skill name="${raw}">\n${md}\n</skill>` })
+          ok(`skill "${raw}" loaded (${md.length} chars)`)
         }
         break
       }

@@ -539,13 +539,13 @@ export function verifySkill(name, { env = process.env } = {}) {
   const man = loadDownloadManifest(env, "skill")
   const rec = man.items?.[id]
   if (!rec) return { ok: false, error: `skill "${id}" not downloaded`, name: id }
-  if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
-    return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
-  }
   const issues = issuesForSkill(id, rec, env)
   if (issues.length) {
     setLifecycle(id, INACTIVE, env, "skill")
     return { ok: false, name: id, lifecycle: INACTIVE, issues }
+  }
+  if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
+    return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
   }
   setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
   return { ok: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
@@ -556,13 +556,13 @@ export function verifyTool(name, { env = process.env } = {}) {
   const man = loadDownloadManifest(env, "tool")
   const rec = man.items?.[id]
   if (!rec) return { ok: false, error: `tool "${id}" not downloaded`, name: id }
-  if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
-    return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
-  }
   const issues = issuesForTool(id, rec, env)
   if (issues.length) {
     setLifecycle(id, INACTIVE, env, "tool")
     return { ok: false, name: id, lifecycle: INACTIVE, issues }
+  }
+  if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
+    return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
   }
   setLifecycle(id, SKILL_LIFE.VERIFIED, env, "tool")
   return { ok: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
@@ -671,15 +671,21 @@ export function readDownloadedToolPlaybook(name, env = process.env) {
   const rec = loadDownloadManifest(env, "tool").items?.[n]
   if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
   const desc = String(rec.description || n).slice(0, 240)
-  return [
+  const url = String(rec.sourceUrl || "").slice(0, 200)
+  const lines = [
     `# ${n} (verified download)`,
     "",
     desc,
     "",
-    "This is a hostless playbook. Follow the description. Do not spawn plugin-host.",
-    "Do not write ~/.forge/tools. Do not flip assumeYes.",
+    "## When",
+    "The task matches this tool's name or description.",
     "",
-  ].join("\n")
+    "## What to run",
+    "Follow the description as a hostless playbook. Do not spawn plugin-host.",
+    "Do not write ~/.forge/tools. Do not flip assumeYes.",
+  ]
+  if (url) lines.push("", `Source: ${url}`)
+  return lines.join("\n") + "\n"
 }
 
 
