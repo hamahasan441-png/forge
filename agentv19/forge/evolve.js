@@ -6,6 +6,10 @@
  * ~/.forge/projects/<hash>/skills/ — never the bundled pack, never the
  * kernel. MICRO/SMALL skip authoring. Disk lessons are not deleted.
  *
+ * v58: first author is CANDIDATE in skilllife.json. VERIFIED only after a
+ * second fully-passed evolveRun (deduped + 9/9 COMPLETED). Never auto-ACTIVE
+ * on first write. Never writes ~/.forge/tools.
+ *
  * This is self-improvement of playbooks. It is not kernel self-mod.
  */
 import fs from "node:fs"
@@ -23,6 +27,16 @@ import { authorPlugin } from "./extend.js"
 export const RETIRE_BELOW = 0.25
 export const HARD_AVOID_MIN = 0.5
 export const PROMOTE_DELTA = 0.1
+export const SKILL_LIFE_FILE = "skilllife.json"
+export const SKILL_LIFE = {
+  CANDIDATE: "CANDIDATE",
+  VERIFIED: "VERIFIED",
+  ACTIVE: "ACTIVE",
+  DEPRECATED: "DEPRECATED",
+  SUPERSEDED: "SUPERSEDED",
+  ARCHIVED: "ARCHIVED",
+}
+const MAX_SKILL_LIFE = 24
 
 const STOP = new Set([
   "the", "and", "for", "with", "from", "this", "that", "fix", "add", "please",
@@ -70,6 +84,72 @@ export function hardAvoid(query, { cwd = process.cwd(), limit = 6 } = {}) {
 
 export function learnedSkillsDir(cwd = process.cwd()) {
   return path.join(projectDir(cwd), "skills")
+}
+
+export function skillLifePath(cwd = process.cwd()) {
+  return path.join(projectDir(cwd || process.cwd()), SKILL_LIFE_FILE)
+}
+
+export function loadSkillLife(cwd = process.cwd()) {
+  try {
+    const j = JSON.parse(fs.readFileSync(skillLifePath(cwd), "utf8"))
+    if (!j || typeof j !== "object") return { v: 1, skills: {} }
+    if (!j.skills || typeof j.skills !== "object") j.skills = {}
+    return j
+  } catch {
+    return { v: 1, skills: {} }
+  }
+}
+
+function saveSkillLife(cwd, data) {
+  writeStateFile(skillLifePath(cwd), JSON.stringify(data, null, 1), { mode: 0o600 })
+}
+
+function touchSkill(cwd, name, { lifecycle = null } = {}) {
+  if (!cwd || !name) return null
+  const all = loadSkillLife(cwd)
+  const skills = all.skills || (all.skills = {})
+  const rec = skills[name] && typeof skills[name] === "object" ? skills[name] : {
+    name, lifecycle: SKILL_LIFE.CANDIDATE, samples: 0, firstSeen: Date.now(),
+  }
+  rec.name = name
+  rec.samples = (rec.samples ?? 0) + 1
+  rec.lastSeen = Date.now()
+  if (lifecycle) rec.lifecycle = lifecycle
+  else if (rec.lifecycle !== SKILL_LIFE.VERIFIED && rec.lifecycle !== SKILL_LIFE.ACTIVE) {
+    rec.lifecycle = SKILL_LIFE.CANDIDATE
+  }
+  skills[name] = rec
+  const names = Object.keys(skills)
+  if (names.length > MAX_SKILL_LIFE) {
+    names.sort((a, b) => (skills[b].lastSeen ?? 0) - (skills[a].lastSeen ?? 0))
+    for (const k of names.slice(MAX_SKILL_LIFE)) delete skills[k]
+  }
+  all.v = 1
+  all.updated = Date.now()
+  all.skills = skills
+  saveSkillLife(cwd, all)
+  return rec
+}
+
+/** First author / repeat use. Never VERIFIED. */
+export function recordSkillCandidate(cwd, name) {
+  return touchSkill(cwd, name)
+}
+
+/**
+ * Mark a learned skill VERIFIED/DEPRECATED after real evidence.
+ * Never infers verification from a model guess.
+ */
+export function recordSkillOutcome({ cwd, name, status = SKILL_LIFE.VERIFIED } = {}) {
+  const life = SKILL_LIFE[status] || status
+  if (life === SKILL_LIFE.VERIFIED) return touchSkill(cwd, name, { lifecycle: SKILL_LIFE.VERIFIED })
+  return touchSkill(cwd, name, { lifecycle: life })
+}
+
+export function skillLifecycle(name, cwd = process.cwd()) {
+  const rec = loadSkillLife(cwd).skills?.[name]
+  return rec?.lifecycle || null
 }
 
 function underDir(p, root) {
@@ -167,7 +247,11 @@ export function authorSkill({
   const dir = path.join(learnedSkillsDir(cwd), name)
   if (underDir(dir, BUNDLED_SKILLS)) return { ok: false, skipped: "bundled" }
   const file = path.join(dir, "SKILL.md")
-  if (fs.existsSync(file)) return { ok: true, name, path: file, deduped: true }
+  if (fs.existsSync(file)) {
+    let lifecycle = SKILL_LIFE.CANDIDATE
+    try { lifecycle = recordSkillCandidate(cwd, name)?.lifecycle || SKILL_LIFE.CANDIDATE } catch { /* life is best-effort */ }
+    return { ok: true, name, path: file, deduped: true, lifecycle }
+  }
   const description = `Playbook: ${String(task || name).slice(0, 120)}`
   const md = formatSkillMd({ name, description, task, repair: body, files, command })
   try {
@@ -176,7 +260,9 @@ export function authorSkill({
   } catch (e) {
     return { ok: false, skipped: "write", error: String(e?.message || e).slice(0, 120) }
   }
-  return { ok: true, name, path: file, deduped: false, desc: skillDescription(md) }
+  let lifecycle = SKILL_LIFE.CANDIDATE
+  try { lifecycle = recordSkillCandidate(cwd, name)?.lifecycle || SKILL_LIFE.CANDIDATE } catch { /* life is best-effort */ }
+  return { ok: true, name, path: file, deduped: false, desc: skillDescription(md), lifecycle }
 }
 
 /**
@@ -217,6 +303,12 @@ export function evolveRun({
     files: (les?.files?.length ? les.files : files) || [],
     command,
   })
+  if (out.skill?.ok && score.ok && score.passed === score.total && out.skill.deduped) {
+    try {
+      const rec = recordSkillOutcome({ cwd, name: out.skill.name, status: SKILL_LIFE.VERIFIED })
+      out.skill.lifecycle = rec?.lifecycle || SKILL_LIFE.VERIFIED
+    } catch { /* promote is best-effort */ }
+  }
   try {
     out.plugin = authorPlugin({
       cwd, task, klass: k, repair,

@@ -13,7 +13,16 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import os from "node:os"
 
-export const DEFAULT_DIR = process.env.FORGE_HOME || path.join(os.homedir(), ".forge")
+export function resolveDataDir(env = process.env) {
+  const home = String(env?.FORGE_HOME || "").trim()
+  if (home) return home
+  const data = String(env?.FORGE_DATA_DIR || "").trim()
+  if (data) return data
+  return path.join(os.homedir(), ".forge")
+}
+
+/** Single Forge-owned data root. FORGE_DATA_DIR aliases FORGE_HOME — not a second tree. */
+export const DEFAULT_DIR = resolveDataDir()
 export const USER_CONFIG_PATH = process.env.FORGE_CONFIG || path.join(DEFAULT_DIR, "config.json")
 export const PROJECT_CONFIG_NAME = "forge.config.json"
 export const SESSIONS_DIR = path.join(DEFAULT_DIR, "sessions")

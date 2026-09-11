@@ -289,7 +289,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
   if (config.skills?.enabled !== false) {
     const idx = skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), process.cwd()) : []
     const klass = query ? (() => { try { return classifyTask(query).class } catch { return null } })() : null
-    const picks = pickSkills(query, idx, { klass, skillsDir })
+    const picks = pickSkills(query, idx, { klass, skillsDir, cwd: process.cwd() })
     const block = formatSkillPicks(picks)
     if (block) lines.push("", block)
   }

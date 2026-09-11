@@ -11,6 +11,7 @@
  * Does not flip assumeYes / allowNewPlugins.
  */
 import { evaluateSkills, formatSkillPicks, scoreAgainst, namedIn } from "./evaluate.js"
+import { loadSkillLife, SKILL_LIFE } from "./evolve.js"
 
 /** First-party playbooks shipped as skills/<name>/SKILL.md plus this catalog. */
 export const FIRST_PARTY = [
@@ -71,7 +72,16 @@ export function scoreSkill(task, skill) {
  */
 export function pickSkills(task, skills = [], opts = {}) {
   const enriched = enrichSkills(skills)
-  const scored = evaluateSkills(task, enriched.map((s) => ({
+  let life = {}
+  if (opts.cwd) {
+    try { life = loadSkillLife(opts.cwd).skills || {} } catch { life = {} }
+  }
+  const tagged = enriched.map((s) => ({
+    ...s,
+    lifecycle: (s.name && life[s.name]?.lifecycle)
+      || (s.learned ? SKILL_LIFE.CANDIDATE : SKILL_LIFE.ACTIVE),
+  }))
+  const scored = evaluateSkills(task, tagged.map((s) => ({
     ...s,
     desc: `${s.desc || ""} ${(s.tags || []).join(" ")} ${(s.aliases || []).join(" ")}`.trim(),
   })), opts)

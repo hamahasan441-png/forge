@@ -103,6 +103,7 @@ export function evaluateSkills(task, skills = [], opts = {}) {
       desc: String(s.desc ?? "").slice(0, 160),
       score,
       ...(s.learned === true ? { learned: true } : {}),
+      ...(s.lifecycle ? { lifecycle: String(s.lifecycle).slice(0, 16) } : {}),
     })
   }
   scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
@@ -112,7 +113,10 @@ export function evaluateSkills(task, skills = [], opts = {}) {
 export function formatSkillPicks(picks = []) {
   if (!Array.isArray(picks) || !picks.length) return ""
   const lines = [`SKILLS FOR THIS TASK (${picks.length}) — call load_skill(name) before using one:`]
-  for (const s of picks) lines.push(`- ${s.name}: ${s.desc || ""}`.trim())
+  for (const s of picks) {
+    const tag = s.lifecycle === "CANDIDATE" ? " (candidate)" : ""
+    lines.push(`- ${s.name}${tag}: ${s.desc || ""}`.trim())
+  }
   return lines.join("\n")
 }
 
@@ -143,7 +147,10 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
       lines.push(s)
     }
   }
-  const named = (skills || []).map((s) => s && s.name).filter(Boolean).slice(0, 3)
+  const named = (skills || []).map((s) => {
+    if (!s || !s.name) return ""
+    return s.lifecycle === "CANDIDATE" ? `${s.name} (candidate)` : s.name
+  }).filter(Boolean).slice(0, 3)
   if (named.length && !skillBooks.length) {
     lines.push(`SKILLS (call load_skill before using): ${named.join(", ")}`)
   } else if (named.length && pluginBooks.length) {
