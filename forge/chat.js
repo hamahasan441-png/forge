@@ -335,6 +335,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         decisions: composed?.decisions || [],
         strategy: composed?.strategy || [],
         models: composed?.models || [],
+        variants: composed?.variants || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }

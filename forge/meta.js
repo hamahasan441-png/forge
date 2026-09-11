@@ -1594,6 +1594,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       decisions: composed.decisions,
       strategy: composed.strategy,
       models: composed.models,
+      variants: composed.variants,
     })
     if (block) {
       steerHint = `\n\n${block}`

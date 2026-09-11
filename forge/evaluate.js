@@ -136,7 +136,7 @@ export function formatSkillPicks(picks = []) {
  * page dump). Never dumps the 40-name pack.
  * MICRO callers pass empty plugins / know / tools / playbooks / mcp / gaps.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null, claims = [], decisions = [], strategy = [], models = [] } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null, claims = [], decisions = [], strategy = [], models = [], variants = [] } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
@@ -219,6 +219,10 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
   const mods = Array.isArray(models) ? models.filter((s) => s && s.model).slice(0, 3) : []
   if (mods.length) {
     lines.push(`MODELS: ${mods.map((s) => `${s.model} (${Math.round((s.rate || 0) * 100)}%)`).join(", ")}`)
+  }
+  const vars = Array.isArray(variants) ? variants.filter((v) => v && (v.strategy || v.name)).slice(0, 3) : []
+  if (vars.length) {
+    lines.push(`VARIANTS: ${vars.map((v) => `${v.family || "?"}/${v.strategy || v.name}-v${v.version || 1}`).join(", ")} — distinct strategies, do not overwrite`)
   }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
   const pref = Array.isArray(tools?.prefer) ? tools.prefer : []

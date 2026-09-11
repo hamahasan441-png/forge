@@ -3,6 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v81.0.0 — "variants"
+
+### Added (v81.0 — named strategy variants, kernel still frozen)
+- **Identity.** A skill is not a strategy. `family + strategy + version + fingerprint` (e.g. `web-design/component-first-v2`).
+- **Siblings coexist.** A new variant never overwrites ACTIVE or VERIFIED. Same body is reused. Different body bumps version.
+- **Independent scores.** `recordVariantOutcome` / `forge variant score` — not a shared skill score.
+- **Compose `[VARIANTS]`.** Read-only pick. MICRO skip.
+- **CLI.** `forge variant list|add|pick|score` and `forge skill variant <name> <strategy>`. Always CANDIDATE.
+
+No ZIP unpack. Never auto-ACTIVE. Compose still never writes.
+
 ## v80.0.0 — "verify2"
 
 ### Added (v80.0 — P0 verification integrity, kernel still frozen)

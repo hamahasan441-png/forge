@@ -4,9 +4,8 @@ Completed enhancements **do not keep a PLAN-vN.md**. Ship, delete the plan,
 move leftovers here as `- [ ]`. Do not check an item until it has shipped
 and tests are green. Never mark complete because a model wrote a spec.
 
-Shipped (gone from this list): v54–v79, v80 verify2 (structured exec
-results, truncated/unknown never PASS, evidence fingerprint, generated-test
-provenance, skill benchmark UNKNOWN-when-unmeasured). See CHANGELOG.
+Shipped (gone from this list): v54–v80, v81 variants (family + strategy +
+version + fingerprint; siblings coexist; never overwrite ACTIVE). See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
 `assumeYes` stays false, compose never writes. `FORGE_DATA_DIR` aliases
@@ -15,12 +14,11 @@ DOWNLOAD ≠ TRUST.
 
 ## Skill forge 2.0
 
-- [ ] Full ZIP unpack of scripts/examples (SKILL.md extract only in v79/v80)
+- [ ] Full ZIP unpack of scripts/examples (SKILL.md extract only — not this release)
 
 ## Bench / agents / kernel
 
 - [ ] Kernel evolution **only** in an isolated worktree (L6 — not now)
-- [ ] Named strategy variants (skill + strategy + version + fingerprint)
 
 ## Known reds (not features)
 
