@@ -156,6 +156,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
         strategy: composed?.strategy || [],
         models: composed?.models || [],
         variants: composed?.variants || [],
+        knowtype: composed?.knowtype || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }

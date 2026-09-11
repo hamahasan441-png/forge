@@ -1,27 +1,25 @@
 #!/usr/bin/env node
 /**
- * forge — v72 claims: per-claim subject store under the project hash.
- *
- * Not a second memory. Compose never writes. Never ACTIVE.
+ * forge — v83 knowtype: FACT/EXPERIENCE/LESSON/HYPOTHESIS.
+ * Hypothesis is never a fact. Compose never writes. Never auto-ACTIVE.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v72-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v83-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v72-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v83-work-"))
 process.chdir(WORK)
 
-const { recordClaim, getClaim, listClaims, claimsPath, validSubject } = await import("../claims.js")
-const { downloadSkill, verifySkill, learnSkill } = await import("../skilldl.js")
-const { SKILL_LIFE } = await import("../evolve.js")
-const { projectDir } = await import("../memory.js")
+const { recordKnowledge, pickKnowledge, listKnowledge, asFact, formatKnowtype, KTYPE } = await import("../knowtype.js")
+const { formatSteer } = await import("../evaluate.js")
+const { compose } = await import("../compose.js")
+const { TASK_CLASS, classifyTaskComplexity, classifyTask } = await import("../classify.js")
 const { evaluateSkills } = await import("../evaluate.js")
-const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../classify.js")
 const { defaultConfig, sanitizeProjectConfig } = await import("../config.js")
 const { VERSION } = await import("../version.js")
 const { CATALOG } = await import("../providers.js")
@@ -43,73 +41,52 @@ function listGlobalTools() {
   try { return fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".mjs") || f.endsWith(".js")) } catch { return [] }
 }
 
-const STRUCT = `---
-name: web-design
-description: Responsive layout playbook
----
-
-# Web Design
-
-A layout playbook.
-
-## What worked
-Use a 12-column grid.
-
-## Files
-- layout.css
-`
-
-function mockFetch(body, { filename = "artifact.bin" } = {}) {
-  const buf = Buffer.from(String(body), "utf8")
-  return async (href) => ({
-    ok: true, status: 200, statusText: "OK",
-    headers: { "content-disposition": `filename="${filename}"` },
-    body: buf, url: href,
-  })
-}
-
-console.log("== subject + recordClaim under project hash ==")
+console.log("== FACT needs evidence; hypothesis is never a fact ==")
 {
-  eq("valid", validSubject("web-design"), "web-design")
-  eq("bad", validSubject("../x"), "")
-  const r = recordClaim({ cwd: WORK, subject: "web-design", text: "Use a 12-column grid.", source: "skill", skill: "web-design" })
-  eq("ok", r.ok, true)
-  const p = claimsPath(WORK)
-  ok("under projects hash", p.startsWith(projectDir(WORK)), p)
-  ok("named claims.json", p.endsWith("claims.json"))
-  eq("get text", getClaim(WORK, "web-design")?.text, "Use a 12-column grid.")
-  eq("listed", listClaims(WORK).some((c) => c.subject === "web-design"), true)
-  eq("missing", getClaim(WORK, "no-such"), null)
-  eq("empty refused", recordClaim({ cwd: WORK, subject: "web-design", text: "  " }).ok, false)
+  const hyp = recordKnowledge({ cwd: WORK, type: "HYPOTHESIS", text: "auth tokens expire after fifteen minutes" })
+  eq("hyp ok", hyp.ok, true)
+  eq("hyp type", hyp.type, KTYPE.HYPOTHESIS)
+  eq("hyp not fact", asFact(hyp), false)
+  const silent = recordKnowledge({ cwd: WORK, type: "FACT", text: "the payment webhook retries twice" })
+  eq("FACT without evidence demoted", silent.type, KTYPE.HYPOTHESIS)
+  eq("demoted flag", silent.demoted, true)
+  eq("still not fact", asFact(silent), false)
+  const fact = recordKnowledge({ cwd: WORK, type: "FACT", text: "JWT expires after 15 minutes", evidence: "verifySkill echo-ok" })
+  eq("FACT with evidence", fact.type, KTYPE.FACT)
+  eq("asFact", asFact(fact), true)
+  const exp = recordKnowledge({ cwd: WORK, type: "EXPERIENCE", text: "layout-first failed on the homepage grid" })
+  eq("experience", exp.type, KTYPE.EXPERIENCE)
+  const les = recordKnowledge({ cwd: WORK, type: "LESSON", text: "do not invent npm test for a knowledge gap" })
+  eq("lesson", les.type, KTYPE.LESSON)
 }
 
-console.log("== learnSkill upserts a claim; CANDIDATE does not ==")
+console.log("== pick ranks FACT above HYPOTHESIS; MICRO skip ==")
 {
-  await downloadSkill("https://example.com/web-design.skill", {
-    fetchFn: mockFetch(STRUCT, { filename: "web-design.skill" }),
-  })
-  eq("candidate learn fails", (learnSkill("web-design", { cwd: WORK })).ok, false)
-  eq("no extra claim from candidate", listClaims(WORK).filter((c) => c.subject === "web-design").length, 1)
-  eq("verified", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
-  const learned = learnSkill("web-design", { cwd: WORK })
-  eq("learn ok", learned.ok, true)
-  eq("not ACTIVE", learned.lifecycle === SKILL_LIFE.ACTIVE, false)
-  const c = getClaim(WORK, "web-design")
-  ok("claim has procedure", /12-column/.test(c?.text || ""), c?.text)
-  eq("source skill", c?.source, "skill")
-  const mem = path.join(projectDir(WORK), "memory.md")
-  ok("did not write memory.md", !fs.existsSync(mem))
+  const picked = pickKnowledge("JWT auth timeout on the login page", { cwd: WORK, klass: TASK_CLASS.MEDIUM })
+  ok("includes FACT", picked.some((x) => x.type === KTYPE.FACT), JSON.stringify(picked.map((x) => x.type)))
+  const types = picked.map((x) => x.type)
+  const fi = types.indexOf(KTYPE.FACT)
+  const hi = types.indexOf(KTYPE.HYPOTHESIS)
+  ok("FACT before HYPOTHESIS when both present", fi === -1 || hi === -1 || fi < hi, types.join(","))
+  const steer = formatSteer({ knowtype: picked })
+  ok("KNOW line", /KNOW:/.test(steer), steer)
+  ok("unproven label if hyp present", !picked.some((x) => x.type === KTYPE.HYPOTHESIS) || /unproven/.test(steer), steer)
+  eq("MICRO empty", pickKnowledge("fix a typo", { cwd: WORK, klass: TASK_CLASS.MICRO }).length, 0)
+  const c = compose("JWT auth timeout", { cwd: WORK, klass: TASK_CLASS.MEDIUM, includePlugins: false })
+  ok("compose.knowtype array", Array.isArray(c.knowtype))
+  const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
+  ok("compose has no recordKnowledge", !/recordKnowledge/.test(composeSrc))
+  ok("compose has no knowtype.json write", !/knowtype\.json/.test(composeSrc))
 }
 
-console.log("== CLI/TUI wired; compose never writes ==")
+console.log("== CLI wired ==")
 {
   const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
+  ok("CLI knowtype", /case "knowtype"/.test(forgeSrc))
   const chatSrc = fs.readFileSync(path.join(FORGE, "chat.js"), "utf8")
-  const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
-  ok("CLI claims", /case "claims"/.test(forgeSrc) && /listClaims/.test(forgeSrc))
-  ok("TUI /claims", /case "claims"/.test(chatSrc))
-  ok("compose has no recordClaim", !/recordClaim/.test(composeSrc))
-  ok("compose has no skilldl", !/skilldl/.test(composeSrc))
+  ok("TUI /knowtype", /case "knowtype"/.test(chatSrc))
+  ok("list not empty", listKnowledge(WORK).length >= 3)
+  ok("formatKnowtype", /KNOW:/.test(formatKnowtype(listKnowledge(WORK))))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -128,7 +105,7 @@ console.log("== no side writes / frozen kernel + package ==")
   eq("VERSION is 83.0.0", VERSION, "83.0.0")
   const pkg = JSON.parse(fs.readFileSync(path.join(FORGE, "package.json"), "utf8"))
   eq("package.json is 83.0.0", pkg.version, "83.0.0")
-  ok("files includes claims.js", (pkg.files || []).includes("claims.js"))
+  ok("files includes knowtype.js", (pkg.files || []).includes("knowtype.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
   eq("custom is still index 17 (pick 18)", CATALOG[17]?.name, "custom")
   eq("apinex still after custom", CATALOG[18]?.name, "apinex")
@@ -138,10 +115,11 @@ console.log("== no side writes / frozen kernel + package ==")
   const todo = fs.readFileSync(path.join(FORGE, "TODO.md"), "utf8")
   eq("TODO still unchecked", (todo.match(/^- \[[xX]\]/gm) || []).length, 0)
   ok("no PLAN file", fs.readdirSync(FORGE).filter((n) => /^PLAN-v\d+\.md$/.test(n)).length === 0)
+  ok("Never list kept", /Research crawler/.test(todo) && /Auto-ACTIVE/.test(todo))
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v72 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v83 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)

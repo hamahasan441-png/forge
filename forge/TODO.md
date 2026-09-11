@@ -4,8 +4,8 @@ Completed enhancements **do not keep a PLAN-vN.md**. Ship, delete the plan,
 move leftovers here as `- [ ]`. Do not check an item until it has shipped
 and tests are green. Never mark complete because a model wrote a spec.
 
-Shipped (gone from this list): v54–v81, v82 zip unpack (SKILL.md +
-scripts/examples/references, never tools, never binaries). See CHANGELOG.
+Shipped (gone from this list): v54–v82, v83 knowtype (FACT/EXPERIENCE/LESSON/
+HYPOTHESIS; hypothesis is never a fact). See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
 `assumeYes` stays false, compose never writes. `FORGE_DATA_DIR` aliases
@@ -15,6 +15,7 @@ DOWNLOAD ≠ TRUST.
 ## Bench / agents / kernel
 
 - [ ] Kernel evolution **only** in an isolated worktree (L6 — not now)
+- [ ] Deep skill capability extract (verified SKILL.md → reusable caps)
 
 ## Known reds (not features)
 
