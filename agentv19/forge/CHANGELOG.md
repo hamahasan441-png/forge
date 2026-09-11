@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v60.0.0 — "blast"
+
+### Added (v60.0 — v33 graph as planner knowledge: radius, importers, mapped tests)
+- **Blast.** `blastFromWorld` reads the existing v33 graph only (never walks, never writes). Compose snapshot `[blast] radius=N importers=M tests=T scope=…`. A miss is UNKNOWN, not "no dependents". MICRO/SMALL skip.
+- **Steer.** formatSteer `BLAST:` names importers, mapped tests, and testing scope so a hub is not treated as a leaf. `planAcquire` prefers graph-mapped tests over `web_search`. Skill/repo still cheaper. CONTRADICT from v59 now also prints on formatSteer.
+
+Single mutating writer is unchanged. PLAN-v63 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Drift detector, architecture store, crawler, L6, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v59.0.0 — "contradict"
 
 ### Added (v59.0 — failed evidence on a VERIFIED domain is CONTRADICTED)

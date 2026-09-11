@@ -312,6 +312,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         playbooks: composed?.playbooks || [],
         mcp: composed?.mcp || [],
         gaps: composed?.gaps || null,
+        blast: composed?.blast || null,
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }

@@ -12,6 +12,7 @@
  * No implicit grants. FORGE_SKILLS_ALL=1 restores the dump for debugging.
  */
 import { classifyTask, TASK_CLASS } from "./classify.js"
+import { formatBlastSteer } from "./impact.js"
 
 const STOP = new Set([
   "the", "and", "for", "with", "from", "this", "that", "use", "using", "when",
@@ -130,7 +131,7 @@ export function formatSkillPicks(picks = []) {
  * page dump). Never dumps the 40-name pack.
  * MICRO callers pass empty plugins / know / tools / playbooks / mcp / gaps.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
@@ -190,6 +191,12 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
     }).join("; ")
     lines.push(`LEARN: ${body} — cheapest source, do not dump pages`)
   }
+  const contra = gapRows.filter((x) => x.status === "CONTRADICTED")
+  if (contra.length) {
+    lines.push(`CONTRADICT: ${contra.slice(0, 3).map((x) => x.id).join(", ")} — re-verify, do not trust prior`)
+  }
+  const blastLine = formatBlastSteer(blast)
+  if (blastLine) lines.push(blastLine)
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
   const pref = Array.isArray(tools?.prefer) ? tools.prefer : []
   const av = Array.isArray(tools?.avoid) ? tools.avoid : []

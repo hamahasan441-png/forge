@@ -8,6 +8,9 @@
  *
  * Bounded: never walks the whole repo. Caps on files scanned and bytes read.
  * A miss is UNKNOWN, not "no dependents".
+ *
+ * v60: blastFromWorld() is the compose-safe path — uses the v33 graph only,
+ * never walks, never writes. Planner sees BLAST / [blast] + test mapping.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -110,6 +113,53 @@ export function impactRadius(input = {}) {
     skipped: [],
     graph: false,
   }
+}
+
+export function emptyBlast() {
+  return {
+    files: [], importers: [], tests: [], configs: [],
+    radius: 0, scope: [], unknown: true, scanned: 0, skipped: [], graph: false,
+  }
+}
+
+/**
+ * Compose-safe blast. Graph only — never walks, never calls buildCrossGraph.
+ * Empty graph / no edges → unknown (a miss is UNKNOWN, not "no dependents").
+ */
+export function blastFromWorld({ files = [], graph = null, cwd = "", ledger = null } = {}) {
+  const f = unique((files || []).map((x) => String(x || "")).filter(Boolean)).slice(0, 40)
+  if (!f.length) return emptyBlast()
+  if (!graph || !Array.isArray(graph.files) || !graph.files.length) {
+    return { ...emptyBlast(), files: f, unknown: true }
+  }
+  try {
+    const fromGraph = impactFromGraph(f, cwd || process.cwd(), graph, { ledger })
+    if (fromGraph) return fromGraph
+  } catch { /* miss */ }
+  return { ...emptyBlast(), files: f, unknown: true }
+}
+
+export function formatBlast(b) {
+  if (!b || b.unknown || !b.radius) return ""
+  const scope = Array.isArray(b.scope) && b.scope.length ? b.scope[b.scope.length - 1] : ""
+  let s = `[blast] radius=${b.radius} importers=${(b.importers || []).length} tests=${(b.tests || []).length}`
+  if (scope) s += ` scope=${scope}`
+  const skip = (b.skipped || []).length
+  if (skip) s += ` skip=${skip}`
+  return s
+}
+
+export function formatBlastSteer(b) {
+  if (!b || b.unknown || !b.radius) return ""
+  const scope = Array.isArray(b.scope) && b.scope.length ? b.scope[b.scope.length - 1] : "focused_test"
+  const bits = [`BLAST: radius ${b.radius}, test ${scope}`]
+  const imp = (b.importers || []).filter(Boolean).slice(0, 3)
+  if (imp.length) bits.push(`importers: ${imp.join(", ")}`)
+  const tests = (b.tests || []).filter(Boolean).slice(0, 3)
+  if (tests.length) bits.push(`tests: ${tests.join(", ")}`)
+  if ((b.skipped || []).length) bits.push(`skip ${b.skipped.length} unchanged tests`)
+  bits.push("do not treat a hub as a leaf")
+  return bits.join(" — ")
 }
 
 function impactFromGraph(files, cwd, graph, input = {}) {

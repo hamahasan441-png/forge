@@ -38,6 +38,8 @@
  * v57: [learn] is priority-capped (1, or 2 if both CRITICAL). Compose
  * still never writes or fetches.
  * v58: learned skills tagged CANDIDATE until a second 9/9 evolveRun.
+ * v60: [blast] from the v33 graph (importers + tests + scope). Compose
+ * never walks the repo and never writes. A miss is UNKNOWN, not "none".
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
@@ -53,6 +55,7 @@ import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
 import { relevantLessons } from "./lessons.js"
 import { relevantTools, formatToolMem, emptyTools } from "./toolintel.js"
 import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
+import { blastFromWorld, emptyBlast, formatBlast } from "./impact.js"
 
 const RADIUS_SHOW = 16
 const FILE_SHOW = 8
@@ -296,6 +299,7 @@ export function emptyCompose(klass = null) {
     verify: { command: "", tests: [] },
     tools: emptyTools(),
     gaps: emptyGaps(),
+    blast: emptyBlast(),
   }
 }
 
@@ -380,6 +384,9 @@ export function compose(task = "", opts = {}) {
     out.world.files = uniq([...out.world.files, ...impl]).slice(0, FILE_SHOW)
   }
   const world = out.world
+  if (!isMicro(klass) && opts.includeBlast !== false) {
+    try { out.blast = blastFromWorld({ files: world.files, graph: world.graph, cwd }) } catch { out.blast = emptyBlast() }
+  }
   if (opts.includeMemory !== false) {
     try {
       const mem = relevantMemory(q, {
@@ -420,6 +427,7 @@ export function compose(task = "", opts = {}) {
         know: out.know,
         world: out.world,
         playbooks: out.playbooks,
+        blast: out.blast,
       })
     } catch { out.gaps = emptyGaps() }
   }
@@ -444,6 +452,7 @@ function onceKey(task, opts = {}) {
     opts.includePlaybooks !== false ? "b" : "-",
     opts.includeMcp !== false ? "c" : "-",
     opts.includeGaps !== false ? "g" : "-",
+    opts.includeBlast !== false ? "r" : "-",
   ].join("")
   const plugs = Array.isArray(opts.plugins)
     ? opts.plugins.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
@@ -573,6 +582,8 @@ export function formatCompose(c) {
   if (toolsLine) lines.push(toolsLine)
   const mcpNames = (c.mcp || []).map((m) => m && m.name).filter(Boolean).slice(0, 4)
   if (mcpNames.length) lines.push(`[mcp] ${mcpNames.join(", ")}`)
+  const blastLine = formatBlast(c.blast)
+  if (blastLine) lines.push(blastLine)
   const gapBlock = formatGaps(c.gaps)
   if (gapBlock) lines.push(gapBlock)
   return lines.join("\n")

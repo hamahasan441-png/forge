@@ -1587,6 +1587,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       playbooks: composed.playbooks,
       mcp: composed.mcp,
       gaps: composed.gaps,
+      blast: composed.blast,
     })
     if (block) {
       steerHint = `\n\n${block}`

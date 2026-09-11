@@ -150,6 +150,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
         playbooks: composed?.playbooks || [],
         mcp: composed?.mcp || [],
         gaps: composed?.gaps || null,
+        blast: composed?.blast || null,
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }
