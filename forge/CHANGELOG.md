@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v72.0.0 — "claims"
+
+### Added (v72.0 — per-claim subject store)
+- **Claims.** `FORGE_HOME/projects/<hash>/claims.json` next to knowgap.json. Not a second memory. `forge skill learn` upserts a claim keyed by skill id. `forge claims [subject]` and TUI `/claims`.
+- Compose still never writes. Never ACTIVE. Never `~/.forge/tools`.
+
+Architecture decision log, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v71.0.0 — "drift"
 
 ### Added (v71.0 — body sha vs last verifiedSha)

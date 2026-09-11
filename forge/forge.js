@@ -1436,6 +1436,23 @@ async function main() {
       process.exit(summary.failed ? 1 : 0)
       return
     }
+    case "claims": {
+      const { listClaims, getClaim, formatClaims, claimsPath } = await import("./claims.js")
+      const cwd = process.cwd()
+      const subject = (positional[1] || "").trim()
+      if (subject) {
+        const c = getClaim(cwd, subject)
+        if (JSON_OUT) { emitJson({ subject, claim: c }); return }
+        if (!c) { err(`no claim for ${subject}`); process.exit(1); return }
+        console.log(formatClaims([c], { subject }).trimEnd())
+        return
+      }
+      const rows = listClaims(cwd)
+      if (JSON_OUT) { emitJson({ path: claimsPath(cwd), count: rows.length, claims: rows }); return }
+      console.log(bold(`claims`) + dim(`  ${claimsPath(cwd)}`))
+      console.log(formatClaims(rows).trimEnd())
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -1495,6 +1512,7 @@ ${bold("usage")}
   ${cyan("forge tool verify <name|all>")}   structurally verify a downloaded tool (hostless playbook, never plugin-host)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
+  ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 12 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}

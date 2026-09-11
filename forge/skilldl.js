@@ -28,6 +28,9 @@
  *
  * v71: VERIFIED body sha mismatch vs last verifiedSha → DRIFT (not STALE,
  * not CONTRADICTED). Hidden from pick. Re-verify restores. Never ACTIVE.
+ *
+ * v72: learnSkill upserts a project claim (FORGE_HOME/projects/<hash>/claims.json).
+ * Not a second memory. Compose never writes claims.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -40,6 +43,7 @@ import { writeStateFile } from "./securefs.js"
 import { validSkillName, skillDescription, parseSkillPlaybook } from "./skills.js"
 import { SKILL_LIFE } from "./evolve.js"
 import { classifyCommand } from "./shellguard.js"
+import { recordClaim } from "./claims.js"
 
 export const SKILL_DOWNLOADS = "skill-downloads"
 export const TOOL_DOWNLOADS = "tool-downloads"
@@ -1053,7 +1057,7 @@ export function readSkillKnowledge(name, env = process.env) {
  * LEARN ≠ INDEX. VERIFIED only. Writes knowledge.json under the download
  * dir. Lifecycle stays VERIFIED (not ACTIVE). Never ~/.forge/tools.
  */
-export function learnSkill(name, { env = process.env, now = Date.now } = {}) {
+export function learnSkill(name, { env = process.env, now = Date.now, cwd = process.cwd() } = {}) {
   const id = String(name || "").trim()
   const man = loadDownloadManifest(env, "skill")
   const rec = man.items?.[id]
@@ -1094,12 +1098,21 @@ export function learnSkill(name, { env = process.env, now = Date.now } = {}) {
   man.updated = now()
   saveManifest(man, env, "skill")
   try { writeStateFile(path.join(skillDownloadsDir(env), id, "meta.json"), JSON.stringify(rec, null, 1), { mode: 0o600 }) } catch { /* meta best-effort */ }
+  let claim = null
+  try {
+    const text = (knowledge.procedures || [])
+      .map((p) => typeof p === "string" ? p : [p?.title, p?.body].filter(Boolean).join(": "))
+      .filter(Boolean)
+      .join("\n") || knowledge.repair || id
+    claim = recordClaim({ cwd, subject: id, text, source: "skill", skill: id })
+  } catch { /* claims are best-effort */ }
   return {
     ok: true,
     name: id,
     lifecycle: SKILL_LIFE.VERIFIED,
     learned: true,
     knowledge: payload,
+    claim: claim?.ok ? claim.claim : null,
   }
 }
 
