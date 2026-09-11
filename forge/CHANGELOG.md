@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v84.0.0 — "promote"
+
+### Added (v84.0 — gated auto-promote + capability extract, kernel still frozen)
+- **`forge skill autopromote`.** ACTIVE only when every gate passes: VERIFIED, authored **behavioral** tests all PASS, fresh fingerprint, reusable caps. Structural-only, generated-only, CANDIDATE, and download-without-verify stay put.
+- **Explicit `forge skill promote`** is unchanged (human override from VERIFIED).
+- **Capability extract.** `forge skill caps` / `extractCapabilities` — procedures, workflow, examples, fingerprint. Indexing a name is not a capability.
+- **ACTIVE downloads** stay in the verified index; TTL/drift still demote them.
+
+Never auto-ACTIVE because a download succeeded. Compose still never writes.
+
 ## v83.0.0 — "knowtype"
 
 ### Added (v83.0 — typed knowledge, kernel still frozen)

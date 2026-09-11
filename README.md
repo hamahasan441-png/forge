@@ -3,7 +3,7 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 83.0.0.** One folder: `forge/`.
+**Version 84.0.0.** One folder: `forge/`.
 
 ## Layout
 
