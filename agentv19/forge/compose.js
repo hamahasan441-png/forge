@@ -31,6 +31,8 @@
  * v54: knowledge-gap ranking (required vs known vs skippable) joins the
  * snapshot as [gaps]/[skip]. Compose never writes knowgap.json — persist
  * is meta/CLI. MICRO/SMALL skip unless a domain is named. No second data root.
+ * v55: [learn] names the cheapest acquisition method (skill → repo → docs
+ * → web_search last). Compose never fetches, never dumps a page.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"

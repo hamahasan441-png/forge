@@ -122,7 +122,8 @@ export function formatSkillPicks(picks = []) {
  * hostless first-party playbooks (v53). Then long-term lessons (v47 know).
  * Then avoid. Then MCP names (configured, matching). Then TOOLS prefer/avoid
  * from persisted toolintel outcomes (v52). Then GAPS / SKIP from the
- * knowledge-gap ranking (v54). Never dumps the 40-name pack.
+ * knowledge-gap ranking (v54). Then LEARN (v55 cheapest source — never a
+ * page dump). Never dumps the 40-name pack.
  * MICRO callers pass empty plugins / know / tools / playbooks / mcp / gaps.
  */
 export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null } = {}) {
@@ -172,6 +173,15 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
   const skipRows = Array.isArray(gaps?.skip) ? gaps.skip.filter((x) => x && x.id).slice(0, 2) : []
   if (skipRows.length) {
     lines.push(`SKIP: ${skipRows.map((x) => `${x.id} (low impact)`).join(", ")}`)
+  }
+  const learnRows = Array.isArray(gaps?.learn) ? gaps.learn.filter((x) => x && x.id && x.tool).slice(0, 3) : []
+  if (learnRows.length) {
+    const body = learnRows.map((x) => {
+      let s = `${x.id} via ${x.tool} "${String(x.query || "").slice(0, 40)}" (${x.method}`
+      if (x.then && x.then.tool) s += ` then ${x.then.tool}`
+      return s + ")"
+    }).join("; ")
+    lines.push(`LEARN: ${body} — cheapest source, do not dump pages`)
   }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
   const pref = Array.isArray(tools?.prefer) ? tools.prefer : []

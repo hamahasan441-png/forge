@@ -12,6 +12,9 @@
  * (aggregates only — no task text, no secrets, 0600). MICRO/SMALL skip unless
  * a domain is named. No model calls. No research. No fake confidence.
  *
+ * v55: planAcquire() names the cheapest source (skill → repo → docs → web).
+ * Compose never fetches. Web is last and is a search hint, not a page dump.
+ *
  * This is not a second memory, graph, or skill system. It ranks what the
  * existing snapshot does not yet cover and stores that ranking in the
  * existing FORGE_HOME project dir.
@@ -48,6 +51,29 @@ export const LIFECYCLE = {
   DEPRECATED: "DEPRECATED",
 }
 
+/** Cheapest reliable source first. Compose never executes these. */
+export const METHOD = {
+  SKILL: "skill",
+  REPO: "repo",
+  DOCS: "docs",
+  WEB: "web",
+}
+
+const SKILL_FOR = {
+  payment: "forge-api",
+  api: "forge-api",
+  auth: "forge-security",
+  security: "forge-security",
+  database: "forge-sql",
+  testing: "forge-test",
+  deploy: "forge-devops",
+  ui: "forge-frontend",
+  architecture: "coding-agent",
+  types: "coding-agent",
+  config: "coding-agent",
+  dependency: "coding-agent",
+}
+
 const IMPACT_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }
 const STATUS_RANK = { UNKNOWN: 4, UNCERTAIN: 3, PROBABLE: 2, KNOWN: 1, SKIPPABLE: 0 }
 const MAX_DOMAINS = 24
@@ -82,7 +108,7 @@ export function domainIds() {
 }
 
 export function emptyGaps() {
-  return { required: [], known: [], gaps: [], skip: [] }
+  return { required: [], known: [], gaps: [], skip: [], learn: [] }
 }
 
 function isMicro(klass) {
@@ -159,6 +185,78 @@ export function requiredDomains(task = "", { klass = null } = {}) {
   return [...hits.values()].sort((a, b) =>
     (IMPACT_RANK[b.impact] || 0) - (IMPACT_RANK[a.impact] || 0)
     || a.id.localeCompare(b.id))
+}
+
+function bestQuery(domain) {
+  const d = DOMAIN_BY_ID.get(domain.id) || domain
+  const tags = d.tags || [d.id]
+  return tags.find((t) => t.length >= 4 && t !== d.id) || d.id
+}
+
+function skillIn(opts, name) {
+  if (!name) return null
+  for (const s of opts.skills || []) {
+    if (s && s.name === name) return s
+  }
+  return null
+}
+
+/**
+ * Cheapest acquisition method for one blocking gap.
+ * Never fetches. Never dumps a page. Skill (already ranked into the
+ * snapshot) beats repo grep, which beats glob, which beats web_search.
+ */
+export function planAcquire(gap, opts = {}) {
+  if (!gap || !gap.id || gap.learn === false) return null
+  if (gap.status === STATUS.KNOWN || gap.status === STATUS.SKIPPABLE) return null
+  const q = bestQuery(gap)
+  const files = (opts.world?.files || []).map((f) => String(f || "")).filter(Boolean).slice(0, 2)
+  const skillName = SKILL_FOR[gap.id]
+  const skill = skillIn(opts, skillName)
+  if (skill) {
+    const next = files.length
+      ? { method: METHOD.REPO, tool: "grep_files", query: q }
+      : { method: METHOD.REPO, tool: "glob_files", query: `*${gap.id}*` }
+    return {
+      id: gap.id,
+      method: METHOD.SKILL,
+      tool: "load_skill",
+      query: skill.name,
+      cost: 1,
+      then: next,
+      why: "existing skill is cheaper than research",
+    }
+  }
+  if (files.length) {
+    return {
+      id: gap.id,
+      method: METHOD.REPO,
+      tool: "grep_files",
+      query: q,
+      cost: 1,
+      files,
+      why: "repository evidence before the web",
+    }
+  }
+  const docs = (opts.world?.radius || []).filter((f) => /readme|docs?\//i.test(String(f || "")))
+  if (docs.length) {
+    return {
+      id: gap.id,
+      method: METHOD.DOCS,
+      tool: "read_file",
+      query: String(docs[0]).slice(0, 80),
+      cost: 2,
+      why: "local docs before the web",
+    }
+  }
+  return {
+    id: gap.id,
+    method: METHOD.WEB,
+    tool: "web_search",
+    query: `${gap.id} official documentation`,
+    cost: 4,
+    why: "no local skill or files — search, do not dump the page",
+  }
 }
 
 function blobOf(opts) {
@@ -281,20 +379,27 @@ export function detectGaps(task = "", opts = {}) {
       continue
     }
     const blocking = req.impact === IMPACT.CRITICAL || req.impact === IMPACT.HIGH
-    gaps.push({
+    const rowOut = {
       ...row,
       learn: blocking && ev.status === STATUS.UNKNOWN,
-    })
+    }
+    if (rowOut.learn) {
+      const plan = planAcquire(rowOut, opts)
+      if (plan) rowOut.acquire = plan
+    }
+    gaps.push(rowOut)
   }
   const rank = (a, b) =>
     (IMPACT_RANK[b.impact] || 0) - (IMPACT_RANK[a.impact] || 0)
     || (STATUS_RANK[b.status] || 0) - (STATUS_RANK[a.status] || 0)
     || a.id.localeCompare(b.id)
+  const rankedGaps = gaps.sort(rank).slice(0, MAX_GAPS)
   const out = {
     required,
     known: known.sort(rank).slice(0, 6),
-    gaps: gaps.sort(rank).slice(0, MAX_GAPS),
+    gaps: rankedGaps,
     skip: skip.sort(rank).slice(0, MAX_SKIP),
+    learn: rankedGaps.map((g) => g.acquire).filter(Boolean).slice(0, 3),
   }
   if (opts.persist && opts.cwd) persistGaps(opts.cwd, out, { task: q })
   return out
@@ -329,6 +434,13 @@ export function persistGaps(cwd, assessment, { task = "" } = {}) {
     rec.evidence = String(row.evidence || rec.evidence || "none").slice(0, 80)
     rec.provenance = String(row.provenance || rec.provenance || "system-generated").slice(0, 40)
     rec.confidence = Number(row.confidence ?? rec.confidence ?? 0)
+    if (row.acquire && row.acquire.method) {
+      rec.acquire = {
+        method: String(row.acquire.method).slice(0, 16),
+        tool: String(row.acquire.tool || "").slice(0, 24),
+        cost: Number(row.acquire.cost ?? 0) || 0,
+      }
+    }
     if (rec.lifecycle === LIFECYCLE.VERIFIED) {
       rec.status = STATUS.KNOWN
     } else if (rec.lifecycle === LIFECYCLE.DEPRECATED || rec.lifecycle === LIFECYCLE.STALE) {
@@ -394,6 +506,14 @@ export function formatGaps(g) {
   if (skip.length) {
     lines.push(`[skip] ${skip.slice(0, MAX_SKIP).map((x) => x.id).join(", ")}`)
   }
+  const learn = (g.learn || []).filter((x) => x && x.id && x.tool)
+  if (learn.length) {
+    lines.push(`[learn] ${learn.slice(0, 3).map((x) => {
+      let s = `${x.id}: ${x.tool} ${String(x.query || "").slice(0, 40)} (${x.method})`
+      if (x.then && x.then.tool) s += ` then ${x.then.tool}`
+      return s
+    }).join("; ")}`)
+  }
   return lines.join("\n")
 }
 
@@ -412,6 +532,14 @@ export function formatGapSteer(g) {
   const skip = (g.skip || []).filter((x) => x && x.id)
   if (skip.length) {
     lines.push(`SKIP: ${skip.slice(0, MAX_SKIP).map((x) => `${x.id} (low impact)`).join(", ")}`)
+  }
+  const learn = (g.learn || []).filter((x) => x && x.id && x.tool)
+  if (learn.length) {
+    lines.push(`LEARN: ${learn.slice(0, 3).map((x) => {
+      let s = `${x.id} via ${x.tool} "${String(x.query || "").slice(0, 40)}" (${x.method}`
+      if (x.then && x.then.tool) s += ` then ${x.then.tool}`
+      return s + ")"
+    }).join("; ")} — cheapest source, do not dump pages`)
   }
   return lines.join("\n")
 }

@@ -222,7 +222,7 @@ console.log("== ∞ HUD stays width-safe ==")
 
 console.log("== package version ==")
 {
-  ok("VERSION is 54.0.0", VERSION === "54.0.0")
+  ok("VERSION is 55.0.0", VERSION === "55.0.0")
 }
 
 console.log(`\n== infinity suite: ${PASS} passed, ${FAIL} failed ==`)
