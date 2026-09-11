@@ -35,6 +35,8 @@
  * → web_search last). Compose never fetches, never dumps a page.
  * v56: ingestAcquire (agent/chat) records real tool runs as UNCERTAIN.
  * Compose still never writes. Next [learn] skips tried methods.
+ * v57: [learn] is priority-capped (1, or 2 if both CRITICAL). Compose
+ * still never writes or fetches.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"

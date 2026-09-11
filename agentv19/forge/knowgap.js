@@ -16,6 +16,8 @@
  * Compose never fetches. Web is last and is a search hint, not a page dump.
  * v56: ingestAcquire() records that a real tool ran. Status becomes
  * UNCERTAIN (never VERIFIED). Next plan skips tried methods. No page dump.
+ * v57: priorityOf() ranks which blocking gap is worth LEARN this turn.
+ * Cap 1 (2 only if both CRITICAL). Lower-score gaps stay on [gaps].
  *
  * This is not a second memory, graph, or skill system. It ranks what the
  * existing snapshot does not yet cover and stores that ranking in the
@@ -88,10 +90,15 @@ const SKILL_FOR = {
 
 const IMPACT_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }
 const STATUS_RANK = { UNKNOWN: 4, UNCERTAIN: 3, PROBABLE: 2, KNOWN: 1, SKIPPABLE: 0 }
+const UNCERTAINTY_RANK = { UNKNOWN: 4, UNCERTAIN: 2, PROBABLE: 1, KNOWN: 0, SKIPPABLE: 0 }
+const METHOD_COST = { skill: 1, repo: 1, docs: 2, web: 4, verify: 3 }
+const METHOD_RISK = { skill: 1, repo: 1, docs: 1, web: 4, verify: 2 }
+const METHOD_TIME = { skill: 1, repo: 1, docs: 1, web: 3, verify: 2 }
 const MAX_DOMAINS = 24
 const MAX_GAPS = 4
 const MAX_SKIP = 2
 const MIN_SCORE = 2
+const LEARN_SECOND_MIN = 1
 
 /**
  * Engineering domains. Lexical only — not a model. `implies` expands
@@ -282,6 +289,48 @@ export function planAcquire(gap, opts = {}) {
   }
 }
 
+/**
+ * Which blocking gap is worth LEARN this turn.
+ * (impact + uncertainty + recurrence) / (cost + risk + time)
+ * Deterministic. No model. Recurrence from samples/tried only.
+ */
+export function priorityOf(gap, prior = null) {
+  if (!gap || !gap.id) return 0
+  if (gap.status === STATUS.KNOWN || gap.status === STATUS.SKIPPABLE) return 0
+  const impact = IMPACT_RANK[gap.impact] || 0
+  const uncertainty = UNCERTAINTY_RANK[gap.status] || 0
+  const samples = Number(prior?.samples ?? gap.samples ?? 0) || 0
+  const triedN = (Array.isArray(prior?.tried) ? prior.tried : (gap.tried || [])).length
+  const recurrence = Math.min(4, 1 + Math.min(3, samples) + Math.min(2, triedN))
+  const method = gap.acquire?.method || METHOD.WEB
+  const cost = Number(gap.acquire?.cost ?? METHOD_COST[method] ?? 4) || 4
+  const risk = METHOD_RISK[method] ?? 2
+  const time = METHOD_TIME[method] ?? 1
+  const num = impact + uncertainty + recurrence
+  const den = Math.max(1, cost + risk + time)
+  return Math.round((num / den) * 1000) / 1000
+}
+
+/** Cap LEARN to 1, or 2 if both CRITICAL and the second score is real. */
+export function pickLearn(gaps = []) {
+  const ranked = (Array.isArray(gaps) ? gaps : [])
+    .filter((g) => g && g.learn && g.acquire)
+    .map((g) => ({ g, score: Number(g.priority ?? priorityOf(g)) }))
+    .sort((a, b) => b.score - a.score
+      || (IMPACT_RANK[b.g.impact] || 0) - (IMPACT_RANK[a.g.impact] || 0)
+      || a.g.id.localeCompare(b.g.id))
+  if (!ranked.length) return []
+  const out = [ranked[0].g]
+  const second = ranked[1]
+  if (second
+      && ranked[0].g.impact === IMPACT.CRITICAL
+      && second.g.impact === IMPACT.CRITICAL
+      && second.score >= LEARN_SECOND_MIN) {
+    out.push(second.g)
+  }
+  return out
+}
+
 function blobOf(opts) {
   const parts = []
   if (opts.memory) parts.push(String(opts.memory))
@@ -420,6 +469,7 @@ export function detectGaps(task = "", opts = {}) {
       if (plan) {
         rowOut.acquire = plan
         rowOut.learn = true
+        rowOut.priority = priorityOf(rowOut, priorRec)
       }
     }
     gaps.push(rowOut)
@@ -429,12 +479,16 @@ export function detectGaps(task = "", opts = {}) {
     || (STATUS_RANK[b.status] || 0) - (STATUS_RANK[a.status] || 0)
     || a.id.localeCompare(b.id)
   const rankedGaps = gaps.sort(rank).slice(0, MAX_GAPS)
+  const winners = new Set(pickLearn(rankedGaps).map((g) => g.id))
+  for (const g of rankedGaps) {
+    if (g.learn && !winners.has(g.id)) g.learn = false
+  }
   const out = {
     required,
     known: known.sort(rank).slice(0, 6),
     gaps: rankedGaps,
     skip: skip.sort(rank).slice(0, MAX_SKIP),
-    learn: rankedGaps.map((g) => g.acquire).filter(Boolean).slice(0, 3),
+    learn: rankedGaps.filter((g) => g.learn).map((g) => g.acquire).filter(Boolean),
   }
   if (opts.persist && opts.cwd) persistGaps(opts.cwd, out, { task: q })
   return out
@@ -686,7 +740,9 @@ function listStateFiles(dir, names) {
  */
 export function dataStatus(cwd = process.cwd()) {
   const root = DEFAULT_DIR
-  const via = process.env.FORGE_HOME ? "FORGE_HOME" : "default"
+  const via = process.env.FORGE_HOME ? "FORGE_HOME"
+    : process.env.FORGE_DATA_DIR ? "FORGE_DATA_DIR"
+    : "default"
   const hash = projectHash(cwd)
   const pdir = projectDir(cwd)
   const rootFiles = listStateFiles(root, [
