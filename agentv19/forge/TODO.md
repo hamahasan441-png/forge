@@ -6,7 +6,8 @@ and tests are green. Never mark complete because a model wrote a spec.
 
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
-v63 verify, v64 wire, v65 discover (lists + `forge skills <name>`).
+v63 verify, v64 wire, v65 discover, v66 learn
+(`forge skill learn` extracts procedures; indexing is not learned).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -16,7 +17,6 @@ DOWNLOAD ≠ TRUST.
 
 ## Skill forge 2.0
 
-- [ ] `/skill learn <name>` — extract procedures/patterns into FORGE_HOME knowledge; indexing is not "learned"
 - [ ] Research → implement a new skill from a gap (not only `authorSkill` from a repair)
 - [ ] Validate a CANDIDATE with generated tests before VERIFIED (v63 is structural only)
 - [ ] Benchmark a playbook vs the repair it came from
@@ -50,7 +50,7 @@ DOWNLOAD ≠ TRUST.
 - [ ] Bench 2.0
 - [ ] Multi-agent roles
 - [ ] Kernel evolution **only** in an isolated worktree (L6 — not now)
-- [ ] Land v38–v65 stack on `main` (separate merge, not an enhancement)
+- [ ] Land v38–v66 stack on `main` (separate merge, not an enhancement)
 
 ## Known reds (not features)
 

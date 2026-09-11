@@ -88,7 +88,7 @@ export const COMMANDS = [
   ["models", "", "list models of active provider (live)"],
   ["key", "<api-key>", "set API key for active provider"],
   ["skills", "[name]", "list skills, or load one into the conversation"],
-  ["skill", "download|verify", "download a skill (CANDIDATE) or structurally verify it"],
+  ["skill", "download|verify|learn", "download, verify, or extract procedures from a skill"],
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
@@ -150,6 +150,7 @@ ${bold("setup")}
   /skills [name]        list skills, or load one into the conversation
   /skill download <url> download a skill to ~/.forge/skill-downloads (CANDIDATE, not trusted)
   /skill verify <name>  structurally verify a downloaded skill (pass → VERIFIED)
+  /skill learn <name>   extract procedures from a VERIFIED skill (indexing is not learned)
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
@@ -1238,7 +1239,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (cmd === "settings") return part.includes("=") ? null : pick(["dock", "thinking", "ascii", "a11y", "collapse"])
       if (cmd === "provider") return pick(CATALOG.map((c) => c.name))
       if (cmd === "skills") { try { return pick(indexSkills(resolveSkillsDir(config.skills?.dir)).map((x) => x.name)) } catch { return null } }
-      if (cmd === "skill" || cmd === "tool") return pick(["download", "verify"])
+      if (cmd === "skill" || cmd === "tool") return pick(["download", "verify", "learn"])
       if (cmd === "undo") return pick(["--run"])
       if (cmd === "diff") return pathCandidates(part, from)
       return null
@@ -1929,6 +1930,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           console.log(formatVerifyReport(results, "SKILL"))
           break
         }
+        if (sub === "learn") {
+          const names = parts.slice(1)
+          if (!names.length) { err("usage: /skill learn <name> [<name>…]"); break }
+          const { learnSkill, formatLearnReport } = await import("./skilldl.js")
+          for (const n of names) {
+            const r = learnSkill(n)
+            if (r.ok) console.log(formatLearnReport(r))
+            else err(formatLearnReport(r).trim())
+          }
+          break
+        }
         if (!sub || sub === "list") {
           const { listDownloads, skillDownloadsDir } = await import("./skilldl.js")
           const have = listDownloads()
@@ -1938,7 +1950,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           if (have.length) console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
           break
         }
-        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all>`)
+        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name>`)
         break
       }
       case "tool": {
@@ -1980,7 +1992,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       case "skills": {
         const raw = (arg || "").trim()
         const head = raw.split(/\s+/)[0]?.toLowerCase() || ""
-        if (head === "download" || head === "verify") {
+        if (head === "download" || head === "verify" || head === "learn") {
           // /skills download|verify → same as /skill
           const rest = raw.slice(head.length).trim()
           const fake = rest ? `${head} ${rest}` : head
@@ -2005,6 +2017,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
             const results = verifySkills(names)
             if (!results.length) { err("no skill candidates to verify — download first"); break }
             console.log(formatVerifyReport(results, "SKILL"))
+            break
+          }
+          if (sub === "learn") {
+            const names = parts.slice(1)
+            if (!names.length) { err("usage: /skill learn <name> [<name>…]"); break }
+            const { learnSkill, formatLearnReport } = await import("./skilldl.js")
+            for (const n of names) {
+              const r = learnSkill(n)
+              if (r.ok) console.log(formatLearnReport(r))
+              else err(formatLearnReport(r).trim())
+            }
             break
           }
         }
