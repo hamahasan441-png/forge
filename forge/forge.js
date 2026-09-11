@@ -906,6 +906,34 @@ async function main() {
           : `rolled back ${r.name} → SUPERSEDED, restored ${r.restored}`)
         return
       }
+      if (sub === "autopromote") {
+        const name = positional[2]
+        if (!name) { err("usage: forge skill autopromote <name>"); process.exit(1); return }
+        const { autoPromote } = await import("./promote.js")
+        const r = autoPromote(name, { cwd: process.cwd() })
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error || "gates failed"); process.exit(1); return }
+        ok(`auto-promoted ${r.name} → ACTIVE${r.already ? " (already)" : ""}`)
+        return
+      }
+      if (sub === "caps") {
+        const name = positional[2]
+        if (!name) { err("usage: forge skill caps <name>"); process.exit(1); return }
+        const { extractCapabilities } = await import("./caps.js")
+        const { skillMdPath, readDownloadedSkill } = await import("./skilldl.js")
+        const { readLearnedSkill } = await import("./evolve.js")
+        let md = readDownloadedSkill(name) || readLearnedSkill(process.cwd(), name)
+        if (!md) {
+          try { md = fs.readFileSync(skillMdPath(name), "utf8") } catch { md = "" }
+        }
+        const r = extractCapabilities(md, { name })
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        console.log(bold(`caps ${r.identity || name}`))
+        for (const c of r.capabilities) console.log(`  • ${c}`)
+        if (r.workflow) console.log(dim(`  workflow: ${String(r.workflow).slice(0, 160)}`))
+        return
+      }
       if (sub === "ingest") {
         const src = positional[2]
         if (!src) { err("usage: forge skill ingest <zip|folder|SKILL.md>"); process.exit(1); return }
@@ -959,7 +987,7 @@ async function main() {
         ok(`variant ${r.name}  ${r.strategy} v${r.version}  ${r.lifecycle}${r.reused ? " (reused)" : ""}`)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder> | forge skill evidence <name> | forge skill benchmark <name> | forge skill variant <name> <strategy>`)
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder> | forge skill evidence <name> | forge skill benchmark <name> | forge skill variant <name> <strategy> | forge skill autopromote <name> | forge skill caps <name>`)
       process.exit(1)
       return
     }
@@ -1765,7 +1793,9 @@ ${bold("usage")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
   ${cyan("forge skill verify <name|all>")}  structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)
-  ${cyan("forge skill evidence <name>")}   print stored evidence.json ${dim("fingerprint, PASS/FAIL/TIMEOUT/… — never invented")}
+  ${cyan("forge skill promote <name>")}   human override VERIFIED → ACTIVE
+  ${cyan("forge skill autopromote <name>")}  ACTIVE only if every gate passes ${dim("never on download/structural")}
+  ${cyan("forge skill caps <name>")}      extract reusable capabilities from SKILL.md
   ${cyan("forge skill benchmark <name>")}  measured rates from evidence ${dim("UNKNOWN when structural only")}
   ${cyan("forge skill learn <name>")}      extract procedures from a VERIFIED skill (indexing is not learned)
   ${cyan("forge skill ttl <name> [<ms>]")} per-skill TTL override (ms); omit ms to print

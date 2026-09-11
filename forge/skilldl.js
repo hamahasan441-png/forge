@@ -218,6 +218,22 @@ function setLifecycle(name, lifecycle, env, kind = "skill", extra = {}) {
   return rec
 }
 
+/** Gated ACTIVE for a VERIFIED download. Never from CANDIDATE. */
+export function activateVerifiedDownload(name, { env = process.env } = {}) {
+  const id = String(name || "").trim()
+  const man = loadDownloadManifest(env, "skill")
+  const rec = man.items?.[id]
+  if (!rec) return { ok: false, error: `skill "${id}" not downloaded`, name: id }
+  if (rec.lifecycle === SKILL_LIFE.ACTIVE) {
+    return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.ACTIVE }
+  }
+  if (rec.lifecycle !== SKILL_LIFE.VERIFIED) {
+    return { ok: false, error: `not VERIFIED (never auto-ACTIVE from ${rec.lifecycle || "CANDIDATE"})`, name: id, lifecycle: rec.lifecycle }
+  }
+  setLifecycle(id, SKILL_LIFE.ACTIVE, env, "skill")
+  return { ok: true, already: false, name: id, lifecycle: SKILL_LIFE.ACTIVE }
+}
+
 /** CANDIDATE/VERIFIED fail → INACTIVE. STALE fail N times → CONTRADICTED. */
 function recordVerifyFail(name, env, kind = "skill") {
   const man = loadDownloadManifest(env, kind)
@@ -243,7 +259,7 @@ export function sweepStale(env = process.env, kind = "skill") {
   const now = Date.now()
   const demoted = []
   for (const [id, rec] of Object.entries(man.items || {})) {
-    if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) continue
+    if (!rec || (rec.lifecycle !== SKILL_LIFE.VERIFIED && rec.lifecycle !== SKILL_LIFE.ACTIVE)) continue
     const at = Number(rec.verifiedAt) || 0
     if (!at) {
       rec.verifiedAt = now
@@ -301,7 +317,7 @@ export function sweepDrift(env = process.env, kind = "skill") {
   const man = loadDownloadManifest(env, kind)
   const demoted = []
   for (const [id, rec] of Object.entries(man.items || {})) {
-    if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) continue
+    if (!rec || (rec.lifecycle !== SKILL_LIFE.VERIFIED && rec.lifecycle !== SKILL_LIFE.ACTIVE)) continue
     const now = bodySha(id, kind, env)
     const was = String(rec.verifiedSha || "")
     if (!was) {
@@ -773,7 +789,7 @@ export function formatDownloadReport(result) {
   ].join("\n") + "\n"
 }
 
-function skillMdPath(id, env) {
+export function skillMdPath(id, env) {
   return path.join(skillDownloadsDir(env), id, "SKILL.md")
 }
 
@@ -1091,7 +1107,7 @@ export function formatVerifyReport(results, label = "SKILL") {
 export function indexVerifiedSkills(env = process.env) {
   const out = []
   for (const rec of listDownloads(env, "skill")) {
-    if (rec.lifecycle !== SKILL_LIFE.VERIFIED) continue
+    if (rec.lifecycle !== SKILL_LIFE.VERIFIED && rec.lifecycle !== SKILL_LIFE.ACTIVE) continue
     const p = skillMdPath(rec.id, env)
     if (!fs.existsSync(p)) continue
     if (!evidenceIsFresh(rec.id, env) && readSkillEvidence(rec.id, env)?.sourceFingerprint) continue
@@ -1100,7 +1116,7 @@ export function indexVerifiedSkills(env = process.env) {
       desc: rec.description || "",
       path: p,
       downloaded: true,
-      lifecycle: SKILL_LIFE.VERIFIED,
+      lifecycle: rec.lifecycle === SKILL_LIFE.ACTIVE ? SKILL_LIFE.ACTIVE : SKILL_LIFE.VERIFIED,
       extracted: rec.learned === true,
       evidence: readSkillEvidence(rec.id, env)?.kind || "structural",
     })
@@ -1136,7 +1152,7 @@ export function readDownloadedSkill(name, env = process.env) {
   sweepDrift(env, "skill")
   sweepStale(env, "skill")
   const rec = loadDownloadManifest(env, "skill").items?.[n]
-  if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
+  if (!rec || (rec.lifecycle !== SKILL_LIFE.VERIFIED && rec.lifecycle !== SKILL_LIFE.ACTIVE)) return null
   const file = skillMdPath(n, env)
   try {
     if (!fs.existsSync(file)) return null

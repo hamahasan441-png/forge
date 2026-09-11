@@ -1,26 +1,23 @@
 #!/usr/bin/env node
 /**
- * forge — v71 drift: VERIFIED body sha mismatch → DRIFT, not STALE.
- *
- * Re-verify restores. Sibling unchanged. Never ACTIVE. Compose never fetches.
+ * forge — v84 gated auto-promote + capability extract.
+ * DOWNLOAD / structural / CANDIDATE never auto-ACTIVE.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v84-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v84-work-"))
 process.chdir(WORK)
 
-const {
-  downloadSkill, verifySkill, sweepDrift, indexVerifiedSkills,
-  readDownloadedSkill, listDownloads, skillDownloadsDir,
-  DRIFT, STALE,
-} = await import("../skilldl.js")
+const { downloadSkill, verifySkill } = await import("../skilldl.js")
+const { autoPromote, evaluatePromoteGates } = await import("../promote.js")
+const { extractCapabilities } = await import("../caps.js")
 const { SKILL_LIFE } = await import("../evolve.js")
 const { evaluateSkills } = await import("../evaluate.js")
 const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../classify.js")
@@ -45,16 +42,6 @@ function listGlobalTools() {
   try { return fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".mjs") || f.endsWith(".js")) } catch { return [] }
 }
 
-const STRUCT = `---
-name: web-design
-description: Responsive layout playbook
----
-
-# Web Design
-
-A layout playbook.
-`
-
 function mockFetch(body, { filename = "artifact.bin" } = {}) {
   const buf = Buffer.from(String(body), "utf8")
   return async (href) => ({
@@ -64,56 +51,76 @@ function mockFetch(body, { filename = "artifact.bin" } = {}) {
   })
 }
 
-function manPath() { return path.join(HOME, "skill-downloads", "manifest.json") }
-function loadMan() { return JSON.parse(fs.readFileSync(manPath(), "utf8")) }
-function saveMan(j) { fs.writeFileSync(manPath(), JSON.stringify(j, null, 1)) }
-function skillFile(id) { return path.join(skillDownloadsDir(), id, "SKILL.md") }
+const STRUCT = `---
+name: web-design
+description: Responsive layout playbook
+---
+# Web Design
+## Layout
+Set a fluid grid.
+## What worked
+Use a 12-column grid.
+`
 
-console.log("== body change → DRIFT; sibling stays VERIFIED; re-verify restores ==")
+const PASSING = `---
+name: echo-ok
+description: A skill with a safe test
+---
+# Echo Ok
+Does one thing.
+## What worked
+Echo ok then continue.
+## Tests
+- \`echo ok\`
+`
+
+console.log("== download / structural never auto-ACTIVE ==")
 {
   await downloadSkill("https://example.com/web-design.skill", {
     fetchFn: mockFetch(STRUCT, { filename: "web-design.skill" }),
   })
-  await downloadSkill("https://example.com/fresh-name.skill", {
-    fetchFn: mockFetch(STRUCT.replace("web-design", "fresh-name"), { filename: "fresh-name.skill" }),
+  const cand = autoPromote("web-design")
+  eq("CANDIDATE blocked", cand.ok, false)
+  ok("mentions CANDIDATE", /CANDIDATE/.test(cand.error || (cand.blocked || []).join(" ")), cand.error)
+  const v = verifySkill("web-design")
+  eq("structural VERIFIED", v.lifecycle, SKILL_LIFE.VERIFIED)
+  const g = evaluatePromoteGates("web-design")
+  eq("structural gates fail", g.ok, false)
+  ok("structural-only blocked", (g.blocked || []).some((b) => /structural/.test(b)), JSON.stringify(g.blocked))
+  const no = autoPromote("web-design")
+  eq("still not ACTIVE", no.ok, false)
+  eq("lifecycle stays VERIFIED", no.lifecycle, SKILL_LIFE.VERIFIED)
+}
+
+console.log("== behavioral VERIFIED auto-promotes ==")
+{
+  await downloadSkill("https://example.com/echo-ok.skill", {
+    fetchFn: mockFetch(PASSING, { filename: "echo-ok.skill" }),
   })
-  eq("a VERIFIED", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
-  eq("b VERIFIED", verifySkill("fresh-name").lifecycle, SKILL_LIFE.VERIFIED)
-  ok("verifiedSha stamped", !!loadMan().items["web-design"].verifiedSha)
-
-  fs.appendFileSync(skillFile("web-design"), "\nA harmless extra line.\n")
-  const demoted = sweepDrift()
-  ok("sweep names it", demoted.includes("web-design"), String(demoted))
-  eq("DRIFT", listDownloads().find((d) => d.id === "web-design")?.lifecycle, DRIFT)
-  eq("not STALE", listDownloads().find((d) => d.id === "web-design")?.lifecycle === STALE, false)
-  eq("sibling VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("hidden", indexVerifiedSkills().some((s) => s.name === "web-design"), false)
-  eq("sibling indexed", indexVerifiedSkills().some((s) => s.name === "fresh-name"), true)
-  eq("load hidden", readDownloadedSkill("web-design"), null)
-
-  const back = verifySkill("web-design")
-  eq("restored VERIFIED", back.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("not ACTIVE", back.lifecycle === SKILL_LIFE.ACTIVE, false)
-  eq("indexed again", indexVerifiedSkills().some((s) => s.name === "web-design"), true)
-  ok("body back", !!readDownloadedSkill("web-design"))
+  const v = verifySkill("echo-ok")
+  eq("behavioral VERIFIED", v.ok && v.evidence?.kind === "behavioral", true)
+  const r = autoPromote("echo-ok")
+  eq("autoPromote ok", r.ok, true)
+  eq("ACTIVE", r.lifecycle, SKILL_LIFE.ACTIVE)
+  eq("gated", r.gated, true)
+  const again = autoPromote("echo-ok")
+  eq("already ACTIVE", again.already, true)
 }
 
-console.log("== missing verifiedSha is stamped, not instantly DRIFT ==")
+console.log("== caps extract; compose write-free ==")
 {
-  const man = loadMan()
-  delete man.items["fresh-name"].verifiedSha
-  saveMan(man)
-  const demoted = sweepDrift()
-  eq("fresh not demoted", demoted.includes("fresh-name"), false)
-  eq("still VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
-  ok("clock stamped", !!loadMan().items["fresh-name"].verifiedSha)
-}
-
-console.log("== compose never fetches ==")
-{
+  const caps = extractCapabilities(PASSING, { name: "echo-ok" })
+  eq("caps ok", caps.ok, true)
+  ok("has capability or workflow", caps.capabilities.length + (caps.workflow ? 1 : 0) >= 1)
+  ok("fingerprint", Boolean(caps.fingerprint))
+  const empty = extractCapabilities("---\nname: x\ndescription: y\n---\n# X\n")
+  eq("name-only not a capability", empty.ok, false)
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
-  ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no sweepDrift", !/sweepDrift/.test(composeSrc))
+  ok("compose has no autoPromote", !/autoPromote/.test(composeSrc))
+  ok("compose has no promote.js", !/promote\.js/.test(composeSrc) && !/from \".\/promote/.test(composeSrc))
+  const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
+  ok("CLI autopromote", /autopromote/.test(forgeSrc))
+  ok("CLI caps", /skill caps/.test(forgeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -132,6 +139,8 @@ console.log("== no side writes / frozen kernel + package ==")
   eq("VERSION is 84.0.0", VERSION, "84.0.0")
   const pkg = JSON.parse(fs.readFileSync(path.join(FORGE, "package.json"), "utf8"))
   eq("package.json is 84.0.0", pkg.version, "84.0.0")
+  ok("files includes promote.js", (pkg.files || []).includes("promote.js"))
+  ok("files includes caps.js", (pkg.files || []).includes("caps.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
   eq("custom is still index 17 (pick 18)", CATALOG[17]?.name, "custom")
   eq("apinex still after custom", CATALOG[18]?.name, "apinex")
@@ -141,10 +150,12 @@ console.log("== no side writes / frozen kernel + package ==")
   const todo = fs.readFileSync(path.join(FORGE, "TODO.md"), "utf8")
   eq("TODO still unchecked", (todo.match(/^- \[[xX]\]/gm) || []).length, 0)
   ok("no PLAN file", fs.readdirSync(FORGE).filter((n) => /^PLAN-v\d+\.md$/.test(n)).length === 0)
+  ok("Never list kept", /Research crawler/.test(todo) && /Auto-ACTIVE/.test(todo))
+  ok("download still never auto-ACTIVE", /because a download succeeded/.test(todo))
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v71 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v84 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)

@@ -160,8 +160,8 @@ console.log("== runAgent never auto-flips assumeYes ==")
 }
 
 console.log("== package version ==")
-ok("VERSION is 83.0.0", VERSION === "83.0.0")
-ok("package.json is 83.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === "83.0.0")
+ok("VERSION is 84.0.0", VERSION === "84.0.0")
+ok("package.json is 84.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === "84.0.0")
 
 console.log(`\n== v25 suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
