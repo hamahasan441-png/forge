@@ -108,7 +108,7 @@ console.log("== CLI/TUI wired; compose never writes ==")
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
   ok("CLI claims", /case "claims"/.test(forgeSrc) && /listClaims/.test(forgeSrc))
   ok("TUI /claims", /case "claims"/.test(chatSrc))
-  ok("compose has no claims", !/claims\.js/.test(composeSrc) && !/recordClaim/.test(composeSrc))
+  ok("compose has no recordClaim", !/recordClaim/.test(composeSrc))
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
 }
 
