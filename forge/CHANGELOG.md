@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v78.0.0 — "experiment"
+
+### Added (v78.0 — gap experiment → outcome → CANDIDATE skill)
+- **Experiment engine.** `forge experiment <domain> [--command <cmd>]` / `/experiment`. Hypothesis → shellguard-focused test → `recordGapOutcome` (VERIFIED or CONTRADICTED). Skip is a ledger entry, never silent, never invented `npm test`.
+- **Skill from a gap.** A passing experiment may `authorSkill` a CANDIDATE playbook. Not only from a repair. Never auto-ACTIVE.
+- **Benchmark.** `benchmarkPlaybook` scores a SKILL.md against the repair it came from (files + command + distinct body).
+- Compose still never writes. Never `~/.forge/tools`.
+
+ZIP unpack, Strategy 2.0, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v77.0.0 — "skillver"
 
 ### Added (v77.0 — versioned skills, rollback, generated tests, tool progress)

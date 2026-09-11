@@ -92,6 +92,7 @@ export const COMMANDS = [
   ["claims", "[subject]", "project claims (not a second memory)"],
   ["decisions", "[add title reason]", "architecture decision log"],
   ["knowledge", "", "knowledge pane: claims, decisions, gaps, downloads"],
+  ["experiment", "<domain>", "focused test for a blocking gap (never invents npm test)"],
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
@@ -160,6 +161,7 @@ ${bold("setup")}
   /claims [subject]     list project claims, or one subject (not a second memory)
   /decisions [add …]    architecture decision log
   /knowledge            knowledge pane (claims / decisions / gaps / downloads)
+  /experiment <domain>  focused test for a blocking gap (never invents npm test)
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
@@ -2058,6 +2060,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const { snapshotKnowledge } = await import("./decisions.js")
           dispatchUI({ type: "KNOWLEDGE_UPDATED", ...snapshotKnowledge(cwd) })
         } catch { /* dock is best-effort */ }
+        break
+      }
+      case "experiment": {
+        const parts = arg.split(/\s+/).filter(Boolean)
+        const id = parts[0]
+        if (!id) { err("usage: /experiment <domain> [--command <cmd>]"); break }
+        let command = ""
+        const ci = parts.indexOf("--command")
+        if (ci >= 0) command = parts.slice(ci + 1).join(" ")
+        const { runExperiment, formatExperimentReport } = await import("./experiment.js")
+        const r = runExperiment({ cwd: process.cwd(), id, command, task: `close knowledge gap ${id}` })
+        console.log(formatExperimentReport(r).trimEnd())
         break
       }
       case "tool": {

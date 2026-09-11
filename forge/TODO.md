@@ -7,7 +7,7 @@ and tests are green. Never mark complete because a model wrote a spec.
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
 v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence, v68 stale,
-v75 dock, v76 live, v77 skillver (versioned skills, rollback, CONTRADICTED supersede, generated tests, tool download progress).
+v76 live, v77 skillver, v78 experiment (gap hypothesis → focused test → recordGapOutcome; skill from a gap; playbook benchmark).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -17,8 +17,7 @@ DOWNLOAD ≠ TRUST.
 
 ## Skill forge 2.0
 
-- [ ] Research → implement a new skill from a gap (not only `authorSkill` from a repair)
-- [ ] Benchmark a playbook vs the repair it came from
+- [ ] ZIP/folder skill ingest (unpack still not this kernel)
 
 ## Knowledge
 
@@ -29,12 +28,11 @@ DOWNLOAD ≠ TRUST.
 - [ ] Strategy 2.0 (beyond v40 `evolveRun` score/avoid)
 - [ ] Toolintel 2.0 (beyond v52 aggregates)
 - [ ] Model empirics from real outcomes (not a static registry)
-- [ ] Experiment engine: hypothesis → focused test → `recordGapOutcome`
 - [ ] Consolidate lessons + memory without dropping provenance
 
 ## Tests / architecture
 
-- [ ] Test generation for a blocking gap (still never skip tests without a ledger)
+- [ ] Gap tests that are not explicit still never invent a toolchain
 
 ## Bench / agents / kernel
 
