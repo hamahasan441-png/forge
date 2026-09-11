@@ -11,6 +11,7 @@
  */
 import { selectPlugins, scoreAgainst, namedIn, TASK_CLASS } from "./evaluate.js"
 import { configuredServers } from "./mcp.js"
+import { indexVerifiedToolPlaybooks } from "./skilldl.js"
 
 /** Playbooks the model can follow without a live plugin-host. */
 export const PLUGIN_PLAYBOOKS = [
@@ -41,7 +42,9 @@ export function pickPlugins(task, plugins = [], opts = {}) {
   const klass = opts.klass
   const micro = klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL || klass === "micro" || klass === "small"
   const books = []
-  for (const b of PLUGIN_PLAYBOOKS) {
+  const catalog = [...PLUGIN_PLAYBOOKS]
+  try { catalog.push(...indexVerifiedToolPlaybooks()) } catch { /* downloads are best-effort */ }
+  for (const b of catalog) {
     const explicit = namedIn(q, b.name)
     if (micro && !explicit) continue
     const score = scorePlugin(q, b)

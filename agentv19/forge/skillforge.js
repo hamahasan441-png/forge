@@ -12,6 +12,7 @@
  */
 import { evaluateSkills, formatSkillPicks, scoreAgainst, namedIn } from "./evaluate.js"
 import { loadSkillLife, SKILL_LIFE } from "./evolve.js"
+import { indexVerifiedSkills } from "./skilldl.js"
 
 /** First-party playbooks shipped as skills/<name>/SKILL.md plus this catalog. */
 export const FIRST_PARTY = [
@@ -71,7 +72,13 @@ export function scoreSkill(task, skill) {
  * Tags and aliases join the description blob so "debug" hits forge-debug.
  */
 export function pickSkills(task, skills = [], opts = {}) {
-  const enriched = enrichSkills(skills)
+  let base = Array.isArray(skills) ? skills.slice() : []
+  try {
+    const extra = indexVerifiedSkills()
+    const have = new Set(base.map((s) => s?.name))
+    for (const s of extra) if (s?.name && !have.has(s.name)) base.push(s)
+  } catch { /* downloads are best-effort */ }
+  const enriched = enrichSkills(base)
   let life = {}
   if (opts.cwd) {
     try { life = loadSkillLife(opts.cwd).skills || {} } catch { life = {} }
@@ -79,6 +86,7 @@ export function pickSkills(task, skills = [], opts = {}) {
   const tagged = enriched.map((s) => ({
     ...s,
     lifecycle: (s.name && life[s.name]?.lifecycle)
+      || s.lifecycle
       || (s.learned ? SKILL_LIFE.CANDIDATE : SKILL_LIFE.ACTIVE),
   }))
   const scored = evaluateSkills(task, tagged.map((s) => ({

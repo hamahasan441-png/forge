@@ -127,6 +127,56 @@ async function runSkillDownload(urls) {
   return results.every((r) => r.ok) ? 0 : 1
 }
 
+async function runToolDownload(urls) {
+  const { downloadTools, formatDownloadReport, listToolDownloads, toolDownloadsDir } = await import("./skilldl.js")
+  const { SKILL_LIFE } = await import("./evolve.js")
+  const list = (urls || []).map((u) => String(u || "").trim()).filter(Boolean)
+  if (!list.length) {
+    const have = listToolDownloads()
+    if (JSON_OUT) { emitJson({ dir: toolDownloadsDir(), downloads: have }); return 0 }
+    console.log(bold(`tool downloads`) + dim(`  (${have.length}) — ${toolDownloadsDir()}`))
+    if (!have.length) {
+      console.log(dim('  none yet — forge tool download <https-url>'))
+      return 0
+    }
+    for (const r of have) {
+      const life = r.lifecycle || SKILL_LIFE.CANDIDATE
+      console.log(`  ${cyan((r.skillName || r.id).padEnd(28))} ${life}  ${dim(r.status || "")}  ${dim(r.sourceUrl || "")}`)
+    }
+    console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not live tools."))
+    return 0
+  }
+  const results = await downloadTools(list)
+  if (JSON_OUT) {
+    emitJson({ results: results.map((r) => ({ ok: r.ok, error: r.error || null, reused: r.reused || false, record: r.record || null })) })
+  } else {
+    for (const r of results) {
+      if (r.ok) {
+        console.log(formatDownloadReport(r))
+        const rec = r.record || {}
+        console.log(dim(`  ${rec.filename || ""}  sha256=${String(rec.sha256 || "").slice(0, 12)}…  ${rec.size ?? 0} B`))
+        console.log()
+      } else {
+        err(formatDownloadReport(r).trim())
+      }
+    }
+  }
+  return results.every((r) => r.ok) ? 0 : 1
+}
+
+async function runVerify(kind, names) {
+  const { verifySkills, verifyTools, formatVerifyReport } = await import("./skilldl.js")
+  const list = (names || []).map((n) => String(n || "").trim()).filter(Boolean)
+  if (!list.length) {
+    err(`usage: forge ${kind} verify <name> [<name>…] | all`)
+    return 1
+  }
+  const results = kind === "tool" ? verifyTools(list) : verifySkills(list)
+  if (JSON_OUT) { emitJson({ kind, results }); return results.every((r) => r.ok) ? 0 : 1 }
+  console.log(formatVerifyReport(results, kind === "tool" ? "TOOL" : "SKILL"))
+  return results.every((r) => r.ok) ? 0 : 1
+}
+
 function emitJson(obj) { console.log(JSON.stringify(obj, null, 2)) }
 
 function resolveProvider(config) {
@@ -775,13 +825,44 @@ async function main() {
         if (code) process.exit(code)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url>  (DOWNLOAD ≠ VERIFY)`)
+      if (sub === "verify") {
+        const code = await runVerify("skill", positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all>`)
+      process.exit(1)
+      return
+    }
+    case "tool": {
+      const sub = (positional[1] || "").toLowerCase()
+      if (!sub || sub === "list" || sub === "downloads") {
+        const code = await runToolDownload([])
+        if (code) process.exit(code)
+        return
+      }
+      if (sub === "download") {
+        const code = await runToolDownload(positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      if (sub === "verify") {
+        const code = await runVerify("tool", positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      err(`unknown: forge tool ${sub} — use: forge tool download <https-url> | forge tool verify <name|all>`)
       process.exit(1)
       return
     }
     case "skills": {
       if (positional[1] === "download") {
         const code = await runSkillDownload(positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      if (positional[1] === "verify") {
+        const code = await runVerify("skill", positional.slice(2))
         if (code) process.exit(code)
         return
       }
@@ -1331,6 +1412,9 @@ ${bold("usage")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
+  ${cyan("forge skill verify <name|all>")}  structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)
+  ${cyan("forge tool download <url>")}     download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
+  ${cyan("forge tool verify <name|all>")}   structurally verify a downloaded tool (hostless playbook, never plugin-host)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
