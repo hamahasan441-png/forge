@@ -129,7 +129,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   }
   if (skillsEnabled) {
     const idx = skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), cwd) : []
-    const picks = pickSkills(task || "", idx, { klass, skillsDir })
+    const picks = pickSkills(task || "", idx, { klass, skillsDir, cwd })
     const block = formatSkillPicks(picks)
     if (block) lines.push("", block)
   }

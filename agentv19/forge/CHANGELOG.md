@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v58.0.0 — "skilllife"
+
+### Added (v58.0 — learned skills are CANDIDATE until a second verified run)
+- **Lifecycle.** First `authorSkill` records CANDIDATE in `~/.forge/projects/<hash>/skilllife.json` (0600). A second 9/9 COMPLETED `evolveRun` on the same playbook is the only auto-VERIFIED path. `recordSkillOutcome` is the explicit path. First-party skills stay ACTIVE.
+- **Steer.** `pickSkills` attaches lifecycle. formatSteer / `[skills]` mark `(candidate)` so the planner does not treat a first-write playbook as trusted.
+
+Single mutating writer is unchanged. PLAN-v61 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Skill research pipeline, CONTRADICTED, crawler, L6, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v57.0.0 — "priority"
 
 ### Added (v57.0 — LEARN is the gap worth paying for, not every unknown)

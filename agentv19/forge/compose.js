@@ -37,6 +37,7 @@
  * Compose still never writes. Next [learn] skips tried methods.
  * v57: [learn] is priority-capped (1, or 2 if both CRITICAL). Compose
  * still never writes or fetches.
+ * v58: learned skills tagged CANDIDATE until a second 9/9 evolveRun.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
@@ -354,7 +355,7 @@ export function compose(task = "", opts = {}) {
       } catch { idx = [] }
     }
     if (Array.isArray(idx)) {
-      try { out.skills = pickSkills(q, idx, { klass }) } catch { out.skills = [] }
+      try { out.skills = pickSkills(q, idx, { klass, cwd }) } catch { out.skills = [] }
       try { attachSkillBodies(out.skills, cwd) } catch { /* body is best-effort */ }
     }
   }
@@ -516,7 +517,10 @@ export function formatCompose(c) {
   if (w) lines.push(w)
   if (c.memoryCount) lines.push(`[memory] ${c.memoryCount} note${c.memoryCount === 1 ? "" : "s"}`)
   if (c.avoid?.length) lines.push(`[avoid] ${c.avoid.slice(0, 4).join("; ")}`)
-  if (c.skills?.length) lines.push(`[skills] ${c.skills.map((s) => s.name).filter(Boolean).slice(0, 3).join(", ")}`)
+  if (c.skills?.length) lines.push(`[skills] ${c.skills.map((s) => {
+    if (!s || !s.name) return ""
+    return s.lifecycle === "CANDIDATE" ? `${s.name} (candidate)` : s.name
+  }).filter(Boolean).slice(0, 3).join(", ")}`)
   if (c.playbooks?.length) lines.push(`[playbooks] ${c.playbooks.map((p) => p.name).filter(Boolean).slice(0, 3).join(", ")}`)
   let skillN = 0
   for (const s of c.skills || []) {
