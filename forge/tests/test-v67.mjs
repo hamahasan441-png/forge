@@ -1,27 +1,27 @@
 #!/usr/bin/env node
 /**
- * forge — v66 learn: extract procedures from VERIFIED downloads.
+ * forge — v67 evidence: ## Tests run through shellguard.
  *
- * LEARN ≠ INDEX. CANDIDATE refused. Not ACTIVE. Never ~/.forge/tools.
+ * No ## Tests → structural VERIFIED. Fail/refused → INACTIVE. Not ACTIVE.
+ * ## Verify is not executed. Never ~/.forge/tools. Compose never fetches.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v66-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v67-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v66-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v67-work-"))
 process.chdir(WORK)
 
 const {
-  downloadSkill, verifySkill, learnSkill, formatLearnReport,
-  extractKnowledge, readSkillKnowledge, readDownloadedSkill, indexVerifiedSkills,
+  downloadSkill, verifySkill, formatVerifyReport, extractTestCommands,
+  readSkillEvidence, indexVerifiedSkills,
 } = await import("../skilldl.js")
 const { SKILL_LIFE } = await import("../evolve.js")
-const { execTool } = await import("../tools.js")
 const { evaluateSkills } = await import("../evaluate.js")
 const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../classify.js")
 const { defaultConfig, sanitizeProjectConfig } = await import("../config.js")
@@ -45,34 +45,53 @@ function listGlobalTools() {
   try { return fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".mjs") || f.endsWith(".js")) } catch { return [] }
 }
 
-const RICH = `---
+const STRUCT = `---
 name: web-design
 description: Responsive layout playbook
 ---
 
 # Web Design
 
-You will produce accessible, responsive layouts.
-
 ## Layout
-Set a fluid grid and test at 390px.
-
-## What worked
-Use clamp() for type and a 12-column grid.
-
-## Files
-- src/styles.css
+Set a fluid grid.
 
 ## Verify
 \`npm test\`
 `
 
-const THIN = `---
-name: thin-name
-description: Just a label
+const PASSING = `---
+name: echo-ok
+description: A skill with a safe test
 ---
 
-# Thin Name
+# Echo Ok
+
+Does one thing.
+
+## Tests
+- \`echo ok\`
+`
+
+const FAILING = `---
+name: always-fail
+description: A skill whose test fails
+---
+
+# Always Fail
+
+## Tests
+- \`false\`
+`
+
+const EVIL = `---
+name: wipe-root
+description: A skill that tries to wipe the disk
+---
+
+# Wipe Root
+
+## Tests
+- \`rm -rf /\`
 `
 
 function mockFetch(body, { filename = "artifact.bin" } = {}) {
@@ -84,55 +103,71 @@ function mockFetch(body, { filename = "artifact.bin" } = {}) {
   })
 }
 
-console.log("== extractKnowledge ==")
+console.log("== extractTestCommands ==")
 {
-  const k = extractKnowledge(RICH)
-  ok("layout procedure", k.procedures.some((p) => /layout/i.test(p.title)))
-  ok("repair from What worked", /clamp/.test(k.repair))
-  ok("file", k.files.includes("src/styles.css"))
-  const thin = extractKnowledge(THIN)
-  eq("thin no procedures", thin.procedures.length, 0)
+  eq("no Tests heading", extractTestCommands(STRUCT).length, 0)
+  eq("bullet tick", extractTestCommands(PASSING).join("|"), "echo ok")
+  const fenced = extractTestCommands("# X\n\n## Tests\n```sh\necho a\n# skip\necho b\n```\n")
+  ok("fenced two", fenced.includes("echo a") && fenced.includes("echo b"))
+  eq("cap 4", extractTestCommands("# X\n\n## Tests\n- `a`\n- `b`\n- `c`\n- `d`\n- `e`\n").length, 4)
 }
 
-console.log("== CANDIDATE learn fails; VERIFIED extracts; thin fails ==")
+console.log("== no ## Tests is structural VERIFIED; ## Verify is not run ==")
 {
   await downloadSkill("https://example.com/web-design.skill", {
-    fetchFn: mockFetch(RICH, { filename: "web-design.skill" }),
+    fetchFn: mockFetch(STRUCT, { filename: "web-design.skill" }),
   })
-  const before = learnSkill("web-design")
-  ok("CANDIDATE refused", before.ok === false && /not verified|indexing/.test(before.error), before.error)
-  verifySkill("web-design")
-  const r = learnSkill("web-design")
-  eq("learn ok", r.ok, true)
-  eq("still VERIFIED", r.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("not ACTIVE", r.lifecycle === SKILL_LIFE.ACTIVE, false)
-  ok("knowledge.json", fs.existsSync(path.join(HOME, "skill-downloads", "web-design", "knowledge.json")))
-  const know = readSkillKnowledge("web-design")
-  ok("procedures stored", (know?.procedures || []).length >= 1)
-  ok("report", /Learned/.test(formatLearnReport(r)) && /Not ACTIVE/.test(formatLearnReport(r)))
-  const loaded = await execTool({ cwd: WORK, skillsDir: null }, "load_skill", { name: "web-design" })
-  ok("load_skill appends procedures", /Learned procedures/.test(String(loaded)), String(loaded).slice(0, 200))
-  const listed = indexVerifiedSkills()
-  eq("extracted flag", listed.find((s) => s.name === "web-design")?.extracted, true)
-
-  await downloadSkill("https://example.com/thin-name.skill", {
-    fetchFn: mockFetch(THIN, { filename: "thin-name.skill" }),
-  })
-  verifySkill("thin-name")
-  const thin = learnSkill("thin-name")
-  ok("thin refused", thin.ok === false && /indexing is not learned/.test(thin.error), thin.error)
-  eq("thin not learned", readSkillKnowledge("thin-name"), null)
+  const r = verifySkill("web-design")
+  eq("ok", r.ok, true)
+  eq("VERIFIED", r.lifecycle, SKILL_LIFE.VERIFIED)
+  eq("structural", r.evidence?.kind, "structural")
+  const ev = readSkillEvidence("web-design")
+  eq("evidence file", ev?.kind, "structural")
+  ok("report names evidence", /evidence: structural/.test(formatVerifyReport(r)))
+  eq("indexed evidence", indexVerifiedSkills().find((s) => s.name === "web-design")?.evidence, "structural")
 }
 
-console.log("== CLI/TUI wired; compose never fetches ==")
+console.log("== ## Tests echo ok → behavioral VERIFIED ==")
 {
-  const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
-  ok("CLI learn", /forge skill learn/.test(forgeSrc) && /runLearn/.test(forgeSrc))
-  const chatSrc = fs.readFileSync(path.join(FORGE, "chat.js"), "utf8")
-  ok("TUI /skill learn", /\/skill learn/.test(chatSrc) && /sub === "learn"/.test(chatSrc))
+  await downloadSkill("https://example.com/echo-ok.skill", {
+    fetchFn: mockFetch(PASSING, { filename: "echo-ok.skill" }),
+  })
+  const r = verifySkill("echo-ok")
+  eq("ok", r.ok, true)
+  eq("VERIFIED", r.lifecycle, SKILL_LIFE.VERIFIED)
+  eq("not ACTIVE", r.lifecycle === SKILL_LIFE.ACTIVE, false)
+  eq("behavioral", r.evidence?.kind, "behavioral")
+  eq("test ran", r.evidence?.results?.[0]?.ok, true)
+  ok("evidence.json", fs.existsSync(path.join(HOME, "skill-downloads", "echo-ok", "evidence.json")))
+}
+
+console.log("== failing / refused tests → INACTIVE; siblings independent ==")
+{
+  await downloadSkill("https://example.com/always-fail.skill", {
+    fetchFn: mockFetch(FAILING, { filename: "always-fail.skill" }),
+  })
+  await downloadSkill("https://example.com/wipe-root.skill", {
+    fetchFn: mockFetch(EVIL, { filename: "wipe-root.skill" }),
+  })
+  const fail = verifySkill("always-fail")
+  eq("fail not ok", fail.ok, false)
+  eq("fail INACTIVE", fail.lifecycle, "INACTIVE")
+  ok("fail issue", (fail.issues || []).some((i) => /false/.test(i)), String(fail.issues))
+  const evil = verifySkill("wipe-root")
+  eq("evil not ok", evil.ok, false)
+  eq("evil INACTIVE", evil.lifecycle, "INACTIVE")
+  ok("evil refused not executed", evil.evidence?.results?.[0]?.skipped === true, JSON.stringify(evil.evidence?.results?.[0]))
+  eq("echo-ok still VERIFIED", verifySkill("echo-ok").lifecycle, SKILL_LIFE.VERIFIED)
+  eq("web-design still VERIFIED", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
+  eq("fail not indexed", indexVerifiedSkills().some((s) => s.name === "always-fail"), false)
+}
+
+console.log("== compose never fetches ==")
+{
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no learnSkill", !/learnSkill\(/.test(composeSrc))
+  ok("compose has no extractTestCommands", !/extractTestCommands/.test(composeSrc))
+  ok("compose has no runSkillTests", !/runSkillTests/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -163,7 +198,7 @@ console.log("== no side writes / frozen kernel + package ==")
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v66 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v67 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)

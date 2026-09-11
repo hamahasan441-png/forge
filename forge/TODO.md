@@ -6,8 +6,8 @@ and tests are green. Never mark complete because a model wrote a spec.
 
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
-v63 verify, v64 wire, v65 discover, v66 learn
-(`forge skill learn` extracts procedures; indexing is not learned).
+v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence
+(`## Tests` run through shellguard; no tests → structural VERIFIED).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -18,7 +18,7 @@ DOWNLOAD ≠ TRUST.
 ## Skill forge 2.0
 
 - [ ] Research → implement a new skill from a gap (not only `authorSkill` from a repair)
-- [ ] Validate a CANDIDATE with generated tests before VERIFIED (v63 is structural only)
+- [ ] Validate a CANDIDATE with generated tests before VERIFIED (v67 runs author `## Tests` only)
 - [ ] Benchmark a playbook vs the repair it came from
 - [ ] Deprecate / supersede a learned skill when CONTRADICTED
 - [ ] Versioned skills (v2 is a new CANDIDATE; v1 stays ACTIVE until v2 beats it)

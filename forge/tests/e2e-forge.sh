@@ -54,7 +54,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v66.0.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v67.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
