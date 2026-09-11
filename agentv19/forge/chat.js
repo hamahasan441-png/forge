@@ -1975,9 +1975,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       }
       case "skills": {
         const dir = resolveSkillsDir(config.skills?.dir)
-        if (!dir) { err("no skills dir found"); break }
+        if (!dir && !arg) { err("no skills dir found"); break }
         if (arg) {
-          const md = loadSkill(dir, arg)
+          let md = dir ? loadSkill(dir, arg) : null
+          if (!md) {
+            try { md = (await import("./skilldl.js")).readDownloadedSkill(arg) } catch { md = null }
+          }
           if (!md) { err(`skill "${arg}" not found`); break }
           messages.push({ role: "user", content: `Use this skill for my next requests. Acknowledge briefly.\n\n<skill name="${arg}">\n${md}\n</skill>` })
           ok(`skill "${arg}" loaded (${md.length} chars)`)

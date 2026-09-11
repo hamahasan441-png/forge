@@ -40,6 +40,7 @@ import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./
 import { generatedBoundary } from "./langengine.js"
 import { readLearnedSkill } from "./evolve.js"
 import { readLearnedPlaybookByName } from "./extend.js"
+import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
@@ -1166,22 +1167,28 @@ function load_skill(ctx, args) {
   // validate the NAME first — never touch the filesystem with a hostile name
   const name = validSkillName(args.name)
   if (!name) return `ERROR: invalid skill name "${String(args.name ?? "")}" — use the plain skill directory name (no paths)`
-  if (!ctx.skillsDir) return "ERROR: no skills directory configured"
-  const base = realPathOf(ctx.skillsDir)
-  const target = path.join(ctx.skillsDir, name, "SKILL.md")
-  const sp = safePath({ ...ctx, root: ctx.skillsDir }, path.join(name, "SKILL.md"))
-  if (!sp.ok) return sp.error
-  const real = realPathOf(target)
-  if (!insideDir(real, base)) return `ERROR: skill path escapes the skills directory`
-  if (!fs.existsSync(target)) {
-    const learned = ctx.cwd ? readLearnedSkill(ctx.cwd, name) : null
-    if (learned) return learned
-    const play = ctx.cwd ? readLearnedPlaybookByName(ctx.cwd, name) : null
-    if (play) return play
-    return `ERROR: skill not found: ${name}`
+  if (ctx.skillsDir) {
+    const base = realPathOf(ctx.skillsDir)
+    const target = path.join(ctx.skillsDir, name, "SKILL.md")
+    const sp = safePath({ ...ctx, root: ctx.skillsDir }, path.join(name, "SKILL.md"))
+    if (!sp.ok) return sp.error
+    const real = realPathOf(target)
+    if (!insideDir(real, base)) return `ERROR: skill path escapes the skills directory`
+    if (fs.existsSync(target)) {
+      const md = fs.readFileSync(target, "utf8")
+      return md.length > 24000 ? md.slice(0, 24000) + "\n... (truncated)" : md
+    }
   }
-  const md = fs.readFileSync(target, "utf8")
-  return md.length > 24000 ? md.slice(0, 24000) + "\n... (truncated)" : md
+  const learned = ctx.cwd ? readLearnedSkill(ctx.cwd, name) : null
+  if (learned) return learned
+  const play = ctx.cwd ? readLearnedPlaybookByName(ctx.cwd, name) : null
+  if (play) return play
+  const downloaded = readDownloadedSkill(name)
+  if (downloaded) return downloaded
+  const toolPlay = readDownloadedToolPlaybook(name)
+  if (toolPlay) return toolPlay
+  if (!ctx.skillsDir) return "ERROR: no skills directory configured"
+  return `ERROR: skill not found: ${name}`
 }
 
 // --- web ---------------------------------------------------------------------

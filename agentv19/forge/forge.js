@@ -172,6 +172,11 @@ async function runVerify(kind, names) {
     return 1
   }
   const results = kind === "tool" ? verifyTools(list) : verifySkills(list)
+  if (!results.length) {
+    if (JSON_OUT) { emitJson({ kind, results: [] }); return 0 }
+    console.log(dim(`no ${kind} candidates to verify — download first`))
+    return 0
+  }
   if (JSON_OUT) { emitJson({ kind, results }); return results.every((r) => r.ok) ? 0 : 1 }
   console.log(formatVerifyReport(results, kind === "tool" ? "TOOL" : "SKILL"))
   return results.every((r) => r.ok) ? 0 : 1

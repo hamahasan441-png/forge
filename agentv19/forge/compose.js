@@ -42,6 +42,7 @@
  * never walks the repo and never writes. A miss is UNKNOWN, not "none".
  */
 import path from "node:path"
+import fs from "node:fs"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { worldFromCwd, filesCited, radiusOf, indexSnapshot, implOf } from "./memgraph.js"
 import { relevantMemory } from "./memory.js"
@@ -211,13 +212,24 @@ function filesFromIndex(cwd, task, klass) {
   return scored.slice(0, INDEX_HITS).map((s) => s.rel)
 }
 
-/** Attach What-worked / files / command from learned SKILL.md. Never bundled pack. */
+/** Attach What-worked / files / command from learned SKILL.md. Never bundled pack.
+ *  v64: also attach VERIFIED downloaded skills (path under skill-downloads). */
 function attachSkillBodies(skills, cwd) {
   if (!Array.isArray(skills) || !skills.length) return skills || []
   for (const s of skills) {
-    if (!s || !s.name || s.learned !== true || s.repair) continue
+    if (!s || !s.name || s.repair) continue
     let md = null
-    try { md = readLearnedSkill(cwd, s.name) } catch { md = null }
+    if (s.downloaded && s.path) {
+      try {
+        const abs = path.resolve(String(s.path))
+        const norm = abs.replace(/\\/g, "/")
+        if (norm.includes("/skill-downloads/") && norm.endsWith("/SKILL.md") && !norm.includes("/../")) {
+          md = fs.readFileSync(abs, "utf8")
+        }
+      } catch { md = null }
+    } else if (s.learned === true) {
+      try { md = readLearnedSkill(cwd, s.name) } catch { md = null }
+    }
     if (!md) continue
     let parsed
     try { parsed = parseSkillPlaybook(md) } catch { continue }

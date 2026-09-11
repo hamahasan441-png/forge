@@ -641,3 +641,45 @@ export function indexVerifiedToolPlaybooks(env = process.env) {
   return out
 }
 
+/**
+ * Body of a VERIFIED downloaded skill. CANDIDATE/INACTIVE return null.
+ * Sync. No fetch. No plugin-host.
+ */
+export function readDownloadedSkill(name, env = process.env) {
+  const n = validSkillName(name)
+  if (!n) return null
+  const rec = loadDownloadManifest(env, "skill").items?.[n]
+  if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
+  const file = skillMdPath(n, env)
+  try {
+    if (!fs.existsSync(file)) return null
+    const md = fs.readFileSync(file, "utf8")
+    if (!md.trim() || KERNEL_HINT.test(md)) return null
+    return md.length > 24000 ? md.slice(0, 24000) + "\n... (truncated)" : md
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Hostless markdown playbook for a VERIFIED downloaded tool.
+ * Never returns the .mjs source. Never spawns plugin-host.
+ */
+export function readDownloadedToolPlaybook(name, env = process.env) {
+  const n = String(name || "").trim()
+  if (!TOOL_NAME_RE.test(n) || TOOL_FORBIDDEN.has(n)) return null
+  const rec = loadDownloadManifest(env, "tool").items?.[n]
+  if (!rec || rec.lifecycle !== SKILL_LIFE.VERIFIED) return null
+  const desc = String(rec.description || n).slice(0, 240)
+  return [
+    `# ${n} (verified download)`,
+    "",
+    desc,
+    "",
+    "This is a hostless playbook. Follow the description. Do not spawn plugin-host.",
+    "Do not write ~/.forge/tools. Do not flip assumeYes.",
+    "",
+  ].join("\n")
+}
+
+
