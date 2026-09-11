@@ -274,6 +274,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             playbooks: (composed.playbooks || []).map((p) => p.name).slice(0, 3),
             mcp: (composed.mcp || []).map((m) => m.name).slice(0, 4),
             gaps: (composed.gaps?.gaps || []).map((g) => g.id).slice(0, 4),
+            claims: (composed.claims || []).slice(0, 3),
+            decisions: (composed.decisions || []).slice(0, 3),
           })
         }
         try { persistGaps(process.cwd(), composed.gaps, { task: state.objective }) } catch { /* persist is best-effort */ }

@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v75.0.0 — "dock"
+
+### Added (v75.0 — claims/decisions on the omega TUI dock)
+- **Dock.** `KNOWLEDGE_UPDATED` folds claims and decisions into UI state. The omega panel and `/status` task panel show `know claims … · decisions …`. `PLAN_COMPOSE` from meta is the source. Compose still never writes.
+- Never ACTIVE. Never `~/.forge/tools`.
+
+Tool-download progress, generated tests, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v74.0.0 — "cockpit"
 
 ### Added (v74.0 — steer + decisions + knowledge pane + honest download progress)
