@@ -178,8 +178,8 @@ console.log("== safety + wiring (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 79.0.0", VERSION, "79.0.0")
-  eq("package.json is 79.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "79.0.0")
+  eq("VERSION is 80.0.0", VERSION, "80.0.0")
+  eq("package.json is 80.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "80.0.0")
 }
 
 console.log(`\n== v29 suite: ${PASS} passed, ${FAIL} failed ==`)

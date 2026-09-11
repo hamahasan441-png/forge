@@ -3,6 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v80.0.0 — "verify2"
+
+### Added (v80.0 — P0 verification integrity, kernel still frozen)
+- **Execution result model.** `execresult.js`: stdout/stderr/exitCode/timedOut/killed/truncated/duration/signal/status. Status is PASS | FAIL | TIMEOUT | KILLED | BLOCKED | TRUNCATED | UNKNOWN.
+- **UNKNOWN and TRUNCATED never PASS.** Ledger `evaluateVerification` refuses truncated/killed as success. Skill tests and experiments use the same classifier.
+- **Evidence v2.** `evidence.json` carries `sourceFingerprint`, `evidenceVersion`, structured results, environment. Changed SKILL.md → fingerprint mismatch → dropped from verified index (stale evidence is not reused).
+- **Generated-test provenance.** `generated: true` + sourceGap/reason/generator/fingerprint. Not evidence until executed.
+- **`forge skill evidence` / `forge skill benchmark`.** Benchmark metrics are UNKNOWN when only structural verify ran. Never invented scores.
+
+Never auto-ACTIVE. Compose still never writes. Full ZIP unpack and named strategy variants stay leftovers.
+
 ## v79.0.0 — "complete"
 
 ### Added (v79.0 — remaining feature TODOs, kernel still frozen)

@@ -270,8 +270,8 @@ console.log("== router: text stays read_file; a png is read_image ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 79.0.0", VERSION, "79.0.0")
-  eq("package.json is 79.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "79.0.0")
+  eq("VERSION is 80.0.0", VERSION, "80.0.0")
+  eq("package.json is 80.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "80.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
   ok("files includes vision.js", pkg.files.includes("vision.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

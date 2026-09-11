@@ -1995,6 +1995,25 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           else err(r.error)
           break
         }
+        if (sub === "evidence") {
+          const name = parts[1]
+          if (!name) { err("usage: /skill evidence <name>"); break }
+          const { readSkillEvidence, evidenceIsFresh } = await import("./skilldl.js")
+          const ev = readSkillEvidence(name)
+          if (!ev) { err(`no evidence for "${name}"`); break }
+          console.log(bold(`evidence ${name}`) + dim(`  ${evidenceIsFresh(name) ? "fresh" : "stale"}`))
+          console.log(`  kind: ${ev.kind}  ok=${ev.ok === true}`)
+          break
+        }
+        if (sub === "benchmark") {
+          const name = parts[1]
+          if (!name) { err("usage: /skill benchmark <name>"); break }
+          const { benchmarkSkill } = await import("./skilldl.js")
+          const r = benchmarkSkill(name)
+          if (!r.ok) err(r.error)
+          else console.log(`${r.name}: ${r.metrics?.status || "UNKNOWN"} successRate=${r.metrics?.successRate}`)
+          break
+        }
         if (!sub || sub === "list") {
           const { listDownloads, skillDownloadsDir } = await import("./skilldl.js")
           const have = listDownloads()
@@ -2015,7 +2034,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
             : `rolled back ${r.name} → SUPERSEDED, restored ${r.restored}`)
           break
         }
-        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>] | /skill promote <name> | /skill rollback <name> | /skill ingest <zip|folder>`)
+        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>] | /skill promote <name> | /skill rollback <name> | /skill ingest <zip|folder> | /skill evidence <name> | /skill benchmark <name>`)
         break
       }
       case "claims": {

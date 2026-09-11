@@ -916,7 +916,39 @@ async function main() {
         console.log(formatDownloadReport(r))
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder>`)
+      if (sub === "evidence") {
+        const name = positional[2]
+        if (!name) { err("usage: forge skill evidence <name>"); process.exit(1); return }
+        const { readSkillEvidence, evidenceIsFresh } = await import("./skilldl.js")
+        const ev = readSkillEvidence(name)
+        if (!ev) { err(`no evidence for "${name}"`); process.exit(1); return }
+        const fresh = evidenceIsFresh(name)
+        if (JSON_OUT) { emitJson({ name, fresh, evidence: ev }); return }
+        console.log(bold(`evidence ${name}`) + dim(`  ${fresh ? "fresh" : "stale/missing fingerprint"}`))
+        console.log(`  kind: ${ev.kind}  v${ev.evidenceVersion || ev.v || 1}  ok=${ev.ok === true}`)
+        if (ev.sourceFingerprint) console.log(`  fingerprint: ${String(ev.sourceFingerprint).slice(0, 16)}…`)
+        for (const r of ev.results || []) {
+          console.log(`  ${r.status || (r.ok ? "PASS" : "FAIL")}  ${r.cmd || ""}`)
+        }
+        return
+      }
+      if (sub === "benchmark") {
+        const name = positional[2]
+        if (!name) { err("usage: forge skill benchmark <name>"); process.exit(1); return }
+        const { benchmarkSkill } = await import("./skilldl.js")
+        const r = benchmarkSkill(name)
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        const m = r.metrics || {}
+        console.log(bold(`benchmark ${r.name}`) + dim(`  ${r.kind}`))
+        if (m.status === "UNKNOWN") console.log(dim(`  ${r.reason || "UNKNOWN — not invented"}`))
+        else {
+          console.log(`  successRate ${m.successRate}  failureRate ${m.failureRate}  medianMs ${m.medianDurationMs}`)
+          console.log(dim("  tokens/interventions UNKNOWN unless measured"))
+        }
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder> | forge skill evidence <name> | forge skill benchmark <name>`)
       process.exit(1)
       return
     }
@@ -1636,6 +1668,8 @@ ${bold("usage")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
   ${cyan("forge skill verify <name|all>")}  structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)
+  ${cyan("forge skill evidence <name>")}   print stored evidence.json ${dim("fingerprint, PASS/FAIL/TIMEOUT/… — never invented")}
+  ${cyan("forge skill benchmark <name>")}  measured rates from evidence ${dim("UNKNOWN when structural only")}
   ${cyan("forge skill learn <name>")}      extract procedures from a VERIFIED skill (indexing is not learned)
   ${cyan("forge skill ttl <name> [<ms>]")} per-skill TTL override (ms); omit ms to print
   ${cyan("forge tool download <url>")}     download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
