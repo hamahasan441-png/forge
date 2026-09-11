@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v55.0.0 — "acquire"
+
+### Added (v55.0 — cheapest-source acquisition plan into compose / planner)
+- **Learn.** `planAcquire` picks the cheapest reliable source for each blocking gap: existing snapshot skill (`load_skill`) → repo `grep_files` → local docs → `web_search` last. Surfaces as `[learn]` and `LEARN:`.
+- **No dump.** Compose never fetches. Never injects webpage text. A search hint is not VERIFIED knowledge. `recordGapOutcome` stays the only VERIFIED path.
+- **Persist.** `knowgap.json` stores `{ method, tool, cost }` aggregates. No page text, no task text.
+
+Single mutating writer is unchanged. PLAN-v58 is the contract. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Research crawler, skill-forge 2.0, L6, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v54.0.0 — "knowgap"
 
 ### Added (v54.0 — required vs known vs skippable into compose / planner)
