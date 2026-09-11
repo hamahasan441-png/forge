@@ -66,6 +66,7 @@ import { blastFromWorld, emptyBlast, formatBlast } from "./impact.js"
 import { pickStrategy } from "./strategy.js"
 import { pickModelEmpiric } from "./empirics.js"
 import { pickVariant } from "./variant.js"
+import { pickKnowledge } from "./knowtype.js"
 
 const RADIUS_SHOW = 16
 const FILE_SHOW = 8
@@ -471,6 +472,7 @@ export function compose(task = "", opts = {}) {
   try { out.strategy = pickStrategy(q, { cwd, klass, limit: 3 }) } catch { out.strategy = [] }
   try { out.models = pickModelEmpiric({ limit: 3 }) } catch { out.models = [] }
   try { out.variants = pickVariant(q, { cwd, klass, limit: 3 }) } catch { out.variants = [] }
+  try { out.knowtype = pickKnowledge(q, { cwd, klass, limit: 4 }) } catch { out.knowtype = [] }
   return out
 }
 

@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v83.0.0 — "knowtype"
+
+### Added (v83.0 — typed knowledge, kernel still frozen)
+- **FACT | EXPERIENCE | LESSON | HYPOTHESIS.** `FORGE_HOME/projects/<hash>/knowtype.json` next to claims. Not a second memory.
+- **Hypothesis is never a fact.** FACT without evidence is stored as HYPOTHESIS. `asFact()` requires type FACT and evidence.
+- **Compose `[KNOW]`.** Read-only pick. MICRO skip. Hypotheses labeled `(unproven)`.
+- **CLI.** `forge knowtype list|add|pick` and `/knowtype`. Never auto-ACTIVE.
+
+Compose still never writes.
+
 ## v82.0.0 — "zipunpack"
 
 ### Added (v82.0 — ZIP/folder support files, kernel still frozen)

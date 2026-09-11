@@ -336,6 +336,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
         strategy: composed?.strategy || [],
         models: composed?.models || [],
         variants: composed?.variants || [],
+        knowtype: composed?.knowtype || [],
       })
       if (steer) lines.push("", steer)
     } catch { /* compose is best-effort */ }
@@ -2099,6 +2100,26 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const { snapshotKnowledge } = await import("./decisions.js")
           dispatchUI({ type: "KNOWLEDGE_UPDATED", ...snapshotKnowledge(cwd) })
         } catch { /* dock is best-effort */ }
+        break
+      }
+      case "knowtype": {
+        const parts = arg.split(/\s+/).filter(Boolean)
+        const { recordKnowledge, listKnowledge, pickKnowledge, formatKnowtype, KTYPE } = await import("./knowtype.js")
+        const sub = (parts[0] || "list").toLowerCase()
+        const cwd = process.cwd()
+        if (sub === "add") {
+          const r = recordKnowledge({ cwd, type: parts[1], text: parts.slice(2).join(" "), source: "chat" })
+          if (!r.ok) err(r.error)
+          else ok(`${r.type} ${r.id}${r.demoted ? " (unproven)" : ""}`)
+          break
+        }
+        if (sub === "pick") {
+          console.log(formatKnowtype(pickKnowledge(parts.slice(1).join(" "), { cwd })) || dim("  none"))
+          break
+        }
+        const rows = listKnowledge(cwd)
+        console.log(bold(`typed knowledge (${rows.length})`) + dim("  hypothesis is never a fact"))
+        for (const r of rows) console.log(`  ${(r.type === KTYPE.HYPOTHESIS ? "HYPOTHESIS (unproven)" : r.type).padEnd(22)} ${r.text}`)
         break
       }
       case "experiment": {

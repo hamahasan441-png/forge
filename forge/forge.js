@@ -1666,6 +1666,44 @@ async function main() {
       process.exit(1)
       return
     }
+    case "knowtype":
+    case "knowtypes": {
+      const { recordKnowledge, listKnowledge, pickKnowledge, formatKnowtype, KTYPE } = await import("./knowtype.js")
+      const sub = (positional[1] || "list").toLowerCase()
+      const cwd = process.cwd()
+      if (sub === "list") {
+        const rows = listKnowledge(cwd, positional[2] || null)
+        if (JSON_OUT) { emitJson({ items: rows }); return }
+        console.log(bold(`typed knowledge (${rows.length})`) + dim("  FACT > EXPERIENCE > LESSON > HYPOTHESIS (unproven)"))
+        if (!rows.length) console.log(dim("  none — forge knowtype add FACT|EXPERIENCE|LESSON|HYPOTHESIS <text>"))
+        for (const r of rows) {
+          const tag = r.type === KTYPE.HYPOTHESIS ? "HYPOTHESIS (unproven)" : r.type
+          console.log(`  ${tag.padEnd(22)} ${r.text}`)
+        }
+        return
+      }
+      if (sub === "add") {
+        const type = positional[2]
+        const text = positional.slice(3).join(" ")
+        if (!type || !text) { err("usage: forge knowtype add FACT|EXPERIENCE|LESSON|HYPOTHESIS <text> [--evidence …]"); process.exit(1); return }
+        const r = recordKnowledge({ cwd, type, text, evidence: flags.evidence || "", source: "cli" })
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        const note = r.demoted ? " (FACT without evidence → HYPOTHESIS)" : ""
+        ok(`${r.type} ${r.id}${note}`)
+        return
+      }
+      if (sub === "pick") {
+        const task = positional.slice(2).join(" ") || "medium repair"
+        const rows = pickKnowledge(task, { cwd })
+        if (JSON_OUT) { emitJson({ task, items: rows }); return }
+        console.log(formatKnowtype(rows) || dim("  none"))
+        return
+      }
+      err("unknown: forge knowtype — use list | add | pick")
+      process.exit(1)
+      return
+    }
     case "roles": {
       const { roleCatalog } = await import("./agentmanager.js")
       const rows = roleCatalog()
@@ -1740,6 +1778,7 @@ ${bold("usage")}
   ${cyan("forge knowledge")}              knowledge pane             ${dim("claims + decisions + gaps + downloads")}
   ${cyan("forge skill ingest <path>")}     ZIP / folder / SKILL.md → CANDIDATE ${dim("(extracts SKILL.md only; DOWNLOAD ≠ TRUST)")}
   ${cyan("forge variant list")}           strategy variants ${dim("family + strategy + version + fingerprint")}
+  ${cyan("forge knowtype list")}          typed knowledge ${dim("FACT | EXPERIENCE | LESSON | HYPOTHESIS — hypothesis is never a fact")}
   ${cyan("forge variant add <fam> <s>")}  author a CANDIDATE sibling ${dim("--repair \"…\"  never overwrites ACTIVE")}
   ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
