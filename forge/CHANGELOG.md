@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v70.0.0 — "ttl"
+
+### Added (v70.0 — per-skill TTL override)
+- **Record TTL.** `ttlMs` on a download overrides `FORGE_SKILL_TTL_MS`. `forge skill ttl <name> [<ms>]` and TUI `/skill ttl`. Invalid/missing `ttlMs` still uses the env default (30d). Short override can STALE a sibling while others stay VERIFIED.
+- Never ACTIVE. Compose still never fetches. Never `~/.forge/tools`.
+
+Drift detector, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v69.0.0 — "contradict"
 
 ### Added (v69.0 — STALE fails N times → CONTRADICTED)
