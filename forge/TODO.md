@@ -7,7 +7,7 @@ and tests are green. Never mark complete because a model wrote a spec.
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
 v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence, v68 stale,
-v69 contradict, v70 ttl, v71 drift (body sha vs last verifiedSha).
+v70 ttl, v71 drift, v72 claims (per-claim subject store under the project hash).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -26,7 +26,7 @@ DOWNLOAD ≠ TRUST.
 
 ## Knowledge
 
-- [ ] Per-claim subject store (still under `FORGE_HOME/projects/<hash>/`, not a second memory)
+- [ ] Claim lookup in compose [world] (still read-only; compose never writes claims)
 
 ## Strategy / tools / models
 

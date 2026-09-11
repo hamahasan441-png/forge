@@ -89,6 +89,7 @@ export const COMMANDS = [
   ["key", "<api-key>", "set API key for active provider"],
   ["skills", "[name]", "list skills, or load one into the conversation"],
   ["skill", "download|verify|learn", "download, verify, or extract procedures from a skill"],
+  ["claims", "[subject]", "project claims (not a second memory)"],
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
@@ -152,6 +153,7 @@ ${bold("setup")}
   /skill verify <name>  structurally verify a downloaded skill (pass → VERIFIED)
   /skill learn <name>   extract procedures from a VERIFIED skill (indexing is not learned)
   /skill ttl <name> [ms] per-skill TTL override (omit ms to print)
+  /claims [subject]     list project claims, or one subject (not a second memory)
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
@@ -1962,6 +1964,21 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           break
         }
         err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>]`)
+        break
+      }
+      case "claims": {
+        const { listClaims, getClaim, formatClaims, claimsPath } = await import("./claims.js")
+        const cwd = process.cwd()
+        const subject = arg.trim()
+        if (subject) {
+          const c = getClaim(cwd, subject)
+          if (!c) { err(`no claim for ${subject}`); break }
+          console.log(formatClaims([c], { subject }).trimEnd())
+          break
+        }
+        const rows = listClaims(cwd)
+        console.log(bold(`claims`) + dim(`  ${claimsPath(cwd)}`))
+        console.log(formatClaims(rows).trimEnd())
         break
       }
       case "tool": {

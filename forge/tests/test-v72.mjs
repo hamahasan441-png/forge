@@ -1,27 +1,25 @@
 #!/usr/bin/env node
 /**
- * forge — v71 drift: VERIFIED body sha mismatch → DRIFT, not STALE.
+ * forge — v72 claims: per-claim subject store under the project hash.
  *
- * Re-verify restores. Sibling unchanged. Never ACTIVE. Compose never fetches.
+ * Not a second memory. Compose never writes. Never ACTIVE.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v72-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v72-work-"))
 process.chdir(WORK)
 
-const {
-  downloadSkill, verifySkill, sweepDrift, indexVerifiedSkills,
-  readDownloadedSkill, listDownloads, skillDownloadsDir,
-  DRIFT, STALE,
-} = await import("../skilldl.js")
+const { recordClaim, getClaim, listClaims, claimsPath, validSubject } = await import("../claims.js")
+const { downloadSkill, verifySkill, learnSkill } = await import("../skilldl.js")
 const { SKILL_LIFE } = await import("../evolve.js")
+const { projectDir } = await import("../memory.js")
 const { evaluateSkills } = await import("../evaluate.js")
 const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../classify.js")
 const { defaultConfig, sanitizeProjectConfig } = await import("../config.js")
@@ -53,6 +51,12 @@ description: Responsive layout playbook
 # Web Design
 
 A layout playbook.
+
+## What worked
+Use a 12-column grid.
+
+## Files
+- layout.css
 `
 
 function mockFetch(body, { filename = "artifact.bin" } = {}) {
@@ -64,56 +68,48 @@ function mockFetch(body, { filename = "artifact.bin" } = {}) {
   })
 }
 
-function manPath() { return path.join(HOME, "skill-downloads", "manifest.json") }
-function loadMan() { return JSON.parse(fs.readFileSync(manPath(), "utf8")) }
-function saveMan(j) { fs.writeFileSync(manPath(), JSON.stringify(j, null, 1)) }
-function skillFile(id) { return path.join(skillDownloadsDir(), id, "SKILL.md") }
+console.log("== subject + recordClaim under project hash ==")
+{
+  eq("valid", validSubject("web-design"), "web-design")
+  eq("bad", validSubject("../x"), "")
+  const r = recordClaim({ cwd: WORK, subject: "web-design", text: "Use a 12-column grid.", source: "skill", skill: "web-design" })
+  eq("ok", r.ok, true)
+  const p = claimsPath(WORK)
+  ok("under projects hash", p.startsWith(projectDir(WORK)), p)
+  ok("named claims.json", p.endsWith("claims.json"))
+  eq("get text", getClaim(WORK, "web-design")?.text, "Use a 12-column grid.")
+  eq("listed", listClaims(WORK).some((c) => c.subject === "web-design"), true)
+  eq("missing", getClaim(WORK, "no-such"), null)
+  eq("empty refused", recordClaim({ cwd: WORK, subject: "web-design", text: "  " }).ok, false)
+}
 
-console.log("== body change → DRIFT; sibling stays VERIFIED; re-verify restores ==")
+console.log("== learnSkill upserts a claim; CANDIDATE does not ==")
 {
   await downloadSkill("https://example.com/web-design.skill", {
     fetchFn: mockFetch(STRUCT, { filename: "web-design.skill" }),
   })
-  await downloadSkill("https://example.com/fresh-name.skill", {
-    fetchFn: mockFetch(STRUCT.replace("web-design", "fresh-name"), { filename: "fresh-name.skill" }),
-  })
-  eq("a VERIFIED", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
-  eq("b VERIFIED", verifySkill("fresh-name").lifecycle, SKILL_LIFE.VERIFIED)
-  ok("verifiedSha stamped", !!loadMan().items["web-design"].verifiedSha)
-
-  fs.appendFileSync(skillFile("web-design"), "\nA harmless extra line.\n")
-  const demoted = sweepDrift()
-  ok("sweep names it", demoted.includes("web-design"), String(demoted))
-  eq("DRIFT", listDownloads().find((d) => d.id === "web-design")?.lifecycle, DRIFT)
-  eq("not STALE", listDownloads().find((d) => d.id === "web-design")?.lifecycle === STALE, false)
-  eq("sibling VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("hidden", indexVerifiedSkills().some((s) => s.name === "web-design"), false)
-  eq("sibling indexed", indexVerifiedSkills().some((s) => s.name === "fresh-name"), true)
-  eq("load hidden", readDownloadedSkill("web-design"), null)
-
-  const back = verifySkill("web-design")
-  eq("restored VERIFIED", back.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("not ACTIVE", back.lifecycle === SKILL_LIFE.ACTIVE, false)
-  eq("indexed again", indexVerifiedSkills().some((s) => s.name === "web-design"), true)
-  ok("body back", !!readDownloadedSkill("web-design"))
+  eq("candidate learn fails", (learnSkill("web-design", { cwd: WORK })).ok, false)
+  eq("no extra claim from candidate", listClaims(WORK).filter((c) => c.subject === "web-design").length, 1)
+  eq("verified", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
+  const learned = learnSkill("web-design", { cwd: WORK })
+  eq("learn ok", learned.ok, true)
+  eq("not ACTIVE", learned.lifecycle === SKILL_LIFE.ACTIVE, false)
+  const c = getClaim(WORK, "web-design")
+  ok("claim has procedure", /12-column/.test(c?.text || ""), c?.text)
+  eq("source skill", c?.source, "skill")
+  const mem = path.join(projectDir(WORK), "memory.md")
+  ok("did not write memory.md", !fs.existsSync(mem))
 }
 
-console.log("== missing verifiedSha is stamped, not instantly DRIFT ==")
+console.log("== CLI/TUI wired; compose never writes ==")
 {
-  const man = loadMan()
-  delete man.items["fresh-name"].verifiedSha
-  saveMan(man)
-  const demoted = sweepDrift()
-  eq("fresh not demoted", demoted.includes("fresh-name"), false)
-  eq("still VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
-  ok("clock stamped", !!loadMan().items["fresh-name"].verifiedSha)
-}
-
-console.log("== compose never fetches ==")
-{
+  const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
+  const chatSrc = fs.readFileSync(path.join(FORGE, "chat.js"), "utf8")
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
+  ok("CLI claims", /case "claims"/.test(forgeSrc) && /listClaims/.test(forgeSrc))
+  ok("TUI /claims", /case "claims"/.test(chatSrc))
+  ok("compose has no claims", !/claims\.js/.test(composeSrc) && !/recordClaim/.test(composeSrc))
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no sweepDrift", !/sweepDrift/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -132,6 +128,7 @@ console.log("== no side writes / frozen kernel + package ==")
   eq("VERSION is 72.0.0", VERSION, "72.0.0")
   const pkg = JSON.parse(fs.readFileSync(path.join(FORGE, "package.json"), "utf8"))
   eq("package.json is 72.0.0", pkg.version, "72.0.0")
+  ok("files includes claims.js", (pkg.files || []).includes("claims.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
   eq("custom is still index 17 (pick 18)", CATALOG[17]?.name, "custom")
   eq("apinex still after custom", CATALOG[18]?.name, "apinex")
@@ -144,7 +141,7 @@ console.log("== no side writes / frozen kernel + package ==")
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v71 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v72 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)
