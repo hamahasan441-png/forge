@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v71.0.0 — "drift"
+
+### Added (v71.0 — body sha vs last verifiedSha)
+- **Drift.** A VERIFIED download whose SKILL.md / tool `.mjs` no longer matches `verifiedSha` becomes **DRIFT**, not STALE, not CONTRADICTED. Hidden from `pickSkills` / `load_skill`. Missing `verifiedSha` is stamped now — no instant demote. Re-verify restores VERIFIED.
+- Never ACTIVE. Compose still never fetches. Never `~/.forge/tools`.
+
+Per-claim subject store, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v70.0.0 — "ttl"
 
 ### Added (v70.0 — per-skill TTL override)

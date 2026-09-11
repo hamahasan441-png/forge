@@ -1,25 +1,25 @@
 #!/usr/bin/env node
 /**
- * forge — v70 ttl: per-skill ttlMs overrides FORGE_SKILL_TTL_MS.
+ * forge — v71 drift: VERIFIED body sha mismatch → DRIFT, not STALE.
  *
- * Invalid/missing uses env default. Never ACTIVE. Compose never fetches.
+ * Re-verify restores. Sibling unchanged. Never ACTIVE. Compose never fetches.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v70-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-"))
 process.env.FORGE_HOME = HOME
-delete process.env.FORGE_SKILL_TTL_MS
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v70-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-work-"))
 process.chdir(WORK)
 
 const {
-  downloadSkill, verifySkill, sweepStale, indexVerifiedSkills,
-  listDownloads, setSkillTtl, getSkillTtl, skillTtlFor, STALE,
+  downloadSkill, verifySkill, sweepDrift, indexVerifiedSkills,
+  readDownloadedSkill, listDownloads, skillDownloadsDir,
+  DRIFT, STALE,
 } = await import("../skilldl.js")
 const { SKILL_LIFE } = await import("../evolve.js")
 const { evaluateSkills } = await import("../evaluate.js")
@@ -67,16 +67,9 @@ function mockFetch(body, { filename = "artifact.bin" } = {}) {
 function manPath() { return path.join(HOME, "skill-downloads", "manifest.json") }
 function loadMan() { return JSON.parse(fs.readFileSync(manPath(), "utf8")) }
 function saveMan(j) { fs.writeFileSync(manPath(), JSON.stringify(j, null, 1)) }
+function skillFile(id) { return path.join(skillDownloadsDir(), id, "SKILL.md") }
 
-console.log("== skillTtlFor ==")
-{
-  eq("missing uses default 30d", skillTtlFor({}), 30 * 24 * 60 * 60 * 1000)
-  eq("override", skillTtlFor({ ttlMs: 5000 }), 5000)
-  eq("zero ignored", skillTtlFor({ ttlMs: 0 }), 30 * 24 * 60 * 60 * 1000)
-  eq("negative ignored", skillTtlFor({ ttlMs: -1 }), 30 * 24 * 60 * 60 * 1000)
-}
-
-console.log("== short override STALEs one sibling; other stays VERIFIED ==")
+console.log("== body change → DRIFT; sibling stays VERIFIED; re-verify restores ==")
 {
   await downloadSkill("https://example.com/web-design.skill", {
     fetchFn: mockFetch(STRUCT, { filename: "web-design.skill" }),
@@ -86,43 +79,41 @@ console.log("== short override STALEs one sibling; other stays VERIFIED ==")
   })
   eq("a VERIFIED", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
   eq("b VERIFIED", verifySkill("fresh-name").lifecycle, SKILL_LIFE.VERIFIED)
+  ok("verifiedSha stamped", !!loadMan().items["web-design"].verifiedSha)
 
-  const got = getSkillTtl("web-design")
-  eq("get default override null", got.ttlMs, null)
-  ok("get effective 30d", got.effective === 30 * 24 * 60 * 60 * 1000)
-
-  const set = setSkillTtl("web-design", 1000)
-  eq("set ok", set.ok, true)
-  eq("set ttlMs", set.ttlMs, 1000)
-  eq("not ACTIVE", set.lifecycle === SKILL_LIFE.ACTIVE, false)
-
-  const bad = setSkillTtl("web-design", 0)
-  eq("zero refused", bad.ok, false)
-  eq("still 1000", getSkillTtl("web-design").ttlMs, 1000)
-  eq("missing refused", setSkillTtl("no-such", 1000).ok, false)
-
-  const man = loadMan()
-  man.items["web-design"].verifiedAt = Date.now() - 5000
-  man.items["fresh-name"].verifiedAt = Date.now() - 5000
-  saveMan(man)
-  const demoted = sweepStale()
-  ok("short one demoted", demoted.includes("web-design"), String(demoted))
-  eq("default sibling not demoted", demoted.includes("fresh-name"), false)
-  eq("short is STALE", listDownloads().find((d) => d.id === "web-design")?.lifecycle, STALE)
-  eq("sibling still VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("short hidden", indexVerifiedSkills().some((s) => s.name === "web-design"), false)
+  fs.appendFileSync(skillFile("web-design"), "\nA harmless extra line.\n")
+  const demoted = sweepDrift()
+  ok("sweep names it", demoted.includes("web-design"), String(demoted))
+  eq("DRIFT", listDownloads().find((d) => d.id === "web-design")?.lifecycle, DRIFT)
+  eq("not STALE", listDownloads().find((d) => d.id === "web-design")?.lifecycle === STALE, false)
+  eq("sibling VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
+  eq("hidden", indexVerifiedSkills().some((s) => s.name === "web-design"), false)
   eq("sibling indexed", indexVerifiedSkills().some((s) => s.name === "fresh-name"), true)
+  eq("load hidden", readDownloadedSkill("web-design"), null)
+
+  const back = verifySkill("web-design")
+  eq("restored VERIFIED", back.lifecycle, SKILL_LIFE.VERIFIED)
+  eq("not ACTIVE", back.lifecycle === SKILL_LIFE.ACTIVE, false)
+  eq("indexed again", indexVerifiedSkills().some((s) => s.name === "web-design"), true)
+  ok("body back", !!readDownloadedSkill("web-design"))
 }
 
-console.log("== CLI/TUI wired; compose never fetches ==")
+console.log("== missing verifiedSha is stamped, not instantly DRIFT ==")
 {
-  const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
-  const chatSrc = fs.readFileSync(path.join(FORGE, "chat.js"), "utf8")
+  const man = loadMan()
+  delete man.items["fresh-name"].verifiedSha
+  saveMan(man)
+  const demoted = sweepDrift()
+  eq("fresh not demoted", demoted.includes("fresh-name"), false)
+  eq("still VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
+  ok("clock stamped", !!loadMan().items["fresh-name"].verifiedSha)
+}
+
+console.log("== compose never fetches ==")
+{
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
-  ok("CLI skill ttl", /skill ttl/.test(forgeSrc) && /runTtl/.test(forgeSrc))
-  ok("TUI /skill ttl", /\/skill ttl/.test(chatSrc) && /setSkillTtl/.test(chatSrc))
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no setSkillTtl", !/setSkillTtl/.test(composeSrc))
+  ok("compose has no sweepDrift", !/sweepDrift/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -153,7 +144,7 @@ console.log("== no side writes / frozen kernel + package ==")
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v70 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v71 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)
