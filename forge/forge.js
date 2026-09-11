@@ -109,7 +109,16 @@ async function runSkillDownload(urls) {
     console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
     return 0
   }
-  const results = await downloadSkills(list)
+  const results = await downloadSkills(list, JSON_OUT ? {} : {
+    onProgress: (p) => {
+      if (p.phase === "start") process.stderr.write(dim(`  download start ${p.url}\n`))
+      else if (p.phase === "read" && p.received) {
+        const tot = p.total ? `${p.received}/${p.total}` : `${p.received} B`
+        const pct = p.pct == null ? "" : ` ${p.pct}%`
+        process.stderr.write(dim(`  download ${tot}${pct}\n`))
+      }
+    },
+  })
   if (JSON_OUT) {
     emitJson({ results: results.map((r) => ({ ok: r.ok, error: r.error || null, reused: r.reused || false, record: r.record || null })) })
   } else {
@@ -1453,6 +1462,50 @@ async function main() {
       console.log(formatClaims(rows).trimEnd())
       return
     }
+    case "decisions": {
+      const { listDecisions, getDecision, recordDecision, formatDecisions, decisionsPath } = await import("./decisions.js")
+      const cwd = process.cwd()
+      const sub = (positional[1] || "").trim()
+      if (sub === "add") {
+        const title = positional[2]
+        const reason = positional.slice(3).join(" ")
+        if (!title || !reason) { err("usage: forge decisions add <title> <reason>"); process.exit(1); return }
+        const r = recordDecision({ cwd, title, reason })
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`decision ${r.title} recorded`)
+        return
+      }
+      if (sub) {
+        const d = getDecision(cwd, sub)
+        if (JSON_OUT) { emitJson({ title: sub, decision: d }); return }
+        if (!d) { err(`no decision for ${sub}`); process.exit(1); return }
+        console.log(formatDecisions([d]).trimEnd())
+        return
+      }
+      const rows = listDecisions(cwd)
+      if (JSON_OUT) { emitJson({ path: decisionsPath(cwd), count: rows.length, decisions: rows }); return }
+      console.log(bold(`decisions`) + dim(`  ${decisionsPath(cwd)}`))
+      console.log(formatDecisions(rows).trimEnd())
+      return
+    }
+    case "knowledge": {
+      const { listClaims } = await import("./claims.js")
+      const { listDecisions, formatKnowledgePane } = await import("./decisions.js")
+      const { loadGapStats } = await import("./knowgap.js")
+      const { listDownloads } = await import("./skilldl.js")
+      const cwd = process.cwd()
+      const stats = loadGapStats(cwd)
+      const pane = {
+        claims: listClaims(cwd),
+        decisions: listDecisions(cwd),
+        gaps: { gaps: Object.values(stats.domains || {}) },
+        downloads: listDownloads(),
+      }
+      if (JSON_OUT) { emitJson(pane); return }
+      console.log(formatKnowledgePane(pane).trimEnd())
+      return
+    }
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -1513,6 +1566,8 @@ ${bold("usage")}
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
   ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
+  ${cyan("forge decisions [add]")}        architecture decision log  ${dim("~/.forge/projects/<hash>/decisions.json")}
+  ${cyan("forge knowledge")}              knowledge pane             ${dim("claims + decisions + gaps + downloads")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 12 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}

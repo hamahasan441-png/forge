@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v74.0.0 — "cockpit"
+
+### Added (v74.0 — steer + decisions + knowledge pane + honest download progress)
+- **TRY FIRST from claims.** If no plugin/skill/know playbook, matching claims become the steer. `CLAIMS` / `DECISIONS` lines. Agent, chat, and meta pass them through.
+- **Architecture log.** `FORGE_HOME/projects/<hash>/decisions.json`. `forge decisions add <title> <reason>`, TUI `/decisions`. Compose `[decisions]` is read-only. MICRO skip unless named.
+- **Knowledge pane.** `forge knowledge` / `/knowledge` lists claims, decisions, gaps, downloads. Not a second memory.
+- **Download progress.** `onBytes` on pinnedFetch (cap 99% until the body is complete). `/skill download` prints `received/total`. Never a fake 100% on failure. Compose still never fetches.
+
+Generated tests from a gap, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v73.0.0 — "cite"
 
 ### Added (v73.0 — claims join compose, read-only)

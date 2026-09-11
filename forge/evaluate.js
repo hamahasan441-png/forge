@@ -136,12 +136,14 @@ export function formatSkillPicks(picks = []) {
  * page dump). Never dumps the 40-name pack.
  * MICRO callers pass empty plugins / know / tools / playbooks / mcp / gaps.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null, claims = [], decisions = [] } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
   const knowBooks = (know || []).filter((k) => k && k.repair).slice(0, 2)
-  const books = pluginBooks.length ? pluginBooks : skillBooks.length ? skillBooks : knowBooks
+  const claimBooks = (claims || []).filter((c) => c && (c.text || c.repair)).slice(0, 2)
+    .map((c) => ({ name: c.subject || c.name, repair: c.repair || c.text, files: c.files, command: c.command }))
+  const books = pluginBooks.length ? pluginBooks : skillBooks.length ? skillBooks : knowBooks.length ? knowBooks : claimBooks
   if (books.length) {
     lines.push("TRY FIRST (known repair — apply it, then verify; do not rediscover):")
     for (const p of books) {
@@ -202,6 +204,14 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
   }
   const blastLine = formatBlastSteer(blast)
   if (blastLine) lines.push(blastLine)
+  const namedClaims = (claims || []).map((c) => c && (c.subject || c.name)).filter(Boolean).slice(0, 3)
+  if (namedClaims.length) {
+    lines.push(`CLAIMS: ${namedClaims.join(", ")} — apply known subject, do not rediscover`)
+  }
+  const namedDec = (decisions || []).map((d) => d && d.title).filter(Boolean).slice(0, 3)
+  if (namedDec.length) {
+    lines.push(`DECISIONS: ${namedDec.join(", ")} — honor accepted architecture`)
+  }
   if (avoid?.length) lines.push(`AVOID: ${avoid.slice(0, 4).join("; ")}`)
   const pref = Array.isArray(tools?.prefer) ? tools.prefer : []
   const av = Array.isArray(tools?.avoid) ? tools.avoid : []

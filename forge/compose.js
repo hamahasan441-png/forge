@@ -42,6 +42,8 @@
  * never walks the repo and never writes. A miss is UNKNOWN, not "none".
  * v73: [claims] from the project subject store. Compose never writes
  * claims.json. MICRO/SMALL skip unless the subject is named.
+ * v74: [decisions] from the architecture log. Claims also reach formatSteer
+ * TRY FIRST. Compose still never writes.
  */
 import path from "node:path"
 import fs from "node:fs"
@@ -59,6 +61,7 @@ import { relevantLessons } from "./lessons.js"
 import { relevantTools, formatToolMem, emptyTools } from "./toolintel.js"
 import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
 import { listClaims, pickClaims, formatClaimLines } from "./claims.js"
+import { listDecisions, pickDecisions, formatDecisionLines } from "./decisions.js"
 import { blastFromWorld, emptyBlast, formatBlast } from "./impact.js"
 
 const RADIUS_SHOW = 16
@@ -320,6 +323,7 @@ export function emptyCompose(klass = null) {
     gaps: emptyGaps(),
     blast: emptyBlast(),
     claims: [],
+    decisions: [],
   }
 }
 
@@ -458,6 +462,9 @@ export function compose(task = "", opts = {}) {
   if (opts.includeClaims !== false) {
     try { out.claims = pickClaims(q, listClaims(cwd), { klass, limit: 3 }) } catch { out.claims = [] }
   }
+  if (opts.includeDecisions !== false) {
+    try { out.decisions = pickDecisions(q, listDecisions(cwd), { klass, limit: 3 }) } catch { out.decisions = [] }
+  }
   return out
 }
 
@@ -481,6 +488,7 @@ function onceKey(task, opts = {}) {
     opts.includeGaps !== false ? "g" : "-",
     opts.includeBlast !== false ? "r" : "-",
     opts.includeClaims !== false ? "k" : "-",
+    opts.includeDecisions !== false ? "d" : "-",
   ].join("")
   const plugs = Array.isArray(opts.plugins)
     ? opts.plugins.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
@@ -624,6 +632,7 @@ export function formatCompose(c) {
   const gapBlock = formatGaps(c.gaps)
   if (gapBlock) lines.push(gapBlock)
   for (const line of formatClaimLines(c.claims)) lines.push(line)
+  for (const line of formatDecisionLines(c.decisions)) lines.push(line)
   return lines.join("\n")
 }
 
