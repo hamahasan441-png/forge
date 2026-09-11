@@ -41,7 +41,7 @@ import { resolveDataDir } from "./config.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { writeStateFile } from "./securefs.js"
 import { validSkillName, skillDescription, parseSkillPlaybook } from "./skills.js"
-import { SKILL_LIFE } from "./evolve.js"
+import { SKILL_LIFE, supersedeSkill } from "./evolve.js"
 import { classifyCommand } from "./shellguard.js"
 import { recordClaim } from "./claims.js"
 
@@ -227,6 +227,9 @@ function recordVerifyFail(name, env, kind = "skill") {
     ? (n >= skillFailLimit(env) ? CONTRADICTED : STALE)
     : INACTIVE
   setLifecycle(name, next, env, kind, { failCount: n })
+  if (kind === "skill" && next === CONTRADICTED) {
+    try { supersedeSkill(process.cwd(), name) } catch { /* learned sibling is best-effort */ }
+  }
   return next
 }
 
@@ -706,6 +709,16 @@ export function extractTestCommands(md) {
   return out
 }
 
+/**
+ * When ## Tests is missing, derive up to 2 shellguard-safe commands from
+ * ## Verify / files. Never invent a toolchain. Never skip the ledger.
+ */
+export function generateSkillTests(md) {
+  const play = parseSkillPlaybook(md)
+  const cmd = String(play.command || "").trim()
+  return cmd && cmd.length <= 200 ? [cmd] : []
+}
+
 function refuseTestLevel(level) {
   return level === "block" || level === "danger" || level === "confirm"
 }
@@ -807,7 +820,7 @@ function issuesForTool(id, rec, env) {
  * ~/.forge/tools. Pass → VERIFIED. Fail → INACTIVE. Missing → not ok.
  * No ## Tests → structural evidence. Dangerous commands are not executed.
  */
-export function verifySkill(name, { env = process.env } = {}) {
+export function verifySkill(name, { env = process.env, generate = false } = {}) {
   const id = String(name || "").trim()
   const man = loadDownloadManifest(env, "skill")
   const rec = man.items?.[id]
@@ -820,7 +833,9 @@ export function verifySkill(name, { env = process.env } = {}) {
   }
   let md = ""
   try { md = fs.readFileSync(skillMdPath(id, env), "utf8") } catch { /* issuesForSkill already read */ }
-  const commands = extractTestCommands(md)
+  const authored = extractTestCommands(md)
+  const generated = (!authored.length && generate) ? generateSkillTests(md) : []
+  const commands = authored.length ? authored : generated
   if (!commands.length) {
     const evidence = { v: 1, kind: "structural", commands: [], results: [], at: Date.now() }
     saveEvidence(id, evidence, env)
@@ -840,12 +855,12 @@ export function verifySkill(name, { env = process.env } = {}) {
     const why = failed.map((r) => r.skipped
       ? `test refused (${r.level}): ${r.cmd}`
       : `test failed (${r.timed ? "timeout" : r.code}): ${r.cmd}`)
-    const evidence = { v: 1, kind: "behavioral", ok: false, commands, results, at: Date.now() }
+    const evidence = { v: 1, kind: generated.length ? "generated" : "behavioral", ok: false, generated: generated.length > 0, commands, results, at: Date.now() }
     saveEvidence(id, evidence, env)
     const life = recordVerifyFail(id, env, "skill")
     return { ok: false, name: id, lifecycle: life, issues: why, evidence }
   }
-  const evidence = { v: 1, kind: "behavioral", ok: true, commands, results, at: Date.now() }
+  const evidence = { v: 1, kind: generated.length ? "generated" : "behavioral", ok: true, generated: generated.length > 0, commands, results, at: Date.now() }
   saveEvidence(id, evidence, env)
   const already = rec.lifecycle === SKILL_LIFE.VERIFIED
   setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")

@@ -3,6 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v77.0.0 — "skillver"
+
+### Added (v77.0 — versioned skills, rollback, generated tests, tool progress)
+- **Versions.** A second author of a VERIFIED/ACTIVE learned skill writes `{name}-v2` as CANDIDATE. v1 stays. `forge skill promote <name>` makes v2 ACTIVE and v1 SUPERSEDED. `forge skill rollback <name>` restores v1. Both histories kept. Never auto-ACTIVE.
+- **Supersede.** A downloaded skill that becomes CONTRADICTED supersedes a learned sibling of the same name.
+- **Generated tests.** `generateSkillTests` derives a shellguard-safe command from `## Verify` when `verifySkill({ generate: true })`. Default verify is still v67 (`## Tests` only; no tests → structural). Fail → INACTIVE.
+- **Tool download progress.** `/tool download` and `forge tool download` print `received/total`, max 99% until stored.
+- **Idle header.** Omega header and idle screen can show the knowledge dock line.
+
+Research-from-gap, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v76.0.0 — "live"
 
 ### Added (v76.0 — dock refresh without PLAN_COMPOSE)

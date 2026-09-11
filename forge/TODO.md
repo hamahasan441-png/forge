@@ -7,7 +7,7 @@ and tests are green. Never mark complete because a model wrote a spec.
 Shipped (gone from this list): v54 knowgap, v55 acquire, v56 ingest,
 v57 priority, v58 skilllife, v59 contradict, v60 blast, v62 skilldl,
 v63 verify, v64 wire, v65 discover, v66 learn, v67 evidence, v68 stale,
-v74 cockpit, v75 dock, v76 live (knowledge dock refresh on /claims without PLAN_COMPOSE).
+v75 dock, v76 live, v77 skillver (versioned skills, rollback, CONTRADICTED supersede, generated tests, tool download progress).
 See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
@@ -18,15 +18,11 @@ DOWNLOAD ≠ TRUST.
 ## Skill forge 2.0
 
 - [ ] Research → implement a new skill from a gap (not only `authorSkill` from a repair)
-- [ ] Validate a CANDIDATE with generated tests before VERIFIED (v67 runs author `## Tests` only)
 - [ ] Benchmark a playbook vs the repair it came from
-- [ ] Deprecate / supersede a learned skill when CONTRADICTED
-- [ ] Versioned skills (v2 is a new CANDIDATE; v1 stays ACTIVE until v2 beats it)
-- [ ] Rollback ACTIVE v2 → v1 on regression; keep both histories
 
 ## Knowledge
 
-- [ ] Knowledge dock in the idle header (still never writes)
+- [ ] Knowledge dock in chat without a live TUI store (CLI-only status)
 
 ## Strategy / tools / models
 
@@ -39,7 +35,6 @@ DOWNLOAD ≠ TRUST.
 ## Tests / architecture
 
 - [ ] Test generation for a blocking gap (still never skip tests without a ledger)
-- [ ] TUI download progress for tools (`/tool download` status line)
 
 ## Bench / agents / kernel
 
