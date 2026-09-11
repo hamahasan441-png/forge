@@ -916,7 +916,50 @@ async function main() {
         console.log(formatDownloadReport(r))
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder>`)
+      if (sub === "evidence") {
+        const name = positional[2]
+        if (!name) { err("usage: forge skill evidence <name>"); process.exit(1); return }
+        const { readSkillEvidence, evidenceIsFresh } = await import("./skilldl.js")
+        const ev = readSkillEvidence(name)
+        if (!ev) { err(`no evidence for "${name}"`); process.exit(1); return }
+        const fresh = evidenceIsFresh(name)
+        if (JSON_OUT) { emitJson({ name, fresh, evidence: ev }); return }
+        console.log(bold(`evidence ${name}`) + dim(`  ${fresh ? "fresh" : "stale/missing fingerprint"}`))
+        console.log(`  kind: ${ev.kind}  v${ev.evidenceVersion || ev.v || 1}  ok=${ev.ok === true}`)
+        if (ev.sourceFingerprint) console.log(`  fingerprint: ${String(ev.sourceFingerprint).slice(0, 16)}…`)
+        for (const r of ev.results || []) {
+          console.log(`  ${r.status || (r.ok ? "PASS" : "FAIL")}  ${r.cmd || ""}`)
+        }
+        return
+      }
+      if (sub === "benchmark") {
+        const name = positional[2]
+        if (!name) { err("usage: forge skill benchmark <name>"); process.exit(1); return }
+        const { benchmarkSkill } = await import("./skilldl.js")
+        const r = benchmarkSkill(name)
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        const m = r.metrics || {}
+        console.log(bold(`benchmark ${r.name}`) + dim(`  ${r.kind}`))
+        if (m.status === "UNKNOWN") console.log(dim(`  ${r.reason || "UNKNOWN — not invented"}`))
+        else {
+          console.log(`  successRate ${m.successRate}  failureRate ${m.failureRate}  medianMs ${m.medianDurationMs}`)
+          console.log(dim("  tokens/interventions UNKNOWN unless measured"))
+        }
+        return
+      }
+      if (sub === "variant") {
+        const skill = positional[2]
+        const strat = positional[3]
+        if (!skill || !strat) { err("usage: forge skill variant <name> <strategy>"); process.exit(1); return }
+        const { variantFromSkill } = await import("./variant.js")
+        const r = variantFromSkill(process.cwd(), skill, strat)
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`variant ${r.name}  ${r.strategy} v${r.version}  ${r.lifecycle}${r.reused ? " (reused)" : ""}`)
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder> | forge skill evidence <name> | forge skill benchmark <name> | forge skill variant <name> <strategy>`)
       process.exit(1)
       return
     }
@@ -1575,6 +1618,54 @@ async function main() {
       else console.log(formatEmpiric(rows))
       return
     }
+    case "variant":
+    case "variants": {
+      const { authorVariant, listVariants, pickVariant, formatVariants, recordVariantOutcome } = await import("./variant.js")
+      const sub = (positional[1] || "list").toLowerCase()
+      const cwd = process.cwd()
+      if (sub === "list") {
+        const fam = positional[2] || null
+        const rows = listVariants(cwd, fam)
+        if (JSON_OUT) { emitJson({ variants: rows }); return }
+        console.log(bold(`strategy variants (${rows.length})`) + dim("  family+strategy+version+fingerprint — siblings coexist"))
+        if (!rows.length) console.log(dim("  none — forge variant add <family> <strategy> --repair \"…\""))
+        for (const v of rows) {
+          console.log(`  ${String(v.name).padEnd(36)} ${v.lifecycle || "CANDIDATE"}  ${v.strategy} v${v.version}  rate=${Math.round((v.rate || 0) * 100)}%`)
+        }
+        return
+      }
+      if (sub === "add") {
+        const family = positional[2]
+        const strategy = positional[3]
+        const repair = typeof flags.repair === "string" ? flags.repair : positional.slice(4).join(" ")
+        if (!family || !strategy || !repair) { err("usage: forge variant add <family> <strategy> --repair \"what worked\""); process.exit(1); return }
+        const r = authorVariant({ cwd, family, strategy, repair, task: flags.task || "" })
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`variant ${r.name}  CANDIDATE  fp ${String(r.fingerprint).slice(0, 12)}…`)
+        return
+      }
+      if (sub === "pick") {
+        const task = positional.slice(2).join(" ") || "medium repair"
+        const rows = pickVariant(task, { cwd })
+        if (JSON_OUT) { emitJson({ task, variants: rows }); return }
+        console.log(formatVariants(rows) || dim("  none"))
+        return
+      }
+      if (sub === "score") {
+        const name = positional[2]
+        const pass = positional[3] !== "fail"
+        if (!name) { err("usage: forge variant score <name> [ok|fail]"); process.exit(1); return }
+        const rec = recordVariantOutcome({ cwd, name, ok: pass })
+        if (!rec) { err(`unknown variant "${name}"`); process.exit(1); return }
+        if (JSON_OUT) { emitJson(rec); return }
+        ok(`scored ${name}  ${Math.round((rec.rate || 0) * 100)}% n=${rec.samples}`)
+        return
+      }
+      err("unknown: forge variant — use list | add | pick | score")
+      process.exit(1)
+      return
+    }
     case "roles": {
       const { roleCatalog } = await import("./agentmanager.js")
       const rows = roleCatalog()
@@ -1636,6 +1727,8 @@ ${bold("usage")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
   ${cyan("forge skill verify <name|all>")}  structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)
+  ${cyan("forge skill evidence <name>")}   print stored evidence.json ${dim("fingerprint, PASS/FAIL/TIMEOUT/… — never invented")}
+  ${cyan("forge skill benchmark <name>")}  measured rates from evidence ${dim("UNKNOWN when structural only")}
   ${cyan("forge skill learn <name>")}      extract procedures from a VERIFIED skill (indexing is not learned)
   ${cyan("forge skill ttl <name> [<ms>]")} per-skill TTL override (ms); omit ms to print
   ${cyan("forge tool download <url>")}     download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
@@ -1646,7 +1739,8 @@ ${bold("usage")}
   ${cyan("forge decisions [add]")}        architecture decision log  ${dim("~/.forge/projects/<hash>/decisions.json")}
   ${cyan("forge knowledge")}              knowledge pane             ${dim("claims + decisions + gaps + downloads")}
   ${cyan("forge skill ingest <path>")}     ZIP / folder / SKILL.md → CANDIDATE ${dim("(extracts SKILL.md only; DOWNLOAD ≠ TRUST)")}
-  ${cyan("forge empirics")}               model outcomes from real runs ${dim("not the static registry")}
+  ${cyan("forge variant list")}           strategy variants ${dim("family + strategy + version + fingerprint")}
+  ${cyan("forge variant add <fam> <s>")}  author a CANDIDATE sibling ${dim("--repair \"…\"  never overwrites ACTIVE")}
   ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}

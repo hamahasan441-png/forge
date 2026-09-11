@@ -137,13 +137,16 @@ export function evaluateVerification(command, result, opts = {}) {
   const resolved = resolveExitCode(opts, out)
   const exitCode = resolved
   const timedOut = exitCode === 124 || /timed out after|TimeoutError/i.test(out)
+  const truncated = opts.truncated === true
+  const killed = opts.killed === true || opts.signal === "SIGKILL"
   const type = opts.type || classifyCommand(command)
 
   const observed = exitCode !== UNKNOWN_EXIT_CODE
   const shape = detectFailureShape(out)
   // Success requires RELIABLE evidence: an OBSERVED exit status of 0, no
-  // timeout and no failure shape in the output. Unknown status ⇒ not passed.
-  const passed = observed && exitCode === 0 && !timedOut && !shape
+  // timeout, no truncation, no kill, and no failure shape in the output.
+  // Unknown / truncated / killed ⇒ not passed. Never infer PASS from tails.
+  const passed = observed && exitCode === 0 && !timedOut && !shape && !truncated && !killed
 
   const evidence = extractEvidence(out, type)
 
@@ -173,6 +176,8 @@ export function evaluateVerification(command, result, opts = {}) {
     timestamp: opts.timestamp ?? Date.now(),
     confidence: confidenceFor(type, passed, out, observed),
     timed_out: timedOut,
+    truncated: truncated === true,
+    killed: killed === true,
     command: String(command).slice(0, 300),
     duration: opts.duration ?? null,
     // v21.1 P1 — provenance: where/when the check ran and what it covered.

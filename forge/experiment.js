@@ -6,13 +6,13 @@
  * Fail → CONTRADICTED. Never invent npm test. Never skip without a ledger.
  * Never auto-ACTIVE. Compose never writes. Not a second infogain/hypothesis.
  */
-import { spawnSync } from "node:child_process"
 import { classifyCommand } from "./shellguard.js"
 import { recordGapOutcome, loadGapStats, LIFECYCLE, domainIds } from "./knowgap.js"
 import { authorSkill, SKILL_LIFE } from "./evolve.js"
 import { parseSkillPlaybook } from "./skills.js"
 import { TASK_CLASS } from "./classify.js"
 import { recordStrategy } from "./strategy.js"
+import { runCommand, EXEC_STATUS, generatedTestProvenance } from "./execresult.js"
 
 const TEST_TIMEOUT_MS = 15_000
 const REFUSE = new Set(["block", "danger", "confirm"])
@@ -21,20 +21,31 @@ const INVENTED = /^(npm test|yarn test|pnpm test|cargo test|pytest|go test)\b/i
 
 export function generateGapTest(gap, { command, blast } = {}) {
   const explicit = String(command || "").trim()
-  if (explicit) return { ok: true, command: explicit.slice(0, 200), source: "explicit" }
+  if (explicit) {
+    return {
+      ok: true, command: explicit.slice(0, 200), source: "explicit",
+      provenance: generatedTestProvenance({ command: explicit, sourceGap: gap?.id, reason: "explicit --command", generator: "forge-generateGapTest" }),
+    }
+  }
   const mapped = (blast?.tests || gap?.acquire?.tests || []).map((t) => String(t || "").trim()).find(Boolean)
   if (mapped) {
     if (INVENTED.test(mapped)) {
       return { ok: false, skipped: "no-focused-test", reason: "mapped toolchain is invented — pass --command to run it" }
     }
-    return { ok: true, command: mapped.slice(0, 200), source: "graph" }
+    return {
+      ok: true, command: mapped.slice(0, 200), source: "graph",
+      provenance: generatedTestProvenance({ command: mapped, sourceGap: gap?.id, reason: "mapped from blast/acquire tests", generator: "forge-generateGapTest" }),
+    }
   }
   const q = String(gap?.acquire?.query || "").trim()
   if (gap?.acquire?.method === "verify" && q && !/^verify\s/i.test(q) && q !== "verify with a focused test, do not re-search") {
     if (INVENTED.test(q)) {
       return { ok: false, skipped: "no-focused-test", reason: "acquire query invents a toolchain — pass --command" }
     }
-    return { ok: true, command: q.slice(0, 200), source: "acquire" }
+    return {
+      ok: true, command: q.slice(0, 200), source: "acquire",
+      provenance: generatedTestProvenance({ command: q, sourceGap: gap?.id, reason: "acquire verify query", generator: "forge-generateGapTest" }),
+    }
   }
   return {
     ok: false,
@@ -81,21 +92,24 @@ export function runExperiment({
     ledger.push({ skipped: "shellguard", command: hypo.command, level: cls.level })
     return { ok: false, skipped: "shellguard", command: hypo.command, level: cls.level, ledger, id: domain }
   }
-  const r = spawnSync("sh", ["-c", hypo.command], {
-    cwd,
-    env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: cwd, LANG: "C" },
-    timeout: TEST_TIMEOUT_MS,
-    encoding: "utf8",
+  const exec = runCommand(hypo.command, { cwd, timeoutMs: TEST_TIMEOUT_MS })
+  const passed = exec.status === EXEC_STATUS.PASS
+  ledger.push({
+    command: hypo.command,
+    ok: passed,
+    code: exec.exitCode,
+    timed: exec.timedOut,
+    status: exec.status,
+    truncated: exec.truncated,
+    killed: exec.killed,
+    level: cls.level,
   })
-  const timed = r.error?.code === "ETIMEDOUT" || r.signal === "SIGTERM"
-  const passed = r.status === 0 && !timed
-  ledger.push({ command: hypo.command, ok: passed, code: r.status, timed: !!timed, level: cls.level })
   const life = passed ? LIFECYCLE.VERIFIED : LIFECYCLE.CONTRADICTED
   let outcome = null
   try {
     outcome = recordGapOutcome({
       cwd, id: domain, status: life,
-      evidence: `experiment ${hypo.command} ${passed ? "pass" : timed ? "timeout" : `exit ${r.status}`}`,
+      evidence: `experiment ${hypo.command} ${passed ? "pass" : exec.timedOut ? "timeout" : exec.status === EXEC_STATUS.TRUNCATED ? "truncated" : exec.status === EXEC_STATUS.UNKNOWN ? "unknown" : `exit ${exec.exitCode}`}`,
     })
   } catch { /* persist is best-effort */ }
   try { recordStrategy({ cwd, name: "experiment", ok: passed }) } catch { /* best-effort */ }

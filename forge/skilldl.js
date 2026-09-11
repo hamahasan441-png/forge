@@ -36,7 +36,6 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import crypto from "node:crypto"
-import { spawnSync } from "node:child_process"
 import { resolveDataDir } from "./config.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { writeStateFile } from "./securefs.js"
@@ -45,6 +44,7 @@ import { SKILL_LIFE, supersedeSkill } from "./evolve.js"
 import { classifyCommand } from "./shellguard.js"
 import { recordClaim } from "./claims.js"
 import { extractSkillMdFromZip, readSkillFromFolder, isZipBuffer } from "./zipingest.js"
+import { runCommand, classifySpawn, EXEC_STATUS, generatedTestProvenance } from "./execresult.js"
 
 export const SKILL_DOWNLOADS = "skill-downloads"
 export const TOOL_DOWNLOADS = "tool-downloads"
@@ -804,28 +804,75 @@ export function runSkillTests(commands, { cwd, env = process.env } = {}) {
   for (const cmd of commands) {
     const cls = classifyCommand(cmd, { cwd: dir, root: dir, env })
     if (refuseTestLevel(cls.level)) {
-      results.push({
-        cmd, ok: false, skipped: true, level: cls.level,
+      results.push(classifySpawn(null, {
+        cmd, blocked: true, level: cls.level,
         reason: (cls.reasons && cls.reasons[0]) || cls.level,
-      })
+      }))
       continue
     }
-    const r = spawnSync("sh", ["-c", cmd], {
-      cwd: dir,
-      env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: dir, LANG: "C" },
-      timeout: TEST_TIMEOUT_MS,
-      encoding: "utf8",
-    })
-    const timed = r.error?.code === "ETIMEDOUT" || r.signal === "SIGTERM"
-    results.push({
-      cmd,
-      ok: r.status === 0 && !timed,
-      code: r.status,
-      level: cls.level,
-      timed: !!timed,
-    })
+    results.push(runCommand(cmd, { cwd: dir, env, timeoutMs: TEST_TIMEOUT_MS }))
   }
   return results
+}
+
+export function evidenceIsFresh(name, env = process.env) {
+  const ev = readSkillEvidence(name, env)
+  if (!ev || !ev.sourceFingerprint) return false
+  const sha = bodySha(name, "skill", env)
+  return Boolean(sha) && sha === ev.sourceFingerprint
+}
+
+function makeEvidence({ kind, results = [], commands = [], issues = [], fingerprint = "", generated = false, provenance = null }) {
+  const statuses = (results || []).map((r) => r.status).filter(Boolean)
+  const unknown = statuses.includes(EXEC_STATUS.UNKNOWN) || statuses.includes(EXEC_STATUS.TRUNCATED)
+  return {
+    v: 2,
+    evidenceVersion: 2,
+    kind,
+    ok: results.length ? results.every((r) => r.ok) : kind === "structural",
+    generated: generated === true,
+    commands,
+    results,
+    issues,
+    sourceFingerprint: fingerprint || "",
+    timestamp: new Date().toISOString(),
+    at: Date.now(),
+    environment: { node: process.version, platform: process.platform },
+    provenance: provenance || null,
+    unknownNeverPass: unknown ? true : undefined,
+  }
+}
+
+export function benchmarkSkill(name, { env = process.env } = {}) {
+  const id = String(name || "").trim()
+  const ev = readSkillEvidence(id, env)
+  if (!ev) return { ok: false, error: `no evidence for "${id}"`, name: id }
+  const results = Array.isArray(ev.results) ? ev.results : []
+  if (!results.length) {
+    return {
+      ok: true, name: id, kind: ev.kind || "structural",
+      metrics: {
+        successRate: null, failureRate: null, medianDurationMs: null,
+        tokens: null, interventions: null, status: "UNKNOWN",
+      },
+      reason: "structural only — no executable tests, metrics UNKNOWN",
+    }
+  }
+  const n = results.length
+  const pass = results.filter((r) => r.ok === true || r.status === EXEC_STATUS.PASS).length
+  const durs = results.map((r) => Number(r.duration)).filter((x) => Number.isFinite(x) && x >= 0).sort((a, b) => a - b)
+  const mid = durs.length ? durs[Math.floor(durs.length / 2)] : null
+  return {
+    ok: true, name: id, kind: ev.kind,
+    metrics: {
+      successRate: pass / n,
+      failureRate: (n - pass) / n,
+      medianDurationMs: mid,
+      tokens: null,
+      interventions: null,
+      status: "MEASURED",
+    },
+  }
 }
 
 export function readSkillEvidence(name, env = process.env) {
@@ -901,9 +948,10 @@ export function verifySkill(name, { env = process.env, generate = false } = {}) 
   const rec = man.items?.[id]
   if (!rec) return { ok: false, error: `skill "${id}" not downloaded`, name: id }
   const issues = issuesForSkill(id, rec, env)
+  const fingerprint = bodySha(id, "skill", env)
   if (issues.length) {
     const life = recordVerifyFail(id, env, "skill")
-    saveEvidence(id, { v: 1, kind: "failed", issues, at: Date.now() }, env)
+    saveEvidence(id, makeEvidence({ kind: "failed", issues, fingerprint }), env)
     return { ok: false, name: id, lifecycle: life, issues }
   }
   let md = ""
@@ -911,8 +959,11 @@ export function verifySkill(name, { env = process.env, generate = false } = {}) 
   const authored = extractTestCommands(md)
   const generated = (!authored.length && generate) ? generateSkillTests(md) : []
   const commands = authored.length ? authored : generated
+  const provenance = generated.length
+    ? generatedTestProvenance({ command: generated[0], reason: "playbook command, generate=true", generator: "forge-generateSkillTests" })
+    : null
   if (!commands.length) {
-    const evidence = { v: 1, kind: "structural", commands: [], results: [], at: Date.now() }
+    const evidence = makeEvidence({ kind: "structural", commands: [], results: [], fingerprint, provenance })
     saveEvidence(id, evidence, env)
     const already = rec.lifecycle === SKILL_LIFE.VERIFIED
     setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
@@ -926,16 +977,22 @@ export function verifySkill(name, { env = process.env, generate = false } = {}) 
     try { fs.rmSync(work, { recursive: true, force: true }) } catch { /* tmp */ }
   }
   const failed = results.filter((r) => !r.ok)
+  const kind = generated.length ? "generated" : "behavioral"
   if (failed.length) {
-    const why = failed.map((r) => r.skipped
-      ? `test refused (${r.level}): ${r.cmd}`
-      : `test failed (${r.timed ? "timeout" : r.code}): ${r.cmd}`)
-    const evidence = { v: 1, kind: generated.length ? "generated" : "behavioral", ok: false, generated: generated.length > 0, commands, results, at: Date.now() }
+    const why = failed.map((r) => {
+      if (r.skipped || r.status === EXEC_STATUS.BLOCKED) return `test refused (${r.level}): ${r.cmd}`
+      if (r.status === EXEC_STATUS.TIMEOUT) return `test failed (timeout): ${r.cmd}`
+      if (r.status === EXEC_STATUS.TRUNCATED) return `test failed (truncated): ${r.cmd}`
+      if (r.status === EXEC_STATUS.UNKNOWN) return `test failed (unknown): ${r.cmd}`
+      if (r.status === EXEC_STATUS.KILLED) return `test failed (killed): ${r.cmd}`
+      return `test failed (${r.code}): ${r.cmd}`
+    })
+    const evidence = makeEvidence({ kind, results, commands, generated: generated.length > 0, fingerprint, provenance })
     saveEvidence(id, evidence, env)
     const life = recordVerifyFail(id, env, "skill")
     return { ok: false, name: id, lifecycle: life, issues: why, evidence }
   }
-  const evidence = { v: 1, kind: generated.length ? "generated" : "behavioral", ok: true, generated: generated.length > 0, commands, results, at: Date.now() }
+  const evidence = makeEvidence({ kind, results, commands, generated: generated.length > 0, fingerprint, provenance })
   saveEvidence(id, evidence, env)
   const already = rec.lifecycle === SKILL_LIFE.VERIFIED
   setLifecycle(id, SKILL_LIFE.VERIFIED, env, "skill")
@@ -1004,6 +1061,7 @@ export function indexVerifiedSkills(env = process.env) {
     if (rec.lifecycle !== SKILL_LIFE.VERIFIED) continue
     const p = skillMdPath(rec.id, env)
     if (!fs.existsSync(p)) continue
+    if (!evidenceIsFresh(rec.id, env) && readSkillEvidence(rec.id, env)?.sourceFingerprint) continue
     out.push({
       name: rec.id,
       desc: rec.description || "",
