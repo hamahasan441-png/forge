@@ -1,21 +1,23 @@
 #!/usr/bin/env node
 /**
- * forge — v75 dock: claims/decisions on the omega TUI dock. Read-only.
+ * forge — v82 zip unpack: SKILL.md + scripts/examples/references.
+ * Never tools, never binaries, never ACTIVE.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v75-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v82-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v75-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v82-work-"))
 process.chdir(WORK)
 
-const { initialState, reduce } = await import("../uistate.js")
-const { knowledgeDockText, renderOmegaPanel, renderTaskPanel, renderOptions } = await import("../render.js")
+const { makeStoreZip, extractSkillMdFromZip, extractZipPack, safeSupportRel } = await import("../zipingest.js")
+const { ingestLocal, skillDownloadsDir } = await import("../skilldl.js")
+const { SKILL_LIFE } = await import("../evolve.js")
 const { evaluateSkills } = await import("../evaluate.js")
 const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../classify.js")
 const { defaultConfig, sanitizeProjectConfig } = await import("../config.js")
@@ -39,56 +41,73 @@ function listGlobalTools() {
   try { return fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".mjs") || f.endsWith(".js")) } catch { return [] }
 }
 
-console.log("== knowledgeDockText + reduce KNOWLEDGE_UPDATED ==")
+const MD = `---
+name: web-design
+description: layout
+---
+# Web Design
+## What worked
+Use a 12-column grid.
+`
+
+console.log("== pack extract: SKILL.md + scripts/examples, skip junk ==")
 {
-  eq("empty", knowledgeDockText({}), "")
-  eq("claims", knowledgeDockText({ claims: [{ subject: "web-design" }] }), "claims web-design")
-  ok("both", /claims web-design/.test(knowledgeDockText({
-    claims: [{ subject: "web-design" }],
-    decisions: [{ title: "use-postgres" }],
-  })) && /decisions use-postgres/.test(knowledgeDockText({
-    claims: [{ subject: "web-design" }],
-    decisions: [{ title: "use-postgres" }],
-  })))
-  const s0 = initialState({ cwd: WORK })
-  eq("initial empty", (s0.knowledge?.claims || []).length, 0)
-  const s1 = reduce(s0, {
-    type: "KNOWLEDGE_UPDATED",
-    claims: [{ subject: "web-design", text: "Use a 12-column grid." }],
-    decisions: [{ title: "use-postgres", reason: "billing rows", status: "accepted" }],
+  eq("scripts ok", safeSupportRel("scripts/ok.sh"), "scripts/ok.sh")
+  eq("deny traversal", safeSupportRel("scripts/../evil.sh"), null)
+  eq("deny exe", safeSupportRel("scripts/tool.exe"), null)
+  eq("deny tools root", safeSupportRel("tools/x.mjs"), null)
+  const zip = makeStoreZip({
+    "pack/SKILL.md": MD,
+    "pack/scripts/ok.sh": "echo grid\n",
+    "pack/examples/grid.md": "# grid\n",
+    "pack/README.txt": "nope",
+    "bin/tool.exe": "MZ",
+    "scripts/../evil.sh": "rm -rf /\n",
   })
-  eq("claim folded", s1.knowledge.claims[0]?.subject, "web-design")
-  eq("decision folded", s1.knowledge.decisions[0]?.title, "use-postgres")
+  const md = extractSkillMdFromZip(zip)
+  eq("v79 extract still ok", md.ok, true)
+  const pack = extractZipPack(zip)
+  eq("pack ok", pack.ok, true)
+  ok("has script", pack.files.some((f) => f.name === "scripts/ok.sh"))
+  ok("has example", pack.files.some((f) => f.name === "examples/grid.md"))
+  eq("no readme", pack.files.some((f) => /README/.test(f.name)), false)
+  eq("no exe", pack.files.some((f) => /\.exe$/.test(f.name)), false)
+  eq("no traversal", pack.files.some((f) => f.name.includes("..")), false)
 }
 
-console.log("== omega / status panels show know line ==")
+console.log("== ingest writes support; never tools; CANDIDATE ==")
 {
-  const o = renderOptions({ ascii: true, a11y: true })
-  const st = reduce(initialState({ cwd: WORK, state: "PLANNING", task: { title: "layout", startedAt: Date.now() } }), {
-    type: "KNOWLEDGE_UPDATED",
-    claims: [{ subject: "web-design", text: "grid" }],
-    decisions: [{ title: "use-postgres" }],
+  const zip = makeStoreZip({
+    "SKILL.md": MD,
+    "scripts/ok.sh": "echo grid\n",
+    "examples/grid.md": "# grid\n",
   })
-  const omega = renderOmegaPanel(st, 80, o).join("\n")
-  ok("omega know", /know /.test(omega) && /web-design/.test(omega), omega)
-  ok("omega decisions", /use-postgres/.test(omega))
-  const panel = renderTaskPanel(st, 80, o).join("\n")
-  ok("status Knowledge", /Knowledge/.test(panel) && /web-design/.test(panel), panel)
-  const empty = renderOmegaPanel(initialState({ cwd: WORK }), 80, o).join("\n")
-  eq("empty no know", /know /.test(empty), false)
+  const zipPath = path.join(WORK, "skill.zip")
+  fs.writeFileSync(zipPath, zip)
+  const ing = ingestLocal(zipPath)
+  eq("ingest ok", ing.ok, true)
+  eq("CANDIDATE", ing.lifecycle, SKILL_LIFE.CANDIDATE)
+  eq("not ACTIVE", ing.lifecycle === SKILL_LIFE.ACTIVE, false)
+  ok("unpacked listed", (ing.record?.unpacked || []).includes("scripts/ok.sh"))
+  const dest = path.join(skillDownloadsDir(), ing.record.id)
+  ok("script on disk", fs.existsSync(path.join(dest, "scripts", "ok.sh")))
+  ok("example on disk", fs.existsSync(path.join(dest, "examples", "grid.md")))
+  eq("mode 0600-class", (fs.statSync(path.join(dest, "scripts", "ok.sh")).mode & 0o111), 0)
+  eq("no tools dir", fs.existsSync(path.join(HOME, "tools")), false)
+  const folder = path.join(WORK, "skill-folder")
+  fs.mkdirSync(path.join(folder, "scripts"), { recursive: true })
+  fs.writeFileSync(path.join(folder, "SKILL.md"), MD)
+  fs.writeFileSync(path.join(folder, "scripts", "from-folder.sh"), "echo hi\n")
+  const ing2 = ingestLocal(folder)
+  eq("folder ingest", ing2.ok, true)
+  ok("folder script", (ing2.record?.unpacked || []).includes("scripts/from-folder.sh"))
 }
 
-console.log("== PLAN_COMPOSE wires claims; compose never writes ==")
+console.log("== compose write-free ==")
 {
-  const metaSrc = fs.readFileSync(path.join(FORGE, "meta.js"), "utf8")
-  const uiSrc = fs.readFileSync(path.join(FORGE, "uistate.js"), "utf8")
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
-  ok("PLAN_COMPOSE claims", /type: "PLAN_COMPOSE"/.test(metaSrc) && /composed\.claims/.test(metaSrc))
-  ok("PLAN_COMPOSE decisions", /composed\.decisions/.test(metaSrc))
-  ok("bridge PLAN_COMPOSE", /case "PLAN_COMPOSE"/.test(uiSrc) && /KNOWLEDGE_UPDATED/.test(uiSrc))
-  ok("compose has no recordClaim", !/recordClaim/.test(composeSrc))
-  ok("compose has no recordDecision", !/recordDecision/.test(composeSrc))
-  ok("compose has no skilldl", !/skilldl/.test(composeSrc))
+  ok("compose has no zipingest", !/zipingest/.test(composeSrc))
+  ok("compose has no extractZipPack", !/extractZipPack/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -107,6 +126,7 @@ console.log("== no side writes / frozen kernel + package ==")
   eq("VERSION is 82.0.0", VERSION, "82.0.0")
   const pkg = JSON.parse(fs.readFileSync(path.join(FORGE, "package.json"), "utf8"))
   eq("package.json is 82.0.0", pkg.version, "82.0.0")
+  ok("files includes zipingest.js", (pkg.files || []).includes("zipingest.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
   eq("custom is still index 17 (pick 18)", CATALOG[17]?.name, "custom")
   eq("apinex still after custom", CATALOG[18]?.name, "apinex")
@@ -116,10 +136,12 @@ console.log("== no side writes / frozen kernel + package ==")
   const todo = fs.readFileSync(path.join(FORGE, "TODO.md"), "utf8")
   eq("TODO still unchecked", (todo.match(/^- \[[xX]\]/gm) || []).length, 0)
   ok("no PLAN file", fs.readdirSync(FORGE).filter((n) => /^PLAN-v\d+\.md$/.test(n)).length === 0)
+  ok("Never list kept", /Research crawler/.test(todo) && /Auto-ACTIVE/.test(todo))
+  ok("ZIP leftover gone", !/Full ZIP unpack/.test(todo))
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v75 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v82 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)
