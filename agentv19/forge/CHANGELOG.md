@@ -3,6 +3,15 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v62.0.0 — "skilldl"
+
+### Added (v62.0 — native skill download, CANDIDATE only)
+- **Download.** `forge skill download <https-url> [<url>…]` and TUI `/skill download <url>` fetch via `pinnedFetch` into `~/.forge/skill-downloads/` (FORGE_DATA_DIR alias). Metadata + sha256. Markdown becomes `SKILL.md`. Archives stored, not unpacked. Status is always CANDIDATE.
+- **Fail closed.** HTTPS only. HTML pages, empty bodies, HTTP errors, private/metadata hosts, `file:` — no candidate. Duplicate sha256 reuses the existing record and will not overwrite VERIFIED.
+- **Not trusted.** Download does not verify, learn, or activate. Compose never fetches. Nothing lands in the user project or `~/.forge/tools`.
+
+Single mutating writer is unchanged. TODO.md is the living list. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. `/skill verify`, deep learn, rollback, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v61.0.0 — "todo"
 
 ### Changed (v61.0 — completed PLAN files removed; leftovers live in TODO.md)

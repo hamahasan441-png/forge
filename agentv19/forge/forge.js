@@ -89,6 +89,44 @@ if (flags["no-color"] || !process.stdout.isTTY) process.env.NO_COLOR = "1"
 // v20.2 (P2-6): machine-readable output. `--json` on data commands prints one
 // JSON document and nothing else, so forge can be scripted.
 const JSON_OUT = flags.json === true || flags.json === "true"
+
+async function runSkillDownload(urls) {
+  const { downloadSkills, formatDownloadReport, listDownloads, skillDownloadsDir } = await import("./skilldl.js")
+  const { SKILL_LIFE } = await import("./evolve.js")
+  const list = (urls || []).map((u) => String(u || "").trim()).filter(Boolean)
+  if (!list.length) {
+    const have = listDownloads()
+    if (JSON_OUT) { emitJson({ dir: skillDownloadsDir(), downloads: have }); return 0 }
+    console.log(bold(`skill downloads`) + dim(`  (${have.length}) — ${skillDownloadsDir()}`))
+    if (!have.length) {
+      console.log(dim('  none yet — forge skill download <https-url>'))
+      return 0
+    }
+    for (const r of have) {
+      const life = r.lifecycle || SKILL_LIFE.CANDIDATE
+      console.log(`  ${cyan((r.skillName || r.id).padEnd(28))} ${life}  ${dim(r.status || "")}  ${dim(r.sourceUrl || "")}`)
+    }
+    console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
+    return 0
+  }
+  const results = await downloadSkills(list)
+  if (JSON_OUT) {
+    emitJson({ results: results.map((r) => ({ ok: r.ok, error: r.error || null, reused: r.reused || false, record: r.record || null })) })
+  } else {
+    for (const r of results) {
+      if (r.ok) {
+        console.log(formatDownloadReport(r))
+        const rec = r.record || {}
+        console.log(dim(`  ${rec.filename || ""}  sha256=${String(rec.sha256 || "").slice(0, 12)}…  ${rec.size ?? 0} B`))
+        console.log()
+      } else {
+        err(formatDownloadReport(r).trim())
+      }
+    }
+  }
+  return results.every((r) => r.ok) ? 0 : 1
+}
+
 function emitJson(obj) { console.log(JSON.stringify(obj, null, 2)) }
 
 function resolveProvider(config) {
@@ -725,7 +763,28 @@ async function main() {
       console.log(dim("  resume: forge resume <n|id>  •  search: forge sessions --search \"text\"  •  last: forge chat --continue"))
       return
     }
+    case "skill": {
+      const sub = (positional[1] || "").toLowerCase()
+      if (!sub || sub === "list" || sub === "downloads") {
+        const code = await runSkillDownload([])
+        if (code) process.exit(code)
+        return
+      }
+      if (sub === "download") {
+        const code = await runSkillDownload(positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url>  (DOWNLOAD ≠ VERIFY)`)
+      process.exit(1)
+      return
+    }
     case "skills": {
+      if (positional[1] === "download") {
+        const code = await runSkillDownload(positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
       const dir = resolveSkillsDir(config.skills?.dir)
       if (!dir) { err("no skills directory found (looked in ./skills, repo root, cli/forge/skills, ~/.forge/skills)"); process.exit(1); return }
       // v20.2 (P2-5): forge skills --check | forge skills check — validate all skills
@@ -1271,6 +1330,7 @@ ${bold("usage")}
   ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 19 tools")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
+  ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
