@@ -18,6 +18,10 @@
  *
  * v68: VERIFIED past FORGE_SKILL_TTL_MS (default 30d) → STALE, not
  * CONTRADICTED. Re-verify restores VERIFIED. STALE is hidden from pick.
+ *
+ * v69: STALE + N failed re-verifies (FORGE_SKILL_FAIL_LIMIT, default 2)
+ * → CONTRADICTED. CANDIDATE/VERIFIED fail is still INACTIVE. Hidden from
+ * pick. Success restores VERIFIED and clears failCount. Never ACTIVE.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -46,11 +50,18 @@ export const DOWNLOAD_STATUS = Object.freeze({
 export const MAX_SKILL_BYTES = 8 * 1024 * 1024
 export const INACTIVE = "INACTIVE"
 export const STALE = "STALE"
+export const CONTRADICTED = "CONTRADICTED"
 export const DEFAULT_SKILL_TTL_MS = 30 * 24 * 60 * 60 * 1000
+export const DEFAULT_STALE_FAILS = 2
 
 export function skillTtlMs(env = process.env) {
   const n = Number(env?.FORGE_SKILL_TTL_MS)
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_SKILL_TTL_MS
+}
+
+export function skillFailLimit(env = process.env) {
+  const n = Number(env?.FORGE_SKILL_FAIL_LIMIT)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_STALE_FAILS
 }
 
 const KERNEL_HINT = /(?:^|[^A-Za-z0-9])(agentv19[\\/]forge|classifyTaskComplexity|assumeYes|plugin-host|securefs)\b/i
@@ -147,7 +158,7 @@ function recordCandidate(name, env, kind = "skill") {
   return rec
 }
 
-function setLifecycle(name, lifecycle, env, kind = "skill") {
+function setLifecycle(name, lifecycle, env, kind = "skill", extra = {}) {
   const all = loadDownloadLife(env, kind)
   const key = lifeBucket(kind)
   const bucket = all[key] || (all[key] = {})
@@ -158,7 +169,11 @@ function setLifecycle(name, lifecycle, env, kind = "skill") {
   rec.lifecycle = lifecycle
   rec.lastSeen = Date.now()
   rec.samples = rec.samples || 1
-  if (lifecycle === SKILL_LIFE.VERIFIED) rec.verifiedAt = Date.now()
+  if (lifecycle === SKILL_LIFE.VERIFIED) {
+    rec.verifiedAt = Date.now()
+    rec.failCount = 0
+  }
+  if (extra.failCount != null) rec.failCount = extra.failCount
   bucket[name] = rec
   all.v = 1
   all.updated = Date.now()
@@ -167,13 +182,30 @@ function setLifecycle(name, lifecycle, env, kind = "skill") {
   const man = loadDownloadManifest(env, kind)
   if (man.items?.[name]) {
     man.items[name].lifecycle = lifecycle
-    if (lifecycle === SKILL_LIFE.VERIFIED) man.items[name].verifiedAt = rec.verifiedAt
+    if (lifecycle === SKILL_LIFE.VERIFIED) {
+      man.items[name].verifiedAt = rec.verifiedAt
+      man.items[name].failCount = 0
+    }
+    if (extra.failCount != null) man.items[name].failCount = extra.failCount
     man.updated = Date.now()
     saveManifest(man, env, kind)
     const meta = path.join(rootFor(kind, env), name, "meta.json")
     try { writeStateFile(meta, JSON.stringify(man.items[name], null, 1), { mode: 0o600 }) } catch { /* meta is best-effort */ }
   }
   return rec
+}
+
+/** CANDIDATE/VERIFIED fail → INACTIVE. STALE fail N times → CONTRADICTED. */
+function recordVerifyFail(name, env, kind = "skill") {
+  const man = loadDownloadManifest(env, kind)
+  const rec = man.items?.[name] || {}
+  const n = (Number(rec.failCount) || 0) + 1
+  const prev = rec.lifecycle
+  const next = (prev === STALE || prev === CONTRADICTED)
+    ? (n >= skillFailLimit(env) ? CONTRADICTED : STALE)
+    : INACTIVE
+  setLifecycle(name, next, env, kind, { failCount: n })
+  return next
 }
 
 /**
@@ -679,9 +711,9 @@ export function verifySkill(name, { env = process.env } = {}) {
   if (!rec) return { ok: false, error: `skill "${id}" not downloaded`, name: id }
   const issues = issuesForSkill(id, rec, env)
   if (issues.length) {
-    setLifecycle(id, INACTIVE, env, "skill")
+    const life = recordVerifyFail(id, env, "skill")
     saveEvidence(id, { v: 1, kind: "failed", issues, at: Date.now() }, env)
-    return { ok: false, name: id, lifecycle: INACTIVE, issues }
+    return { ok: false, name: id, lifecycle: life, issues }
   }
   let md = ""
   try { md = fs.readFileSync(skillMdPath(id, env), "utf8") } catch { /* issuesForSkill already read */ }
@@ -707,8 +739,8 @@ export function verifySkill(name, { env = process.env } = {}) {
       : `test failed (${r.timed ? "timeout" : r.code}): ${r.cmd}`)
     const evidence = { v: 1, kind: "behavioral", ok: false, commands, results, at: Date.now() }
     saveEvidence(id, evidence, env)
-    setLifecycle(id, INACTIVE, env, "skill")
-    return { ok: false, name: id, lifecycle: INACTIVE, issues: why, evidence }
+    const life = recordVerifyFail(id, env, "skill")
+    return { ok: false, name: id, lifecycle: life, issues: why, evidence }
   }
   const evidence = { v: 1, kind: "behavioral", ok: true, commands, results, at: Date.now() }
   saveEvidence(id, evidence, env)
@@ -724,8 +756,8 @@ export function verifyTool(name, { env = process.env } = {}) {
   if (!rec) return { ok: false, error: `tool "${id}" not downloaded`, name: id }
   const issues = issuesForTool(id, rec, env)
   if (issues.length) {
-    setLifecycle(id, INACTIVE, env, "tool")
-    return { ok: false, name: id, lifecycle: INACTIVE, issues }
+    const life = recordVerifyFail(id, env, "tool")
+    return { ok: false, name: id, lifecycle: life, issues }
   }
   if (rec.lifecycle === SKILL_LIFE.VERIFIED) {
     return { ok: true, already: true, name: id, lifecycle: SKILL_LIFE.VERIFIED, issues: [] }
@@ -772,7 +804,7 @@ export function formatVerifyReport(results, label = "SKILL") {
   return lines.join("\n") + "\n"
 }
 
-/** VERIFIED downloads only — CANDIDATE/INACTIVE/STALE stay out of pickSkills. */
+/** VERIFIED downloads only — CANDIDATE/INACTIVE/STALE/CONTRADICTED stay out of pickSkills. */
 export function indexVerifiedSkills(env = process.env) {
   const out = []
   for (const rec of listDownloads(env, "skill")) {
@@ -811,7 +843,7 @@ export function indexVerifiedToolPlaybooks(env = process.env) {
 }
 
 /**
- * Body of a VERIFIED downloaded skill. CANDIDATE/INACTIVE/STALE return null.
+ * Body of a VERIFIED downloaded skill. CANDIDATE/INACTIVE/STALE/CONTRADICTED return null.
  * Sync. No fetch. No plugin-host.
  */
 export function readDownloadedSkill(name, env = process.env) {

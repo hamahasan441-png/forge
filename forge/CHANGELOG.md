@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v69.0.0 — "contradict"
+
+### Added (v69.0 — STALE fails N times → CONTRADICTED)
+- **Fail limit.** `FORGE_SKILL_FAIL_LIMIT` (default **2**). A STALE download that fails re-verify that many times becomes **CONTRADICTED**, not INACTIVE. Hidden from `pickSkills` / `load_skill`.
+- CANDIDATE / VERIFIED fail is still **INACTIVE** (v63). Success restores VERIFIED and clears `failCount`. Never ACTIVE. Compose still never fetches.
+
+Per-skill TTL override, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v68.0.0 — "stale"
 
 ### Added (v68.0 — VERIFIED past TTL is STALE, not CONTRADICTED)
