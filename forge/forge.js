@@ -198,6 +198,21 @@ async function runLearn(names) {
   return results.every((r) => r.ok) ? 0 : 1
 }
 
+async function runTtl(args) {
+  const { setSkillTtl, getSkillTtl, formatTtlReport } = await import("./skilldl.js")
+  const name = String(args?.[0] || "").trim()
+  const raw = args?.[1]
+  if (!name) {
+    err("usage: forge skill ttl <name> [<ms>]")
+    return 1
+  }
+  const r = raw == null || raw === "" ? getSkillTtl(name) : setSkillTtl(name, raw)
+  if (JSON_OUT) { emitJson(r); return r.ok ? 0 : 1 }
+  if (r.ok) console.log(formatTtlReport(r).trimEnd())
+  else err(formatTtlReport(r).trim())
+  return r.ok ? 0 : 1
+}
+
 function emitJson(obj) { console.log(JSON.stringify(obj, null, 2)) }
 
 function resolveProvider(config) {
@@ -856,7 +871,12 @@ async function main() {
         if (code) process.exit(code)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name>`)
+      if (sub === "ttl") {
+        const code = await runTtl(positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>]`)
       process.exit(1)
       return
     }
@@ -1470,6 +1490,7 @@ ${bold("usage")}
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
   ${cyan("forge skill verify <name|all>")}  structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)
   ${cyan("forge skill learn <name>")}      extract procedures from a VERIFIED skill (indexing is not learned)
+  ${cyan("forge skill ttl <name> [<ms>]")} per-skill TTL override (ms); omit ms to print
   ${cyan("forge tool download <url>")}     download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   ${cyan("forge tool verify <name|all>")}   structurally verify a downloaded tool (hostless playbook, never plugin-host)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}

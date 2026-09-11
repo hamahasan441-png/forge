@@ -151,6 +151,7 @@ ${bold("setup")}
   /skill download <url> download a skill to ~/.forge/skill-downloads (CANDIDATE, not trusted)
   /skill verify <name>  structurally verify a downloaded skill (pass → VERIFIED)
   /skill learn <name>   extract procedures from a VERIFIED skill (indexing is not learned)
+  /skill ttl <name> [ms] per-skill TTL override (omit ms to print)
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
@@ -1941,6 +1942,16 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           }
           break
         }
+        if (sub === "ttl") {
+          const name = parts[1]
+          const raw = parts[2]
+          if (!name) { err("usage: /skill ttl <name> [<ms>]"); break }
+          const { setSkillTtl, getSkillTtl, formatTtlReport } = await import("./skilldl.js")
+          const r = raw == null || raw === "" ? getSkillTtl(name) : setSkillTtl(name, raw)
+          if (r.ok) console.log(formatTtlReport(r).trimEnd())
+          else err(formatTtlReport(r).trim())
+          break
+        }
         if (!sub || sub === "list") {
           const { listDownloads, skillDownloadsDir } = await import("./skilldl.js")
           const have = listDownloads()
@@ -1950,7 +1961,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           if (have.length) console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
           break
         }
-        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name>`)
+        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>]`)
         break
       }
       case "tool": {

@@ -22,6 +22,9 @@
  * v69: STALE + N failed re-verifies (FORGE_SKILL_FAIL_LIMIT, default 2)
  * → CONTRADICTED. CANDIDATE/VERIFIED fail is still INACTIVE. Hidden from
  * pick. Success restores VERIFIED and clears failCount. Never ACTIVE.
+ *
+ * v70: per-skill `ttlMs` on the download record overrides FORGE_SKILL_TTL_MS.
+ * Missing/invalid ttlMs still uses the env default. Never ACTIVE.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -53,10 +56,18 @@ export const STALE = "STALE"
 export const CONTRADICTED = "CONTRADICTED"
 export const DEFAULT_SKILL_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const DEFAULT_STALE_FAILS = 2
+export const MAX_SKILL_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
 export function skillTtlMs(env = process.env) {
   const n = Number(env?.FORGE_SKILL_TTL_MS)
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_SKILL_TTL_MS
+}
+
+/** Per-record override, else env/default. Invalid ttlMs is ignored. */
+export function skillTtlFor(rec, env = process.env) {
+  const n = Number(rec?.ttlMs)
+  if (Number.isFinite(n) && n > 0 && n <= MAX_SKILL_TTL_MS) return Math.floor(n)
+  return skillTtlMs(env)
 }
 
 export function skillFailLimit(env = process.env) {
@@ -214,7 +225,6 @@ function recordVerifyFail(name, env, kind = "skill") {
  */
 export function sweepStale(env = process.env, kind = "skill") {
   const man = loadDownloadManifest(env, kind)
-  const ttl = skillTtlMs(env)
   const now = Date.now()
   const demoted = []
   for (const [id, rec] of Object.entries(man.items || {})) {
@@ -227,11 +237,44 @@ export function sweepStale(env = process.env, kind = "skill") {
       saveManifest(man, env, kind)
       continue
     }
-    if (now - at <= ttl) continue
+    if (now - at <= skillTtlFor(rec, env)) continue
     setLifecycle(id, STALE, env, kind)
     demoted.push(id)
   }
   return demoted
+}
+
+export function setSkillTtl(name, ttlMs, { env = process.env, kind = "skill" } = {}) {
+  const id = String(name || "").trim()
+  const man = loadDownloadManifest(env, kind)
+  const rec = man.items?.[id]
+  if (!rec) return { ok: false, error: `${kind} "${id}" not downloaded`, name: id }
+  const n = Number(ttlMs)
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_SKILL_TTL_MS) {
+    return { ok: false, error: `ttlMs must be 1..${MAX_SKILL_TTL_MS}`, name: id, ttlMs: rec.ttlMs || null, effective: skillTtlFor(rec, env) }
+  }
+  rec.ttlMs = Math.floor(n)
+  man.items[id] = rec
+  man.updated = Date.now()
+  saveManifest(man, env, kind)
+  const meta = path.join(rootFor(kind, env), id, "meta.json")
+  try { writeStateFile(meta, JSON.stringify(rec, null, 1), { mode: 0o600 }) } catch { /* meta is best-effort */ }
+  sweepStale(env, kind)
+  const after = loadDownloadManifest(env, kind).items?.[id] || rec
+  return { ok: true, name: id, ttlMs: after.ttlMs, effective: skillTtlFor(after, env), lifecycle: after.lifecycle }
+}
+
+export function getSkillTtl(name, { env = process.env, kind = "skill" } = {}) {
+  const id = String(name || "").trim()
+  const rec = loadDownloadManifest(env, kind).items?.[id]
+  if (!rec) return { ok: false, error: `${kind} "${id}" not downloaded`, name: id }
+  return { ok: true, name: id, ttlMs: rec.ttlMs || null, effective: skillTtlFor(rec, env), lifecycle: rec.lifecycle }
+}
+
+export function formatTtlReport(r) {
+  if (!r?.ok) return `TTL FAILED\n\n${r?.error || "unknown"}\n`
+  const set = r.ttlMs != null ? `${r.ttlMs} ms` : "default"
+  return `ttl ${r.name}: ${set} (effective ${r.effective} ms)${r.lifecycle ? `  ${r.lifecycle}` : ""}\n`
 }
 
 export function listDownloads(env = process.env, kind = "skill") {
