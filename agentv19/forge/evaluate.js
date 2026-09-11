@@ -105,6 +105,7 @@ export function evaluateSkills(task, skills = [], opts = {}) {
       score,
       ...(s.learned === true ? { learned: true } : {}),
       ...(s.downloaded === true ? { downloaded: true, path: s.path ? String(s.path).slice(0, 400) : undefined } : {}),
+      ...(s.extracted === true ? { extracted: true } : {}),
       ...(s.lifecycle ? { lifecycle: String(s.lifecycle).slice(0, 16) } : {}),
     })
   }
@@ -117,6 +118,7 @@ export function formatSkillPicks(picks = []) {
   const lines = [`SKILLS FOR THIS TASK (${picks.length}) — call load_skill(name) before using one:`]
   for (const s of picks) {
     const tag = s.lifecycle === "CANDIDATE" ? " (candidate)"
+      : s.extracted ? " (learned)"
       : s.downloaded ? " (verified download)"
       : ""
     lines.push(`- ${s.name}${tag}: ${s.desc || ""}`.trim())

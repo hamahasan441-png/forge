@@ -182,6 +182,22 @@ async function runVerify(kind, names) {
   return results.every((r) => r.ok) ? 0 : 1
 }
 
+async function runLearn(names) {
+  const { learnSkill, formatLearnReport } = await import("./skilldl.js")
+  const list = (names || []).map((n) => String(n || "").trim()).filter(Boolean)
+  if (!list.length) {
+    err("usage: forge skill learn <name> [<name>…]")
+    return 1
+  }
+  const results = list.map((n) => learnSkill(n))
+  if (JSON_OUT) { emitJson({ results }); return results.every((r) => r.ok) ? 0 : 1 }
+  for (const r of results) {
+    if (r.ok) console.log(formatLearnReport(r))
+    else err(formatLearnReport(r).trim())
+  }
+  return results.every((r) => r.ok) ? 0 : 1
+}
+
 function emitJson(obj) { console.log(JSON.stringify(obj, null, 2)) }
 
 function resolveProvider(config) {
@@ -835,7 +851,12 @@ async function main() {
         if (code) process.exit(code)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all>`)
+      if (sub === "learn") {
+        const code = await runLearn(positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name>`)
       process.exit(1)
       return
     }
@@ -868,6 +889,11 @@ async function main() {
       }
       if (positional[1] === "verify") {
         const code = await runVerify("skill", positional.slice(2))
+        if (code) process.exit(code)
+        return
+      }
+      if (positional[1] === "learn") {
+        const code = await runLearn(positional.slice(2))
         if (code) process.exit(code)
         return
       }
@@ -1443,6 +1469,7 @@ ${bold("usage")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
   ${cyan("forge skill verify <name|all>")}  structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)
+  ${cyan("forge skill learn <name>")}      extract procedures from a VERIFIED skill (indexing is not learned)
   ${cyan("forge tool download <url>")}     download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   ${cyan("forge tool verify <name|all>")}   structurally verify a downloaded tool (hostless playbook, never plugin-host)
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}

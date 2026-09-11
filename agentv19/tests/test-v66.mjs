@@ -1,31 +1,27 @@
 #!/usr/bin/env node
 /**
- * forge — v65 discover: verified downloads show up in lists and CLI print.
+ * forge — v66 learn: extract procedures from VERIFIED downloads.
  *
- * Does not: fetch from compose, write ~/.forge/tools, spawn plugin-host,
- * flip assumeYes, change classifyTaskComplexity().
+ * LEARN ≠ INDEX. CANDIDATE refused. Not ACTIVE. Never ~/.forge/tools.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v65-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v66-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v65-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v66-work-"))
 process.chdir(WORK)
 
 const {
-  downloadSkill, downloadTool, verifySkill, verifyTool,
-  readDownloadedToolPlaybook, indexVerifiedSkills,
+  downloadSkill, verifySkill, learnSkill, formatLearnReport,
+  extractKnowledge, readSkillKnowledge, readDownloadedSkill, indexVerifiedSkills,
 } = await import("../forge/skilldl.js")
-const { SKILL_LIFE, INACTIVE } = await import("../forge/skilldl.js").then(async (m) => ({
-  SKILL_LIFE: (await import("../forge/evolve.js")).SKILL_LIFE,
-  INACTIVE: m.INACTIVE,
-}))
-const { compose, formatCompose } = await import("../forge/compose.js")
+const { SKILL_LIFE } = await import("../forge/evolve.js")
+const { execTool } = await import("../forge/tools.js")
 const { evaluateSkills } = await import("../forge/evaluate.js")
 const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../forge/classify.js")
 const { defaultConfig, sanitizeProjectConfig } = await import("../forge/config.js")
@@ -49,7 +45,7 @@ function listGlobalTools() {
   try { return fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".mjs") || f.endsWith(".js")) } catch { return [] }
 }
 
-const SKILL_MD = `---
+const RICH = `---
 name: web-design
 description: Responsive layout playbook
 ---
@@ -57,14 +53,26 @@ description: Responsive layout playbook
 # Web Design
 
 You will produce accessible, responsive layouts.
+
+## Layout
+Set a fluid grid and test at 390px.
+
+## What worked
+Use clamp() for type and a 12-column grid.
+
+## Files
+- src/styles.css
+
+## Verify
+\`npm test\`
 `
 
-const TOOL_MJS = `export default {
-  name: "lint_hints",
-  description: "Read-only lint hints playbook",
-  readOnly: true,
-  async run() { return { ok: true, text: "run the project linter" } },
-}
+const THIN = `---
+name: thin-name
+description: Just a label
+---
+
+# Thin Name
 `
 
 function mockFetch(body, { filename = "artifact.bin" } = {}) {
@@ -76,55 +84,55 @@ function mockFetch(body, { filename = "artifact.bin" } = {}) {
   })
 }
 
-console.log("== CLI/TUI discovery is wired ==")
+console.log("== extractKnowledge ==")
 {
-  const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
-  ok("forge skills print uses readDownloadedSkill", /readDownloadedSkill\(sub\)/.test(forgeSrc))
-  ok("forge skills lists extra", /verified downloads/.test(forgeSrc) && /indexVerifiedSkills/.test(forgeSrc))
-  ok("forge plugins lists downloads", /indexVerifiedToolPlaybooks/.test(forgeSrc) && /downloaded playbook/.test(forgeSrc))
-  ok("forge tools download hint", /did you mean: forge tool/.test(forgeSrc))
-  const chatSrc = fs.readFileSync(path.join(FORGE, "chat.js"), "utf8")
-  ok("TUI /skills download alias", /head === "download"/.test(chatSrc))
-  ok("TUI /skills lists extra", /indexVerifiedSkills/.test(chatSrc) && /verified downloads/.test(chatSrc))
-  ok("TUI empty verify", /no skill candidates to verify/.test(chatSrc))
-  const ctxSrc = fs.readFileSync(path.join(FORGE, "context.js"), "utf8")
-  ok("context compose includes skills", /includeSkills:\s*true/.test(ctxSrc))
+  const k = extractKnowledge(RICH)
+  ok("layout procedure", k.procedures.some((p) => /layout/i.test(p.title)))
+  ok("repair from What worked", /clamp/.test(k.repair))
+  ok("file", k.files.includes("src/styles.css"))
+  const thin = extractKnowledge(THIN)
+  eq("thin no procedures", thin.procedures.length, 0)
 }
 
-console.log("== no What-worked still attaches; playbook line; re-verify demotes ==")
+console.log("== CANDIDATE learn fails; VERIFIED extracts; thin fails ==")
 {
   await downloadSkill("https://example.com/web-design.skill", {
-    fetchFn: mockFetch(SKILL_MD, { filename: "web-design.skill" }),
+    fetchFn: mockFetch(RICH, { filename: "web-design.skill" }),
   })
-  eq("verified", verifySkill("web-design").ok, true)
-  const snap = compose("use the web-design skill to build a responsive accessible layout", { cwd: WORK, klass: TASK_CLASS.MEDIUM })
-  const sk = (snap.skills || []).find((s) => s.name === "web-design")
-  ok("repair from first paragraph", /accessible, responsive/.test(sk?.repair || ""), sk?.repair)
-  await downloadTool("https://example.com/lint_hints.mjs", {
-    fetchFn: mockFetch(TOOL_MJS, { filename: "lint_hints.mjs" }),
-  })
-  verifyTool("lint_hints")
-  const md = readDownloadedToolPlaybook("lint_hints")
-  ok("When heading", /## When/.test(md) && /hostless/.test(md))
-  ok("no mjs dump", !/export default/.test(md))
-  const snap2 = compose("run lint hints on the project", { cwd: WORK, klass: TASK_CLASS.MEDIUM })
-  const fmt = formatCompose(snap2)
-  ok("[playbook] line", /\[playbook\] lint_hints/.test(fmt) || (snap2.playbooks || []).some((p) => p.name === "lint_hints"), fmt.slice(0, 500))
+  const before = learnSkill("web-design")
+  ok("CANDIDATE refused", before.ok === false && /not verified|indexing/.test(before.error), before.error)
+  verifySkill("web-design")
+  const r = learnSkill("web-design")
+  eq("learn ok", r.ok, true)
+  eq("still VERIFIED", r.lifecycle, SKILL_LIFE.VERIFIED)
+  eq("not ACTIVE", r.lifecycle === SKILL_LIFE.ACTIVE, false)
+  ok("knowledge.json", fs.existsSync(path.join(HOME, "skill-downloads", "web-design", "knowledge.json")))
+  const know = readSkillKnowledge("web-design")
+  ok("procedures stored", (know?.procedures || []).length >= 1)
+  ok("report", /Learned/.test(formatLearnReport(r)) && /Not ACTIVE/.test(formatLearnReport(r)))
+  const loaded = await execTool({ cwd: WORK, skillsDir: null }, "load_skill", { name: "web-design" })
+  ok("load_skill appends procedures", /Learned procedures/.test(String(loaded)), String(loaded).slice(0, 200))
   const listed = indexVerifiedSkills()
-  ok("indexed", listed.some((s) => s.name === "web-design"))
-  const dest = path.join(HOME, "skill-downloads", "web-design", "SKILL.md")
-  fs.unlinkSync(dest)
-  const again = verifySkill("web-design")
-  eq("demoted INACTIVE", again.ok, false)
-  eq("lifecycle INACTIVE", again.lifecycle, INACTIVE)
+  eq("extracted flag", listed.find((s) => s.name === "web-design")?.extracted, true)
+
+  await downloadSkill("https://example.com/thin-name.skill", {
+    fetchFn: mockFetch(THIN, { filename: "thin-name.skill" }),
+  })
+  verifySkill("thin-name")
+  const thin = learnSkill("thin-name")
+  ok("thin refused", thin.ok === false && /indexing is not learned/.test(thin.error), thin.error)
+  eq("thin not learned", readSkillKnowledge("thin-name"), null)
 }
 
-console.log("== compose still never fetches ==")
+console.log("== CLI/TUI wired; compose never fetches ==")
 {
+  const forgeSrc = fs.readFileSync(path.join(FORGE, "forge.js"), "utf8")
+  ok("CLI learn", /forge skill learn/.test(forgeSrc) && /runLearn/.test(forgeSrc))
+  const chatSrc = fs.readFileSync(path.join(FORGE, "chat.js"), "utf8")
+  ok("TUI /skill learn", /\/skill learn/.test(chatSrc) && /sub === "learn"/.test(chatSrc))
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no downloadSkill", !/downloadSkill\(/.test(composeSrc))
-  ok("compose has no pinnedFetch", !/pinnedFetch/.test(composeSrc))
+  ok("compose has no learnSkill", !/learnSkill\(/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -155,7 +163,7 @@ console.log("== no side writes / frozen kernel + package ==")
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v65 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v66 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)

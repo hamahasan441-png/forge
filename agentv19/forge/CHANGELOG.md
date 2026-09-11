@@ -3,6 +3,14 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v66.0.0 — "learn"
+
+### Added (v66.0 — extract procedures; indexing is not learned)
+- **Learn.** `forge skill learn <name>` and TUI `/skill learn <name>` extract headings → procedures and bullets → patterns into `knowledge.json` next to the VERIFIED download. Name+description-only fails: indexing is not learned.
+- **CANDIDATE/INACTIVE refused.** Lifecycle stays VERIFIED (not ACTIVE). Never `~/.forge/tools`. `load_skill` appends learned procedures. Compose still never fetches.
+
+Single mutating writer is unchanged. TODO.md is the living list. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. Generated tests, rollback, research-from-gap, and landing the stack on `main` are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v65.0.0 — "discover"
 
 ### Fixed (v65.0 — verified downloads show up in lists and `forge skills <name>`)

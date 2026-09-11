@@ -160,8 +160,8 @@ console.log("== runAgent never auto-flips assumeYes ==")
 }
 
 console.log("== package version ==")
-ok("VERSION is 65.0.0", VERSION === "65.0.0")
-ok("package.json is 65.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version === "65.0.0")
+ok("VERSION is 66.0.0", VERSION === "66.0.0")
+ok("package.json is 66.0.0", JSON.parse(fs.readFileSync(new URL("../forge/package.json", import.meta.url), "utf8")).version === "66.0.0")
 
 console.log(`\n== v25 suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

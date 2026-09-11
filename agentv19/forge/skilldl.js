@@ -20,13 +20,14 @@ import crypto from "node:crypto"
 import { resolveDataDir } from "./config.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { writeStateFile } from "./securefs.js"
-import { validSkillName, skillDescription } from "./skills.js"
+import { validSkillName, skillDescription, parseSkillPlaybook } from "./skills.js"
 import { SKILL_LIFE } from "./evolve.js"
 
 export const SKILL_DOWNLOADS = "skill-downloads"
 export const TOOL_DOWNLOADS = "tool-downloads"
 export const MANIFEST_FILE = "manifest.json"
 export const LIFE_FILE = "skilllife.json"
+export const KNOWLEDGE_FILE = "knowledge.json"
 export const DOWNLOAD_STATUS = Object.freeze({
   DOWNLOADED: "DOWNLOADED",
   FAILED: "FAILED",
@@ -618,6 +619,7 @@ export function indexVerifiedSkills(env = process.env) {
       path: p,
       downloaded: true,
       lifecycle: SKILL_LIFE.VERIFIED,
+      extracted: rec.learned === true,
     })
   }
   return out
@@ -655,7 +657,17 @@ export function readDownloadedSkill(name, env = process.env) {
     if (!fs.existsSync(file)) return null
     const md = fs.readFileSync(file, "utf8")
     if (!md.trim() || KERNEL_HINT.test(md)) return null
-    return md.length > 24000 ? md.slice(0, 24000) + "\n... (truncated)" : md
+    let out = md.length > 24000 ? md.slice(0, 24000) + "\n... (truncated)" : md
+    if (rec.learned === true) {
+      const know = readSkillKnowledge(n, env)
+      if (know?.procedures?.length) {
+        out += "\n\n## Learned procedures\n"
+        for (const p of know.procedures.slice(0, 6)) {
+          out += `- ${p.title}${p.body ? ": " + String(p.body).slice(0, 160) : ""}\n`
+        }
+      }
+    }
+    return out
   } catch {
     return null
   }
@@ -687,5 +699,136 @@ export function readDownloadedToolPlaybook(name, env = process.env) {
   if (url) lines.push("", `Source: ${url}`)
   return lines.join("\n") + "\n"
 }
+
+function knowledgePath(id, env) {
+  return path.join(skillDownloadsDir(env), id, KNOWLEDGE_FILE)
+}
+
+/**
+ * Deterministic extract. Headings become procedures; bullets become patterns.
+ * A name+description-only skill has nothing to learn.
+ */
+export function extractKnowledge(md) {
+  const src = String(md || "")
+  const play = parseSkillPlaybook(src)
+  const procedures = []
+  const heads = []
+  const re = /^##\s+(.+)\s*$/gm
+  let m
+  while ((m = re.exec(src))) heads.push({ title: m[1].trim(), index: m.index, len: m[0].length })
+  for (let i = 0; i < heads.length; i++) {
+    const h = heads[i]
+    if (/^(files|verify|references|learned procedures)$/i.test(h.title)) continue
+    const start = h.index + h.len
+    const end = i + 1 < heads.length ? heads[i + 1].index : src.length
+    const body = src.slice(start, end).trim().split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+      .join(" ")
+      .slice(0, 400)
+    procedures.push({ title: h.title.slice(0, 80), body })
+  }
+  const patterns = []
+  for (const line of src.split("\n")) {
+    const t = line.trim()
+    if (!/^[-*]\s+\S/.test(t)) continue
+    const b = t.replace(/^[-*]\s+/, "").replace(/^`([^`]+)`$/, "$1").trim()
+    if (b.length < 12 || b.length > 200) continue
+    if (/^src\/|^https?:/i.test(b)) continue
+    patterns.push(b.slice(0, 160))
+  }
+  return {
+    procedures: procedures.slice(0, 8),
+    patterns: [...new Set(patterns)].slice(0, 8),
+    files: play.files || [],
+    command: play.command || "",
+    repair: play.repair || "",
+  }
+}
+
+export function readSkillKnowledge(name, env = process.env) {
+  const n = validSkillName(name)
+  if (!n) return null
+  try {
+    const j = JSON.parse(fs.readFileSync(knowledgePath(n, env), "utf8"))
+    if (!j || typeof j !== "object") return null
+    return j
+  } catch {
+    return null
+  }
+}
+
+/**
+ * LEARN ≠ INDEX. VERIFIED only. Writes knowledge.json under the download
+ * dir. Lifecycle stays VERIFIED (not ACTIVE). Never ~/.forge/tools.
+ */
+export function learnSkill(name, { env = process.env, now = Date.now } = {}) {
+  const id = String(name || "").trim()
+  const man = loadDownloadManifest(env, "skill")
+  const rec = man.items?.[id]
+  if (!rec) return { ok: false, error: `skill "${id}" not downloaded`, name: id }
+  if (rec.lifecycle === INACTIVE) return { ok: false, error: "INACTIVE — verify first", name: id, lifecycle: INACTIVE }
+  if (rec.lifecycle !== SKILL_LIFE.VERIFIED) {
+    return { ok: false, error: "not verified (indexing is not learned)", name: id, lifecycle: rec.lifecycle || SKILL_LIFE.CANDIDATE }
+  }
+  const file = skillMdPath(id, env)
+  let md = ""
+  try { md = fs.readFileSync(file, "utf8") } catch {
+    return { ok: false, error: "SKILL.md missing", name: id }
+  }
+  if (KERNEL_HINT.test(md)) return { ok: false, error: "kernel path — refused", name: id }
+  const knowledge = extractKnowledge(md)
+  const substance = (knowledge.procedures.length + (knowledge.repair ? 1 : 0) + knowledge.patterns.length)
+  if (substance < 1) {
+    return { ok: false, error: "nothing to extract (indexing is not learned)", name: id, lifecycle: SKILL_LIFE.VERIFIED }
+  }
+  const payload = {
+    v: 1,
+    name: id,
+    learnedAt: new Date(now()).toISOString(),
+    sourceUrl: rec.sourceUrl || "",
+    sha256: rec.sha256 || "",
+    ...knowledge,
+  }
+  try {
+    writeStateFile(knowledgePath(id, env), JSON.stringify(payload, null, 1), { mode: 0o600 })
+  } catch (e) {
+    return { ok: false, error: e?.message || "write failed", name: id }
+  }
+  rec.learned = true
+  rec.learnedAt = payload.learnedAt
+  rec.procedures = knowledge.procedures.length
+  rec.patterns = knowledge.patterns.length
+  man.items[id] = rec
+  man.updated = now()
+  saveManifest(man, env, "skill")
+  try { writeStateFile(path.join(skillDownloadsDir(env), id, "meta.json"), JSON.stringify(rec, null, 1), { mode: 0o600 }) } catch { /* meta best-effort */ }
+  return {
+    ok: true,
+    name: id,
+    lifecycle: SKILL_LIFE.VERIFIED,
+    learned: true,
+    knowledge: payload,
+  }
+}
+
+export function formatLearnReport(result) {
+  if (!result?.ok) {
+    return `LEARN FAILED\n\nReason:\n${result?.error || "unknown"}\n`
+  }
+  const k = result.knowledge || {}
+  return [
+    "Learned.",
+    "",
+    "Skill:",
+    result.name,
+    "",
+    `Procedures: ${k.procedures?.length ?? 0}`,
+    `Patterns: ${k.patterns?.length ?? 0}`,
+    "",
+    "Not ACTIVE. LEARN ≠ INDEX. DOWNLOAD ≠ VERIFY.",
+  ].join("\n") + "\n"
+}
+
 
 
