@@ -3,6 +3,13 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v61.0.0 — "todo"
+
+### Changed (v61.0 — completed PLAN files removed; leftovers live in TODO.md)
+- **Plans.** Shipped `PLAN-v*.md` files are deleted. Remaining work is `[agentv19/forge/TODO.md](TODO.md)` — every item is `- [ ]` until it ships. Do not keep a plan file after the enhancement lands. CHANGELOG remains the history.
+
+Single mutating writer is unchanged. TODO.md is the living list. Plugin-iso reds (Node 22 has no `--allow-net`) are not this release. `assumeYes` stays false. Wizard pick 18 stays `custom`.
+
 ## v60.0.0 — "blast"
 
 ### Added (v60.0 — v33 graph as planner knowledge: radius, importers, mapped tests)
