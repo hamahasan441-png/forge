@@ -283,6 +283,18 @@ export function planAcquire(gap, opts = {}) {
       why: "local docs before the web",
     }
   }
+  const mapped = (opts.blast?.tests || []).map((t) => String(t || "")).filter(Boolean).slice(0, 2)
+  if (mapped.length && !tried.has(METHOD.VERIFY)) {
+    return {
+      id: gap.id,
+      method: METHOD.VERIFY,
+      tool: "bash",
+      query: mapped[0],
+      cost: 3,
+      tests: mapped,
+      why: "graph maps tests — run them, do not re-search",
+    }
+  }
   if (!tried.has(METHOD.WEB)) {
     return {
       id: gap.id,
