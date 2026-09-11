@@ -5,11 +5,15 @@
  *   FORGE_HOME/projects/<hash>/claims.json
  * Not a second memory, graph, or skill system. Compose never writes.
  * LEARN of a VERIFIED skill upserts a claim keyed by subject (skill id).
+ *
+ * v73: pickClaims() ranks claims into compose [claims]. Compose never writes.
  */
 import fs from "node:fs"
 import path from "node:path"
 import { writeStateFile } from "./securefs.js"
 import { projectDir } from "./memory.js"
+import { scoreAgainst, namedIn } from "./evaluate.js"
+import { TASK_CLASS } from "./classify.js"
 
 export const CLAIMS_FILE = "claims.json"
 export const MAX_CLAIMS = 48
@@ -89,4 +93,39 @@ export function formatClaims(rows, { subject = "" } = {}) {
     lines.push(`${c.subject}  ${c.source || ""}  ${(c.text || "").split("\n")[0].slice(0, 80)}`)
   }
   return lines.join("\n") + "\n"
+}
+
+/**
+ * Rank stored claims for a task. MICRO/SMALL only if the subject is named.
+ * Never writes. Cap 3.
+ */
+export function pickClaims(task, rows, { klass, limit = 3 } = {}) {
+  const list = Array.isArray(rows) ? rows : []
+  const q = String(task || "")
+  const scored = []
+  for (const c of list) {
+    const n = String(c?.subject || "")
+    if (!n) continue
+    const d = String(c?.text || "")
+    const s = scoreAgainst(q, n, d)
+    if (s <= 0) continue
+    scored.push({ subject: n, text: d.slice(0, MAX_CLAIM_TEXT), source: c.source || "", score: s })
+  }
+  scored.sort((a, b) => b.score - a.score || a.subject.localeCompare(b.subject))
+  const cap = Math.max(1, Math.min(3, Number(limit) || 3))
+  if (klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL) {
+    return scored.filter((c) => namedIn(q, c.subject)).slice(0, 1)
+  }
+  return scored.slice(0, cap)
+}
+
+export function formatClaimLines(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const out = []
+  for (const c of list.slice(0, 3)) {
+    const hint = String(c.text || "").split("\n")[0].slice(0, 160)
+    if (!c.subject || !hint) continue
+    out.push(`[claims] ${c.subject}: ${hint}`)
+  }
+  return out
 }

@@ -3,6 +3,13 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v73.0.0 — "cite"
+
+### Added (v73.0 — claims join compose, read-only)
+- **Cite.** Matching project claims surface as `[claims]` in the compose snapshot. MICRO/SMALL skip unless the subject is named. Compose still never writes `claims.json`. Never ACTIVE.
+
+Architecture decision log, ZIP unpack, and auto-ACTIVE are not this release. `assumeYes` stays false. TODO.md is the living list.
+
 ## v72.0.0 — "claims"
 
 ### Added (v72.0 — per-claim subject store)

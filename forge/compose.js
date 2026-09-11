@@ -40,6 +40,8 @@
  * v58: learned skills tagged CANDIDATE until a second 9/9 evolveRun.
  * v60: [blast] from the v33 graph (importers + tests + scope). Compose
  * never walks the repo and never writes. A miss is UNKNOWN, not "none".
+ * v73: [claims] from the project subject store. Compose never writes
+ * claims.json. MICRO/SMALL skip unless the subject is named.
  */
 import path from "node:path"
 import fs from "node:fs"
@@ -56,6 +58,7 @@ import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
 import { relevantLessons } from "./lessons.js"
 import { relevantTools, formatToolMem, emptyTools } from "./toolintel.js"
 import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
+import { listClaims, pickClaims, formatClaimLines } from "./claims.js"
 import { blastFromWorld, emptyBlast, formatBlast } from "./impact.js"
 
 const RADIUS_SHOW = 16
@@ -316,6 +319,7 @@ export function emptyCompose(klass = null) {
     tools: emptyTools(),
     gaps: emptyGaps(),
     blast: emptyBlast(),
+    claims: [],
   }
 }
 
@@ -451,6 +455,9 @@ export function compose(task = "", opts = {}) {
       })
     } catch { out.gaps = emptyGaps() }
   }
+  if (opts.includeClaims !== false) {
+    try { out.claims = pickClaims(q, listClaims(cwd), { klass, limit: 3 }) } catch { out.claims = [] }
+  }
   return out
 }
 
@@ -473,6 +480,7 @@ function onceKey(task, opts = {}) {
     opts.includeMcp !== false ? "c" : "-",
     opts.includeGaps !== false ? "g" : "-",
     opts.includeBlast !== false ? "r" : "-",
+    opts.includeClaims !== false ? "k" : "-",
   ].join("")
   const plugs = Array.isArray(opts.plugins)
     ? opts.plugins.map((p) => p && p.name).filter(Boolean).slice(0, 8).join(",")
@@ -615,6 +623,7 @@ export function formatCompose(c) {
   if (blastLine) lines.push(blastLine)
   const gapBlock = formatGaps(c.gaps)
   if (gapBlock) lines.push(gapBlock)
+  for (const line of formatClaimLines(c.claims)) lines.push(line)
   return lines.join("\n")
 }
 

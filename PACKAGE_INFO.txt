@@ -1,4 +1,4 @@
-forge v72.0.0 — CLI-only build
+forge v73.0.0 — CLI-only build
 - zero-dependency Node CLI (>=18), runs directly against providers (no localhost)
 - 18 providers with per-provider contextWindow + keyUrl docs: openai, anthropic,
   zai, deepseek, groq, openrouter, gemini, mistral, xai, together, cerebras,
