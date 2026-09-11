@@ -14,6 +14,8 @@
  *
  * v55: planAcquire() names the cheapest source (skill → repo → docs → web).
  * Compose never fetches. Web is last and is a search hint, not a page dump.
+ * v56: ingestAcquire() records that a real tool ran. Status becomes
+ * UNCERTAIN (never VERIFIED). Next plan skips tried methods. No page dump.
  *
  * This is not a second memory, graph, or skill system. It ranks what the
  * existing snapshot does not yet cover and stores that ranking in the
@@ -57,6 +59,16 @@ export const METHOD = {
   REPO: "repo",
   DOCS: "docs",
   WEB: "web",
+  VERIFY: "verify",
+}
+
+const ACQUIRE_TOOLS = {
+  load_skill: METHOD.SKILL,
+  grep_files: METHOD.REPO,
+  glob_files: METHOD.REPO,
+  read_file: METHOD.REPO,
+  web_search: METHOD.WEB,
+  fetch_url: METHOD.WEB,
 }
 
 const SKILL_FOR = {
@@ -209,11 +221,12 @@ function skillIn(opts, name) {
 export function planAcquire(gap, opts = {}) {
   if (!gap || !gap.id || gap.learn === false) return null
   if (gap.status === STATUS.KNOWN || gap.status === STATUS.SKIPPABLE) return null
+  const tried = new Set((opts.tried || gap.tried || []).map(String))
   const q = bestQuery(gap)
   const files = (opts.world?.files || []).map((f) => String(f || "")).filter(Boolean).slice(0, 2)
   const skillName = SKILL_FOR[gap.id]
   const skill = skillIn(opts, skillName)
-  if (skill) {
+  if (skill && !tried.has(METHOD.SKILL)) {
     const next = files.length
       ? { method: METHOD.REPO, tool: "grep_files", query: q }
       : { method: METHOD.REPO, tool: "glob_files", query: `*${gap.id}*` }
@@ -227,7 +240,7 @@ export function planAcquire(gap, opts = {}) {
       why: "existing skill is cheaper than research",
     }
   }
-  if (files.length) {
+  if (files.length && !tried.has(METHOD.REPO)) {
     return {
       id: gap.id,
       method: METHOD.REPO,
@@ -239,7 +252,7 @@ export function planAcquire(gap, opts = {}) {
     }
   }
   const docs = (opts.world?.radius || []).filter((f) => /readme|docs?\//i.test(String(f || "")))
-  if (docs.length) {
+  if (docs.length && !tried.has(METHOD.DOCS) && !tried.has(METHOD.REPO)) {
     return {
       id: gap.id,
       method: METHOD.DOCS,
@@ -249,13 +262,23 @@ export function planAcquire(gap, opts = {}) {
       why: "local docs before the web",
     }
   }
+  if (!tried.has(METHOD.WEB)) {
+    return {
+      id: gap.id,
+      method: METHOD.WEB,
+      tool: "web_search",
+      query: `${gap.id} official documentation`,
+      cost: 4,
+      why: "no local skill or files — search, do not dump the page",
+    }
+  }
   return {
     id: gap.id,
-    method: METHOD.WEB,
-    tool: "web_search",
-    query: `${gap.id} official documentation`,
-    cost: 4,
-    why: "no local skill or files — search, do not dump the page",
+    method: METHOD.VERIFY,
+    tool: "todo",
+    query: "verify with a focused test, do not re-search",
+    cost: 3,
+    why: "already acquired — verify, do not dump",
   }
 }
 
@@ -288,12 +311,21 @@ function evidenceFor(domain, blob, prior) {
   if (prior && prior.lifecycle === LIFECYCLE.STALE) {
     return { status: STATUS.UNCERTAIN, confidence: 0.3, evidence: "stale", provenance: "system-generated" }
   }
+  const tried = Array.isArray(prior?.tried) ? prior.tried.filter(Boolean) : []
   const mem = blob || ""
   for (const t of tags) {
     if (t.length < 3) continue
     if (mem.includes(t)) hits.push(t)
   }
   if (!hits.length) {
+    if (tried.length) {
+      return {
+        status: STATUS.UNCERTAIN,
+        confidence: Math.min(0.5, 0.2 + tried.length * 0.1),
+        evidence: `acquired:${tried.slice(0, 4).join(",")}`,
+        provenance: "system-generated",
+      }
+    }
     return { status: STATUS.UNKNOWN, confidence: 0, evidence: "none", provenance: "system-generated" }
   }
   const unique = [...new Set(hits)].slice(0, 3)
@@ -355,7 +387,8 @@ export function detectGaps(task = "", opts = {}) {
   const gaps = []
   const skip = []
   for (const req of required) {
-    const ev = evidenceFor(req, blob, prior[req.id])
+    const priorRec = prior[req.id]
+    const ev = evidenceFor(req, blob, priorRec)
     const row = {
       id: req.id,
       impact: req.impact,
@@ -364,6 +397,7 @@ export function detectGaps(task = "", opts = {}) {
       evidence: ev.evidence,
       provenance: ev.provenance,
       why: req.why,
+      tried: Array.isArray(priorRec?.tried) ? priorRec.tried.slice(0, 6) : [],
     }
     const low = req.impact === IMPACT.LOW
     if (low && ev.status !== STATUS.KNOWN) {
@@ -379,13 +413,14 @@ export function detectGaps(task = "", opts = {}) {
       continue
     }
     const blocking = req.impact === IMPACT.CRITICAL || req.impact === IMPACT.HIGH
-    const rowOut = {
-      ...row,
-      learn: blocking && ev.status === STATUS.UNKNOWN,
-    }
-    if (rowOut.learn) {
-      const plan = planAcquire(rowOut, opts)
-      if (plan) rowOut.acquire = plan
+    const canLearn = blocking && ev.status !== STATUS.KNOWN && ev.status !== STATUS.PROBABLE
+    const rowOut = { ...row, learn: false }
+    if (canLearn) {
+      const plan = planAcquire({ ...rowOut, learn: true }, { ...opts, tried: row.tried })
+      if (plan) {
+        rowOut.acquire = plan
+        rowOut.learn = true
+      }
     }
     gaps.push(rowOut)
   }
@@ -441,10 +476,15 @@ export function persistGaps(cwd, assessment, { task = "" } = {}) {
         cost: Number(row.acquire.cost ?? 0) || 0,
       }
     }
+    if (Array.isArray(row.tried) && row.tried.length) {
+      rec.tried = [...new Set([...(rec.tried || []), ...row.tried.map(String)])].slice(0, 6)
+    }
     if (rec.lifecycle === LIFECYCLE.VERIFIED) {
       rec.status = STATUS.KNOWN
     } else if (rec.lifecycle === LIFECYCLE.DEPRECATED || rec.lifecycle === LIFECYCLE.STALE) {
       rec.status = row.status || rec.status
+    } else if (rec.status === STATUS.UNCERTAIN && rec.tried?.length && row.status === STATUS.UNKNOWN) {
+      // ingest already recorded a real tool — do not demote
     } else {
       rec.status = row.status || rec.status || STATUS.UNKNOWN
       rec.lifecycle = rec.lifecycle === LIFECYCLE.CANDIDATE && rec.samples > 1
@@ -490,6 +530,89 @@ export function recordGapOutcome({ cwd, id, status = LIFECYCLE.VERIFIED, evidenc
   domains[id] = rec
   all.v = GAP_SCHEMA
   all.updated = Date.now()
+  all.domains = domains
+  saveGapStats(cwd, all)
+  return all
+}
+
+function queryOf(r) {
+  if (!r || typeof r !== "object") return ""
+  const args = r.args && typeof r.args === "object" ? r.args : {}
+  const raw = r.arguments_summary ?? r.query ?? args.name ?? args.pattern ?? args.query ?? args.url ?? args.path ?? args.skill ?? ""
+  return String(raw).split("\n")[0].replace(/https?:\/\/\S+/gi, "").slice(0, 80)
+}
+
+function methodOf(tool, query) {
+  if (tool === "read_file" && /readme|docs?\//i.test(query)) return METHOD.DOCS
+  return ACQUIRE_TOOLS[tool] || null
+}
+
+function recordMatchesDomain(id, tool, query) {
+  const d = DOMAIN_BY_ID.get(id)
+  if (!d) return false
+  const q = String(query || "").toLowerCase()
+  if (tool === "load_skill") {
+    const skill = SKILL_FOR[id]
+    if (skill && q.includes(skill.toLowerCase())) return true
+  }
+  if (q.includes(id)) return true
+  for (const t of d.tags || []) {
+    if (t.length >= 4 && q.includes(t)) return true
+  }
+  return false
+}
+
+/**
+ * Record that a real acquire tool ran. CANDIDATE / UNCERTAIN only —
+ * never VERIFIED, never stores result text or URLs. Best-effort.
+ *
+ * @param {object} o { cwd, task, records, klass }
+ */
+export function ingestAcquire({ cwd, records = [], task = "", klass = null } = {}) {
+  if (!cwd || !Array.isArray(records) || !records.length) return null
+  const all = loadGapStats(cwd)
+  const domains = all.domains || (all.domains = {})
+  const now = Date.now()
+  if (task) {
+    for (const req of requiredDomains(task, { klass })) {
+      if (!domains[req.id]) {
+        domains[req.id] = {
+          id: req.id, samples: 0, firstSeen: now, lifecycle: LIFECYCLE.CANDIDATE,
+          impact: req.impact, status: STATUS.UNKNOWN, tried: [],
+        }
+      }
+    }
+  }
+  let hits = 0
+  for (const r of records) {
+    const tool = String(r?.tool || r?.name || "")
+    const query = queryOf(r)
+    const method = methodOf(tool, query)
+    if (!method) continue
+    if (r.status && r.status !== "ok") continue
+    for (const id of Object.keys(domains)) {
+      const rec = domains[id]
+      if (!rec || rec.lifecycle === LIFECYCLE.VERIFIED) continue
+      const planned = rec.acquire && rec.acquire.tool === tool
+      if (!planned && !recordMatchesDomain(id, tool, query)) continue
+      rec.tried = Array.isArray(rec.tried) ? rec.tried : []
+      if (!rec.tried.includes(method)) rec.tried.push(method)
+      rec.tried = rec.tried.slice(0, 6)
+      rec.status = STATUS.UNCERTAIN
+      rec.lifecycle = rec.lifecycle === LIFECYCLE.VERIFIED ? LIFECYCLE.VERIFIED
+        : (rec.lifecycle === LIFECYCLE.CANDIDATE ? LIFECYCLE.ACTIVE : rec.lifecycle)
+      rec.confidence = Math.min(0.5, (Number(rec.confidence) || 0) + 0.1)
+      rec.evidence = `${tool} ${id}`.slice(0, 80)
+      rec.provenance = "system-generated"
+      rec.lastMethod = method
+      rec.lastSeen = now
+      rec.samples = (rec.samples ?? 0) + 1
+      hits++
+    }
+  }
+  if (!hits) return null
+  all.v = GAP_SCHEMA
+  all.updated = now
   all.domains = domains
   saveGapStats(cwd, all)
   return all

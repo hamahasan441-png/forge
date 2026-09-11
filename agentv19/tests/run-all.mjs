@@ -131,6 +131,7 @@ const suites = [
   ["v53", "node", ["test-v53.mjs"]],
   ["v54", "node", ["test-v54.mjs"]],
   ["v55", "node", ["test-v55.mjs"]],
+  ["v56", "node", ["test-v56.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

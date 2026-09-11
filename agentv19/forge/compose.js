@@ -33,6 +33,8 @@
  * is meta/CLI. MICRO/SMALL skip unless a domain is named. No second data root.
  * v55: [learn] names the cheapest acquisition method (skill → repo → docs
  * → web_search last). Compose never fetches, never dumps a page.
+ * v56: ingestAcquire (agent/chat) records real tool runs as UNCERTAIN.
+ * Compose still never writes. Next [learn] skips tried methods.
  */
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"

@@ -43,7 +43,8 @@ import { formatSkillPicks, formatSteer } from "./evaluate.js"
 import { pickSkills } from "./skillforge.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
-import { composeOnce, formatCompose } from "./compose.js"
+import { composeOnce, clearComposeOnce, formatCompose } from "./compose.js"
+import { ingestAcquire } from "./knowgap.js"
 import { classifyTask } from "./classify.js"
 import { saveSession, loadSession, lastSessionFile, listSessions, findSession } from "./sessions.js"
 import { relevantMemory } from "./memory.js"
@@ -912,6 +913,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         records: results.map((r) => r?.record).filter(Boolean),
       })
     } catch { /* persist is best-effort */ }
+    try {
+      const recs = results.map((r) => r?.record).filter(Boolean)
+      if (ingestAcquire({ cwd: process.cwd(), task: lastUserTask, records: recs })) clearComposeOnce()
+    } catch { /* ingest is best-effort */ }
     for (let i = 0; i < parsed.length; i++) {
       const { tc } = parsed[i]
       if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
