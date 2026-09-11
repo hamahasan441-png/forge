@@ -923,6 +923,17 @@ export function renderDiff(text, width, o, { max = 120 } = {}) {
   return out
 }
 
+/** Compact dock line. Never writes. Empty knowledge → "". */
+export function knowledgeDockText(knowledge) {
+  const k = knowledge && typeof knowledge === "object" ? knowledge : {}
+  const c = (k.claims || []).map((x) => x.subject || x.name).filter(Boolean).slice(0, 3)
+  const d = (k.decisions || []).map((x) => x.title).filter(Boolean).slice(0, 2)
+  const bits = []
+  if (c.length) bits.push(`claims ${c.join(", ")}`)
+  if (d.length) bits.push(`decisions ${d.join(", ")}`)
+  return bits.join(" · ")
+}
+
 /** Full vertical task panel (for /status and /tasks). */
 export function renderTaskPanel(state, width, o) {
   const out = section("TASK", width, o)
@@ -940,6 +951,8 @@ export function renderTaskPanel(state, width, o) {
   if (tt) row("Tests", tt)
   if (state.checkpoint) row("Checkpoint", shortCheckpoint(state.checkpoint))
   if (state.task?.startedAt) row("Elapsed", fmtClock((state.task.endedAt ?? o.now) - state.task.startedAt))
+  const know = knowledgeDockText(state.knowledge)
+  if (know) row("Knowledge", know)
   row("State", state.state)
   return out
 }
@@ -987,6 +1000,8 @@ export function renderOmegaPanel(state, width, o) {
   if (state.omega?.origin) {
     body.push(fitS(o.th.muted(`origin ${state.omega.origin}`), inner, o))
   }
+  const know = knowledgeDockText(state.knowledge)
+  if (know) body.push(fitS(o.th.muted(`know ${know}`), inner, o))
   if (plan.length) {
     body.push(fitS("PLAN", inner, o))
     for (const item of plan.slice(0, 8)) {

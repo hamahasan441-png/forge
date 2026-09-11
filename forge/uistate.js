@@ -59,6 +59,7 @@ export const EVENTS = [
   // authoritative task metadata from the v21 controller
   "SEGMENT_UPDATED", "DAG_UPDATED", "META_UPDATE", "TASK_CLASSIFIED",
   "CAUSAL_UPDATED", "REVIEW_STARTED", "REVIEW_COMPLETED", "ORIGIN_CLASSIFIED",
+  "KNOWLEDGE_UPDATED",
 ]
 
 export const VIEWS = ["tools", "plan", "diff", "verification"]
@@ -110,6 +111,7 @@ export function initialState(over = {}) {
     dag: null,
     risk: null,
     omega: null,
+    knowledge: { claims: [], decisions: [] },
     seq: 0,
     ...over,
   }
@@ -211,6 +213,18 @@ export function reduce(s, ev) {
           review: { status: ev.ok ? "ok" : "block", ok: !!ev.ok, findings: ev.findings || [], blockers: ev.blockers || [] },
         },
       }
+    }
+    case "KNOWLEDGE_UPDATED": {
+      const claims = Array.isArray(ev.claims) ? ev.claims.slice(0, 3).map((c) => ({
+        subject: String(c.subject || c.name || "").slice(0, 40),
+        text: String(c.text || c.repair || "").slice(0, 160),
+      })).filter((c) => c.subject) : []
+      const decisions = Array.isArray(ev.decisions) ? ev.decisions.slice(0, 3).map((d) => ({
+        title: String(d.title || "").slice(0, 48),
+        status: String(d.status || "accepted").slice(0, 16),
+        reason: String(d.reason || "").slice(0, 160),
+      })).filter((d) => d.title) : []
+      return { ...s, knowledge: { claims, decisions } }
     }
 
     case "TASK_STARTED": {
@@ -765,6 +779,12 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
       if (Array.isArray(ev.items) && ev.items.length) emit({ type: "PLAN_UPDATED", items: ev.items })
       emit({ type: "NOTICE", level: "info", text: `∞ synthesised ${ev.nodes || ev.items?.length || 0}-node plan (${ev.class})` })
       break
+    case "PLAN_COMPOSE": {
+      const claims = Array.isArray(ev.claims) ? ev.claims : []
+      const decisions = Array.isArray(ev.decisions) ? ev.decisions : []
+      if (claims.length || decisions.length) emit({ type: "KNOWLEDGE_UPDATED", claims, decisions })
+      break
+    }
     case "IMPACT_ANALYZED":
       emit({ type: "NOTICE", level: "info", text: `impact radius ${ev.radius ?? "?"} • ${(ev.scope || []).join(" → ") || "syntax"}` })
       break

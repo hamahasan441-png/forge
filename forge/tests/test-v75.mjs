@@ -1,27 +1,21 @@
 #!/usr/bin/env node
 /**
- * forge — v71 drift: VERIFIED body sha mismatch → DRIFT, not STALE.
- *
- * Re-verify restores. Sibling unchanged. Never ACTIVE. Compose never fetches.
+ * forge — v75 dock: claims/decisions on the omega TUI dock. Read-only.
  */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-"))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v75-"))
 process.env.FORGE_HOME = HOME
 delete process.env.FORGE_SKILLS_ALL
 delete process.env.FORGE_DATA_DIR
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v71-work-"))
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v75-work-"))
 process.chdir(WORK)
 
-const {
-  downloadSkill, verifySkill, sweepDrift, indexVerifiedSkills,
-  readDownloadedSkill, listDownloads, skillDownloadsDir,
-  DRIFT, STALE,
-} = await import("../skilldl.js")
-const { SKILL_LIFE } = await import("../evolve.js")
+const { initialState, reduce } = await import("../uistate.js")
+const { knowledgeDockText, renderOmegaPanel, renderTaskPanel, renderOptions } = await import("../render.js")
 const { evaluateSkills } = await import("../evaluate.js")
 const { classifyTaskComplexity, classifyTask, TASK_CLASS } = await import("../classify.js")
 const { defaultConfig, sanitizeProjectConfig } = await import("../config.js")
@@ -45,75 +39,56 @@ function listGlobalTools() {
   try { return fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".mjs") || f.endsWith(".js")) } catch { return [] }
 }
 
-const STRUCT = `---
-name: web-design
-description: Responsive layout playbook
----
-
-# Web Design
-
-A layout playbook.
-`
-
-function mockFetch(body, { filename = "artifact.bin" } = {}) {
-  const buf = Buffer.from(String(body), "utf8")
-  return async (href) => ({
-    ok: true, status: 200, statusText: "OK",
-    headers: { "content-disposition": `filename="${filename}"` },
-    body: buf, url: href,
+console.log("== knowledgeDockText + reduce KNOWLEDGE_UPDATED ==")
+{
+  eq("empty", knowledgeDockText({}), "")
+  eq("claims", knowledgeDockText({ claims: [{ subject: "web-design" }] }), "claims web-design")
+  ok("both", /claims web-design/.test(knowledgeDockText({
+    claims: [{ subject: "web-design" }],
+    decisions: [{ title: "use-postgres" }],
+  })) && /decisions use-postgres/.test(knowledgeDockText({
+    claims: [{ subject: "web-design" }],
+    decisions: [{ title: "use-postgres" }],
+  })))
+  const s0 = initialState({ cwd: WORK })
+  eq("initial empty", (s0.knowledge?.claims || []).length, 0)
+  const s1 = reduce(s0, {
+    type: "KNOWLEDGE_UPDATED",
+    claims: [{ subject: "web-design", text: "Use a 12-column grid." }],
+    decisions: [{ title: "use-postgres", reason: "billing rows", status: "accepted" }],
   })
+  eq("claim folded", s1.knowledge.claims[0]?.subject, "web-design")
+  eq("decision folded", s1.knowledge.decisions[0]?.title, "use-postgres")
 }
 
-function manPath() { return path.join(HOME, "skill-downloads", "manifest.json") }
-function loadMan() { return JSON.parse(fs.readFileSync(manPath(), "utf8")) }
-function saveMan(j) { fs.writeFileSync(manPath(), JSON.stringify(j, null, 1)) }
-function skillFile(id) { return path.join(skillDownloadsDir(), id, "SKILL.md") }
-
-console.log("== body change → DRIFT; sibling stays VERIFIED; re-verify restores ==")
+console.log("== omega / status panels show know line ==")
 {
-  await downloadSkill("https://example.com/web-design.skill", {
-    fetchFn: mockFetch(STRUCT, { filename: "web-design.skill" }),
+  const o = renderOptions({ ascii: true, a11y: true })
+  const st = reduce(initialState({ cwd: WORK, state: "PLANNING", task: { title: "layout", startedAt: Date.now() } }), {
+    type: "KNOWLEDGE_UPDATED",
+    claims: [{ subject: "web-design", text: "grid" }],
+    decisions: [{ title: "use-postgres" }],
   })
-  await downloadSkill("https://example.com/fresh-name.skill", {
-    fetchFn: mockFetch(STRUCT.replace("web-design", "fresh-name"), { filename: "fresh-name.skill" }),
-  })
-  eq("a VERIFIED", verifySkill("web-design").lifecycle, SKILL_LIFE.VERIFIED)
-  eq("b VERIFIED", verifySkill("fresh-name").lifecycle, SKILL_LIFE.VERIFIED)
-  ok("verifiedSha stamped", !!loadMan().items["web-design"].verifiedSha)
-
-  fs.appendFileSync(skillFile("web-design"), "\nA harmless extra line.\n")
-  const demoted = sweepDrift()
-  ok("sweep names it", demoted.includes("web-design"), String(demoted))
-  eq("DRIFT", listDownloads().find((d) => d.id === "web-design")?.lifecycle, DRIFT)
-  eq("not STALE", listDownloads().find((d) => d.id === "web-design")?.lifecycle === STALE, false)
-  eq("sibling VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("hidden", indexVerifiedSkills().some((s) => s.name === "web-design"), false)
-  eq("sibling indexed", indexVerifiedSkills().some((s) => s.name === "fresh-name"), true)
-  eq("load hidden", readDownloadedSkill("web-design"), null)
-
-  const back = verifySkill("web-design")
-  eq("restored VERIFIED", back.lifecycle, SKILL_LIFE.VERIFIED)
-  eq("not ACTIVE", back.lifecycle === SKILL_LIFE.ACTIVE, false)
-  eq("indexed again", indexVerifiedSkills().some((s) => s.name === "web-design"), true)
-  ok("body back", !!readDownloadedSkill("web-design"))
+  const omega = renderOmegaPanel(st, 80, o).join("\n")
+  ok("omega know", /know /.test(omega) && /web-design/.test(omega), omega)
+  ok("omega decisions", /use-postgres/.test(omega))
+  const panel = renderTaskPanel(st, 80, o).join("\n")
+  ok("status Knowledge", /Knowledge/.test(panel) && /web-design/.test(panel), panel)
+  const empty = renderOmegaPanel(initialState({ cwd: WORK }), 80, o).join("\n")
+  eq("empty no know", /know /.test(empty), false)
 }
 
-console.log("== missing verifiedSha is stamped, not instantly DRIFT ==")
+console.log("== PLAN_COMPOSE wires claims; compose never writes ==")
 {
-  const man = loadMan()
-  delete man.items["fresh-name"].verifiedSha
-  saveMan(man)
-  const demoted = sweepDrift()
-  eq("fresh not demoted", demoted.includes("fresh-name"), false)
-  eq("still VERIFIED", listDownloads().find((d) => d.id === "fresh-name")?.lifecycle, SKILL_LIFE.VERIFIED)
-  ok("clock stamped", !!loadMan().items["fresh-name"].verifiedSha)
-}
-
-console.log("== compose never fetches ==")
-{
+  const metaSrc = fs.readFileSync(path.join(FORGE, "meta.js"), "utf8")
+  const uiSrc = fs.readFileSync(path.join(FORGE, "uistate.js"), "utf8")
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
+  ok("PLAN_COMPOSE claims", /type: "PLAN_COMPOSE"/.test(metaSrc) && /composed\.claims/.test(metaSrc))
+  ok("PLAN_COMPOSE decisions", /composed\.decisions/.test(metaSrc))
+  ok("bridge PLAN_COMPOSE", /case "PLAN_COMPOSE"/.test(uiSrc) && /KNOWLEDGE_UPDATED/.test(uiSrc))
+  ok("compose has no recordClaim", !/recordClaim/.test(composeSrc))
+  ok("compose has no recordDecision", !/recordDecision/.test(composeSrc))
   ok("compose has no skilldl", !/skilldl/.test(composeSrc))
-  ok("compose has no sweepDrift", !/sweepDrift/.test(composeSrc))
 }
 
 console.log("== no side writes / frozen kernel + package ==")
@@ -144,7 +119,7 @@ console.log("== no side writes / frozen kernel + package ==")
   ok("no ~/.forge/tools", !fs.existsSync(path.join(HOME, "tools")) || fs.readdirSync(path.join(HOME, "tools")).length === 0)
 }
 
-console.log(`\n== v71 suite: ${PASS} passed, ${FAIL} failed ==`)
+console.log(`\n== v75 suite: ${PASS} passed, ${FAIL} failed ==`)
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 try { fs.rmSync(WORK, { recursive: true, force: true }) } catch {}
 process.exit(FAIL ? 1 : 0)
