@@ -155,6 +155,8 @@ ${bold("setup")}
   /skill verify <name>  structurally verify a downloaded skill (pass → VERIFIED)
   /skill learn <name>   extract procedures from a VERIFIED skill (indexing is not learned)
   /skill ttl <name> [ms] per-skill TTL override (omit ms to print)
+  /skill promote <name>  VERIFIED v2 → ACTIVE (v1 SUPERSEDED)
+  /skill rollback <name> ACTIVE v2 → v1; keep both histories
   /claims [subject]     list project claims, or one subject (not a second memory)
   /decisions [add …]    architecture decision log
   /knowledge            knowledge pane (claims / decisions / gaps / downloads)
@@ -1981,7 +1983,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           if (have.length) console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
           break
         }
-        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>]`)
+        if (sub === "promote" || sub === "rollback") {
+          const name = parts[1]
+          if (!name) { err(`usage: /skill ${sub} <name>`); break }
+          const { promoteSkill, rollbackSkill } = await import("./evolve.js")
+          const r = sub === "promote" ? promoteSkill(process.cwd(), name) : rollbackSkill(process.cwd(), name)
+          if (!r.ok) err(r.error)
+          else ok(sub === "promote"
+            ? `promoted ${r.name} → ACTIVE${r.predecessor ? ` (superseded ${r.predecessor})` : ""}`
+            : `rolled back ${r.name} → SUPERSEDED, restored ${r.restored}`)
+          break
+        }
+        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>] | /skill promote <name> | /skill rollback <name>`)
         break
       }
       case "claims": {
@@ -2054,8 +2067,16 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const urls = parts.slice(1)
           if (!urls.length) { err("usage: /tool download <https-url> [<url>…]"); break }
           const { downloadTools, formatDownloadReport } = await import("./skilldl.js")
-          info("downloading…")
-          const results = await downloadTools(urls)
+          info("download started")
+          const results = await downloadTools(urls, {
+            onProgress: (p) => {
+              if (p.phase === "read" && p.received) {
+                const tot = p.total ? `${p.received}/${p.total}` : `${p.received} B`
+                const pct = p.pct == null ? "" : ` ${p.pct}%`
+                info(`download ${tot}${pct}`)
+              }
+            },
+          })
           for (const r of results) {
             if (r.ok) console.log(formatDownloadReport(r))
             else err(formatDownloadReport(r).trim())

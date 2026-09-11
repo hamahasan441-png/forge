@@ -155,7 +155,16 @@ async function runToolDownload(urls) {
     console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not live tools."))
     return 0
   }
-  const results = await downloadTools(list)
+  const results = await downloadTools(list, JSON_OUT ? {} : {
+    onProgress: (p) => {
+      if (p.phase === "start") process.stderr.write(dim(`  download start ${p.url}\n`))
+      else if (p.phase === "read" && p.received) {
+        const tot = p.total ? `${p.received}/${p.total}` : `${p.received} B`
+        const pct = p.pct == null ? "" : ` ${p.pct}%`
+        process.stderr.write(dim(`  download ${tot}${pct}\n`))
+      }
+    },
+  })
   if (JSON_OUT) {
     emitJson({ results: results.map((r) => ({ ok: r.ok, error: r.error || null, reused: r.reused || false, record: r.record || null })) })
   } else {
@@ -885,7 +894,19 @@ async function main() {
         if (code) process.exit(code)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>]`)
+      if (sub === "promote" || sub === "rollback") {
+        const name = positional[2]
+        if (!name) { err(`usage: forge skill ${sub} <name>`); process.exit(1); return }
+        const { promoteSkill, rollbackSkill } = await import("./evolve.js")
+        const r = sub === "promote" ? promoteSkill(process.cwd(), name) : rollbackSkill(process.cwd(), name)
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(sub === "promote"
+          ? `promoted ${r.name} → ACTIVE${r.predecessor ? ` (superseded ${r.predecessor})` : ""}`
+          : `rolled back ${r.name} → SUPERSEDED, restored ${r.restored}`)
+        return
+      }
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name>`)
       process.exit(1)
       return
     }

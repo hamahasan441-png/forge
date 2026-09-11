@@ -389,6 +389,8 @@ export function renderHeader(state, width, o) {
   const tail = []
   if (elapsed && st !== "READY") tail.push(o.th.muted(elapsed))
   if (state.risk) tail.push(o.th.warn(`risk ${state.risk}`))
+  const know = knowledgeDockText(state.knowledge)
+  if (know) tail.push(o.th.muted(fitS(know, Math.max(12, Math.min(28, width >> 2)), o)))
   if (state.provider || state.model) tail.push(o.th.muted([state.provider, state.model].filter(Boolean).join("/")))
   // WHAT: task title (truncated); WHERE: node/segment; then state, then tail
   const titleSeg = state.task?.title ? o.th.muted(fitS(state.task.title, Math.max(10, Math.min(24, width >> 2)), o)) : ""
@@ -846,6 +848,7 @@ export function renderIdle(info, width, o) {
   row("Provider", info.provider)
   row("Mode", info.mode)
   if (info.lastTask) row("Last task", info.lastTask)
+  if (info.knowledge) row("Knowledge", info.knowledge)
   if (info.hint) { out.push(""); out.push(o.th.muted(fitS(info.hint, width - 1, o))) }
   return out
 }

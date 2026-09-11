@@ -10,6 +10,10 @@
  * second fully-passed evolveRun (deduped + 9/9 COMPLETED). Never auto-ACTIVE
  * on first write. Never writes ~/.forge/tools.
  *
+ * v77: a second author of a VERIFIED/ACTIVE skill is `{name}-v2` CANDIDATE.
+ * v1 stays. promoteSkill makes v2 ACTIVE and v1 SUPERSEDED. rollbackSkill
+ * restores v1. CONTRADICTED → SUPERSEDED. Never auto-ACTIVE.
+ *
  * This is self-improvement of playbooks. It is not kernel self-mod.
  */
 import fs from "node:fs"
@@ -105,7 +109,7 @@ function saveSkillLife(cwd, data) {
   writeStateFile(skillLifePath(cwd), JSON.stringify(data, null, 1), { mode: 0o600 })
 }
 
-function touchSkill(cwd, name, { lifecycle = null } = {}) {
+function touchSkill(cwd, name, { lifecycle = null, family = null, version = null, predecessor = null } = {}) {
   if (!cwd || !name) return null
   const all = loadSkillLife(cwd)
   const skills = all.skills || (all.skills = {})
@@ -119,6 +123,9 @@ function touchSkill(cwd, name, { lifecycle = null } = {}) {
   else if (rec.lifecycle !== SKILL_LIFE.VERIFIED && rec.lifecycle !== SKILL_LIFE.ACTIVE) {
     rec.lifecycle = SKILL_LIFE.CANDIDATE
   }
+  if (family) rec.family = family
+  if (version != null) rec.version = version
+  if (predecessor) rec.predecessor = predecessor
   skills[name] = rec
   const names = Object.keys(skills)
   if (names.length > MAX_SKILL_LIFE) {
@@ -133,8 +140,8 @@ function touchSkill(cwd, name, { lifecycle = null } = {}) {
 }
 
 /** First author / repeat use. Never VERIFIED. */
-export function recordSkillCandidate(cwd, name) {
-  return touchSkill(cwd, name)
+export function recordSkillCandidate(cwd, name, extra = {}) {
+  return touchSkill(cwd, name, extra)
 }
 
 /**
@@ -150,6 +157,60 @@ export function recordSkillOutcome({ cwd, name, status = SKILL_LIFE.VERIFIED } =
 export function skillLifecycle(name, cwd = process.cwd()) {
   const rec = loadSkillLife(cwd).skills?.[name]
   return rec?.lifecycle || null
+}
+
+export function familyName(name) {
+  return String(name || "").replace(/-v\d+$/, "")
+}
+
+export function nextSkillVersion(cwd, base) {
+  const fam = familyName(base) || String(base || "")
+  let n = 2
+  while (fs.existsSync(path.join(learnedSkillsDir(cwd), `${fam}-v${n}`, "SKILL.md"))) n++
+  return `${fam}-v${n}`
+}
+
+/** VERIFIED successor becomes ACTIVE; predecessor SUPERSEDED. Never first-write ACTIVE. */
+export function promoteSkill(cwd, name) {
+  const n = validSkillName(name) || String(name || "").trim()
+  if (!n) return { ok: false, error: "invalid name" }
+  const rec = loadSkillLife(cwd).skills?.[n]
+  if (!rec) return { ok: false, error: `skill "${n}" not learned` }
+  if (rec.lifecycle !== SKILL_LIFE.VERIFIED) {
+    return { ok: false, error: "not VERIFIED (never auto-ACTIVE from CANDIDATE)", name: n, lifecycle: rec.lifecycle }
+  }
+  const pred = rec.predecessor
+  if (pred && loadSkillLife(cwd).skills?.[pred]) {
+    touchSkill(cwd, pred, { lifecycle: SKILL_LIFE.SUPERSEDED })
+  }
+  const next = touchSkill(cwd, n, { lifecycle: SKILL_LIFE.ACTIVE, family: rec.family || familyName(n), version: rec.version || 2, predecessor: pred || rec.predecessor })
+  return { ok: true, name: n, lifecycle: SKILL_LIFE.ACTIVE, predecessor: pred || null, record: next }
+}
+
+/** ACTIVE v2 → SUPERSEDED; predecessor restored ACTIVE. Both histories kept. */
+export function rollbackSkill(cwd, name) {
+  const n = validSkillName(name) || String(name || "").trim()
+  if (!n) return { ok: false, error: "invalid name" }
+  const rec = loadSkillLife(cwd).skills?.[n]
+  if (!rec) return { ok: false, error: `skill "${n}" not learned` }
+  if (rec.lifecycle !== SKILL_LIFE.ACTIVE) {
+    return { ok: false, error: "not ACTIVE", name: n, lifecycle: rec.lifecycle }
+  }
+  const pred = rec.predecessor
+  if (!pred) return { ok: false, error: "no predecessor to restore", name: n }
+  touchSkill(cwd, n, { lifecycle: SKILL_LIFE.SUPERSEDED })
+  const restored = touchSkill(cwd, pred, { lifecycle: SKILL_LIFE.ACTIVE })
+  return { ok: true, name: n, lifecycle: SKILL_LIFE.SUPERSEDED, restored: pred, predecessor: restored }
+}
+
+/** CONTRADICTED / failed successor → SUPERSEDED. Predecessor unchanged. */
+export function supersedeSkill(cwd, name) {
+  const n = validSkillName(name) || String(name || "").trim()
+  if (!n) return { ok: false, error: "invalid name" }
+  const rec = loadSkillLife(cwd).skills?.[n]
+  if (!rec) return { ok: false, error: `skill "${n}" not learned` }
+  const next = touchSkill(cwd, n, { lifecycle: SKILL_LIFE.SUPERSEDED })
+  return { ok: true, name: n, lifecycle: SKILL_LIFE.SUPERSEDED, record: next }
 }
 
 function underDir(p, root) {
@@ -248,6 +309,27 @@ export function authorSkill({
   if (underDir(dir, BUNDLED_SKILLS)) return { ok: false, skipped: "bundled" }
   const file = path.join(dir, "SKILL.md")
   if (fs.existsSync(file)) {
+    const prev = skillLifecycle(name, cwd)
+    if (prev === SKILL_LIFE.VERIFIED || prev === SKILL_LIFE.ACTIVE) {
+      const nextName = nextSkillVersion(cwd, name)
+      const nextDir = path.join(learnedSkillsDir(cwd), nextName)
+      const nextFile = path.join(nextDir, "SKILL.md")
+      const description = `Playbook: ${String(task || nextName).slice(0, 120)}`
+      const md = formatSkillMd({ name: nextName, description, task, repair: body, files, command })
+      try {
+        fs.mkdirSync(nextDir, { recursive: true })
+        writeStateFile(nextFile, md, { mode: 0o600 })
+      } catch (e) {
+        return { ok: false, skipped: "write", error: String(e?.message || e).slice(0, 120) }
+      }
+      let lifecycle = SKILL_LIFE.CANDIDATE
+      try {
+        lifecycle = recordSkillCandidate(cwd, nextName, {
+          family: familyName(name), version: Number(String(nextName).match(/-v(\d+)$/)?.[1] || 2), predecessor: name,
+        })?.lifecycle || SKILL_LIFE.CANDIDATE
+      } catch { /* life is best-effort */ }
+      return { ok: true, name: nextName, path: nextFile, deduped: false, versioned: true, predecessor: name, lifecycle, desc: skillDescription(md) }
+    }
     let lifecycle = SKILL_LIFE.CANDIDATE
     try { lifecycle = recordSkillCandidate(cwd, name)?.lifecycle || SKILL_LIFE.CANDIDATE } catch { /* life is best-effort */ }
     return { ok: true, name, path: file, deduped: true, lifecycle }
