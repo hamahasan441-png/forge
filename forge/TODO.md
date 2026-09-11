@@ -4,17 +4,13 @@ Completed enhancements **do not keep a PLAN-vN.md**. Ship, delete the plan,
 move leftovers here as `- [ ]`. Do not check an item until it has shipped
 and tests are green. Never mark complete because a model wrote a spec.
 
-Shipped (gone from this list): v54–v80, v81 variants (family + strategy +
-version + fingerprint; siblings coexist; never overwrite ACTIVE). See CHANGELOG.
+Shipped (gone from this list): v54–v81, v82 zip unpack (SKILL.md +
+scripts/examples/references, never tools, never binaries). See CHANGELOG.
 
 Standing rules: no kernel rewrite, no second data root, no page dump,
 `assumeYes` stays false, compose never writes. `FORGE_DATA_DIR` aliases
 `FORGE_HOME` (`~/.forge`) — never `Forge/data/` under the checkout.
 DOWNLOAD ≠ TRUST.
-
-## Skill forge 2.0
-
-- [ ] Full ZIP unpack of scripts/examples (SKILL.md extract only — not this release)
 
 ## Bench / agents / kernel
 

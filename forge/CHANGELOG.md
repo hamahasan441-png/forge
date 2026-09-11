@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v82.0.0 — "zipunpack"
+
+### Added (v82.0 — ZIP/folder support files, kernel still frozen)
+- **Unpack `scripts/`, `examples/`, `references/`.** Text allowlist only (md/txt/js/sh/py/…). SKILL.md still required.
+- **Traversal / binaries skipped.** `..`, absolute paths, NULs, kernel hints, `plugin-host.js` never land.
+- **Never `~/.forge/tools`.** Mode 0600, no +x. Always CANDIDATE. DOWNLOAD ≠ TRUST.
+- **Folder ingest** copies the same allowlisted dirs next to SKILL.md.
+
+Never auto-ACTIVE. Compose still never writes.
+
 ## v81.0.0 — "variants"
 
 ### Added (v81.0 — named strategy variants, kernel still frozen)

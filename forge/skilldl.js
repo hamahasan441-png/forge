@@ -43,7 +43,7 @@ import { validSkillName, skillDescription, parseSkillPlaybook } from "./skills.j
 import { SKILL_LIFE, supersedeSkill } from "./evolve.js"
 import { classifyCommand } from "./shellguard.js"
 import { recordClaim } from "./claims.js"
-import { extractSkillMdFromZip, readSkillFromFolder, isZipBuffer } from "./zipingest.js"
+import { extractZipPack, readSkillFromFolder, isZipBuffer, safeSupportRel } from "./zipingest.js"
 import { runCommand, classifySpawn, EXEC_STATUS, generatedTestProvenance } from "./execresult.js"
 
 export const SKILL_DOWNLOADS = "skill-downloads"
@@ -267,6 +267,30 @@ function bodyPath(id, kind, env) {
 
 function bodySha(id, kind, env) {
   try { return sha256(fs.readFileSync(bodyPath(id, kind, env))) } catch { return "" }
+}
+
+function underDest(p, dest) {
+  const rel = path.relative(path.resolve(dest), path.resolve(p))
+  return rel && !rel.startsWith("..") && !path.isAbsolute(rel)
+}
+
+/** scripts/ examples/ references/ only. Never ~/.forge/tools. Never +x. */
+export function writeSupportFiles(dest, files) {
+  const written = []
+  const root = path.resolve(dest)
+  if (root.includes(`${path.sep}tools${path.sep}`) || root.endsWith(`${path.sep}tools`)) return written
+  for (const f of files || []) {
+    const rel = safeSupportRel(f.name)
+    if (!rel) continue
+    const out = path.join(root, rel)
+    if (!underDest(out, root)) continue
+    try {
+      fs.mkdirSync(path.dirname(out), { recursive: true })
+      writeStateFile(out, String(f.text || ""), { mode: 0o600 })
+      written.push(rel)
+    } catch { /* skip one */ }
+  }
+  return written
 }
 
 /**
@@ -554,10 +578,12 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
 
   const kinded0 = kind === "tool" ? detectToolArtifact(body, filename) : detectSkillArtifact(body, filename)
   let kinded = kinded0
+  let support = []
   if (kind === "skill" && (kinded.type === "archive" || isZipBuffer(body))) {
-    const extracted = extractSkillMdFromZip(body)
+    const extracted = extractZipPack(body)
     if (!extracted.ok) return { ok: false, error: extracted.error || "zip has no SKILL.md", url: checked.url }
     kinded = { type: "markdown", text: extracted.text }
+    support = extracted.files || []
   }
   if (!kinded.type) return { ok: false, error: kinded.error, url: checked.url }
 
@@ -591,6 +617,7 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
     if (kinded.type === "markdown") {
       writeStateFile(path.join(dest, "SKILL.md"), kinded.text, { mode: 0o600 })
     }
+    const unpacked = kind === "skill" ? writeSupportFiles(dest, support) : []
     if (kinded.type === "plugin") {
       writeStateFile(path.join(dest, `${id}.mjs`), kinded.text, { mode: 0o600 })
     }
@@ -608,6 +635,7 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
       detectedType: kinded.type,
       skillName: id,
     }
+    if (unpacked.length) rec.unpacked = unpacked
     if (kinded.type === "markdown") {
       const desc = skillDescription(kinded.text)
       if (desc) rec.description = desc.slice(0, 240)
@@ -650,18 +678,21 @@ export function ingestLocal(src, { env = process.env, now = Date.now } = {}) {
   try { st = fs.statSync(p) } catch { return { ok: false, error: `not found: ${p}` } }
   let text = ""
   let filename = "SKILL.md"
+  let support = []
   if (st.isDirectory()) {
     const got = readSkillFromFolder(p)
     if (!got.ok) return { ok: false, error: got.error, path: p }
     text = got.text
+    support = got.files || []
   } else {
     let buf
     try { buf = fs.readFileSync(p) } catch (e) { return { ok: false, error: e.message, path: p } }
     if (isZipBuffer(buf) || /\.zip$/i.test(p)) {
-      const got = extractSkillMdFromZip(buf)
+      const got = extractZipPack(buf)
       if (!got.ok) return { ok: false, error: got.error, path: p }
       text = got.text
       filename = "skill.zip"
+      support = got.files || []
     } else {
       const det = detectSkillArtifact(buf, path.basename(p))
       if (det.type !== "markdown") return { ok: false, error: det.error || "not a SKILL.md", path: p }
@@ -676,6 +707,7 @@ export function ingestLocal(src, { env = process.env, now = Date.now } = {}) {
   ensureDir(dest)
   try {
     writeStateFile(path.join(dest, "SKILL.md"), text, { mode: 0o600 })
+    const unpacked = writeSupportFiles(dest, support)
     const rec = {
       id,
       kind: "skill",
@@ -690,6 +722,7 @@ export function ingestLocal(src, { env = process.env, now = Date.now } = {}) {
       skillName: id,
       ingested: true,
     }
+    if (unpacked.length) rec.unpacked = unpacked
     const desc = skillDescription(text)
     if (desc) rec.description = desc.slice(0, 240)
     writeStateFile(path.join(dest, "meta.json"), JSON.stringify(rec, null, 1), { mode: 0o600 })
