@@ -116,29 +116,23 @@ function realPathOf(abs) {
 
 /**
  * Resolve + validate a tool path.
- *  write=false (read/scan): outside-project reads are allowed EXCEPT sensitive
- *    files/dirs (checked on BOTH the logical and the real path — symlink
- *    escapes to ~/.ssh or .env are caught).
- *  write=true: the target (real path) must stay inside the project root.
- *    tools.allowOutsideProject: true opts out (user decision).
- *    Generated dirs (dist/.next/target/node_modules/…) are refused unless
- *    ctx.allowGeneratedWrites is set.
+ *  write=false (read/scan): allowed anywhere (v88 noguard — sensitive-file
+ *    read protection removed with the rest of the guards; secrets.js redaction
+ *    still masks known key shapes in tool RESULTS before the model sees them).
+ *  write=true: allowed anywhere (v88 noguard — the project write boundary is
+ *    gone). Generated dirs (dist/.next/target/node_modules/…) are still
+ *    refused unless ctx.allowGeneratedWrites is set — that is a correctness
+ *    guard (edit the source, not the build output), not a permission gate.
  * Returns { ok, abs, error }.
  */
 export function safePath(ctx, p, { write = false } = {}) {
   const rel = String(p ?? "").trim()
   if (!rel) return { ok: false, abs: null, error: "ERROR: empty path" }
-  // v20: expand ~ like a shell would — "~/.ssh/id_rsa" must not slip through
+  // v20: expand ~ like a shell would
   const expanded = rel === "~" || rel.startsWith("~/") ? path.join(os.homedir(), rel.slice(1)) : rel
   const abs = path.resolve(ctx.cwd, expanded)
   const real = realPathOf(abs)
   if (write) {
-    if (!ctx.allowOutsideProject && !insideDir(real, ctx.root ?? ctx.cwd)) {
-      return {
-        ok: false, abs, real,
-        error: `ERROR: write target escapes the project directory (${path.relative(ctx.root ?? ctx.cwd, real).slice(0, 60)}) — keep changes inside ${ctx.root ?? ctx.cwd}, or set tools.allowOutsideProject: true in config to allow it`,
-      }
-    }
     if (!ctx.allowGeneratedWrites) {
       const gen = generatedBoundary(abs, ctx.root ?? ctx.cwd) || generatedBoundary(real, ctx.root ?? ctx.cwd)
       if (gen) {
@@ -150,14 +144,7 @@ export function safePath(ctx, p, { write = false } = {}) {
     }
     return { ok: true, abs, real }
   }
-  // read policy
-  const root = ctx.root ?? ctx.cwd
-  if (!insideDir(real, root) || !insideDir(abs, root)) {
-    const why = sensitiveReason(abs) ?? sensitiveReason(real)
-    if (why) {
-      return { ok: false, abs, real, error: `BLOCKED: ${why} (${rel}) is protected from model reads. If you really need it, copy the non-secret parts yourself.` }
-    }
-  }
+  // v88 noguard: reads are unrestricted
   return { ok: true, abs, real }
 }
 
@@ -175,7 +162,9 @@ export function safePath(ctx, p, { write = false } = {}) {
 //
 // In-project symlinks are still honoured the way the old code honoured them:
 // a link whose target is INSIDE the project is followed once (via realpath,
-// then re-verified) — a link that points outside is refused.
+// then re-verified). v88 noguard: a link that points outside is written
+// through its parent anchor (atomic, no final-component following) instead
+// of being refused.
 
 function resolveWriteAnchor(ctx, abs) {
   const root = ctx.root ?? ctx.cwd
@@ -196,20 +185,16 @@ function resolveWriteAnchor(ctx, abs) {
     let parentReal
     try { parentReal = fs.realpathSync(parent) } catch { parentReal = parent }
     if (insideDir(parentReal, rootReal)) return { root: rootReal, target: logical }
-    if (!ctx.allowOutsideProject) {
-      throw new SecureFsError(`write target escapes the project directory (${path.relative(rootReal, dest).slice(0, 60)})`, "EESCAPE")
-    }
+    // v88 noguard: no project boundary — anchored at the target's real parent,
+    // still no symlink-following on the final component, still atomic.
     return { root: parentReal, target: logical }
   }
 
   const real = realPathOf(abs)
   if (insideDir(real, rootReal)) return { root: rootReal, target: real }
   if (insideDir(logical, rootReal) && !fs.existsSync(abs)) return { root: rootReal, target: logical }
-  if (!ctx.allowOutsideProject) {
-    throw new SecureFsError(`write target escapes the project directory (${path.relative(rootReal, real).slice(0, 60)})`, "EESCAPE")
-  }
-  // user opted out of the project boundary: still no symlink-following on the
-  // final component, still atomic — anchored at the target's real parent
+  // v88 noguard: writes outside the project are allowed — anchored at the
+  // target's real parent, atomic, still no trailing-symlink following.
   return { root: path.dirname(real), target: real }
 }
 
@@ -248,7 +233,7 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "bash",
-      description: "Run a shell command in the working directory. Use for builds, tests, git, installs. Output is capped and secret-redacted. Destructive commands targeting paths outside the project are blocked.",
+      description: "Run a shell command in the working directory. Use for builds, tests, git, installs. Output is capped and secret-redacted. No command restrictions (v88 full control).",
       parameters: { type: "object", properties: { command: { type: "string" }, timeout_sec: { type: "number", description: "max seconds (default 45)" } }, required: ["command"] },
     },
   },
@@ -1242,7 +1227,7 @@ async function fetch_url(ctx, args) {
   try {
     const res = await pinnedFetch(url, {
       headers: { "user-agent": `forge-agent/${VERSION}`, accept: "text/*,application/json;q=0.9,*/*;q=0.5" },
-      allowPrivate: !!ctx.fetchPrivateUrls,
+      allowPrivate: true, // v88 noguard: local/private fetches allowed — no SSRF gate on fetch_url
       timeoutMs: 15000,
       totalTimeoutMs: 30000,
       maxRedirects: 5,
@@ -1268,7 +1253,7 @@ async function fetch_url(ctx, args) {
   } catch (e) {
     if (e instanceof PinnedFetchError && e.blocked) {
       const hop = e.hop ? ` (redirect hop ${e.hop} → ${String(e.url).slice(0, 120)})` : ""
-      return `BLOCKED (SSRF guard): ${e.message}${hop}. If this is an intentional local fetch, set tools.fetchPrivateUrls: true or FORGE_ALLOW_PRIVATE_URLS=1.`
+      return `ERROR: fetch integrity failure: ${e.message}${hop} (the socket must connect to exactly the validated addresses — v88 noguard removed the private-URL gate, not socket pinning)`
     }
     if (e instanceof PinnedFetchError && e.code === "ETOOLARGE") return `ERROR: ${e.message} (limit 2MB)`
     if (e instanceof PinnedFetchError && e.code === "ABORT_ERR") return "ERROR: cancelled — fetch stopped by user interrupt"

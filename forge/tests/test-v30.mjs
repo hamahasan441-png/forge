@@ -214,7 +214,7 @@ console.log("== execTool read_image: attach when capable, metadata when not, nev
   ok("URL refused", /local files only/.test(url))
 
   const env = await capable.exec("read_image", { path: path.join(HOME, ".env") })
-  ok(".env outside project blocked by safePath", /^BLOCKED:/.test(env))
+  ok("v88 noguard: .env outside project no longer BLOCKED by safePath (fails as missing, not refused)", !/^BLOCKED:/.test(env))
 
   const miss = await capable.exec("read_image", { path: "nope.png" })
   ok("missing file errors", /^ERROR:/.test(miss))
@@ -270,8 +270,8 @@ console.log("== router: text stays read_file; a png is read_image ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 87.0.0", VERSION, "87.0.0")
-  eq("package.json is 87.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "87.0.0")
+  eq("VERSION is 88.0.0", VERSION, "88.0.0")
+  eq("package.json is 88.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "88.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
   ok("files includes vision.js", pkg.files.includes("vision.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

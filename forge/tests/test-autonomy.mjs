@@ -233,7 +233,7 @@ console.log("== resource manager: adaptation ==")
   const rm2 = resources.createResourceManager({ config: { agent: { maxParallelSubAgents: 3 } }, cwd: WORK })
   rm2.setFreeMB(200)
   const ev2 = rm2.evaluate()
-  eq("low RAM reduces workers to 1", ev2.limits.maxWorkers, 1)
+  eq("low RAM reduces workers to the v88 floor (2)", ev2.limits.maxWorkers, 2)
   ok("low RAM reported", ev2.actions.some((a) => a.action === resources.ADAPT.REDUCE_CONCURRENCY))
 
   // large repo → precise retrieval

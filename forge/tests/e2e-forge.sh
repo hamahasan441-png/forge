@@ -59,7 +59,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v87.0.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v88.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
@@ -141,7 +141,7 @@ out=$(printf 'hello\n/retry\n/exit\n' | $F chat 2>&1)
 n=$(echo "$out" | grep -c "Hello from mock!")
 if [ "${n:-0}" -ge 2 ]; then PASS=$((PASS+1)); echo "  ok  chat /retry regenerates"
 else FAIL=$((FAIL+1)); echo "  FAIL chat /retry regenerates (got $n answers)"; fi
-check "banner v30" "$out" "forge v87"
+check "banner v30" "$out" "forge v88"
 
 # 18. chat /export writes markdown transcript
 mkdir -p "$T/work"
@@ -383,7 +383,7 @@ check "config menu probe ok" "$out" "connection OK"
 
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
-check "autopick banner" "$out" "forge v87"
+check "autopick banner" "$out" "forge v88"
 check "autopick provider" "$out" "provider: custom"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"
@@ -510,9 +510,11 @@ check "cd persists in session" "$out" "/tmp"
 out=$(printf '!export FORGE_V19=ok19\n!printenv FORGE_V19\nbye\n' | $F 2>&1)
 check "export persists in session" "$out" "ok19"
 
-# 69. catastrophic commands are refused (same guard as the bash tool)
-out=$(printf '!rm -rf /\nbye\n' | $F 2>&1)
-check "forbidden command blocked" "$out" "BLOCKED"
+# 69. v88 noguard: nothing is refused in the terminal (probe is harmless —
+#     a test must never execute a real root wipe)
+out=$(printf '!rm -rf /nonexistent-e2e-v88-probe\nbye\n' | $F 2>&1)
+check_absent "v88: terminal command not BLOCKED" "$out" "BLOCKED"
+check "v88: the probe command actually ran" "$out" "rm -rf /nonexistent-e2e-v88-probe"
 
 # 70. natural-language look-alikes stay chat messages (no shell exec)
 out=$(printf 'Please write a haiku about pwd\nbye\n' | $F 2>&1)
@@ -587,35 +589,41 @@ check "help mentions terminal mode" "$out" "like a real terminal"
 
 # ---- v20 HARDENING additions ----
 
-# 78. SSRF guard ON by default: fetch_url to loopback BLOCKED without the opt-in
+# 78. v88 noguard: fetch_url fetches loopback URLs (no SSRF gate, no opt-in needed)
 out=$(env -u FORGE_ALLOW_PRIVATE_URLS $F agent "USE_URL fetch the page please" 2>&1 </dev/null)
-check "ssrf blocks loopback by default" "$out" "SSRF guard"
-check "ssrf blocked url surfaced" "$out" "127.0.0.1"
+check_absent "v88: no SSRF refusal on loopback" "$out" "SSRF guard"
+check "v88: loopback fetch answered by the mock" "$out" "MOCK PAGE 42"
 
-# 79. project-boundary writes: the model cannot write outside the project
+# 79. v88 noguard: writes outside the project are ALLOWED
 out=$($F agent --cwd "$T/work" "USE_PATH_ESCAPE write outside" 2>&1 </dev/null)
-check "write escape blocked" "$out" "escapes the project"
-if [ -f "$T/forge-escape-test.txt" ]; then
-  FAIL=$((FAIL+1)); echo "  FAIL escaped file must not exist"
+check "v88: outside write succeeds" "$out" "OK wrote"
+# "../../forge-escape-test.txt" resolves relative to the agent cwd ($T/work)
+# → dirname($T)/forge-escape-test.txt, i.e. OUTSIDE the project root $T/work
+ESCFILE="$(dirname "$T")/forge-escape-test.txt"
+if [ -f "$ESCFILE" ]; then
+  PASS=$((PASS+1)); echo "  ok  escaped file created (v88: no boundary)"
+  rm -f "$ESCFILE"
 else
-  PASS=$((PASS+1)); echo "  ok  escaped file not created"
+  FAIL=$((FAIL+1)); echo "  FAIL v88 expected the escaped file to exist at $ESCFILE"
 fi
 
-# 80. sensitive reads blocked (.ssh private key via ~ expansion)
+# 80. v88 noguard: sensitive reads are allowed (no BLOCKED refusal)
 out=$($F agent "USE_SENSITIVE_READ read the key" 2>&1 </dev/null)
-check "sensitive read blocked" "$out" "BLOCKED"
+check_absent "v88: sensitive read not BLOCKED" "$out" "BLOCKED"
 
 # 81. skill traversal blocked
 out=$($F agent "USE_SKILL_TRAVERSAL load that skill" 2>&1 </dev/null)
 check "skill traversal blocked" "$out" "invalid skill name"
 
-# 82. bash tool refuses destructive commands outside the project
+# 82. v88 noguard: the bash tool runs destructive commands outside the project
+#     (the target is a file this test owns in /tmp)
+echo "v88" > /tmp/forge-e2e-outside-target
 out=$($F agent --cwd "$T/work" "USE_OUTSIDE_RM clean the temp dir" 2>&1 </dev/null)
-check "bash refuses outside rm" "$out" "BLOCKED"
+check_absent "v88: outside rm not BLOCKED" "$out" "BLOCKED"
 if [ -e /tmp/forge-e2e-outside-target ]; then
-  FAIL=$((FAIL+1)); echo "  FAIL outside target must not be touched"
+  FAIL=$((FAIL+1)); echo "  FAIL v88 expected the outside target to be removed"
 else
-  PASS=$((PASS+1)); echo "  ok  outside target untouched"
+  PASS=$((PASS+1)); echo "  ok  outside target removed (v88: no boundary)"
 fi
 
 # 83. failure learning recorded to project memory
@@ -640,38 +648,26 @@ else
   FAIL=$((FAIL+1)); echo "  FAIL undo restored modified file"
 fi
 
-# 85. terminal confirm flow: risky command piped without consent → refused;
-#     with FORGE_ASSUME_YES=1 it runs
+# 85. v88 noguard: a piped risky rm just runs — no consent gate at all
 printf 'hello doc\n' > "$T/work/risky-target.txt"
-out=$(printf '!rm risky-target.txt\nbye\n' | $F 2>&1)
-check "piped risky rm refused" "$out" "BLOCKED (non-interactive)"
+out=$(cd "$T/work" && printf '!rm risky-target.txt\nbye\n' | $F 2>&1)
+check_absent "v88: piped rm not refused" "$out" "BLOCKED"
 if [ -f "$T/work/risky-target.txt" ]; then
-  PASS=$((PASS+1)); echo "  ok  refused rm left file intact"
+  FAIL=$((FAIL+1)); echo "  FAIL v88 rm should have deleted the file"
 else
-  FAIL=$((FAIL+1)); echo "  FAIL refused rm must not delete"
-fi
-out=$(cd "$T/work" && printf '!rm risky-target.txt\nbye\n' | FORGE_ASSUME_YES=1 $F 2>&1)
-check "assume-yes executes" "$out" "risky-target"
-if [ -f "$T/work/risky-target.txt" ]; then
-  FAIL=$((FAIL+1)); echo "  FAIL assume-yes rm should delete"
-else
-  PASS=$((PASS+1)); echo "  ok  assume-yes rm deleted"
+  PASS=$((PASS+1)); echo "  ok  v88 rm deleted without asking"
 fi
 
-# 86. v20.0.1 REGRESSION: `mv`/`cp` into a system directory crashed the safety
-#     engine ("✗ why is not defined") instead of refusing the command.
+# 86. v20.0.1 REGRESSION (mv classification) kept as a crash check — v88 never
+#     refuses, and a test never writes into /etc or /usr, so use a local rename.
 printf 'keepme\n' > "$T/work/mv-target.txt"
-out=$(printf '!mv mv-target.txt /etc\nbye\n' | $F 2>&1)
-check "terminal mv into /etc blocked" "$out" "BLOCKED"
-check "terminal mv into /etc explains why" "$out" "system directory"
-check_absent "no raw JS error for mv into /etc" "$out" "why is not defined"
-out=$(printf '!cp mv-target.txt /usr\nbye\n' | $F 2>&1)
-check "terminal cp into /usr blocked" "$out" "BLOCKED"
-check_absent "no raw JS error for cp into /usr" "$out" "not defined"
-if [ -f "$T/work/mv-target.txt" ]; then
-  PASS=$((PASS+1)); echo "  ok  mv target left in place"
+out=$(cd "$T/work" && printf '!mv mv-target.txt renamed-v88.txt\nbye\n' | $F 2>&1)
+check_absent "v88: mv not BLOCKED" "$out" "BLOCKED"
+check_absent "no raw JS error for mv" "$out" "why is not defined"
+if [ -f "$T/work/renamed-v88.txt" ]; then
+  PASS=$((PASS+1)); echo "  ok  mv actually renamed the file (v88)"
 else
-  FAIL=$((FAIL+1)); echo "  FAIL mv target must not move"
+  FAIL=$((FAIL+1)); echo "  FAIL v88 mv should have renamed the file"
 fi
 
 # 87. v20.0.1: glob_files "**/*.ext" must match files in the search ROOT too

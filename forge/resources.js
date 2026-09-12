@@ -30,15 +30,15 @@ export const ADAPT = {
 /**
  * v26/v27: read-only worker ceiling. Class strategy (MICRO=0 … ARCH=8) picks
  * the intended fan-out; this is the machine/config cap the scheduler cannot
- * exceed. Low-RAM / low-tier machines stay at 1. Never widens a security
- * boundary. v27: high (12GB / 8GB+) may use the full AGENT_BUDGETS cap (8).
- * v28: `scaleWorkers` may raise a class cap by +2 on 8-core burst, still
- * under this ceiling. Mutators still serialize.
+ * exceed. v88: LOW tier runs 2 (owner floor), the absolute cap is 8. Never
+ * widens a security boundary. Mutators still serialize.
  */
 export function workerCeiling(config = {}, tier = "normal") {
+  // v88: owner clamp — LOW-tier machines run 2 workers (was 1), the absolute
+  // maximum is 8 on any machine (AGENT_BUDGETS.maxParallelSubAgents).
   const configured = Number(config?.agent?.maxParallelSubAgents)
   const cap = Number.isFinite(configured) && configured > 0 ? configured : AGENT_BUDGETS.maxParallelSubAgents
-  if (tier === "low") return 1
+  if (tier === "low") return Math.max(1, Math.min(cap, 2))
   const byTier = tier === "high" ? AGENT_BUDGETS.maxParallelSubAgents : Math.min(4, AGENT_BUDGETS.maxParallelSubAgents)
   return Math.max(1, Math.min(cap, byTier, AGENT_BUDGETS.maxParallelSubAgents))
 }
@@ -149,11 +149,11 @@ export function createResourceManager({ config = {}, cwd = process.cwd(), profil
     }
     const tokenRatio = (state.tokensIn + state.tokensOut) / Math.max(1, state.tokenBudget)
 
-    // --- RAM: low free memory → serialize workers, shrink tool output
+    // --- RAM: low free memory → clamp workers to the v88 floor (2), shrink tool output
     if (state.freeMB < 400) {
-      limits.maxWorkers = 1
+      limits.maxWorkers = 2
       limits.maxToolOutputChars = Math.min(limits.maxToolOutputChars, 6000)
-      actions.push({ action: ADAPT.REDUCE_CONCURRENCY, why: `only ${state.freeMB}MB free RAM — 1 worker`, apply: "immediate" })
+      actions.push({ action: ADAPT.REDUCE_CONCURRENCY, why: `only ${state.freeMB}MB free RAM — 2 workers (v88 floor)`, apply: "immediate" })
     } else if (state.freeMB > 2500 && state.tier !== "low") {
       const ceiling = workerCeiling(config, state.tier)
       if (limits.maxWorkers < ceiling) {

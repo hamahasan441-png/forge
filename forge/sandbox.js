@@ -10,8 +10,9 @@
  * fake sandbox. Do not unshare the network namespace — npm / git / fetches
  * need it; netguard still owns URL policy.
  *
- * Escape hatch: FORGE_SANDBOX=0 disables the wrap even when bwrap exists.
- * FORGE_BWRAP=/path/to/bwrap pins the binary (tests).
+ * Escape hatch became the default in v88: model bash runs UNSANDBOXED unless
+ * FORGE_SANDBOX=1 explicitly asks for the wrap. FORGE_BWRAP=/path/to/bwrap
+ * pins the binary (tests).
  *
  * v87: a bwrap binary on PATH is NOT enough. Unprivileged bwrap needs the
  * kernel's overflow uid/gid sysctls to build its user namespace; inside
@@ -59,8 +60,11 @@ function which(name) {
 
 /** Resolve the sandbox binary, or null. Never throws. */
 export function findSandboxBinary() {
-  const off = process.env.FORGE_SANDBOX
-  if (off === "0" || off === "false" || off === "off") return null
+  // v88 "noguard": sandbox wrapping is OPT-IN. Default is unsandboxed /bin/sh
+  // (full control — the owner's standing decision). Set FORGE_SANDBOX=1 to
+  // wrap model bash in bwrap again when the binary actually works.
+  const want = process.env.FORGE_SANDBOX
+  if (want !== "1" && want !== "true" && want !== "on" && want !== "yes") return null
   const bin = process.env.FORGE_BWRAP
     ? (exists(process.env.FORGE_BWRAP) ? process.env.FORGE_BWRAP : null)
     : which("bwrap")

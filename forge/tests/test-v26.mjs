@@ -47,8 +47,8 @@ console.log("== class worker caps ==")
 
 console.log("== workerCeiling: tier clamp, never above 6 ==")
 {
-  eq("low tier is always 1", workerCeiling({ agent: { maxParallelSubAgents: 8 } }, "low"), 1)
-  eq("low ignores a huge config", workerCeiling({ agent: { maxParallelSubAgents: 99 } }, "low"), 1)
+  eq("low tier is 2 (v88 floor)", workerCeiling({ agent: { maxParallelSubAgents: 8 } }, "low"), 2)
+  eq("low ignores a huge config", workerCeiling({ agent: { maxParallelSubAgents: 99 } }, "low"), 2)
   eq("high with default is 8", workerCeiling({}, "high"), 8)
   eq("normal with default is 4", workerCeiling({}, "normal"), 4)
   eq("config 3 is respected on high", workerCeiling({ agent: { maxParallelSubAgents: 3 } }, "high"), 3)
@@ -95,7 +95,7 @@ console.log("== low RAM still serializes to 1 ==")
   const rm = createResourceManager({ config: { agent: { maxParallelSubAgents: 6 } }, cwd: WORK })
   rm.setFreeMB(200)
   const ev = rm.evaluate()
-  eq("low RAM reduces workers to 1", ev.limits.maxWorkers, 1)
+  eq("low RAM reduces workers to the v88 floor (2)", ev.limits.maxWorkers, 2)
   ok("REDUCE_CONCURRENCY fired", ev.actions.some((a) => a.action === ADAPT.REDUCE_CONCURRENCY))
 }
 
@@ -123,8 +123,8 @@ console.log("== meta filter still refuses a coder worker (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 87.0.0", VERSION, "87.0.0")
-  eq("package.json is 87.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "87.0.0")
+  eq("VERSION is 88.0.0", VERSION, "88.0.0")
+  eq("package.json is 88.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "88.0.0")
 }
 
 console.log(`\n== v26 suite: ${PASS} passed, ${FAIL} failed ==`)

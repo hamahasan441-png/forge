@@ -3,6 +3,44 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v88.0.0 — "noguard + worker clamp"
+
+### Changed (v88.0 — the owner's standing decision, made permanent)
+- **Every command gate is GONE.** `userMayRun()` / `modelMayRun()` always return
+  `ok: true` — no block class, no danger/confirm refusals, no sudo consent, no
+  interpreter-eval consent, no project-boundary refusal, no y/N prompt, in any
+  mode, whatever the config says (a config that sets `tools.unrestricted: false`
+  cannot bring a gate back — the refusal code paths no longer exist).
+  `classifyCommand()` is UNTOUCHED: every command is still labeled
+  block/danger/confirm/low/safe for logs, `/status`, tool-intelligence and
+  verification risk. v88 suite pins all of this.
+- **No project write boundary.** `safePath` write checks allow any target
+  (inside or outside the project); sensitive-file READ protection (.env/.ssh/
+  keys) is removed too. securefs MECHANICS are unchanged — atomic writes, no
+  final-component symlink following (ESYMLINK), TOCTOU anchoring, race
+  detection. Those are correctness, not permission gates.
+- **No SSRF gate on `fetch_url`.** Private/loopback/metadata URLs fetch like
+  public ones (`allowPrivate: true`). Pinned-socket integrity remains (a
+  connection must match the validated addresses — that is anti-rebinding
+  mechanics, not a gate) and skill/tool downloads still go through the full
+  netguard `pinnedFetch` policy.
+- **Sandbox is OPT-IN.** Model bash runs unsandboxed `/bin/sh` unless
+  `FORGE_SANDBOX=1` asks for the bwrap wrap (when bwrap actually works).
+- **Worker clamp: low tier = 2, absolute max = 8.** `workerCeiling()` gives
+  low-tier/low-RAM machines 2 workers (was 1); RAM-pressure adaptation clamps
+  to the same floor; nothing ever exceeds `AGENT_BUDGETS.maxParallelSubAgents`
+  (8) — burst scaling included.
+- **Kept on purpose (correctness, not guards):** read-only verifier/plan agents
+  still cannot write (VERIFY ⇒ READ_ONLY is the anti-fake-evidence contract),
+  secret redaction still masks key shapes in tool results, checkpoints/undo and
+  the verification ledger are unchanged.
+
+### Fixed (v88.0 — test honesty)
+- Test suites that used to assert guard refusals now assert the v88 behavior —
+  and **no test executes a destructive command any more**: root wipes and
+  system-file writes that were previously "safe" because a guard refused them
+  are now checked as VERDICTS (`modelMayRun(...).ok`), never run.
+
 ## v87.0.0 — "full control"
 
 ### Fixed (v87.0 — bash works on kernels where bwrap cannot)

@@ -41,6 +41,11 @@ console.log("== sandbox: a broken-kernel bwrap is never chosen ==")
   fs.writeFileSync(fake, "#!/bin/sh\nexec /bin/sh \"$@\"\n")
   fs.chmodSync(fake, 0o755)
   process.env.FORGE_BWRAP = fake
+  // v88 noguard: wrapping is OPT-IN — without FORGE_SANDBOX=1 nothing is chosen
+  const prevSandbox = process.env.FORGE_SANDBOX
+  delete process.env.FORGE_SANDBOX
+  eq("v88 default: sandbox off unless FORGE_SANDBOX=1", findSandboxBinary(), null)
+  process.env.FORGE_SANDBOX = "1"
   const found = findSandboxBinary()
   if (fs.existsSync("/proc/sys/kernel/overflowuid")) {
     // readable kernel → the pinned binary is trusted (setuid-free)
@@ -54,6 +59,8 @@ console.log("== sandbox: a broken-kernel bwrap is never chosen ==")
   fs.chmodSync(fake, 0o755)
   if (prev === undefined) delete process.env.FORGE_BWRAP
   else process.env.FORGE_BWRAP = prev
+  if (prevSandbox === undefined) delete process.env.FORGE_SANDBOX
+  else process.env.FORGE_SANDBOX = prevSandbox
   ok("detectSandbox stays honest without a binary", detectSandbox({ binary: null }).available === false)
 }
 
@@ -63,6 +70,7 @@ console.log("== bash tool: bwrap that dies at startup re-runs UNSANDBOXED ==")
   fs.writeFileSync(broken, "#!/bin/sh\necho \"bwrap: Can't read /proc/sys/kernel/overflowuid: Permission denied\" >&2\nexit 1\n")
   fs.chmodSync(broken, 0o755)
   process.env.FORGE_BWRAP = broken
+  process.env.FORGE_SANDBOX = "1" // v88: opt in so the fallback path is exercised
   const work = path.join(HOME, "work")
   fs.mkdirSync(work, { recursive: true })
   const { makeToolContext } = await import("../tools.js")
@@ -74,6 +82,7 @@ console.log("== bash tool: bwrap that dies at startup re-runs UNSANDBOXED ==")
   const r2 = await tools.exec("bash", { command: "echo second-run" })
   ok("broken wrapper is skipped for the rest of the session", r2.includes("second-run") && !r2.includes("sandbox skipped"))
   delete process.env.FORGE_BWRAP
+  delete process.env.FORGE_SANDBOX
 }
 
 console.log("== FULL CONTROL: autoApprove never hands a decision to the user ==")

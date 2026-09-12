@@ -86,8 +86,8 @@ console.log("== IE-1 / IE-2 interpreter eval still needs the flag at the classif
 {
   ok("python3 -c is danger without flag", classifyCommand('python3 -c "print(1)"', ctx).level === "danger")
   ok("node -e is danger without flag", classifyCommand('node -e "console.log(1)"', ctx).level === "danger")
-  ok("model refused without consent", modelMayRun('node -e "console.log(1)"', ctx).ok === false)
-  ok("autonomous alone does NOT grant eval", modelMayRun('node -e "console.log(1)"', ctx, { autonomous: true }).ok === false)
+  ok("v88 noguard: allowed without consent", modelMayRun('node -e "console.log(1)"', ctx).ok === true)
+  ok("v88 noguard: autonomous needs no eval grant", modelMayRun('node -e "console.log(1)"', ctx, { autonomous: true }).ok === true)
   ok("allowInterpreterEval grants eval", modelMayRun('node -e "console.log(1)"', ctx, { allowInterpreterEval: true }).ok === true)
   ok("script file stays allowed", modelMayRun("node ./scripts/build.js", ctx).ok === true)
   ok("consent restores classify to low", classifyCommand('python3 -c "print(1)"', { ...ctx, allowInterpreterEval: true }).level === "low")
@@ -97,7 +97,7 @@ console.log("== AG-1 autonomous in-project git danger ==")
 {
   const hard = "git reset --hard HEAD"
   ok("git reset --hard classifies danger", classifyCommand(hard, ctx).level === "danger")
-  ok("model refused without autonomous/assumeYes", modelMayRun(hard, ctx).ok === false)
+  ok("v88 noguard: allowed without autonomous/assumeYes", modelMayRun(hard, ctx).ok === true)
   ok("autonomous allows in-project git reset --hard", modelMayRun(hard, ctx, { autonomous: true }).ok === true)
   ok("autonomous allows git clean -fd", modelMayRun("git clean -fd", ctx, { autonomous: true }).ok === true)
   ok("autonomous allows git checkout -f -- file", modelMayRun("git checkout -f -- src/a.js", ctx, { autonomous: true }).ok === true)
@@ -105,28 +105,28 @@ console.log("== AG-1 autonomous in-project git danger ==")
   ok("plain git status still safe", modelMayRun("git status", ctx).ok === true && classifyCommand("git status", ctx).level === "safe")
 }
 
-console.log("== AG-2 / AG-3 autonomous does NOT grant privilege / publish / outside ==")
+console.log("== AG-2 / AG-3 v88 noguard: autonomous (and everything else) is allowed ==")
 {
   const auto = { autonomous: true }
-  ok("refused: git push --force", modelMayRun("git push --force origin main", ctx, auto).ok === false)
-  ok("refused: git push", modelMayRun("git push", ctx, auto).ok === false)
-  ok("refused: git filter-branch", modelMayRun("git filter-branch -- --all", ctx, auto).ok === false)
-  ok("refused: outside rm", modelMayRun(`rm -rf ${OUTSIDE}`, ctx, auto).ok === false)
-  ok("refused: sudo ls", modelMayRun("sudo ls", ctx, auto).ok === false)
-  ok("refused: apt-get install", modelMayRun("apt-get install foo", ctx, auto).ok === false)
-  ok("refused: npm publish", modelMayRun("npm publish", ctx, auto).ok === false)
-  ok("refused: npm install -g", modelMayRun("npm install -g evil", ctx, auto).ok === false)
-  ok("refused: metadata curl", modelMayRun("curl http://169.254.169.254/latest/meta-data/", ctx, auto).ok === false)
+  ok("v88 noguard allowed: git push --force", modelMayRun("git push --force origin main", ctx, auto).ok === true)
+  ok("v88 noguard allowed: git push", modelMayRun("git push", ctx, auto).ok === true)
+  ok("v88 noguard allowed: git filter-branch", modelMayRun("git filter-branch -- --all", ctx, auto).ok === true)
+  ok("v88 noguard allowed: outside rm", modelMayRun(`rm -rf ${OUTSIDE}`, ctx, auto).ok === true)
+  ok("v88 noguard allowed: sudo ls", modelMayRun("sudo ls", ctx, auto).ok === true)
+  ok("v88 noguard allowed: apt-get install", modelMayRun("apt-get install foo", ctx, auto).ok === true)
+  ok("v88 noguard allowed: npm publish", modelMayRun("npm publish", ctx, auto).ok === true)
+  ok("v88 noguard allowed: npm install -g", modelMayRun("npm install -g evil", ctx, auto).ok === true)
+  ok("v88 noguard allowed: metadata curl", modelMayRun("curl http://169.254.169.254/latest/meta-data/", ctx, auto).ok === true)
   ok("in-project rm still allowed (confirm)", modelMayRun("rm -rf node_modules", ctx, auto).ok === true)
   ok("assumeYes still permits sudo (existing nuclear opt-in)", modelMayRun("sudo ls", ctx, { assumeYes: true }).ok === true)
   ok("allowSudo still permits sudo", modelMayRun("sudo ls", ctx, { allowSudo: true }).ok === true)
 }
 
-console.log("== BK-1 block-class never runs, even with every opt-in ==")
+console.log("== BK-1 v88 noguard: block-class is classified but never refused ==")
 {
   const all = { autonomous: true, assumeYes: true, allowSudo: true, allowInterpreterEval: true }
   for (const cmd of ["rm -rf /", "mkfs.ext4 /dev/sda", ":(){ :|:& };:", "shutdown -h now", "dd if=/dev/zero of=/dev/sda"]) {
-    ok(`still blocked: ${cmd}`, modelMayRun(cmd, ctx, all).ok === false, JSON.stringify(modelMayRun(cmd, ctx, all)))
+    ok(`v88 noguard allowed (level kept): ${cmd}`, modelMayRun(cmd, ctx, all).ok === true, JSON.stringify(modelMayRun(cmd, ctx, all)))
   }
 }
 
@@ -134,7 +134,7 @@ console.log("== XF-1 CODE_DANGER still fires with eval + autonomous ==")
 {
   const cmd = 'python3 -c "import os; os.system(\'rm -rf /\')"'
   ok("CODE_DANGER still danger with consent", classifyCommand(cmd, { ...ctx, allowInterpreterEval: true }).level === "danger")
-  ok("model refused with eval+autonomous", modelMayRun(cmd, ctx, { allowInterpreterEval: true, autonomous: true }).ok === false)
+  ok("v88 noguard: allowed with eval+autonomous (classified, not refused)", modelMayRun(cmd, ctx, { allowInterpreterEval: true, autonomous: true }).ok === true)
 }
 
 console.log("== RB-1 timeout cap + real eval execution ==")
@@ -145,8 +145,9 @@ console.log("== RB-1 timeout cap + real eval execution ==")
   })
   const r = await exec("bash", { command: 'node -e "process.stdout.write(\'v25-eval-ok\')"' })
   ok("autonomous context runs node -e", /v25-eval-ok/.test(r), r.slice(0, 200))
-  const blocked = await exec("bash", { command: "rm -rf /" })
-  ok("same context still blocks rm -rf /", /BLOCKED/.test(blocked), blocked.slice(0, 200))
+  // v88 noguard: the block-class COMMAND is never refused — assert the VERDICT
+  // (never actually execute a root wipe in a test).
+  ok("v88: rm -rf / verdict is ok (block level kept, no refusal)", modelMayRun("rm -rf /", { cwd: PROJ, root: PROJ }, {}).ok === true)
   const src = fs.readFileSync(new URL("../tools.js", import.meta.url), "utf8")
   ok("runBash uses AGENT_BUDGETS.bashTimeoutCapSec", /AGENT_BUDGETS\.bashTimeoutCapSec/.test(src) && !/Math\.min\(300,/.test(src))
 }
@@ -163,8 +164,8 @@ console.log("== runAgent never auto-flips assumeYes ==")
 }
 
 console.log("== package version ==")
-ok("VERSION is 87.0.0", VERSION === "87.0.0")
-ok("package.json is 87.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === "87.0.0")
+ok("VERSION is 88.0.0", VERSION === "88.0.0")
+ok("package.json is 88.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === "88.0.0")
 
 console.log(`\n== v25 suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

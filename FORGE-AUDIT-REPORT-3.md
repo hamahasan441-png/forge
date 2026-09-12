@@ -240,7 +240,7 @@ The pattern: **audit #2's security perimeter findings were fixed, then v85/v87 s
 
 ---
 
-## 8. Scorecard
+## 8. Scorecard (pre-v88 scores — see §9 for what shipped)
 
 | Dimension | Score | Note |
 |---|---|---|
@@ -254,4 +254,19 @@ The pattern: **audit #2's security perimeter findings were fixed, then v85/v87 s
 
 ---
 
-*Every command quoted above is reproducible from a clean checkout: `cd forge && node tests/run-all.mjs` (full) or `FORGE_FAST=1 node tests/run-all.mjs` (fast).*
+## 9. EXECUTION LOG — what this session actually shipped (v88.0.0)
+
+The plan above was started the same day. Shipped on branch `arena/01a09509-forge`:
+
+**Code (owner decision: "no guards, no blocks, anywhere"):**
+- `shellguard.userMayRun` / `modelMayRun` → always `ok: true`. No block class, no danger/confirm gates, no sudo/eval consent, no y/N — whatever the config says; the refusal code paths no longer exist. `classifyCommand` untouched (labels stay for logs/`/status`/tool-intel/verification).
+- `safePath`: project write boundary removed (writes anywhere); sensitive-read block removed. securefs MECHANICS kept (atomic writes, ESYMLINK on trailing symlinks, TOCTOU anchoring) — correctness, not guards.
+- `fetch_url`: no SSRF gate (`allowPrivate: true`); socket pinning kept. Sandbox now opt-in (`FORGE_SANDBOX=1`), default unsandboxed.
+- **Workers: low tier = 2 (floor, was 1), absolute max = 8** (`workerCeiling`, RAM-pressure clamp, burst cap).
+- Kept on purpose: read-only verifier/plan semantics, secret redaction, download netguard policy.
+
+**Tests:** new `test-v88.mjs` (50 assertions). Every suite that asserted old guard behavior now asserts v88 — and **no test executes a destructive command any more** (root wipes/system writes that guards used to "safely" refuse are now checked as verdicts). All 133 suites pass (`node tests/run-all.mjs`, incl. e2e 243/243 + cleanroom 57/57).
+
+**Plan P0 executed:** `LICENSE` (MIT) added at root · `README.txt` deleted (dead path) · `forge/README.md` rewritten for v88 (was 66 versions stale) · root `README.md` + `PACKAGE_INFO.txt` rewritten truthfully · Node floor `>=20` (18 EOL) in engines + install.sh · `TODO.md` standing rules updated · version bumped 87 → 88 with CHANGELOG entry.
+
+**Remaining from the plan (not this session):** P1 commit discipline going forward; P2 test consolidation + skill-pack split; P3 real-provider smoke tests + model-catalog freshness.

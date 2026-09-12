@@ -67,7 +67,7 @@ check "resolves to temp prefix" "$RESOLVED" "$PREFIX/bin/forge"
 cd "$WORK"   # foreign cwd — nowhere near the repo
 
 # 2. version + help from anywhere
-check "foreign cwd version" "$(forge version 2>&1)" "forge v87.0.0"
+check "foreign cwd version" "$(forge version 2>&1)" "forge v88.0.0"
 check "help mentions AutoPick" "$(forge help 2>&1)" "AutoPick"
 check "help mentions terminal" "$(forge help 2>&1)" "like a real terminal"
 check "help mentions --deep" "$(forge help 2>&1)" "--deep"
@@ -94,7 +94,7 @@ check "wizard health recorded" "$(cat "$T/home/health.json" 2>/dev/null)" '"ok":
 
 # 5. v19/v20 AutoPick: bare `forge` (non-TTY) = zero questions, one notice line
 out=$(printf '' | forge 2>&1)
-check "autopick banner" "$out" "forge v87.0.0"
+check "autopick banner" "$out" "forge v88.0.0"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"
 
@@ -105,15 +105,21 @@ check "terminal force output" "$out" "forge-v20-cleanroom"
 check "terminal auto-detect pwd" "$out" "$ pwd"
 out=$(printf '!cd /tmp\npwd\nbye\n' | forge 2>&1)
 check "terminal cd persisted" "$out" "/tmp"
-out=$(printf '!rm -rf /\nbye\n' | forge 2>&1)
-check "terminal forbidden guard" "$out" "BLOCKED"
-# v20.0.1: mv/cp into a system directory used to crash the safety engine
-out=$(printf '!mv cleanroom-target.txt /etc\nbye\n' | forge 2>&1)
-check "mv into /etc blocked" "$out" "BLOCKED"
-check "mv into /etc says why" "$out" "system directory"
-check_absent "mv into /etc: no raw JS error" "$out" "not defined"
+# v88 noguard: nothing is BLOCKED any more — and the test must never execute a
+# real destructive command. A harmless probe command that used to be gated now
+# just runs; classification crashes still must not leak raw JS errors.
+out=$(printf '!rm -rf /nonexistent-forge-v88-probe\nbye\n' | forge 2>&1)
+check_absent "v88: no BLOCKED refusal in the terminal" "$out" "BLOCKED"
+check_absent "v88: no raw JS error from the classifier" "$out" "not defined"
+# v20.0.1 regression (mv into a system dir used to crash the engine) is kept
+# as a CLASSIFIER-level check via the CLI: harmless target, no execution of a
+# system write.
+out=$(printf '!mv --version\nbye\n' | forge 2>&1)
+check_absent "v88: mv never crashes the engine" "$out" "not defined"
+echo "probe" > cleanroom-target.txt
 out=$(printf '!rm cleanroom-target.txt\nbye\n' | forge 2>&1)
-check "piped risky rm needs consent" "$out" "BLOCKED (non-interactive)"
+check_absent "v88: piped risky rm just runs (no consent gate)" "$out" "BLOCKED"
+check "v88: rm actually removed the file" "missing-$(test -f cleanroom-target.txt && echo present || echo ok)" "missing-ok"
 out=$(printf '!echo note-for-the-model\nTERMINAL_NOTE_CHECK\nbye\n' | forge 2>&1)
 check "terminal note reaches model" "$out" "TERMINAL NOTE SEEN"
 # v20.0.1: a sentence starting with a command name must reach the MODEL, not
@@ -171,8 +177,10 @@ check_absent "no raw escape sequences when piped" "$out" "[?2004h"
 # 11. agent loop (no deep) still green + SSRF negative (guard ON without opt-in)
 out=$(forge agent "USE_TOOL plain" </dev/null 2>&1)
 check "plain agent tool" "$out" "forge-e2e-ok"
+# v88 noguard: fetch_url has NO SSRF gate — the loopback URL is fetched, not refused
 out=$(env -u FORGE_ALLOW_PRIVATE_URLS forge agent "USE_URL fetch it" </dev/null 2>&1)
-check "ssrf guard on by default" "$out" "SSRF guard"
+check_absent "v88: no SSRF guard refusal on loopback fetch" "$out" "SSRF guard"
+check "v88: loopback fetch went through (mock /hello answered)" "$out" "hello from mock"
 
 # 12. cold start timing (10 runs, incl. node boot)
 t0=$(date +%s%N); for i in 1 2 3 4 5 6 7 8 9 10; do forge version >/dev/null 2>&1; done; t1=$(date +%s%N)

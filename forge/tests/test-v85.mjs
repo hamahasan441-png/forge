@@ -32,8 +32,8 @@ const ok = (name, cond, extra = "") => {
 const eq = (name, got, want) => ok(name, got === want, `got ${JSON.stringify(got)} want ${JSON.stringify(want)}`)
 
 console.log("== version ==")
-eq("VERSION is 87.0.0", VERSION, "87.0.0")
-eq("package.json is 87.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "87.0.0")
+eq("VERSION is 88.0.0", VERSION, "88.0.0")
+eq("package.json is 88.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "88.0.0")
 
 console.log("== default config: unrestricted ON ==")
 {
@@ -81,15 +81,15 @@ const BLOCKERS = [
   eq("…and still returns ok", v.ok, true)
 }
 
-console.log("== without the switch nothing changed (v84 semantics) ==")
+console.log("== v88 noguard: guards are gone even with the switch off ==")
 {
   const ctx = { cwd: WORK, root: WORK }
-  ok("rm -rf / refused for the model", modelMayRun("rm -rf /", ctx, {}).ok === false)
-  ok("sudo refused without allowSudo", modelMayRun("sudo apt-get install -y htop", ctx, {}).ok === false)
-  ok("node -e refused without allowInterpreterEval", modelMayRun('node -e "1"', ctx, {}).ok === false)
-  ok("block refused for the user even on a TTY", userMayRun("rm -rf /", ctx, { interactive: true }).ok === false)
-  ok("danger asks y/N on a TTY", userMayRun("rm -rf ~/oldbuilds", ctx, { interactive: true }).needsConfirm === true)
-  // the classifier itself is untouched by the switch
+  ok("rm -rf / allowed for the model (v88)", modelMayRun("rm -rf /", ctx, {}).ok === true)
+  ok("sudo allowed without allowSudo (v88)", modelMayRun("sudo apt-get install -y htop", ctx, {}).ok === true)
+  ok("node -e allowed without allowInterpreterEval (v88)", modelMayRun('node -e "1"', ctx, {}).ok === true)
+  ok("block allowed for the user even on a TTY (v88)", userMayRun("rm -rf /", ctx, { interactive: true }).ok === true)
+  ok("danger never asks y/N (v88)", userMayRun("rm -rf ~/oldbuilds", ctx, { interactive: true }).needsConfirm === false)
+  // the classifier itself is untouched
   eq("classifyCommand level for rm -rf /", classifyCommand("rm -rf /", ctx).level, "block")
 }
 

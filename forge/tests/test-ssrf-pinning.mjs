@@ -254,11 +254,21 @@ console.log("== fetch_url tool integration ==")
   const proj = fs.mkdtempSync(path.join(os.tmpdir(), "forge-ssrf-proj-"))
   const t = makeToolContext({ cwd: proj, root: proj, fetchPrivateUrls: false })
   const before = hits.priv
-  for (const u of [`http://${PRIVATE_REAL}:${PP}/`, `http://[::ffff:7f00:1]:${PP}/`, `http://localhost:${PP}/`, "http://169.254.169.254/latest/meta-data/", "http://metadata.google.internal/", `http://0x7f000001:${PP}/`]) {
+  // v88 noguard: fetch_url has NO SSRF gate — private/loopback/metadata URLs
+  // are fetched exactly like public ones (pinnedFetch still pins sockets to
+  // the resolved addresses; the netguard MODULE and its tests above remain
+  // the guard for skill/tool downloads).
+  for (const u of [`http://${PRIVATE_REAL}:${PP}/`, `http://localhost:${PP}/`, `http://0x7f000001:${PP}/`]) {
     const r = await t.exec("fetch_url", { url: u })
-    ok(`fetch_url blocks ${u}`, String(r).startsWith("BLOCKED (SSRF guard)"), String(r).slice(0, 100))
+    ok(`v88 fetch_url allows private ${u}`, !String(r).startsWith("BLOCKED"), String(r).slice(0, 100))
   }
-  ok("no private connection was made through the tool", hits.priv === before)
+  // these two can only ever ERROR (pinned-socket integrity / unresolvable):
+  // the assertion is "no hang, no fake success" — never a policy gate.
+  for (const u of [`http://[::ffff:7f00:1]:${PP}/`, "http://169.254.169.254/latest/meta-data/", "http://metadata.google.internal/"]) {
+    const r = await t.exec("fetch_url", { url: u })
+    ok(`v88 fetch_url ${u} → clean error (pinning integrity, not a gate)`, /^(ERROR|BLOCKED)/.test(String(r)), String(r).slice(0, 100))
+  }
+  ok("v88: private connections now DO happen through the tool", hits.priv > before)
   const r = await t.exec("fetch_url", { url: "not-a-url" })
   ok("fetch_url rejects non-http", String(r).startsWith("ERROR"))
   const tOpt = makeToolContext({ cwd: proj, root: proj, fetchPrivateUrls: true })
