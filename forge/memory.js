@@ -363,6 +363,94 @@ export function appendMemory(tier, text, cwd = process.cwd(), provenance = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// v92 PROCREW — accepted / rejected solutions (the Memory Agent's verdict store)
+// ---------------------------------------------------------------------------
+// "Never repeat a solution the user already rejected" needs a place to remember
+// the rejection. lessons.js remembers FAILURE CLASSES (what kind of thing went
+// wrong); this remembers DECISIONS (this specific approach was refused), which
+// is a different fact and has no home elsewhere. Stored as tagged bullets in the
+// project tier, so it travels with the existing memory pipeline: same file, same
+// lock, same redaction, same dedup, and it is still plain text a human can edit.
+
+export const VERDICT = Object.freeze({ ACCEPTED: "accepted", REJECTED: "rejected" })
+
+const VERDICT_RE = /^\[(accepted|rejected)\]\s*(.*)$/i
+
+/**
+ * Remember a decision about an approach.
+ * @param {"accepted"|"rejected"} kind
+ * @param {string} approach  what was tried, in the words the run used
+ * @param {{reason?:string,cwd?:string,provenance?:object}} [opts]
+ */
+export function recordVerdict(kind, approach, { reason = "", cwd = process.cwd(), provenance = {} } = {}) {
+  const k = String(kind || "").toLowerCase()
+  if (k !== VERDICT.ACCEPTED && k !== VERDICT.REJECTED) return { ok: false, error: `unknown verdict "${kind}"` }
+  const a = String(approach ?? "").trim().replace(/\s+/g, " ").slice(0, 220)
+  if (!a) return { ok: false, error: "empty approach" }
+  const r = String(reason ?? "").trim().replace(/\s+/g, " ").slice(0, 120)
+  return appendMemory("project", `[${k}] ${a}${r ? ` :: ${r}` : ""}`, cwd, provenance)
+}
+
+/** Parse the verdict store. Unknown lines are ignored, never invented. */
+export function verdicts(cwd = process.cwd()) {
+  const out = { accepted: [], rejected: [] }
+  let entries = []
+  try { entries = memoryEntries("project", cwd) } catch { return out }
+  for (const e of entries) {
+    const m = VERDICT_RE.exec(String(e.text ?? "").trim())
+    if (!m) continue
+    const [approach, reason = ""] = String(m[2] || "").split(/\s*::\s*/)
+    const rec = { approach: approach.trim(), reason: reason.trim(), provenance: e.provenance || null }
+    if (m[1].toLowerCase() === VERDICT.ACCEPTED) out.accepted.push(rec)
+    else out.rejected.push(rec)
+  }
+  return out
+}
+
+function tokens(s) {
+  return new Set(String(s ?? "").toLowerCase().replace(/[^a-z0-9_.\/ -]+/g, " ").split(/[\s/]+/).filter((t) => t.length > 2))
+}
+
+/**
+ * Is this approach one the user already rejected?
+ *
+ * Token overlap, not embeddings: deterministic, offline, and a verdict is short
+ * enough that overlap is the honest signal. An accepted verdict with the same
+ * shape CANCELS the rejection — the user changed their mind, and the newer fact
+ * is the one that counts.
+ * @returns {{rejected:boolean, match:string|null, overlap:number}}
+ */
+export function isRejectedApproach(text, { cwd = process.cwd(), minOverlap = 0.6 } = {}) {
+  const want = tokens(text)
+  if (want.size < 2) return { rejected: false, match: null, overlap: 0 }
+  const v = verdicts(cwd)
+  const score = (s) => {
+    const t = tokens(s)
+    if (!t.size) return 0
+    let hit = 0
+    for (const w of want) if (t.has(w)) hit += 1
+    return hit / Math.max(want.size, 1)
+  }
+  let best = { rejected: false, match: null, overlap: 0 }
+  for (const r of v.rejected) {
+    const o = score(r.approach)
+    if (o >= minOverlap && o > best.overlap) best = { rejected: true, match: r.approach, overlap: o }
+  }
+  if (!best.rejected) return best
+  for (const a of v.accepted) if (score(a.approach) >= minOverlap) return { rejected: false, match: a.approach, overlap: best.overlap }
+  return best
+}
+
+/** One-line block for a prompt: what not to try again, and what worked. */
+export function verdictBlock(cwd = process.cwd(), limit = 4) {
+  const v = verdicts(cwd)
+  const lines = []
+  if (v.rejected.length) lines.push(`rejected before (do NOT propose these again): ${v.rejected.slice(-limit).map((r) => r.approach).join(" | ")}`)
+  if (v.accepted.length) lines.push(`accepted before (reuse this shape): ${v.accepted.slice(-limit).map((r) => r.approach).join(" | ")}`)
+  return lines.join("\n")
+}
+
 /** Replace a whole tier (or an explicit file) with `text` — redacted, one pipeline. */
 export function replaceMemory(tierOrFile, text, cwd = process.cwd(), provenance = {}) {
   try {

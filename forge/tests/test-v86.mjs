@@ -23,8 +23,8 @@ const ok = (name, cond, extra = "") => {
 const eq = (name, got, want) => ok(name, got === want, `got ${JSON.stringify(got)} want ${JSON.stringify(want)}`)
 
 console.log("== version ==")
-eq("VERSION is 90.0.0", VERSION, "90.0.0")
-eq("package.json is 90.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "90.0.0")
+eq("VERSION is 93.0.0", VERSION, "93.0.0")
+eq("package.json is 93.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "93.0.0")
 
 console.log("== new routers: doc-true endpoints ==")
 {

@@ -51,6 +51,23 @@ import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
 import { AGENT_BUDGETS } from "./config.js"
 import { createKernel } from "./omega.js"
 import { shouldReplan, replanPrompt, planLessonsPrefix } from "./replan.js"
+// v91 ULTIMATE: objective engine + orchestration + final report. The objective
+// engine never decides completion (the 9-check gate below still does) — it
+// records phases, checkpoints, loop detection and honest progress, and it is
+// what `forge report` reads back.
+import { createObjective, saveObjective, advance as objAdvancePhase, recordAction as objRecord, recordPivot, recordBlocker, verdict as objVerdict, progressOf as objProgress, PHASE, OBJ_STATUS, noteContext } from "./objective.js"
+import { rosterFor, advisories as crewAdvisories, formatAdvisories, approvalRequired as crewApproval, singleWriterOk } from "./orchestra.js"
+// v92 PROCREW: the crew as an executable scheduler, and the verification
+// pipeline that every task runs. Both are additive — `agent.crew:false` and
+// `agent.pipeline:false` restore the v91 behaviour exactly.
+import { workUnits, dedupeUnits, runCrew, formatCrew, CREW_LIMITS } from "./crew.js"
+import { recordVerdict, verdictBlock, VERDICT } from "./memory.js"
+import { planPipeline, runPipeline, pipelineVerdict, formatPipeline, diagnose as pipelineDiagnose, PIPELINE_DEFAULTS } from "./pipeline.js"
+import { buildReport, saveReport } from "./report.js"
+import { docPlan as docsDocPlan, docsBrief } from "./docsintel.js"
+// v93 DOCSMITH: the Documentation Writer. The brief is deterministic; the
+// writing is done by the roster's single writer, never by a second writer.
+import { listSourceFiles } from "./selfup.js"
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -59,6 +76,10 @@ const SEGMENT_STEPS = AGENT_BUDGETS.segmentSteps
 const MAX_SEGMENTS_DEFAULT = AGENT_BUDGETS.maxSegments
 
 export const FINAL = { COMPLETED: "COMPLETED", FAILED: "FAILED", CANCELLED: "CANCELLED", WAITING: "WAITING" }
+
+/** A read-only drafting pass costs a model call, so it is reserved for the
+ *  classes where the documentation delta is usually more than a changelog line. */
+export const DOCS_DRAFT_CLASSES = new Set(["LARGE", "ARCHITECTURAL"])
 
 /**
  * Explicit finalization mapping (P0): preserves terminal states verbatim.
@@ -188,6 +209,291 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const riskLevel = riskForChange({ task: state.objective })
   const classified = classifyTask(state.objective, { resume: Boolean(resumeRec) })
+
+  // --- v91 ULTIMATE: objective engine + orchestration crew -------------------
+  // Both are additive. `agent.objective:false` / `agent.orchestration:false`
+  // restore the exact v90 path (obj === null makes every hook a no-op).
+  const obj = config?.agent?.objective !== false
+    ? createObjective({
+      objective: state.objective, cwd: process.cwd(), klass: classified.class,
+      approvalRequired: crewApproval(classified.class), taskId, runId: taskRunId,
+    })
+    : null
+  const crew = config?.agent?.orchestration !== false ? rosterFor(classified.class) : []
+
+  // --- v92 PROCREW: crew execution stats (reported, never invented) ---------
+  const crewStats = { units: 0, findings: 0, modelCalls: 0, reassigned: 0, skipped: 0, duplicates: 0, failed: 0, deadlineHit: 0 }
+  // --- v92 PROCREW: verification pipeline state -----------------------------
+  // `pipelineRuns` bounds re-runs after repairs; a repair invalidates the last
+  // result, so the NEXT verification pass runs the pipeline again on the fixed
+  // code instead of trusting evidence that predates the fix.
+  // NB: plan-only runs never reach runMeta (they call runAgent directly), so
+  // there is no planOnly flag to check here — and referencing one would be a
+  // ReferenceError, not a no-op.
+  const pipelineEnabled = config?.agent?.pipeline !== false
+  let pipelineRuns = 0
+  let pipelineStale = true
+  let pipelineResult = null
+  // --- v93 DOCSMITH: documentation agent state ------------------------------
+  const docsAgentEnabled = config?.agent?.docsAgent !== false
+  let docsResult = null
+
+  /**
+   * Run a batch of read-only DAG nodes as the named crew.
+   *
+   * This REPLACED the inline per-node spawn loop: there is one scheduler for
+   * sub-agent work, so duplicate work, conflicting edits, self-review, rejected
+   * approaches and failure reassignment are enforced in one place. What did not
+   * change: the runner is still agentmanager.spawn → runAgent, evidence still
+   * lands in the same ledger, nodes still complete only WITH evidence, and the
+   * fan-out is still bounded by the same deadline.
+   *
+   * @returns {Promise<string>} the findings text for the model context
+   */
+  const runCrewBatch = async (batch, { segmentId = null, contextBlock = "", parallelN = 4 } = {}) => {
+    if (!Array.isArray(batch) || !batch.length) return ""
+    // `agent.crew:false` turns the fan-out OFF — not "back to the old loop":
+    // there is exactly one scheduler. The DAG's read-only nodes are then picked
+    // up one at a time by the main agent (the existing no-mutating-node-ready
+    // path), so nothing is orphaned and no logic is duplicated.
+    if (config?.agent?.crew === false) {
+      emit({ type: "CREW_DISABLED", taskId, runId: taskRunId, segmentId, nodes: batch.map((n) => n.id) })
+      return ""
+    }
+    let findings = ""
+    const byId = new Map(batch.map((n) => [n.id, n]))
+    const built = workUnits({ objective: state.objective, steps: batch, crew, context: contextBlock })
+    const { units, duplicates } = dedupeUnits(built)
+
+    // A duplicate work unit is covered by its twin. That fact IS the evidence,
+    // so the node completes with it instead of paying for a second model call.
+    for (const d of duplicates) {
+      // `d.id` is the UNIT id ("u3"); the DAG is keyed by node id, which the unit
+      // carries as stepId. Looking the node up by the unit id silently matched
+      // nothing, so duplicate nodes were never completed.
+      const node = byId.get(d.stepId ?? d.id)
+      if (!node) continue
+      crewStats.duplicates += 1
+      const rec = ledger.add({
+        verification_id: `ver-worker-${node.id}-dup`, taskId, nodeId: node.id, segmentId,
+        verificationEpoch: state.verification_epoch ?? 0, affectedFiles: [], scope: "node", type: "acceptance",
+        passed: true, exitCode: 0, exitCodeKnown: true,
+        evidence: `duplicate work unit — covered by ${d.sameAs}`, timestamp: Date.now(),
+        command: "worker:deduped", output: `duplicate of ${d.sameAs}`,
+      })
+      ts.noteVerification(rec)
+      dagLib.markCompleted(dag, node.id, `duplicate of ${d.sameAs} — not re-run`, { verification: rec })
+      persistDAG()
+      emit({ type: "CREW_DUPLICATE_SKIPPED", taskId, runId: taskRunId, segmentId, nodeId: node.id, sameAs: d.sameAs })
+    }
+
+    // The integrator merges; it never costs a model call. Same rule as before.
+    const spawnable = []
+    for (const u of units) {
+      const node = byId.get(u.stepId)
+      if (node && isIntegratorRole(node.role)) {
+        const merged = integrateResults({ objective: state.objective, reports: reportsFromGraph(dag) })
+        const rec = ledger.add({
+          verification_id: `ver-worker-${node.id}-integrate`, taskId, nodeId: node.id, segmentId,
+          verificationEpoch: state.verification_epoch ?? 0,
+          affectedFiles: merged.apply.map((a) => a.file).filter(Boolean).slice(0, 32),
+          scope: "node", type: "acceptance", passed: true, exitCode: 0, exitCodeKnown: true,
+          evidence: merged.text.slice(0, 300), timestamp: Date.now(),
+          command: "worker:integrator", output: merged.text.slice(0, 500),
+        })
+        ts.noteVerification(rec)
+        dagLib.markCompleted(dag, node.id, merged.text.slice(0, 2000), { verification: rec })
+        findings += `\n\n${merged.text}`
+        persistDAG()
+        continue
+      }
+      spawnable.push(u)
+    }
+
+    // Memory Agent: what this project already proved, so no sub-agent re-derives
+    // an approach the user rejected or ignores one that already worked.
+    let verdictHint = ""
+    try {
+      const vb = verdictBlock(process.cwd(), 3)
+      if (vb) verdictHint = `\n\nMemory from previous runs on this project:\n${vb}`
+    } catch { verdictHint = "" }
+
+    const settled = runCrew({
+      units: spawnable, crew, maxParallel: parallelN, signal,
+      emit: (ev) => emit({ taskId, runId: taskRunId, segmentId, ...ev }),
+      // Memory Agent: never spend a model call on an approach the user already
+      // rejected. A later ACCEPTED verdict for the same shape cancels it.
+      isRejected: (u) => {
+        let r = { rejected: false }
+        try { r = isRejectedApproach(u.task, { cwd: process.cwd() }) } catch { r = { rejected: false } }
+        if (r.rejected) emit({ type: "CREW_REJECTED_APPROACH", taskId, runId: taskRunId, segmentId, nodeId: u.stepId, match: r.match })
+        return r.rejected
+      },
+      // The runner is the existing one: same budgets, same tool loop, same
+      // single-writer rule (a sub-agent is spawned read-only by role).
+      spawn: async (u) => {
+        const job = manager.spawn({
+          role: u.role, taskId, runId: taskRunId, segmentId, nodeId: u.stepId,
+          task: `${u.task}\n\nThis is a read-only investigation subtask of: ${state.objective}. Do NOT modify files. Report concise findings (file paths, symbols, facts) the implementer will need.${verdictHint}`,
+          context: u.context, dagNode: u.stepId, timeoutMs: CREW_LIMITS.perUnitTimeoutMs,
+          targetFiles: u.targetFiles?.length ? u.targetFiles : null,
+          targetSymbols: u.targetSymbols?.length ? u.targetSymbols : null,
+          targetDirs: u.targetDirs?.length ? u.targetDirs : null,
+          resourceLocks: u.resourceLocks?.length ? u.resourceLocks : null,
+        })
+        resources.record({ workers: 1 })
+        return job.promise
+      },
+    // Map every settled unit back onto its DAG node. Attached BEFORE the
+    // deadline race so a late result still lands, exactly as the old per-node
+    // .then() did — the deadline bounds the WAIT, not the bookkeeping.
+    }).then((res) => {
+      crewStats.units += (res.results || []).length
+      crewStats.modelCalls += res.modelCalls || 0
+      crewStats.reassigned += res.reassigned || 0
+      crewStats.skipped += (res.skipped || []).length
+      for (const r of res.results || []) {
+        if (!r.stepId) continue
+        if (r.ok) {
+          crewStats.findings += 1
+          const rec = ledger.add({
+            verification_id: `ver-worker-${r.stepId}-${r.id}`, taskId, nodeId: r.stepId, segmentId,
+            verificationEpoch: state.verification_epoch ?? 0, affectedFiles: [], scope: "node", type: "acceptance",
+            passed: true, exitCode: 0, exitCodeKnown: true,
+            evidence: String(r.text ?? "").slice(0, 300), timestamp: Date.now(),
+            command: `worker:${r.key}`, output: String(r.text ?? "").slice(0, 500),
+          })
+          ts.noteVerification(rec)
+          dagLib.markCompleted(dag, r.stepId, String(r.text ?? "").slice(0, 2000), { verification: rec })
+          findings += `\n\n--- finding from ${r.key} (${r.stepId})${r.attempts > 1 ? `, reassigned from ${r.from}` : ""} ---\n${String(r.text ?? "").slice(0, 1200)}`
+        } else if (r.skipped) {
+          dagLib.markFailed(dag, r.stepId, "approach previously rejected by the user — not attempted")
+        } else {
+          crewStats.failed += 1
+          dagLib.markFailed(dag, r.stepId, r.error ?? "worker produced no findings — cannot verify the node outcome")
+        }
+        // Memory Agent: an approach tried under two different specialists is a
+        // DECISION, not just a failure — the next run must not pay for it again.
+        // A success that only landed after reassignment is worth keeping too.
+        if (r.attempts > 1) {
+          const u = spawnable.find((x) => x.stepId === r.stepId)
+          const approach = String(u?.task ?? "").split("\n")[0].slice(0, 200)
+          if (approach) {
+            try {
+              recordVerdict(r.ok ? VERDICT.ACCEPTED : VERDICT.REJECTED, approach, {
+                reason: r.ok ? `worked when reassigned to ${r.key}` : `${r.key}: ${String(r.error || "no findings").slice(0, 90)}`,
+                cwd: process.cwd(),
+                provenance: { source: "subagent", runId: taskRunId, model: provider?.model ?? null },
+              })
+            } catch { /* memory is best-effort; it never fails a run */ }
+          }
+        }
+        persistDAG()
+      }
+      const line = formatCrew(res)
+      if (obj) objPhase(PHASE.RESEARCH, line.split("\n")[0])
+      return findings
+    }).catch((e) => {
+      ts.noteError("CREW_FAILED", e?.message ?? String(e))
+      emit({ type: "CREW_FAILED", taskId, runId: taskRunId, segmentId, error: String(e?.message ?? e).slice(0, 200) })
+      return findings
+    })
+
+    // Bounded wait: the deadline must be cleared (and unref'd) or it keeps a
+    // timer alive long after the workers have settled.
+    let fanoutTimer = null
+    const waitMs = fanoutWaitMs(resources.state.tier, resources.state)
+    const fanoutDeadline = new Promise((resolve) => {
+      fanoutTimer = setTimeout(resolve, waitMs)
+      if (fanoutTimer && typeof fanoutTimer.unref === "function") fanoutTimer.unref()
+    })
+    const raced = await Promise.race([settled, fanoutDeadline])
+    clearTimeout(fanoutTimer)
+    if (raced === undefined) {
+      crewStats.deadlineHit += 1
+      emit({ type: "CREW_DEADLINE", taskId, runId: taskRunId, segmentId, waitedMs: waitMs })
+      return findings
+    }
+    return raced
+  }
+
+  let lastReview = null
+  let finalReport = null
+  if (obj) {
+    saveObjective(obj)
+    const sw = singleWriterOk(crew)
+    emit({
+      type: "OBJECTIVE_STARTED", taskId, runId: taskRunId, segmentId: null, nodeId: null,
+      objectiveId: obj.id, class: classified.class, approvalRequired: obj.approvalRequired,
+      crew: crew.map((c) => c.key), writers: sw.writers, singleWriter: sw.ok,
+    })
+  }
+  /** Advance a phase, persist it, and publish honest progress. */
+  const objPhase = (phase, note = "", gate = null) => {
+    if (!obj) return
+    try {
+      objAdvancePhase(obj, phase, { note })
+      saveObjective(obj)
+      const prog = objProgress(obj, { gate })
+      emit({ type: "OBJECTIVE_PHASE", taskId, runId: taskRunId, segmentId: null, nodeId: null, phase, pct: prog.pct, label: prog.label, done: prog.done, total: prog.total })
+    } catch { /* the objective record is diagnostic — it must never break a run */ }
+  }
+  /** One action, with loop detection. Returns the loop verdict (or null). */
+  const objAct = (phase, action, args = null, detail = "") => {
+    if (!obj) return null
+    try {
+      const loop = objRecord(obj, { phase, action, args, detail })
+      if (loop) {
+        emit({ type: "LOOP_DETECTED", taskId, runId: taskRunId, segmentId: null, nodeId: null, action: loop.action, repeats: loop.repeats, suggestion: loop.suggestion })
+        // The pivot is recorded AND handed to the strategy machinery that
+        // already exists: an ineffective strategy is not retried.
+        recordPivot(obj, { from: loop.action, to: "different approach", why: loop.suggestion })
+        try {
+          // A detected loop IS a lesson: the same action, retried with identical
+          // arguments, is a failure mode the planner should skip next time.
+          recordLesson({
+            task: state.objective,
+            failure: `loop: "${loop.action}" repeated ${loop.repeats}× with identical arguments`,
+            failedStrategy: loop.action,
+            rootCause: "the agent retried the same action instead of changing approach",
+            solution: loop.suggestion,
+          }, process.cwd())
+        } catch { }
+        saveObjective(obj)
+      }
+      return loop
+    } catch { return null }
+  }
+  /** Build + persist the final report. Idempotent unless `force` (the verdict
+   *  settles the last phases, so the report is rebuilt once to match them). */
+  const objReport = ({ gate = null, docs = null, next = null, force = false, silent = false } = {}) => {
+    if (!obj || (finalReport && !force)) return finalReport
+    try {
+      const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
+      const plan = docsDocPlan({ files: changedRel, repoFiles: changedRel })
+      finalReport = buildReport({
+        objective: obj, task: state, gate: gate ?? lastGate, review: lastReview, ledger,
+        advisories: crew.length ? crewAdvisories({ cwd: process.cwd(), objective: state.objective, klass: classified.class, gate: gate ?? lastGate, review: lastReview, ledger, dag, files: changedRel }) : null,
+        docs: docs ?? plan, klass: classified.class,
+        analysis: [`crew: ${crew.length ? crew.map((c) => c.key).join(", ") : "(orchestration off)"}`],
+        crewRun: crewStats, pipeline: pipelineResult,
+        next,
+      })
+      if (config?.agent?.report !== false) saveReport(finalReport, { cwd: process.cwd() })
+      // `silent` = a draft the closing hook will rebuild and announce once, so
+      // a completed run never prints two FINAL_REPORT lines.
+      if (!silent) emit({ type: "FINAL_REPORT", taskId, runId: taskRunId, segmentId: null, nodeId: null, reportId: finalReport.id, status: finalReport.status, pct: finalReport.pct, gateOk: finalReport.gateOk, sections: finalReport.sections.map((x) => x.id) })
+      return finalReport
+    } catch (e) { if (process.env.FORGE_DEBUG === "1") console.error("objReport failed:", e?.stack ?? e); return null }
+  }
+  if (obj && crew.length) {
+    // The advisory pack is deterministic evidence, not another model call.
+    try {
+      const adv = crewAdvisories({ cwd: process.cwd(), objective: state.objective, klass: classified.class, compose: null })
+      const text = formatAdvisories(adv)
+      if (text) objAdvancePhase(obj, PHASE.ANALYZE, { note: `advisories: ${adv.sections.length} section(s) from ${adv.roles.join(", ")}` })
+    } catch { }
+  }
   const omega = createKernel({ cwd: process.cwd() })
   omega.classify(state.objective, { resume: Boolean(resumeRec) })
   clearComposeOnce()
@@ -402,6 +708,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     planValidation = { ok: false, errors: [String(e?.message ?? e)], recoverable: true, code: "PLAN_EXCEPTION" }
     ts.transition(TASK_STATUS.WAITING, { reason: `planning failed: ${String(e?.message ?? e).slice(0, 200)}` })
     persistCritical()
+    if (obj) {
+      // Planning failure is a real blocker, recorded as one — the objective is
+      // never marked DONE because a later phase would have succeeded.
+      recordBlocker(obj, { reason: "PLAN_FAILED", detail: String(e?.message ?? e).slice(0, 300), phase: PHASE.PLAN, recoverable: true })
+      objPhase(PHASE.PLAN, `planning failed: ${String(e?.message ?? e).slice(0, 160)}`)
+      objVerdict(obj, {})
+      saveObjective(obj)
+      objReport({})
+    }
     return {
       taskId,
       runId: taskRunId,
@@ -413,7 +728,25 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       filesChanged: [],
       verification: { ok: false, missing: [], reason: "planning failed" },
       task: state,
+      objective: obj,
+      report: finalReport,
     }
+  }
+
+  // v91 ULTIMATE: RESEARCH → PLAN → APPROVE are settled before the segment loop
+  // starts. They are phases of the existing pipeline, not new work: the compose
+  // snapshot IS the research, planValidation IS the plan, and approval is the
+  // operator's standing decision (tools.autoApprove), never an invented prompt.
+  if (obj) {
+    objPhase(PHASE.RESEARCH, composedSnap ? "compose snapshot: index + world model + memory + skills" : "no repo model needed for this class")
+    objPhase(PHASE.PLAN, `${planDefs.length} step(s)${planRepaired ? " (plan repaired)" : ""} — validation ${planValidation?.ok === false ? "FAILED" : "ok"}`)
+    if (obj.approvalRequired) {
+      const auto = config?.tools?.autoApprove !== false
+      objAdvancePhase(obj, PHASE.APPROVE, { note: auto ? "auto-approved (tools.autoApprove — FULL CONTROL is the operator's standing decision)" : "approval requested" })
+      if (!auto) recordBlocker(obj, { reason: "APPROVAL_REQUIRED", detail: "this class requires explicit approval; set tools.autoApprove or run with --yolo", phase: PHASE.APPROVE, recoverable: true })
+    }
+    objAdvancePhase(obj, PHASE.APPROVE, { note: obj.approvalRequired ? "see above" : `not required for ${classified.class}` })
+    saveObjective(obj)
   }
 
   let dag = null
@@ -472,6 +805,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const affectedSymbols = []
   const requiredActions = new Set()
   const maxRepairs = config?.agent?.maxRepairs ?? 6
+  // The budget counts ATTEMPTS. `repairCount` only counts repairs that worked,
+  // so a repair that fails left the budget untouched and the run repaired the
+  // same failure until the segment fuse (16 repairs observed against a budget of
+  // 6). Attempts are the thing a budget can bound; successes are a report field.
+  let repairAttempts = 0
+  let lastVerifySignature = null
+  let identicalVerifyFailures = 0
   /** Last completion-gate verdict (for the audit trail / return value). */
   let lastGate = null
 
@@ -585,6 +925,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         blockers: (rev.blockers || []).map((b) => b.id), checks: rev.checks || [],
       })
       for (const b of rev.blockers || []) addRequiredAction(`review: ${b.id}${b.detail ? ` (${b.detail})` : ""}`)
+      lastReview = rev // v91: the report cites the real checklist, not a summary of it
     }
     const gate = canCompleteTask({
       planValid: planValidation ? planValidation.ok !== false : true,
@@ -617,6 +958,25 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     ts.setNextAction(null)
     ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
     emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, text: String(finalText).slice(0, 400), verification: vv.status, finalRisk: fr.risk, gate: gate.checks })
+    // v91 ULTIMATE: the objective closes through DOCUMENT → REPORT → LEARN, and
+    // the report is written from evidence that already exists.
+    if (obj) {
+      objPhase(PHASE.VERIFY, "completion gate satisfied", gate)
+      objPhase(PHASE.OPTIMIZE, changedFiles.size ? `${changedFiles.size} file(s) changed` : "no files changed", gate)
+      const docsRun = await runDocsPhase({
+        agent, config, provider: provRef.prov, signal, emit,
+        objective: state.objective, klass: classified.class, changedFiles,
+        noteFiles: (abs) => ts.noteFiles([abs], []),
+        taskId, runId: taskRunId, cwd: process.cwd(), enabled: docsAgentEnabled,
+      })
+      docsResult = docsRun.result
+      objPhase(PHASE.DOCUMENT, docsRun.note, gate)
+      objVerdict(obj, { gate })
+      objPhase(PHASE.REPORT, "", gate)
+      objReport({ gate, silent: true })
+      objPhase(PHASE.LEARN, `strategy score recorded${repairCount ? ` • ${repairCount} repair(s)` : ""}`, gate)
+      saveObjective(obj)
+    }
     try {
       const evo = evolveRun({
         cwd: process.cwd(),
@@ -899,77 +1259,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           .filter((n) => n.read_only && n.role && n.role !== "coder" && n.id !== currentNodeId)
         if (batch.length) {
           emit({ type: "DAG_DISPATCH", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, nodes: batch.map((n) => n.id), parallel: batch.length })
-          const jobs = batch.map((n) => {
-            dagLib.markRunning(dag, n.id)
-            if (isIntegratorRole(n.role)) {
-              const merged = integrateResults({ objective: state.objective, reports: reportsFromGraph(dag) })
-              const rec = ledger.add({
-                verification_id: `ver-worker-${n.id}-integrate`,
-                taskId, nodeId: n.id, segmentId,
-                verificationEpoch: state.verification_epoch ?? 0,
-                affectedFiles: merged.apply.map((a) => a.file).filter(Boolean).slice(0, 32),
-                scope: "node", type: "acceptance",
-                passed: true, exitCode: 0, exitCodeKnown: true,
-                evidence: merged.text.slice(0, 300),
-                timestamp: Date.now(), command: "worker:integrator", output: merged.text.slice(0, 500),
-              })
-              ts.noteVerification(rec)
-              dagLib.markCompleted(dag, n.id, merged.text.slice(0, 2000), { verification: rec })
-              dagFindings += `\n\n${merged.text}`
-              persistDAG()
-              return Promise.resolve()
-            }
-            const job = manager.spawn({
-              role: n.role,
-              // P0 worker identity: every worker carries taskId/nodeId/segmentId
-              // so nothing downstream has to guess which node it belongs to.
-              taskId, runId: taskRunId, segmentId, nodeId: n.id,
-              task: `${n.objective}\n\nThis is a read-only investigation subtask of: ${state.objective}. Do NOT modify files. Report concise findings (file paths, symbols, facts) the implementer will need.`,
-              context: contextBlock.slice(0, 3500),
-              dagNode: n.id,
-              timeoutMs: 1000 * 60 * 2,
-              // canonical conflict keys, straight from the node definition
-              targetFiles: n.targetFiles ?? null,
-              targetSymbols: n.targetSymbols ?? null,
-              targetDirs: n.targetDirs ?? null,
-              resourceLocks: n.resourceLocks ?? null,
-            })
-            resources.record({ workers: 1 })
-          return job.promise.then((r) => {
-            if (r.status === "completed" && String(r.result ?? "").trim()) {
-              // A read-only node's outcome is its findings: record that as
-              // scoped ACCEPTANCE evidence, then complete the node WITH it.
-              const rec = ledger.add({
-                verification_id: `ver-worker-${n.id}-${job.id}`,
-                taskId, nodeId: n.id, segmentId,
-                verificationEpoch: state.verification_epoch ?? 0,
-                affectedFiles: [], scope: "node", type: "acceptance",
-                passed: true, exitCode: 0, exitCodeKnown: true,
-                evidence: String(r.result ?? "").slice(0, 300),
-                timestamp: Date.now(), command: `worker:${n.role}`, output: String(r.result ?? "").slice(0, 500),
-              })
-              ts.noteVerification(rec)
-              dagLib.markCompleted(dag, n.id, String(r.result ?? "").slice(0, 2000), { verification: rec })
-              dagFindings += `\n\n--- finding from ${n.role} (${n.id}) ---\n${String(r.result ?? "").slice(0, 1200)}`
-            } else if (r.status === "completed") {
-              // worker settled but produced nothing: unverifiable, not complete
-              dagLib.markFailed(dag, n.id, "worker produced no findings — cannot verify the node outcome")
-            } else {
-              dagLib.markFailed(dag, n.id, r.error ?? r.status)
-            }
-            persistDAG()
-          }).catch((e) => { try { dagLib.markFailed(dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} })
-          })
-          // Bounded wait: the deadline must be cleared (and unref'd) or it keeps
-          // a timer alive long after the workers have settled.
-          let fanoutTimer = null
-          const waitMs = fanoutWaitMs(resources.state.tier, resources.state)
-          const fanoutDeadline = new Promise((resolve) => {
-            fanoutTimer = setTimeout(resolve, waitMs)
-            if (fanoutTimer && typeof fanoutTimer.unref === "function") fanoutTimer.unref()
-          })
-          await Promise.race([Promise.allSettled(jobs), fanoutDeadline])
-          clearTimeout(fanoutTimer)
+          // v92 PROCREW: one scheduler for sub-agent work. Duplicate units are
+          // refused before they cost a model call, units that clash on a file
+          // are split into separate waves, every finding is self-reviewed, a
+          // failed unit is retried under a different specialist, and an
+          // approach the user already rejected is never attempted again.
+          dagFindings += await runCrewBatch(batch, { segmentId, contextBlock, parallelN })
         }
       } catch (e) { ts.noteError("DAG_FANOUT_FAILED", e?.message ?? String(e)) }
     }
@@ -1190,6 +1485,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     emit({ type: "SEGMENT_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, status: segStatus, steps: res.steps, toolCalls: segToolCalls, budgetHit: !!res.budgetHit })
 
+    // v91 ULTIMATE: objective bookkeeping for this segment. The fingerprint is
+    // what the segment DID — same outcome twice in a row is a loop, not progress.
+    if (obj) {
+      objPhase(PHASE.EXECUTE, `segment ${segment}: ${segStatus}${res.budgetHit ? " (step budget hit)" : ""}`)
+      const loop = objAct(PHASE.EXECUTE, `segment:${segStatus}:${changedFiles.size}:${segToolCalls}`, { nodeId: currentNodeId, segment })
+      if (loop) objPhase(PHASE.REPAIR, `loop detected: ${loop.suggestion}`)
+      const comp = noteContext(obj, (state.resource_usage?.tokens_in ?? 0) + (state.resource_usage?.tokens_out ?? 0))
+      if (comp) emit({ type: "CONTEXT_COMPRESSION_REQUESTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, chars: comp.chars, budget: comp.budget, directive: comp.directive })
+      if (segStatus === "error") recordBlocker(obj, { reason: "SEGMENT_FAILED", detail: String(res.error ?? "").slice(0, 200), phase: PHASE.EXECUTE, recoverable: true })
+    }
+
     if (res.error) {
       consecutiveFailures++
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
@@ -1278,16 +1584,98 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // The node itself is now officially under verification (not completed).
     if (dag && currentNodeId && !res.error) dagLib.markVerifying(dag, currentNodeId)
 
+    // --- v92 PROCREW: the verification pipeline ------------------------------
+    // Every task runs the SAME stages in the SAME order, taken from the
+    // project's own manifests — build, lint, typecheck, test, validate. The
+    // evidence lands in the ledger BEFORE the status below is judged, so the
+    // completion gate reads real results instead of whatever the model happened
+    // to run. A stage with no real command is reported skipped, never faked.
+    if (pipelineEnabled && pipelineStale && pipelineRuns < 3 && changedFiles.size && !signal?.aborted) {
+      try {
+        pipelineRuns += 1
+        const plan = planPipeline({ cwd: process.cwd(), files: changedRel, config })
+        emit({ type: "PIPELINE_PLANNED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, stages: plan.stages.map((x) => x.id), skipped: plan.skipped.map((x) => `${x.id}: ${x.reason}`) })
+        if (!plan.stages.length) {
+          pipelineStale = false
+          objPhase(PHASE.VERIFY, "pipeline: this project defines no build/lint/typecheck/test command — nothing faked")
+        } else {
+          objPhase(PHASE.VERIFY, `pipeline: ${plan.stages.map((x) => x.id).join(" → ")}`)
+          const res = await runPipeline({
+            plan, cwd: process.cwd(), signal,
+            opts: { timeoutMs: Number(config?.agent?.verifyTimeoutMs) || PIPELINE_DEFAULTS.timeoutMs, stopOnFailure: true },
+            onEvent: (ev) => emit({ taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ...ev }),
+          })
+          pipelineResult = res
+          pipelineStale = false
+          for (const st of res.stages) {
+            if (st.skippedRun) continue
+            const rec = ledger.add({
+              ...st.record,
+              verification_id: `ver-pipeline-${st.id}-${pipelineRuns}`,
+              taskId, runId: taskRunId, nodeId: currentNodeId, segmentId,
+              verificationEpoch: state.verification_epoch ?? 0,
+              affectedFiles: changedRel.slice(0, 32),
+              identityScope: "task",
+            })
+            ts.noteVerification(rec)
+          }
+          const verdict = pipelineVerdict(res)
+          emit({ type: "PIPELINE_RESULT", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: res.ok, reason: verdict.reason, stages: res.stages.map((x) => ({ id: x.id, passed: x.passed, failureShape: x.failureShape, attempts: x.attempts })), ms: res.ms })
+          objPhase(PHASE.VERIFY, `pipeline ${res.ok ? "PASS" : "FAIL"} — ${verdict.reason}`)
+          if (!res.ok) {
+            // Diagnose for the repair phase: shape + hint, from the ledger's own
+            // vocabulary. No new failure taxonomy.
+            const broken = res.stages.find((x) => !x.passed && !x.skippedRun)
+            if (broken) {
+              const d = pipelineDiagnose(broken.record)
+              emit({ type: "PIPELINE_DIAGNOSIS", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, stage: broken.id, shape: d.shape, hint: d.hint, tail: d.tail })
+              recordBlocker(obj, { reason: "PIPELINE_FAILED", detail: `${broken.id}: ${d.shape} — ${d.hint}`, phase: PHASE.VERIFY, recoverable: true })
+            }
+          }
+        }
+      } catch (e) {
+        ts.noteError("PIPELINE_FAILED", e?.message ?? String(e))
+        emit({ type: "PIPELINE_ERROR", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, error: String(e?.message ?? e).slice(0, 200) })
+      }
+    }
+
     const v = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
     emit({ type: "VERIFICATION_STATUS", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: v.ok, missing: v.missing, reason: v.reason, risk: finalRiskLevel, initialRisk: riskLevel, status: v.status })
 
+    if (!v.anyFailure) { lastVerifySignature = null; identicalVerifyFailures = 0 }
     // VERIFICATION FAILED → REPAIRING (hard gate). The node goes back to
     // REPAIRING too: execution succeeded, the OUTCOME did not.
     if (v.anyFailure) {
+      // v92: "retry until success OR report a blocking issue". Two bounds, both
+      // measured on ATTEMPTS: the configured repair budget, and a repeat of the
+      // SAME failure on the SAME files — repairing that again is the loop, not
+      // the fix. Without this the run repaired one unfixable verification until
+      // the segment fuse and then reported a FUSE instead of the real blocker.
+      const verifySignature = `${String(v.reason ?? "")}|${changedRel.join(",")}`
+      if (verifySignature === lastVerifySignature) identicalVerifyFailures += 1
+      else { lastVerifySignature = verifySignature; identicalVerifyFailures = 0 }
+      const exhausted = repairAttempts >= maxRepairs || identicalVerifyFailures >= 2
+      if (exhausted) {
+        const detail = repairAttempts >= maxRepairs
+          ? `${repairAttempts} repair attempt(s) against a budget of ${maxRepairs} — ${String(v.reason ?? "").slice(0, 140)}`
+          : `the same verification failure repeated ${identicalVerifyFailures + 1}× on the same files — ${String(v.reason ?? "").slice(0, 140)}`
+        recordBlocker(obj, { reason: "VERIFICATION_NOT_RECOVERING", detail, phase: PHASE.REPAIR, recoverable: false })
+        emit({ type: "REPAIR_GAVE_UP", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, attempts: repairAttempts, identicalFailures: identicalVerifyFailures + 1, reason: String(v.reason ?? "").slice(0, 200) })
+        objPhase(PHASE.REPAIR, `giving up: ${detail}`)
+        ts.transition(TASK_STATUS.REPAIRING, { reason: "verification not recovering" })
+        finalStatus = explicitFinalization(FINAL.WAITING)
+        finalText = `verification could not be satisfied: ${String(v.reason ?? "").slice(0, 300)}`
+        break
+      }
       if (dag && currentNodeId) { try { dagLib.markRepairing(dag, currentNodeId, v.reason); persistDAG() } catch { } }
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: repairCount + 1, error: v.reason })
+      objPhase(PHASE.REPAIR, `verification failed: ${String(v.reason ?? "").slice(0, 120)}`)
       const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles] })
+      repairAttempts += 1
+      // v92: the pipeline evidence predates the repair, so it no longer verifies
+      // these files. Re-run it on the next verification pass.
+      pipelineStale = true
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0
@@ -1490,6 +1878,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     })
   } catch { }
 
+  // v91 ULTIMATE: the objective verdict is derived, never assumed. A budget or
+  // segment fuse lands in WAITING/FUSE — never in DONE.
+  if (obj) {
+    const v = objVerdict(obj, { gate: lastGate, cancelled: Boolean(signal?.aborted), fuse: finalStatus === FINAL.WAITING, fuseReason: `segment/continuation fuse reached after ${segment} segment(s)` })
+    saveObjective(obj)
+    emit({ type: "OBJECTIVE_VERDICT", taskId, runId: taskRunId, segmentId: null, nodeId: null, status: v.status, reason: v.reason, pct: v.pct, missing: v.missing })
+    // The verdict settled the in-flight phases — rebuild so the report's phase
+    // table and percentage agree with the status it prints.
+    if (finalReport || v.status === OBJ_STATUS.DONE) objReport({ gate: lastGate, force: true })
+    else objReport({ gate: lastGate })
+  }
+
   emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, state: finalState, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
 
   const finalRisk = recomputeFinalRisk()
@@ -1499,6 +1899,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     status: finalStatus,
     state: finalState,
     text: finalText,
+    // v92 PROCREW: what the sub-agents did and what the pipeline proved
+    crew: { ...crewStats },
+    docs: docsResult,
+    pipeline: pipelineResult ? { ok: pipelineResult.ok, reason: pipelineVerdict(pipelineResult).reason, stages: pipelineResult.stages.map((x) => ({ id: x.id, passed: x.passed, skipped: x.skippedRun === true, failureShape: x.failureShape || null, attempts: x.attempts || 1 })) } : null,
     segments: segment,
     repairs: repairCount,
     toolCalls: totalToolCalls,
@@ -1512,6 +1916,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     completionGate: lastGate ? { ok: lastGate.ok, status: lastGate.status, checks: lastGate.checks, blockers: lastGate.blockers } : null,
     verification: ledger.status(finalRisk.risk, [...changedFiles].map((f) => path.relative(process.cwd(), f))),
     task: state,
+    // v91 ULTIMATE — the objective record and the final report (null when
+    // agent.objective / agent.report is off, so callers keep working unchanged)
+    objective: obj,
+    report: finalReport,
   }
 }
 
@@ -1524,6 +1932,90 @@ function segmentEvents(emit, segment, ids = {}) {
     if (!ev || !ev.type) return
     if (ev.type === "run_start" || ev.type === "run_end") return
     try { emit({ ...ids, ...ev, segment }) } catch {}
+  }
+}
+
+/**
+ * v93 DOCSMITH — the DOCUMENT phase, as a testable unit.
+ *
+ * The BRIEF is deterministic (docsintel.docsBrief): every target in it is
+ * obliged by the diff, so the model is never invited to invent something to
+ * document, and an empty brief means "nothing to write" — not "write something
+ * plausible".
+ *
+ * The WRITING is done by the executor, the roster's single writer. The
+ * documentation specialist is read-only and stays read-only: `singleWriterOk`
+ * is a structural invariant, and a docs agent with its own write authority would
+ * be a second writer. For LARGE/ARCHITECTURAL a read-only drafting pass runs
+ * first, because there the delta is usually more than a changelog line.
+ *
+ * Runs after verification, because documentation does not invalidate test
+ * evidence about code. What it writes is added to `changedFiles` so the
+ * report's Files Changed stays truthful.
+ *
+ * @returns {Promise<{note:string, result:object|null}>}
+ */
+export async function runDocsPhase({
+  agent, config, provider, signal = null, emit = () => {},
+  objective = "", klass = null, changedFiles = new Set(), noteFiles = () => {},
+  taskId = null, runId = null, cwd = process.cwd(), enabled = true,
+  draftClasses = DOCS_DRAFT_CLASSES,
+} = {}) {
+  const ev = (e) => { try { emit({ taskId, runId, ...e }) } catch { /* observability never breaks a run */ } }
+  if (!enabled) return { note: "documentation deltas listed in the report (docs agent off)", result: null }
+  if (!changedFiles.size) return { note: "no files changed — nothing to document", result: null }
+
+  let brief = null
+  try {
+    const changedRel = [...changedFiles].map((f) => path.relative(cwd, f))
+    // the REAL repo file list: with only the changed files, a README that exists
+    // would be reported "missing — create", and the model would act on that lie
+    const repoFiles = listSourceFiles(cwd, { exts: new Set([".md", ".markdown", ".txt"]) })
+    brief = docsBrief({ objective, files: changedRel, repoFiles })
+  } catch (e) {
+    return { note: `doc plan unavailable: ${String(e?.message ?? e).slice(0, 120)}`, result: null }
+  }
+  if (brief.empty) return { note: "nothing in this change obliges a documentation update", result: null }
+  ev({ type: "DOCS_BRIEF", segmentId: null, nodeId: null, targets: brief.targets.map((t) => `${t.doc}${t.path ? `(${t.path})` : "(create)"}:${t.severity}`) })
+
+  let draft = ""
+  if (draftClasses.has(klass)) {
+    try {
+      const d = await agent({
+        config, provider, signal, taskId, runId, segmentId: null, nodeId: null,
+        task: `${brief.text}\n\nDo NOT modify any file — you are read-only. Return the exact documentation content to write for each listed file, under a heading with the file path. No commentary.`,
+        readOnly: true, maxStepsOverride: 6, deep: false, onEvent: ev, journal: true,
+        runIdOverride: runId, suppressRunEvents: true, keepJournalRunning: true,
+      })
+      draft = String(d?.text ?? "")
+      ev({ type: "DOCS_DRAFTED", segmentId: null, nodeId: null, ok: !d?.error && draft.trim().length > 0, chars: draft.length, error: d?.error ? String(d.error).slice(0, 160) : null })
+    } catch (e) {
+      ev({ type: "DOCS_DRAFT_FAILED", segmentId: null, nodeId: null, error: String(e?.message ?? e).slice(0, 200) })
+    }
+  }
+
+  try {
+    const ask = `${brief.text}${draft ? `\n\nA read-only reviewer drafted this — use it where it is correct, correct it where it is not:\n${draft.slice(0, 6000)}` : ""}\n\nApply these updates now with the file tools. Change ONLY the listed files.`
+    const r = await agent({
+      config, provider, signal, taskId, runId, segmentId: null, nodeId: null,
+      task: ask, maxStepsOverride: 8, deep: false, onEvent: ev, journal: true,
+      runIdOverride: runId, suppressRunEvents: true, keepJournalRunning: true,
+    })
+    const wrote = [...new Set((r?.toolRecords ?? []).flatMap((x) => x.files_changed ?? []).map(String))]
+    for (const f of wrote) {
+      const abs = path.resolve(cwd, f)
+      changedFiles.add(abs)
+      try { noteFiles(abs) } catch { /* accounting is best-effort */ }
+    }
+    const result = { targets: brief.targets, wrote, draftChars: draft.length, ok: !r?.error }
+    ev({ type: "DOCS_APPLIED", segmentId: null, nodeId: null, ok: !r?.error, files: wrote, targets: brief.targets.length, error: r?.error ? String(r.error).slice(0, 160) : null })
+    return {
+      note: `${brief.targets.length} doc target(s) — ${wrote.length ? `wrote ${wrote.map((f) => path.relative(cwd, f)).join(", ")}` : "no listed file needed a change"}`,
+      result,
+    }
+  } catch (e) {
+    ev({ type: "DOCS_APPLY_FAILED", segmentId: null, nodeId: null, error: String(e?.message ?? e).slice(0, 200) })
+    return { note: `documentation not written: ${String(e?.message ?? e).slice(0, 120)}`, result: null }
   }
 }
 

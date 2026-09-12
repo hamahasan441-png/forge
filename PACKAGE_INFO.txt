@@ -1,4 +1,4 @@
-forge v90.0.0 — CLI-only build ("gitwise" on top of "fast" + "noguard + worker clamp")
+forge v93.0.0 — CLI-only build ("DOCSMITH" on top of "PROCREW" + "ULTIMATE" + "noguard")
 - zero-dependency Node CLI (>=20, ESM), runs directly against providers
   (no localhost server, no build, no native modules; ARM64/Termux friendly)
 - 20 providers, OpenAI AND Anthropic wire protocols, auto-failover,
@@ -17,6 +17,86 @@ forge v90.0.0 — CLI-only build ("gitwise" on top of "fast" + "noguard + worker
     the full netguard pinnedFetch policy
   * classifyCommand still labels every command (block/danger/confirm/low/
     safe) for logs, /status, tool-intelligence and verification risk
+- v93 DOCSMITH (the documentation agent writes):
+  * docsintel.docsBrief() — deterministic brief: every target obliged by the
+    change, existing files resolve to their real path, absent ones are named
+    ("create MIGRATION.md"), breaking changes + changed exports listed, and a
+    ready-to-paste CHANGELOG section. An empty brief means nothing to write
+  * meta.runDocsPhase() — the DOCUMENT phase as a module-level injectable unit
+    (same shape as repairSegment/requestVerification): brief -> read-only draft
+    (LARGE/ARCHITECTURAL only) -> apply. Events DOCS_BRIEF / DOCS_DRAFTED /
+    DOCS_DRAFT_FAILED / DOCS_APPLIED / DOCS_APPLY_FAILED
+  * the writer is the executor: the documentation specialist stays read-only, so
+    singleWriterOk still holds — one writer, always
+  * what it writes is added to the run's changed files, so the report's
+    Files Changed stays truthful
+  * off switch: agent.docsAgent:false restores the v92 behaviour
+- v92 PROCREW (professional sub-agent intelligence):
+  * crew.js — the named crew EXECUTES. workUnits() turns a plan into
+    named-specialist units; dedupeUnits() refuses duplicate work before it costs
+    a model call; waves() keeps two units that touch the same file out of the
+    same wave (dag.canonicalConflictKeys — the DAG scheduler's own key space);
+    reassignFor() retries a failed unit under a DIFFERENT specialist and returns
+    null when the ladder is exhausted; selfReview() reviews each finding against
+    the existing adversarial checklist before it may be merged. The runner is
+    still agentmanager.spawn -> runAgent: one tool loop, one set of budgets, and
+    the executor stays the only mutating role
+  * pipeline.js — every task runs build -> lint -> typecheck -> test -> validate
+    from the project's OWN manifests. A stage with no real command is skipped
+    with the reason, never faked. Pass/fail is verifyledger's call (unobserved
+    exit status, timeout, truncated capture, killed process, or exit 0 with a
+    failure shape in the output are all NOT a pass). Runs BEFORE the completion
+    gate is judged; a repair invalidates the evidence and the next pass re-runs
+  * memory.js — accepted/rejected APPROACHES (recordVerdict, verdicts,
+    isRejectedApproach, verdictBlock). lessons.js keeps failure classes; this
+    records decisions. A later accepted verdict cancels a rejection
+  * forge verify — run the pipeline on demand (--only, --skip, --timeout, --json,
+    exit 1 on failure)
+  * off switches: agent.pipeline:false restores the v91 verification path;
+    agent.crew:false turns the fan-out off (read-only DAG nodes then run one at
+    a time in the main agent)
+- v91 ULTIMATE (objective-based orchestration):
+  * objective.js — the objective, not a step count, decides when a run ends:
+    DONE only when the existing 9-check completion gate is satisfied, BLOCKED
+    on a recorded unrecoverable blocker, WAITING/FUSE on a budget fuse (never
+    DONE). 12 phases (ANALYZE..LEARN) with per-phase checkpoints under
+    ~/.forge/projects/<hash>/objectives/, resume re-verifies, loop detection
+    (same action + identical args 3x) pivots strategy and records a lesson,
+    progress % derived from phase+gate state, context-compression requests
+  * orchestra.js — 13 named roles mapped onto the EXISTING agentmanager roles
+    (no second vocabulary): intent_analyzer, researcher, reviewer, planner,
+    project_architect, executor, tester, debugger, optimizer,
+    documentation_writer, git_manager, memory_manager, reporter. Crew derived
+    from strategyFor(klass).workflow + a class floor (MICRO 5 -> LARGE 13).
+    Exactly one writer (executor); every other role dispatched read-only, with
+    the platform's own answer preserved where it differs (debugger). Advisory
+    packs (memory, blast radius, ledger, claims, decisions, gate) add ZERO
+    model calls
+  * report.js — the final report, always ten sections in a fixed order
+    (analysis, review findings, execution plan, progress, verification, files
+    changed, bugs fixed, performance, remaining issues, next improvements);
+    an empty section says so instead of inventing a sentence
+  * docsintel.js — docs & git intelligence, pure over diff text: breaking
+    changes (removed/renamed exports, removed CLI subcommands, removed env
+    vars, newly required params, tightened schema required lists, major bump),
+    doc plan (README/CHANGELOG/API/migration, honest about missing files),
+    changelog section, migration notes, conventional commit message with a
+    BREAKING CHANGE footer
+  * selfup.js — self-review (duplicate logic, dead exports, import cycles,
+    oversized modules/long functions, security smells, TODO/FIXME) that is
+    deterministic (same tree => same findings) and ignores comments, strings
+    and regex literals; self-upgrade proposals carry evidence/impact/risk/
+    verify; apply writes through a manifest whose entries record their
+    INVERSE; rollback restores. A self-upgrade NEVER writes source files
+  * CLI: forge self-review | self-upgrade --plan|--apply | rollback |
+    report [id|list] | docs | roles --crew
+  * chat: /agent crew|self-review|self-upgrade|rollback|report|docs (and the
+    same five top-level)
+  * meta.js emits OBJECTIVE_STARTED / OBJECTIVE_PHASE / LOOP_DETECTED /
+    CONTEXT_COMPRESSION_REQUESTED / OBJECTIVE_VERDICT / FINAL_REPORT and
+    returns { objective, report }
+  * additive: agent.orchestration|objective|report:false restores the exact
+    v90 path (pinned in test-v91)
 - v90 GITWISE:
   * git_diff / git_log / git_blame — dedicated read-only git views
     (HEAD/stage/worktree/any ref, path filter, context, line budget with
