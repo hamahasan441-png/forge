@@ -65,7 +65,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -345,6 +345,15 @@ async function main() {
   // v21.1: say so when a project's forge.config.json tried to widen a security
   // boundary or launch servers — never silently, never honoured
   for (const line of ignoredConfig || []) console.error(`\x1b[33m⚠ ${line}\x1b[0m`)
+
+  // v87: --yolo = FULL CONTROL for this process — every guard off, no
+  // permission pauses. tools.autoApprove already defaults ON; this flag is
+  // the one-command way to force it (and unrestricted + assumeYes) anywhere.
+  if (flags.yolo === true) {
+    process.env.FORGE_UNRESTRICTED = "1"
+    process.env.FORGE_ASSUME_YES = "1"
+    process.env.FORGE_AUTO_APPROVE = "1"
+  }
 
   if (flags.version || flags.v || cmd === "version") {
     console.log(`forge v${VERSION} (node ${process.version})`)
@@ -1884,6 +1893,7 @@ ${bold("usage")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 19 tools (bash, files, images, browser, web, memory, sub-agents)
   ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
+  ${cyan("forge --yolo …")}            FULL CONTROL — all guards off, zero permission pauses ${dim("(tools.autoApprove in ~/.forge/config.json makes it permanent)")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
