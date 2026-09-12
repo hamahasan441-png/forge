@@ -3,6 +3,66 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v93.0.0 — "DOCSMITH"
+
+The Documentation Writer was the one crew member with a duty and no job: a
+roster row, no advisory, no execution. `docPlan` computed what the diff obliged
+and the report listed it — then nothing was ever written. In v93 it writes.
+
+### Added (v93.0)
+
+- **`docsintel.docsBrief()`** — the deterministic brief the writer works from.
+  Every target in it is obliged by the change, files that exist resolve to their
+  real path, files that do not are named as `create MIGRATION.md`, breaking
+  changes and changed exports are listed, and a ready-to-paste CHANGELOG section
+  is included. An empty brief means "there is nothing to write", never "write
+  something plausible".
+- **`meta.runDocsPhase()`** — the DOCUMENT phase as a module-level, injectable
+  unit, the same shape as the existing `repairSegment` / `requestVerification`.
+  That matters for a concrete reason: the DOCUMENT phase only runs on a run that
+  reached `COMPLETED`, so the docs step is otherwise unreachable from a test
+  that cannot satisfy the completion gate. As a seam it is testable directly.
+  Flow: brief → *read-only drafting pass* (LARGE/ARCHITECTURAL only, because a
+  draft costs a model call and a small change usually needs one changelog line)
+  → apply. (`runMeta` itself did not shrink — it is 1828 lines, up from 1817,
+  because the call site replaced a one-line phase note; splitting that function
+  is still open, see TODO.) Events: `DOCS_BRIEF`, `DOCS_DRAFTED`, `DOCS_DRAFT_FAILED`,
+  `DOCS_APPLIED`, `DOCS_APPLY_FAILED`.
+- **`agent.docsAgent`** (default `true`) — `false` restores the v92 behaviour
+  exactly: deltas listed in the report, nothing written.
+
+### Changed (v93.0)
+
+- **The writer is the executor.** The documentation specialist stays read-only
+  and is dispatched read-only; the roster's single writer applies the updates.
+  `singleWriterOk` is a structural invariant and a docs agent with its own write
+  authority would be a second writer — so the specialist supplies the brief and
+  the draft, and the executor writes.
+- What the docs agent writes is added to the run's changed files, so the final
+  report's *Files Changed* stays truthful instead of describing only the code.
+
+### Fixed (v93.0)
+
+- **`docPlan` ignored an explicit change set.** It derived "did code change?"
+  only from the diff's file list, and an autonomous run knows *which* files
+  changed without carrying the hunks — so the plan came back empty and the
+  documentation writer was told there was nothing to do. It now honours both,
+  and the brief tells the writer to run `git_diff` itself when no diff was
+  supplied, so breaking changes are still found.
+- The docs advisory would have reported a README that exists as
+  "missing — create" (it was built from the changed-file list alone). It now
+  walks the repo for real `.md` / `.markdown` / `.txt` files.
+
+### Verified
+
+`npm test` — 138 suites, including `e2e` and `cleanroom`. `tests/test-v93.mjs`
+adds 77 assertions: the brief's grounding (including that an existing CHANGELOG
+is never reported missing, and that an empty diff yields an empty brief), the
+single-writer invariant across MEDIUM/LARGE/ARCHITECTURAL, the full
+brief → draft → apply flow against the real `runDocsPhase`, the switch off, the
+no-change case (zero model calls), a failing writer (reported, never thrown),
+and two `runMeta` runs proving the DOCUMENT phase calls it.
+
 ## v92.0.0 — "PROCREW"
 
 `/agent` becomes a team of senior engineers instead of one agent with a plan.

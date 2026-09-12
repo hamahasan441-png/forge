@@ -1,4 +1,4 @@
-forge v92.0.0 — CLI-only build ("PROCREW" on top of "ULTIMATE" + "gitwise" + "noguard")
+forge v93.0.0 — CLI-only build ("DOCSMITH" on top of "PROCREW" + "ULTIMATE" + "noguard")
 - zero-dependency Node CLI (>=20, ESM), runs directly against providers
   (no localhost server, no build, no native modules; ARM64/Termux friendly)
 - 20 providers, OpenAI AND Anthropic wire protocols, auto-failover,
@@ -17,6 +17,20 @@ forge v92.0.0 — CLI-only build ("PROCREW" on top of "ULTIMATE" + "gitwise" + "
     the full netguard pinnedFetch policy
   * classifyCommand still labels every command (block/danger/confirm/low/
     safe) for logs, /status, tool-intelligence and verification risk
+- v93 DOCSMITH (the documentation agent writes):
+  * docsintel.docsBrief() — deterministic brief: every target obliged by the
+    change, existing files resolve to their real path, absent ones are named
+    ("create MIGRATION.md"), breaking changes + changed exports listed, and a
+    ready-to-paste CHANGELOG section. An empty brief means nothing to write
+  * meta.runDocsPhase() — the DOCUMENT phase as a module-level injectable unit
+    (same shape as repairSegment/requestVerification): brief -> read-only draft
+    (LARGE/ARCHITECTURAL only) -> apply. Events DOCS_BRIEF / DOCS_DRAFTED /
+    DOCS_DRAFT_FAILED / DOCS_APPLIED / DOCS_APPLY_FAILED
+  * the writer is the executor: the documentation specialist stays read-only, so
+    singleWriterOk still holds — one writer, always
+  * what it writes is added to the run's changed files, so the report's
+    Files Changed stays truthful
+  * off switch: agent.docsAgent:false restores the v92 behaviour
 - v92 PROCREW (professional sub-agent intelligence):
   * crew.js — the named crew EXECUTES. workUnits() turns a plan into
     named-specialist units; dedupeUnits() refuses duplicate work before it costs

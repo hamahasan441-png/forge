@@ -420,8 +420,8 @@ console.log("== 10. wiring: config, meta.js, report, CLI ==")
   // every new module ships in the package
   const pkg = JSON.parse(fs.readFileSync(path.join(FORGE_DIR, "package.json"), "utf8"))
   for (const f of ["crew.js", "pipeline.js"]) ok(`${f} is in files[]`, pkg.files.includes(f))
-  ok("the version is 92.0.0", VERSION === "92.0.0", VERSION)
-  eq("package.json agrees", pkg.version, "92.0.0")
+  ok("the version is 93.0.0", VERSION === "93.0.0", VERSION)
+  eq("package.json agrees", pkg.version, "93.0.0")
 }
 
 // ---------------------------------------------------------------------------

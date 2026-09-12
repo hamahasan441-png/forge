@@ -64,7 +64,10 @@ import { workUnits, dedupeUnits, runCrew, formatCrew, CREW_LIMITS } from "./crew
 import { recordVerdict, verdictBlock, VERDICT } from "./memory.js"
 import { planPipeline, runPipeline, pipelineVerdict, formatPipeline, diagnose as pipelineDiagnose, PIPELINE_DEFAULTS } from "./pipeline.js"
 import { buildReport, saveReport } from "./report.js"
-import { docPlan as docsDocPlan } from "./docsintel.js"
+import { docPlan as docsDocPlan, docsBrief } from "./docsintel.js"
+// v93 DOCSMITH: the Documentation Writer. The brief is deterministic; the
+// writing is done by the roster's single writer, never by a second writer.
+import { listSourceFiles } from "./selfup.js"
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -73,6 +76,10 @@ const SEGMENT_STEPS = AGENT_BUDGETS.segmentSteps
 const MAX_SEGMENTS_DEFAULT = AGENT_BUDGETS.maxSegments
 
 export const FINAL = { COMPLETED: "COMPLETED", FAILED: "FAILED", CANCELLED: "CANCELLED", WAITING: "WAITING" }
+
+/** A read-only drafting pass costs a model call, so it is reserved for the
+ *  classes where the documentation delta is usually more than a changelog line. */
+export const DOCS_DRAFT_CLASSES = new Set(["LARGE", "ARCHITECTURAL"])
 
 /**
  * Explicit finalization mapping (P0): preserves terminal states verbatim.
@@ -227,6 +234,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let pipelineRuns = 0
   let pipelineStale = true
   let pipelineResult = null
+  // --- v93 DOCSMITH: documentation agent state ------------------------------
+  const docsAgentEnabled = config?.agent?.docsAgent !== false
+  let docsResult = null
 
   /**
    * Run a batch of read-only DAG nodes as the named crew.
@@ -953,7 +963,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (obj) {
       objPhase(PHASE.VERIFY, "completion gate satisfied", gate)
       objPhase(PHASE.OPTIMIZE, changedFiles.size ? `${changedFiles.size} file(s) changed` : "no files changed", gate)
-      objPhase(PHASE.DOCUMENT, "documentation deltas listed in the report", gate)
+      const docsRun = await runDocsPhase({
+        agent, config, provider: provRef.prov, signal, emit,
+        objective: state.objective, klass: classified.class, changedFiles,
+        noteFiles: (abs) => ts.noteFiles([abs], []),
+        taskId, runId: taskRunId, cwd: process.cwd(), enabled: docsAgentEnabled,
+      })
+      docsResult = docsRun.result
+      objPhase(PHASE.DOCUMENT, docsRun.note, gate)
       objVerdict(obj, { gate })
       objPhase(PHASE.REPORT, "", gate)
       objReport({ gate, silent: true })
@@ -1884,6 +1901,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     text: finalText,
     // v92 PROCREW: what the sub-agents did and what the pipeline proved
     crew: { ...crewStats },
+    docs: docsResult,
     pipeline: pipelineResult ? { ok: pipelineResult.ok, reason: pipelineVerdict(pipelineResult).reason, stages: pipelineResult.stages.map((x) => ({ id: x.id, passed: x.passed, skipped: x.skippedRun === true, failureShape: x.failureShape || null, attempts: x.attempts || 1 })) } : null,
     segments: segment,
     repairs: repairCount,
@@ -1914,6 +1932,90 @@ function segmentEvents(emit, segment, ids = {}) {
     if (!ev || !ev.type) return
     if (ev.type === "run_start" || ev.type === "run_end") return
     try { emit({ ...ids, ...ev, segment }) } catch {}
+  }
+}
+
+/**
+ * v93 DOCSMITH — the DOCUMENT phase, as a testable unit.
+ *
+ * The BRIEF is deterministic (docsintel.docsBrief): every target in it is
+ * obliged by the diff, so the model is never invited to invent something to
+ * document, and an empty brief means "nothing to write" — not "write something
+ * plausible".
+ *
+ * The WRITING is done by the executor, the roster's single writer. The
+ * documentation specialist is read-only and stays read-only: `singleWriterOk`
+ * is a structural invariant, and a docs agent with its own write authority would
+ * be a second writer. For LARGE/ARCHITECTURAL a read-only drafting pass runs
+ * first, because there the delta is usually more than a changelog line.
+ *
+ * Runs after verification, because documentation does not invalidate test
+ * evidence about code. What it writes is added to `changedFiles` so the
+ * report's Files Changed stays truthful.
+ *
+ * @returns {Promise<{note:string, result:object|null}>}
+ */
+export async function runDocsPhase({
+  agent, config, provider, signal = null, emit = () => {},
+  objective = "", klass = null, changedFiles = new Set(), noteFiles = () => {},
+  taskId = null, runId = null, cwd = process.cwd(), enabled = true,
+  draftClasses = DOCS_DRAFT_CLASSES,
+} = {}) {
+  const ev = (e) => { try { emit({ taskId, runId, ...e }) } catch { /* observability never breaks a run */ } }
+  if (!enabled) return { note: "documentation deltas listed in the report (docs agent off)", result: null }
+  if (!changedFiles.size) return { note: "no files changed — nothing to document", result: null }
+
+  let brief = null
+  try {
+    const changedRel = [...changedFiles].map((f) => path.relative(cwd, f))
+    // the REAL repo file list: with only the changed files, a README that exists
+    // would be reported "missing — create", and the model would act on that lie
+    const repoFiles = listSourceFiles(cwd, { exts: new Set([".md", ".markdown", ".txt"]) })
+    brief = docsBrief({ objective, files: changedRel, repoFiles })
+  } catch (e) {
+    return { note: `doc plan unavailable: ${String(e?.message ?? e).slice(0, 120)}`, result: null }
+  }
+  if (brief.empty) return { note: "nothing in this change obliges a documentation update", result: null }
+  ev({ type: "DOCS_BRIEF", segmentId: null, nodeId: null, targets: brief.targets.map((t) => `${t.doc}${t.path ? `(${t.path})` : "(create)"}:${t.severity}`) })
+
+  let draft = ""
+  if (draftClasses.has(klass)) {
+    try {
+      const d = await agent({
+        config, provider, signal, taskId, runId, segmentId: null, nodeId: null,
+        task: `${brief.text}\n\nDo NOT modify any file — you are read-only. Return the exact documentation content to write for each listed file, under a heading with the file path. No commentary.`,
+        readOnly: true, maxStepsOverride: 6, deep: false, onEvent: ev, journal: true,
+        runIdOverride: runId, suppressRunEvents: true, keepJournalRunning: true,
+      })
+      draft = String(d?.text ?? "")
+      ev({ type: "DOCS_DRAFTED", segmentId: null, nodeId: null, ok: !d?.error && draft.trim().length > 0, chars: draft.length, error: d?.error ? String(d.error).slice(0, 160) : null })
+    } catch (e) {
+      ev({ type: "DOCS_DRAFT_FAILED", segmentId: null, nodeId: null, error: String(e?.message ?? e).slice(0, 200) })
+    }
+  }
+
+  try {
+    const ask = `${brief.text}${draft ? `\n\nA read-only reviewer drafted this — use it where it is correct, correct it where it is not:\n${draft.slice(0, 6000)}` : ""}\n\nApply these updates now with the file tools. Change ONLY the listed files.`
+    const r = await agent({
+      config, provider, signal, taskId, runId, segmentId: null, nodeId: null,
+      task: ask, maxStepsOverride: 8, deep: false, onEvent: ev, journal: true,
+      runIdOverride: runId, suppressRunEvents: true, keepJournalRunning: true,
+    })
+    const wrote = [...new Set((r?.toolRecords ?? []).flatMap((x) => x.files_changed ?? []).map(String))]
+    for (const f of wrote) {
+      const abs = path.resolve(cwd, f)
+      changedFiles.add(abs)
+      try { noteFiles(abs) } catch { /* accounting is best-effort */ }
+    }
+    const result = { targets: brief.targets, wrote, draftChars: draft.length, ok: !r?.error }
+    ev({ type: "DOCS_APPLIED", segmentId: null, nodeId: null, ok: !r?.error, files: wrote, targets: brief.targets.length, error: r?.error ? String(r.error).slice(0, 160) : null })
+    return {
+      note: `${brief.targets.length} doc target(s) — ${wrote.length ? `wrote ${wrote.map((f) => path.relative(cwd, f)).join(", ")}` : "no listed file needed a change"}`,
+      result,
+    }
+  } catch (e) {
+    ev({ type: "DOCS_APPLY_FAILED", segmentId: null, nodeId: null, error: String(e?.message ?? e).slice(0, 200) })
+    return { note: `documentation not written: ${String(e?.message ?? e).slice(0, 120)}`, result: null }
   }
 }
 

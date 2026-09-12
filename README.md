@@ -3,7 +3,14 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 92.0.0 — "PROCREW".** `/agent` is now a team of senior engineers, not
+**Version 93.0.0 — "DOCSMITH".** The Documentation Writer finally writes: the
+DOCUMENT phase builds a deterministic brief from what the change actually
+obliges (real file paths, breaking changes, a ready-to-paste CHANGELOG section),
+drafts it read-only on LARGE/ARCHITECTURAL, and the executor — the roster's
+single writer — applies it. An empty brief spends zero model calls, and
+`agent.docsAgent: false` restores v92.
+
+**v92 "PROCREW".** `/agent` is now a team of senior engineers, not
 one agent with a plan: the named 13-role crew **executes** as real sub-agents in
 parallel under one scheduler (duplicate work refused before it costs a call,
 clashing edits split into waves, every finding self-reviewed before merge, a
@@ -16,6 +23,17 @@ engine: verified objective satisfaction instead of a step count, checkpoints,
 resume, loop detection, ten-section final report, docs & git intelligence,
 self-review → self-upgrade → rollback) and **v88 "noguard"**: no guards, no
 blocks. One folder: `forge/`.
+
+## v93 in one line
+
+```bash
+forge docs                   # what this diff obliges you to document
+forge agent --auto "<task>"  # …and the DOCUMENT phase now writes those files
+```
+
+Only the listed files are touched, an existing file is never reported
+"missing — create", a docs-only change costs no model call, and a writer that
+fails is reported instead of thrown.
 
 ## v92 in one line
 

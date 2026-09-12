@@ -1,4 +1,12 @@
-# ⬢ forge — standalone terminal AI agent (v92)
+# ⬢ forge — standalone terminal AI agent (v93)
+
+**v93 "DOCSMITH"** — the Documentation Writer writes. It was the one crew member
+with a duty and no job: the doc plan was computed, listed in the report, and
+nothing was ever written. Now the DOCUMENT phase builds a deterministic brief
+(every target obliged by the change, real file paths, breaking changes, a
+ready-to-paste CHANGELOG section), drafts it read-only on LARGE/ARCHITECTURAL,
+and the executor — the roster's single writer — applies it. `agent.docsAgent:
+false` restores v92.
 
 **v92 "PROCREW"** — `/agent` becomes a team of senior engineers instead of one
 agent with a plan. The named crew now **executes**: specialists run as real
@@ -53,6 +61,24 @@ A CLI coding agent + interactive chat that runs entirely in your terminal:
 - 20 providers (OpenAI, Anthropic, Gemini, DeepSeek, Groq, OpenRouter, Z.ai,
   Groq, Cerebras, Mistral, xAI, Qwen, GitHub Models, Ollama, custom + routers)
   with automatic failover and measured model routing
+
+## v93 — the documentation agent
+
+```bash
+forge docs                   # what this diff obliges you to document (unchanged)
+forge agent --auto "<task>"  # …and now the DOCUMENT phase writes it
+```
+
+The brief is deterministic and the writing is bounded:
+
+- **only the listed files** — every one of them obliged by the change
+- an existing file is never reported `missing — create`; a genuinely absent one
+  is named (`create MIGRATION.md`)
+- an empty brief means *nothing to write*, so a docs-only or no-op change spends
+  **zero** model calls
+- the drafting pass is read-only and step-bounded, and only LARGE/ARCHITECTURAL
+  pay for it
+- a writer that fails is reported (`documentation not written: …`), never thrown
 
 ## v92 — the crew executes, and every task verifies itself
 

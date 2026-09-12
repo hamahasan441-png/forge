@@ -204,7 +204,13 @@ export function docPlan({ diff = "", diffParsed = null, breaking = null, repoFil
     out.push({ doc, path: p, action, why, severity, exists: Boolean(p) })
   }
 
+  // `files` is the caller's change set (task state). The diff is not always
+  // available — an autonomous run knows WHICH files changed without carrying the
+  // hunks — and a plan built only from the diff then claims nothing changed and
+  // the documentation writer is told there is nothing to do. Honour both.
+  const listedFiles = (files?.length ? files : parsed.files.map((f) => f.path)).map((f) => String(f))
   const codeChanged = parsed.files.some((f) => !/\.(md|txt|json)$/i.test(f.path))
+    || listedFiles.some((f) => !/\.(md|txt|json)$/i.test(f))
   const publicApi = apiDocDelta("", { diffParsed: parsed })
 
   if (brk.length) touch("changelog", "add a BREAKING entry", `${brk.length} breaking change(s): ${brk.slice(0, 3).map((b) => b.kind).join(", ")}${brk.length > 3 ? ", …" : ""}`, "MAJOR")
@@ -325,6 +331,73 @@ export function formatDocPlan(plan = [], { commit = null } = {}) {
     for (const l of commit.text.trimEnd().split("\n")) rows.push(`    ${l}`)
   }
   return rows.join("\n")
+}
+
+/**
+ * v93 DOCSMITH — the brief the Documentation Writer works from.
+ *
+ * Deterministic on purpose: everything in it is derived from the diff and the
+ * repo's real files, so the model cannot be told to document something that did
+ * not change, and an empty brief means "there is nothing to write" rather than
+ * "write something plausible".
+ *
+ * @returns {{text:string,targets:Array,empty:boolean}}
+ */
+export function docsBrief({
+  objective = "", diff = "", diffParsed = null, breaking = null,
+  plan = null, repoFiles = [], files = [], version = "", maxChars = 4000,
+} = {}) {
+  const parsed = diffParsed || parseUnifiedDiff(diff)
+  const brk = breaking ?? detectBreakingChanges("", { diffParsed: parsed })
+  const items = plan ?? docPlan({ diffParsed: parsed, breaking: brk, repoFiles, files })
+  if (!items.length) return { text: "", targets: [], empty: true }
+
+  const targets = items.map((i) => ({ doc: i.doc, path: i.path, action: i.action, why: i.why, severity: i.severity, exists: i.exists }))
+  const lines = []
+  lines.push(`Task: ${objective || "document the change below"}.`)
+  lines.push("")
+  lines.push("You are the Documentation Writer. Update ONLY the files listed here. Every one of")
+  lines.push("them is obliged by the diff — do not touch anything else, do not reformat")
+  lines.push("unrelated sections, and do not document a feature that is not in the diff.")
+  lines.push("")
+  lines.push("Required updates:")
+  for (const t of targets) {
+    lines.push(`  - ${t.doc}${t.path ? ` (${t.path})` : ` (missing — create ${(DOC_FILES[t.doc] || [t.doc])[0]})`}: ${t.action} — ${t.why} [${t.severity}]`)
+  }
+  if (!brk.length && !parsed.files.length) {
+    lines.push("")
+    lines.push("No diff was supplied with this brief, so breaking changes and export deltas are")
+    lines.push("NOT listed here. Run git_diff yourself before writing: any removed or renamed")
+    lines.push("export, command or env var is a BREAKING change and must be recorded.")
+  }
+  if (brk.length) {
+    lines.push("")
+    lines.push(`BREAKING changes that MUST be recorded (${brk.length}):`)
+    for (const b of brk.slice(0, 12)) lines.push(`  - ${b.kind}${b.symbol ? ` ${b.symbol}` : ""} (${b.file}) — ${b.why}`)
+  }
+  const api = apiDocDelta("", { diffParsed: parsed })
+  if (api.length) {
+    lines.push("")
+    lines.push("Public API that changed (the reference must match these signatures):")
+    for (const a of api.slice(0, 8)) {
+      if (a.added.length) lines.push(`  - ${a.file}: added ${a.added.slice(0, 6).join(", ")}`)
+      if (a.removed.length) lines.push(`  - ${a.file}: removed ${a.removed.slice(0, 6).join(", ")}`)
+    }
+  }
+  const cl = changelogSection({ version, title: "", changed: parsed.files.slice(0, 6).map((f) => `\`${f.path}\` (+${f.added}/-${f.removed})`), breaking: brk })
+  if (cl.trim()) {
+    lines.push("")
+    lines.push("CHANGELOG section, ready to paste (keep this wording, extend it if you must):")
+    lines.push(cl.trimEnd().split("\n").map((l) => `  ${l}`).join("\n"))
+  }
+  lines.push("")
+  lines.push("If a listed file does not exist, create it with the minimum content the change")
+  lines.push("requires — never a stub that says TODO. If nothing in a listed file actually")
+  lines.push("needs to change, say so plainly instead of editing it for the sake of it.")
+
+  let text = lines.join("\n")
+  if (text.length > maxChars) text = text.slice(0, maxChars - 1) + "…"
+  return { text, targets, empty: false }
 }
 
 export { DOC_FILES }

@@ -255,7 +255,7 @@ console.log("== 6. docs & git intelligence ==")
     "+++ b/package.json",
     "@@ -1,3 +1,3 @@",
     '-  "version": "90.0.0",',
-    '+  "version": "92.0.0",',
+    '+  "version": "93.0.0",',
   ].join("\n")
 
   const parsed = di.parseUnifiedDiff(diff)
@@ -286,10 +286,10 @@ console.log("== 6. docs & git intelligence ==")
   ok("a missing doc is reported as missing, never invented", plan.find((p) => p.doc === "migration").exists === false)
   ok("an existing doc is found in the repo", plan.find((p) => p.doc === "changelog").exists === true)
 
-  const cl = di.changelogSection({ version: "92.0.0", title: "ultimate", added: ["a thing"], breaking: brk })
+  const cl = di.changelogSection({ version: "93.0.0", title: "ultimate", added: ["a thing"], breaking: brk })
   ok("changelog has the BREAKING section", /### BREAKING/.test(cl))
-  ok("changelog names the version", /## v92\.0\.0 — "ultimate"/.test(cl))
-  const mig = di.migrationNotes(brk, { fromVersion: "90.0.0", toVersion: "92.0.0" })
+  ok("changelog names the version", /## v93\.0\.0 — "ultimate"/.test(cl))
+  const mig = di.migrationNotes(brk, { fromVersion: "90.0.0", toVersion: "93.0.0" })
   ok("migration notes give an action per break", (mig.match(/- \*\*Action:\*\*/g) || []).length === brk.length)
   eq("no breaks ⇒ no migration notes", di.migrationNotes([]), "")
 
@@ -348,7 +348,7 @@ console.log("== 7. the final report: ten sections, in order, honest when empty =
   ok("it is listed", rep.listReports(HOME).some((x) => x.id === r.id))
   ok("latestReport resolves by task id", rep.latestReport(HOME, "task-r")?.id === r.id)
 
-  rep.attachChangelog(r, { version: "92.0.0", added: ["x"] })
+  rep.attachChangelog(r, { version: "93.0.0", added: ["x"] })
   ok("a changelog section can be attached", /### Added/.test(rep.formatReport(r)))
 }
 
@@ -524,7 +524,7 @@ console.log("== 11. wiring: the surface is reachable and shipped ==")
   for (const ev of ["OBJECTIVE_STARTED", "OBJECTIVE_PHASE", "LOOP_DETECTED", "OBJECTIVE_VERDICT", "FINAL_REPORT", "CONTEXT_COMPRESSION_REQUESTED"]) {
     ok(`meta.js emits ${ev}`, metaSrc.includes(ev))
   }
-  ok("the version is 92.0.0", VERSION === "92.0.0", VERSION)
+  ok("the version is 93.0.0", VERSION === "93.0.0", VERSION)
 }
 
 console.log(`\n== v91 suite: ${PASS} passed, ${FAIL} failed ==`)

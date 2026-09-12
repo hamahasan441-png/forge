@@ -94,6 +94,13 @@ export function defaultConfig() {
       // completion ledger before the gate is judged. `verifyTimeoutMs` is the
       // per-stage wall clock. Both are additive: false restores the v91 path.
       crew: true, pipeline: true, verifyTimeoutMs: 300_000,
+      // v93 DOCSMITH: the Documentation Writer. The BRIEF is deterministic
+      // (docsintel.docsBrief — every target is obliged by the diff), and the
+      // writing is done by the executor, the roster's single writer; the
+      // documentation specialist stays read-only. LARGE/ARCHITECTURAL also get a
+      // read-only drafting pass. false restores the v92 behaviour (doc deltas
+      // listed in the report, nothing written).
+      docsAgent: true,
       selfUpgrade: { autoApply: false },
     },
     chat: { stream: true, system: "", showReasoning: true, maxHistoryMessages: 40, tools: true, compact: true, compactAtChars: 48000, profile: "auto", restoreCwd: true, historySize: 300 },
