@@ -49,9 +49,44 @@ export const ROLES = {
   DEBUGGER: "debugger",
   ARCHITECT: "architect",
   INTEGRATOR: "integrator",
+  // v91 (∞ CORE §23): first-class specialist bench. Every role is read-only
+  // except coder — the single-writer discipline is untouched.
+  EXPLORER: "explorer",
+  BUILD_ENGINEER: "build_engineer",
+  PERFORMANCE_ENGINEER: "performance_engineer",
+  DEPENDENCY_ANALYST: "dependency_analyst",
+  DOC_ENGINEER: "doc_engineer",
+  RELEASE_ENGINEER: "release_engineer",
+  LANGUAGE_SPECIALIST: "language_specialist",
+  RUNTIME_SPECIALIST: "runtime_specialist",
 }
 
-const READ_ONLY_ROLES = new Set([ROLES.RESEARCHER, ROLES.PLANNER, ROLES.REVIEWER, ROLES.SECURITY, ROLES.TESTER, ROLES.ARCHITECT, ROLES.INTEGRATOR])
+const READ_ONLY_ROLES = new Set([
+  ROLES.RESEARCHER, ROLES.PLANNER, ROLES.REVIEWER, ROLES.SECURITY, ROLES.TESTER,
+  ROLES.ARCHITECT, ROLES.INTEGRATOR, ROLES.EXPLORER, ROLES.BUILD_ENGINEER,
+  ROLES.PERFORMANCE_ENGINEER, ROLES.DEPENDENCY_ANALYST, ROLES.DOC_ENGINEER,
+  ROLES.RELEASE_ENGINEER, ROLES.LANGUAGE_SPECIALIST, ROLES.RUNTIME_SPECIALIST,
+])
+
+/** Dynamically registered specialist roles (§23 "dynamically creating future
+ *  specialist roles"). Registered roles are read-only — mutation stays
+ *  with the single coder/main context. */
+const DYNAMIC_ROLES = new Map() // name → { readOnly, weight }
+
+export function registerRole(name, { weight = 1, capabilities = [] } = {}) {
+  const key = String(name ?? "").trim().toLowerCase()
+  if (!key || /^[^a-z]/.test(key)) return false
+  // dynamic roles are ALWAYS read-only: a future specialist may observe and
+  // report, mutation stays with the single coder/main context — forever.
+  DYNAMIC_ROLES.set(key, { readOnly: true, weight, capabilities })
+  READ_ONLY_ROLES.add(key)
+  return true
+}
+
+export function roleExists(name) {
+  const key = String(name ?? "").trim().toLowerCase()
+  return Boolean(Object.values(ROLES).includes(key) || DYNAMIC_ROLES.has(key))
+}
 
 /** Is a role permitted to mutate? Only the coder/main agent — and even that is
  *  funnelled through the single mutating context, never a parallel worker. */
@@ -61,10 +96,14 @@ export function roleIsReadOnly(role) {
 
 const ROLE_CONFLICT_WEIGHT = {
   security: 4, reviewer: 3, integrator: 3, debugger: 3, architect: 2, planner: 2, tester: 2, coder: 2, researcher: 1,
+  explorer: 1, build_engineer: 2, performance_engineer: 2, dependency_analyst: 1,
+  doc_engineer: 1, release_engineer: 2, language_specialist: 2, runtime_specialist: 2,
 }
 
 export function roleCatalog() {
-  return Object.values(ROLES).map((role) => ({ role, readOnly: roleIsReadOnly(role) }))
+  const builtin = Object.values(ROLES).map((role) => ({ role, readOnly: roleIsReadOnly(role) }))
+  const dynamic = [...DYNAMIC_ROLES.keys()].map((role) => ({ role, readOnly: roleIsReadOnly(role), dynamic: true }))
+  return [...builtin, ...dynamic]
 }
 
 /** Worker lifecycle states. */
@@ -132,6 +171,10 @@ export function createAgentManager({
     const wid = id || `w${++seq}`
     if (!task) throw new Error("worker requires a task")
     const readOnly = roleIsReadOnly(role)
+    // §32 — duplicate work prevention: is another live worker already on this
+    // exact node / these exact files? The new worker still spawns (callers may
+    // want deliberate redundancy) but the record is flagged and the TUI sees it.
+    const dupe = findDuplicate({ nodeId: nodeId ?? dagNode, targetFiles, targetSymbols })
     const rec = {
       // --- P0 worker identity -------------------------------------------
       workerId: wid,
@@ -151,7 +194,20 @@ export function createAgentManager({
       cancelRequested: false,
       timedOut: false,
       orphaned: false,
+      // --- v91 §25 sub-agent state --------------------------------------
+      parentAgentId: null,       // set by reassign(); null = core-spawned
+      model: null,               // specialist routing choice (crewroute)
+      hypothesis: null,          // what this worker believes it will find/do
+      confidence: null,          // self-reported + selfreview confidence
+      evidenceRefs: [],          // ledger/verification ids this worker produced
+      progress: "",              // last progress note
+      resourceUsage: { toolCalls: 0, tokens: 0, ms: 0 },
+      history: [],               // bounded state trail
+      performanceHistory: [],    // bounded {ok, ms, verified} trail
+      duplicateOf: dupe?.workerId ?? null,
+      reassignmentCount: 0,
     }
+    if (dupe) emit({ type: "WORKER_DUPLICATE", workerId: wid, duplicateOf: dupe.workerId, nodeId: rec.nodeId, reason: "same node/files already claimed by an active worker" })
     workers.set(wid, rec)
     rec.promise = runWhenReady(rec, timeoutMs)
     emit({ type: "WORKER_QUEUED", workerId: wid, id: wid, role, task: rec.task, priority, dagNode, nodeId: rec.nodeId, taskId, runId, segmentId, readOnly })
@@ -284,6 +340,64 @@ export function createAgentManager({
   /** Controller-injected config/provider/runner for the default runner. */
   const ctx = { config: null, provider: null, runner: null }
 
+  /** §32 — is an UNSETTLED worker already on this node / these files? */
+  function findDuplicate({ nodeId = null, targetFiles = null, targetSymbols = null } = {}) {
+    const files = new Set((targetFiles ?? []).filter(Boolean))
+    const symbols = new Set((targetSymbols ?? []).filter(Boolean))
+    for (const w of workers.values()) {
+      if (SETTLED.has(w.status) && !live.has(w.id)) continue
+      if (nodeId && w.nodeId && w.nodeId === nodeId) return w
+      if (files.size && (w.targetFiles ?? []).some((f) => files.has(f))) return w
+      if (symbols.size && (w.targetSymbols ?? []).some((s) => symbols.has(s))) return w
+    }
+    return null
+  }
+
+  /** §35 — reassign a failed/stuck worker: preserve state, classify, hand off,
+   *  select an alternative specialist, transfer context. The original record
+   *  is NEVER deleted — the new one links to it. */
+  function reassign(id, { reason = "", newRole = null, handoff = null } = {}) {
+    const old = workers.get(id)
+    if (!old) return null
+    // preserve state + evidence
+    const context = [
+      old.result ? `Previous worker's findings: ${old.result.slice(0, 1200)}` : "",
+      old.result ? "" : `Previous worker produced no findings (status: ${old.status}${old.error ? `: ${old.error}` : ""})`,
+      old.context,
+    ].filter(Boolean).join("\n\n")
+    if (!SETTLED.has(old.status) || live.has(id)) cancel(id)
+    old.reassigned = true
+    old.reassignmentCount = (old.reassignmentCount ?? 0) + 1
+    const successor = spawn({
+      role: newRole && roleExists(newRole) ? newRole : old.role,
+      task: old.task,
+      context,
+      priority: old.priority,
+      dagNode: old.dagNode,
+      taskId: old.taskId,
+      runId: old.runId,
+      segmentId: old.segmentId,
+      nodeId: old.nodeId,
+      targetFiles: old.targetFiles,
+      targetSymbols: old.targetSymbols,
+      targetDirs: old.targetDirs,
+      resourceLocks: old.resourceLocks,
+    })
+    successor.parentAgentId = old.workerId
+    successor.reassignment_reason = String(reason).slice(0, 300)
+    successor.handoff = handoff ?? {
+      from: old.workerId,
+      to: successor.workerId,
+      current_state: old.status,
+      completed_work: old.result ? [old.result.slice(0, 300)] : [],
+      failed_approaches: old.error ? [old.error.slice(0, 300)] : [],
+      verification_status: "unknown",
+    }
+    old.history.push({ at: Date.now(), kind: "reassigned", to: successor.workerId, reason: String(reason).slice(0, 160) })
+    emit({ type: "WORKER_REASSIGNED", from: old.workerId, to: successor.workerId, role: successor.role, nodeId: old.nodeId, reason: String(reason).slice(0, 200) })
+    return successor
+  }
+
   async function runOne(rec, workerSignal) {
     const run = ctx.runner || runner
     if (typeof run === "function") {
@@ -300,6 +414,8 @@ export function createAgentManager({
         taskId: rec.taskId,
         runId: rec.runId,
         segmentId: rec.segmentId,
+        // v91: the runner reports the model it actually used (§37 crew perf)
+        setModel: (m) => { rec.model = m ? String(m).slice(0, 120) : rec.model },
       })
     }
     // default runner lazily loads the real sub-agent (read-only by role)
@@ -463,7 +579,9 @@ export function createAgentManager({
     stats, list, setBudget, budgetRemaining, settle, liveWorkers,
     WORKER_STATUS,
     setMaxWorkers(n) { maxWorkers = Math.max(1, n | 0) },
-    roleWeight: (role) => ROLE_CONFLICT_WEIGHT[role] ?? 0,
+    roleWeight: (role) => ROLE_CONFLICT_WEIGHT[role] ?? DYNAMIC_ROLES.get(role)?.weight ?? 0,
+    // v91 additions
+    findDuplicate, reassign,
   }
 }
 

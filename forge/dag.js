@@ -42,9 +42,23 @@ export const NODE_STATUS = {
   FAILED: "failed",
   BLOCKED: "blocked",
   CANCELLED: "cancelled",
+  // v91 (∞ CORE §21):
+  //   INVALIDATED — new evidence changed the ground truth this node was built
+  //                 on; the work must be REBUILT. Valid completed work stays
+  //                 completed; only the affected subgraph is invalidated.
+  //   SKIPPED     — deliberately not executed (optional, no longer needed);
+  //                 never blocks the completion gate, recorded for audit.
+  //   RETRYING    — a retry with a CHANGED strategy is in flight (never a
+  //                 blind repeat — the retry carries a reason).
+  INVALIDATED: "invalidated",
+  SKIPPED: "skipped",
+  RETRYING: "retrying",
 }
 
-/** Statuses that mean "the node is not finished yet" for the completion gate. */
+/** Statuses that mean "the node is not finished yet" for the completion gate.
+ *  v91: INVALIDATED and RETRYING also block completion — an invalidated node
+ *  must be rebuilt before the task may claim completion. SKIPPED does NOT
+ *  block (it is a deliberate policy outcome, like CANCELLED). */
 export const UNFINISHED_STATUS = new Set([
   NODE_STATUS.PENDING,
   NODE_STATUS.READY,
@@ -53,6 +67,15 @@ export const UNFINISHED_STATUS = new Set([
   NODE_STATUS.VERIFYING,
   NODE_STATUS.REPAIRING,
   NODE_STATUS.BLOCKED,
+  NODE_STATUS.INVALIDATED,
+  NODE_STATUS.RETRYING,
+])
+
+/** Statuses a node may be moved out of by invalidation. */
+const INVALIDATABLE = new Set([
+  NODE_STATUS.PENDING, NODE_STATUS.READY, NODE_STATUS.RUNNING,
+  NODE_STATUS.EXECUTION_SUCCEEDED, NODE_STATUS.VERIFYING, NODE_STATUS.REPAIRING,
+  NODE_STATUS.BLOCKED, NODE_STATUS.FAILED, NODE_STATUS.INVALIDATED, NODE_STATUS.RETRYING,
 ])
 
 const STATUSES = new Set(Object.values(NODE_STATUS))
@@ -380,11 +403,96 @@ export function markCancelled(graph, id, { cascade = true } = {}) {
 export function retryNode(graph, id) {
   const n = graph.nodes.get(id)
   if (!n) return false
-  if (![NODE_STATUS.FAILED, NODE_STATUS.BLOCKED, NODE_STATUS.REPAIRING, NODE_STATUS.VERIFYING, NODE_STATUS.EXECUTION_SUCCEEDED].includes(n.status)) return false
+  if (![NODE_STATUS.FAILED, NODE_STATUS.BLOCKED, NODE_STATUS.REPAIRING, NODE_STATUS.VERIFYING, NODE_STATUS.EXECUTION_SUCCEEDED, NODE_STATUS.INVALIDATED].includes(n.status)) return false
   n.status = depsSatisfied(graph, n) ? NODE_STATUS.READY : NODE_STATUS.PENDING
   n.error = null
   n.verificationSatisfied = false
   return true
+}
+
+/**
+ * v91 §21 — mark a node RETRYING with a reason (no blind retries, §91).
+ * The retry must carry what changed; identical failed conditions must not
+ * simply re-run. Returns false when the node is not in a retryable state.
+ */
+export function markRetrying(graph, id, reason = null) {
+  const n = graph.nodes.get(id)
+  if (!n) return false
+  if (![NODE_STATUS.FAILED, NODE_STATUS.BLOCKED, NODE_STATUS.REPAIRING, NODE_STATUS.INVALIDATED].includes(n.status)) return false
+  n.status = NODE_STATUS.RETRYING
+  n.retry_reason = reason == null ? n.retry_reason : String(reason).slice(0, 400)
+  n.attempts = (n.attempts ?? 0) + 1
+  return true
+}
+
+/**
+ * v91 §21/§74 — deliberately skip a node (optional / no longer needed).
+ * A SKIPPED node never blocks the completion gate; the reason is recorded.
+ */
+export function skipNode(graph, id, reason = null) {
+  const n = graph.nodes.get(id)
+  if (!n) return false
+  if (n.status === NODE_STATUS.COMPLETED || n.status === NODE_STATUS.CANCELLED) return false
+  n.status = NODE_STATUS.SKIPPED
+  n.ended_at = Date.now()
+  n.skip_reason = reason == null ? n.skip_reason : String(reason).slice(0, 400)
+  return true
+}
+
+/**
+ * v91 §21/§74 — invalidate node(s) whose ground truth changed, and cascade
+ * to the not-yet-settled downstream dependents. COMPLETED nodes that do not
+ * depend (transitively) on invalidated ground truth are PRESERVED — rebuild
+ * only the necessary portion.
+ *
+ * @returns {{ invalidated: string[], blocked: string[] }} ids by outcome
+ */
+export function invalidateNodes(graph, ids, { reason = null } = {}) {
+  const wanted = new Set((Array.isArray(ids) ? ids : [ids]).map(String).filter(Boolean))
+  const invalidated = []
+  const blocked = []
+  if (!wanted.size) return { invalidated, blocked }
+  // 1. invalidate the named nodes (settled COMPLETED work is preserved unless
+  //    it is explicitly named — the caller decided it is no longer valid).
+  for (const id of wanted) {
+    const n = graph.nodes.get(id)
+    if (!n) continue
+    if (!INVALIDATABLE.has(n.status) && n.status !== NODE_STATUS.COMPLETED) continue
+    n.status = NODE_STATUS.INVALIDATED
+    n.ended_at = null
+    n.verificationSatisfied = false
+    n.invalidation_reason = reason == null ? n.invalidation_reason : String(reason).slice(0, 400)
+    invalidated.push(id)
+  }
+  // 2. cascade: every transitive dependent that is not completed/cancelled
+  //    must not continue building on invalidated ground truth.
+  let frontier = [...invalidated]
+  while (frontier.length) {
+    const next = []
+    for (const m of graph.nodes.values()) {
+      if (!m.dependencies.some((d) => frontier.includes(d))) continue
+      if (m.status === NODE_STATUS.CANCELLED || m.status === NODE_STATUS.SKIPPED) continue
+      if (m.status === NODE_STATUS.INVALIDATED) continue
+      if (m.status === NODE_STATUS.COMPLETED) {
+        // completed downstream work built on invalidated ground truth is
+        // invalidated too — evidence wins over sunk cost.
+        m.status = NODE_STATUS.INVALIDATED
+        m.ended_at = null
+        m.verificationSatisfied = false
+        m.invalidation_reason = reason == null ? m.invalidation_reason : `upstream ${m.dependencies.filter((d) => frontier.includes(d)).join(",")} invalidated`
+        invalidated.push(m.id)
+        next.push(m.id)
+        continue
+      }
+      if (m.status !== NODE_STATUS.BLOCKED) { m.status = NODE_STATUS.BLOCKED; blocked.push(m.id) }
+      else blocked.push(m.id)
+      next.push(m.id)
+    }
+    frontier = next
+  }
+  // 3. dependents of still-blocked nodes recompute when the invalidated nodes
+  //    are rebuilt (markCompleted → depsSatisfied already handles READY).
+  return { invalidated, blocked }
 }
 
 export function recomputeDownstream(graph, id) {
@@ -472,6 +580,7 @@ export function allComplete(graph, { optionalPolicy = "ignore" } = {}) {
   if (!nodes.length) return false
   for (const n of nodes) {
     if (n.status === NODE_STATUS.CANCELLED) continue
+    if (n.status === NODE_STATUS.SKIPPED) continue
     if (n.status === NODE_STATUS.COMPLETED) continue
     if (isOptional(n)) {
       if (optionalPolicy === "ignore" || optionalPolicy === "allow") continue
@@ -481,10 +590,11 @@ export function allComplete(graph, { optionalPolicy = "ignore" } = {}) {
   return true
 }
 
-/** Nodes that are required (not optional, not cancelled) and not completed. */
+/** Nodes that are required (not optional, not cancelled/skipped) and not completed. */
 export function incompleteRequiredNodes(graph, { optionalPolicy = "ignore" } = {}) {
   return graphNodes(graph).filter((n) => {
     if (n.status === NODE_STATUS.CANCELLED) return false
+    if (n.status === NODE_STATUS.SKIPPED) return false
     if (n.status === NODE_STATUS.COMPLETED) return false
     if (isOptional(n) && optionalPolicy !== "block") return false
     return true

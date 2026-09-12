@@ -1036,3 +1036,64 @@ export function renderOmegaPanel(state, width, o) {
   lines.push(fitS(`╰${bar}╯`, w, o))
   return lines.map((l) => fitS(l, w, o))
 }
+
+// ── v91 ∞ CORE views (§63-67) ────────────────────────────────────────────────
+
+const NODE_MARK = {
+  pending: "todo", ready: "todo", running: "active", execution_succeeded: "active",
+  verifying: "active", repairing: "fail", completed: "ok", failed: "fail",
+  blocked: "warn", cancelled: "muted", invalidated: "warn", skipped: "muted", retrying: "active",
+}
+
+/** §63/§69 /dag — the task's dependency graph as an inspectable tree. */
+export function renderDagView(dag, width, o) {
+  const out = section("DAG", width, o)
+  const nodes = Array.isArray(dag?.nodes) ? dag.nodes : dag?.nodes ? [...dag.nodes.values()] : []
+  if (!nodes.length) { out.push(o.th.muted("  (no DAG yet — run a task with the planner)")); return out }
+  const done = nodes.filter((n) => n.status === "completed").length
+  out.push(o.th.muted(`  ${done}/${nodes.length} nodes complete`))
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  for (const n of nodes.slice(0, 20)) {
+    const kind = NODE_MARK[n.status] ?? "todo"
+    const deps = (n.dependencies ?? []).map((d) => byId.has(d) ? d : `${d}?`)
+    const depNote = deps.length ? o.th.muted(`  ← ${deps.join(", ")}`) : ""
+    const role = n.role ? o.th.muted(` [${n.role}]`) : ""
+    out.push(fitS(`  ${mark(kind, o)} ${padRight(String(n.id), 18)} ${padRight(String(n.status), 20)}${role}${depNote}`, width - 1, o))
+  }
+  if (nodes.length > 20) out.push(o.th.muted(`  … ${nodes.length - 20} more nodes`))
+  return out
+}
+
+/** §65 /comm — meaningful agent-to-agent / agent-to-core messages. */
+export function renderCommView(messages, width, o) {
+  const out = section("COMMUNICATION", width, o)
+  if (!messages?.length) { out.push(o.th.muted("  (no agent messages yet)")); return out }
+  for (const m of messages.slice(-16)) {
+    const arrow = m.receiver === "*" ? o.th.muted("→ all") : `→ ${o.th.muted(m.receiver)}`
+    const kind = { WARNING: "warn", BLOCKED: "fail", CONFLICT: "fail", COMPLETED: "ok", VERIFIED: "ok" }[m.message_type] ?? "active"
+    out.push(fitS(`  ${mark(kind, o)} ${padRight(m.sender, 18)} ${arrow}`, width - 1, o))
+    out.push(fitS(`      ${o.th.muted(`[${m.message_type}]`)} ${m.content}`, width - 1, o))
+  }
+  return out
+}
+
+/** §67 /resources — pressure before instability: RAM, workers, tokens, fuses. */
+export function renderResourceView(snap, width, o) {
+  const out = section("RESOURCES", width, o)
+  if (!snap) { out.push(o.th.muted("  (no resource data)")); return out }
+  const row = (k, v) => fitS(`  ${padRight(k, 16)} ${v}`, width - 1, o)
+  out.push(row("RAM free", `${snap.freeMB ?? "?"}MB / ${snap.totalMB ?? "?"}MB`))
+  out.push(row("Disk free", snap.diskFreeMB ? `${snap.diskFreeMB}MB` : "—"))
+  out.push(row("Workers", `${snap.workers ?? 0}/${snap.maxWorkers ?? "?"} (peak ${snap.peakWorkers ?? 0})`))
+  out.push(row("Tokens", `${((snap.tokensIn ?? 0) / 1000).toFixed(0)}k in / ${((snap.tokensOut ?? 0) / 1000).toFixed(0)}k out of ${(snap.tokenBudget ?? 0) / 1000 | 0}k`))
+  out.push(row("Model calls", String(snap.modelCalls ?? 0)))
+  out.push(row("Tool calls", String(snap.toolCalls ?? 0)))
+  out.push(row("Model latency", snap.lastLatencyMs ? fmtMs(snap.lastLatencyMs) : "—"))
+  out.push(row("Task runtime", fmtClock(snap.elapsedMs ?? 0)))
+  if (snap.failures || snap.recoveries) out.push(row("Failures/Recoveries", `${snap.failures ?? 0} / ${snap.recoveries ?? 0}`))
+  if (snap.checkpoints) out.push(row("Checkpoints", String(snap.checkpoints)))
+  for (const f of snap.fuses ?? []) {
+    out.push(fitS(`  ${o.th.warn("⚠ fuse")} ${f.fuse}: ${f.why} → ${f.action}`, width - 1, o))
+  }
+  return out
+}
