@@ -1,4 +1,4 @@
-forge v89.0.0 — CLI-only build ("fast" on top of "noguard + worker clamp")
+forge v90.0.0 — CLI-only build ("gitwise" on top of "fast" + "noguard + worker clamp")
 - zero-dependency Node CLI (>=20, ESM), runs directly against providers
   (no localhost server, no build, no native modules; ARM64/Termux friendly)
 - 20 providers, OpenAI AND Anthropic wire protocols, auto-failover,
@@ -17,6 +17,17 @@ forge v89.0.0 — CLI-only build ("fast" on top of "noguard + worker clamp")
     the full netguard pinnedFetch policy
   * classifyCommand still labels every command (block/danger/confirm/low/
     safe) for logs, /status, tool-intelligence and verification risk
+- v90 GITWISE:
+  * git_diff / git_log / git_blame — dedicated read-only git views
+    (HEAD/stage/worktree/any ref, path filter, context, line budget with
+    loud truncation; log limit/stat/path; blame window capped at 200 lines).
+    execFile argument arrays only, base can never be a git flag; LOW-risk
+    READ class, parallel-safe, verifier-whitelisted, doctor-self-tested.
+    19 -> 22 tools.
+  * silent-stop fix: an empty model response (no text, no tool calls) used to
+    end the run as "completed" with "(empty answer)". Now: nudge + retry on
+    the same step budget (3 attempts), persistent streak fails loudly with
+    exit 1. e2e: EMPTY_ONCE recovers, EMPTY_ALWAYS fails.
 - v89 FAST (zero behavior change, byte-identical results — proven by
   tests/test-v89.mjs against a reference implementation of the old code):
   * xlang cross-language graph traversals are adjacency-indexed + memoized:

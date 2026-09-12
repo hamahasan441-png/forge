@@ -2,7 +2,8 @@
  * forge — agent tools (zero dependencies, Node built-ins only)
  *
  * bash, read_file, read_image, write_file, edit_file, multi_edit, apply_patch, list_dir, glob_files,
- * grep_files, fetch_url, web_search, browser, todo, think, memory, delegate, load_skill, git_status
+ * grep_files, fetch_url, web_search, browser, todo, think, memory, delegate, load_skill, git_status,
+ * git_diff, git_log, git_blame
  * (19 tools)
  *
  * v20 hardening:
@@ -248,6 +249,43 @@ export const TOOL_DEFS = [
   {
     type: "function",
     function: {
+      name: "git_diff",
+      description: "Unified diff of changes, token-budgeted. base: 'HEAD' (default — all uncommitted changes), 'stage' (staged only), 'worktree' (unstaged only), or any commit/branch/tag (working tree vs it). Optional path filter, context lines, max_lines budget — long diffs are truncated with a diffstat so context is never blown. Use it to review exactly what changed (yours or the run's) before answering or committing.",
+      parameters: { type: "object", properties: {
+        base: { type: "string", description: "what to diff against: 'HEAD' (default), 'stage', 'worktree', or a commit/branch/tag" },
+        path: { type: "string", description: "limit the diff to this file or directory" },
+        context: { type: "number", description: "context lines around hunks (default 3, 0–10)" },
+        max_lines: { type: "number", description: "diff line budget (default 400, max 2000)" },
+      } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_log",
+      description: "Compact commit history: hash, date, author, subject. Optional path filter and per-commit diffstat (stat=true). Use it to read recent intent before editing an area.",
+      parameters: { type: "object", properties: {
+        path: { type: "string", description: "only commits touching this file or directory" },
+        limit: { type: "number", description: "max commits (default 15, max 50)" },
+        stat: { type: "boolean", description: "include a diffstat per commit (default false)" },
+      } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_blame",
+      description: "Line provenance for a tracked file: commit, author, date per line (start/end window, max 200 lines). Use it to find when and why a line changed. Untracked files are reported as such.",
+      parameters: { type: "object", properties: {
+        path: { type: "string", description: "file to blame (required)" },
+        start: { type: "number", description: "first line (default 1)" },
+        end: { type: "number", description: "last line (default start+39)" },
+      }, required: ["path"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "read_file",
       description: "Read a text file. Returns content with line numbers. Sensitive files (.env, keys, credentials) are protected.",
       parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "number", description: "1-based start line" }, limit: { type: "number", description: "max lines (default 400)" } }, required: ["path"] },
@@ -469,6 +507,7 @@ function isReadOnlyAllowedBash(command) {
 export const VERIFICATION_TOOLS = {
   allowed: [
     "read_file", "read_image", "list_dir", "glob_files", "grep_files", "git_status",
+    "git_diff", "git_log", "git_blame",   // read-only git views — verify what changed
     "bash",            // approved verification commands only (test/build/lint)
     "think",           // reasoning never mutates
     "load_skill",      // read-only skill docs
@@ -1536,6 +1575,98 @@ function git_status(ctx) {
   })
 }
 
+// --- git inspection (v90): git_diff / git_log / git_blame -----------------------
+// All three are read-only views over git plumbing, executed via execFile with
+// argument arrays (never a shell string), output secret-redacted by cap() and
+// token-budgeted so a huge diff can never blow the context.
+
+function gitExec(ctx, args) {
+  return new Promise((resolve) => {
+    execFile("git", args, { cwd: ctx.cwd, timeout: 10000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ err, out: String(stdout ?? ""), errText: String(stderr ?? "") })
+    })
+  })
+}
+
+const GIT_REF_RE = /^[A-Za-z0-9._/~^-]{1,64}$/
+
+async function git_diff(ctx, args = {}) {
+  const base = String(args.base ?? "HEAD")
+  const pathFilter = args.path ? String(args.path) : null
+  const context = Math.max(0, Math.min(10, Number(args.context ?? 3) || 0))
+  const maxLines = Math.max(20, Math.min(2000, Number(args.max_lines ?? 400) || 400))
+  if (!GIT_REF_RE.test(base) || base.startsWith("-")) return "ERROR: invalid base — use 'HEAD', 'stage', 'worktree', or a commit/branch/tag name"
+
+  // target selection: HEAD = staged+unstaged vs HEAD · stage = staged only ·
+  // worktree = unstaged only · anything else = working tree vs that ref
+  const target = []
+  if (base === "stage") target.push("--cached")
+  else if (base !== "worktree") target.push(base)
+  const tail = pathFilter ? ["--", pathFilter] : []
+
+  const stat = await gitExec(ctx, ["diff", "--no-color", "--no-ext-diff", "--stat", ...target, ...tail])
+  const d = await gitExec(ctx, ["diff", "--no-color", "--no-ext-diff", `-U${context}`, ...target, ...tail])
+  if (d.err && /not a git repository/i.test(d.errText)) return "ERROR: not a git repository (or git unavailable)"
+  if (d.err) return "ERROR: git diff failed: " + d.errText.trim().split("\n")[0].slice(0, 200)
+
+  const body = d.out.replace(/\n$/, "")
+  const where = base === "stage" ? "staged" : base === "worktree" ? "in the working tree" : "vs " + base
+  if (!body) return `(no differences ${where}${pathFilter ? " for " + pathFilter : ""})`
+
+  const statLine = stat.err ? "" : String(stat.out).trim()
+  const lines = body.split("\n")
+  if (lines.length <= maxLines) return cap([statLine, body].filter(Boolean).join("\n\n"), ctx.maxToolOutput)
+
+  // over budget: diffstat + head of the diff + how to narrow. Never silently
+  // drop the middle of a diff the model believes it saw in full.
+  const head = lines.slice(0, maxLines).join("\n")
+  return cap(
+    [
+      `diff ${where}${pathFilter ? " — " + pathFilter : ""} is ${lines.length} lines; showing the first ${maxLines}`,
+      statLine,
+      "",
+      head,
+      "",
+      `… ${lines.length - maxLines} more diff lines — narrow with path=, a lower context=, or read specific files`,
+    ].filter(Boolean).join("\n"),
+    ctx.maxToolOutput
+  )
+}
+
+async function git_log(ctx, args = {}) {
+  const limit = Math.max(1, Math.min(50, Number(args.limit ?? 15) || 15))
+  const pathFilter = args.path ? String(args.path) : null
+  const a = ["log", "--no-color", "--date=short", "--pretty=format:%h %ad %an %s", "-n", String(limit)]
+  if (args.stat === true) a.push("--stat")
+  if (pathFilter) a.push("--", pathFilter)
+  const r = await gitExec(ctx, a)
+  if (r.err && /not a git repository/i.test(r.errText)) return "ERROR: not a git repository (or git unavailable)"
+  if (r.err) return "ERROR: git log failed: " + r.errText.trim().split("\n")[0].slice(0, 200)
+  const body = r.out.replace(/\n+$/, "")
+  if (!body) return `(no commits${pathFilter ? " touching " + pathFilter : ""})`
+  return cap(body, ctx.maxToolOutput)
+}
+
+async function git_blame(ctx, args = {}) {
+  const file = String(args.path ?? "")
+  if (!file) return "ERROR: path is required"
+  const start = Math.max(1, Number(args.start ?? 1) || 1)
+  let end = Number(args.end ?? start + 39)
+  if (!Number.isFinite(end) || end < start) end = start
+  const WINDOW = 200
+  let clamped = false
+  if (end - start + 1 > WINDOW) { end = start + WINDOW - 1; clamped = true }
+
+  const r = await gitExec(ctx, ["blame", "--date=short", "-w", "-L", `${start},${end}`, "--", file])
+  if (r.err && /not a git repository/i.test(r.errText)) return "ERROR: not a git repository (or git unavailable)"
+  if (r.err && /no such path|does not exist/i.test(r.errText)) return `ERROR: ${file} is not tracked by git (untracked or missing)`
+  if (r.err) return "ERROR: git blame failed: " + r.errText.trim().split("\n")[0].slice(0, 200)
+
+  const body = r.out.replace(/\n$/, "")
+  if (!body) return `(nothing to blame for ${file} lines ${start}-${end})`
+  return cap((clamped ? `… blame window capped at ${WINDOW} lines (use start=/end= to move it)\n` : "") + body, ctx.maxToolOutput)
+}
+
 // --- todo / think -----------------------------------------------------------------
 
 function readTodo(ctx) {
@@ -1722,6 +1853,30 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
     if (typeof r === "string" && r.startsWith("ERROR")) return r
     return r + "\n[git verified]"
   }))
+  results.push(await t("git_diff", async () => {
+    const { execFileSync } = await import("node:child_process")
+    try {
+      execFileSync("git", ["add", "-A"], { cwd: tmp })
+      execFileSync("git", ["-c", "user.email=doctor@forge.local", "-c", "user.name=forge-doctor", "commit", "-q", "-m", "doctor probe"], { cwd: tmp })
+    } catch {}
+    await execTool(ctx, "write_file", { path: "probe.txt", content: "diff probe v2" })
+    const r = await execTool(ctx, "git_diff", {})
+    if (typeof r === "string" && r.startsWith("ERROR")) return r
+    return typeof r === "string" && r.includes("diff probe v2") ? r + "\n[diff verified]" : "ERROR: git_diff showed no probe change"
+  }))
+  results.push(await t("git_log", async () => {
+    const r = await execTool(ctx, "git_log", { limit: 5 })
+    if (typeof r === "string" && r.startsWith("ERROR")) return r
+    return typeof r === "string" && r.includes("doctor probe") ? r + "\n[log verified]" : "ERROR: git_log missed the probe commit"
+  }))
+  results.push(await t("git_blame", async () => {
+    // patched.txt was committed by the doctor and NOT modified after — its
+    // blame lines carry the probe author (probe.txt was rewritten post-commit,
+    // so it would blame to "Not Committed Yet").
+    const r = await execTool(ctx, "git_blame", { path: "patched.txt", start: 1, end: 1 })
+    if (typeof r === "string" && r.startsWith("ERROR")) return r
+    return typeof r === "string" && r.includes("forge-doctor") ? r + "\n[blame verified]" : "ERROR: git_blame missed the probe author"
+  }))
   results.push(await t("glob_files", () => execTool(ctx, "glob_files", { pattern: "*.txt" })))
   results.push(await t("list_dir", () => execTool(ctx, "list_dir", { path: "." })))
   results.push(await t("grep_files", () => execTool(ctx, "grep_files", { pattern: "v3|a", path: "." })))
@@ -1796,6 +1951,9 @@ export async function execTool(ctx, name, args) {
     case "multi_edit": result = multi_edit(ctx, args); break
     case "apply_patch": result = apply_patch(ctx, args); break
     case "git_status": result = await git_status(ctx); break
+    case "git_diff": result = await git_diff(ctx, args); break
+    case "git_log": result = await git_log(ctx, args); break
+    case "git_blame": result = await git_blame(ctx, args); break
     case "todo": result = todo(ctx, args); break
     case "think": result = think(ctx, args); break
     case "memory": result = memory(ctx, args); break

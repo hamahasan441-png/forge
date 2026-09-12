@@ -1,4 +1,9 @@
-# ⬢ forge — standalone terminal AI agent (v89)
+# ⬢ forge — standalone terminal AI agent (v90)
+
+**v90 "gitwise"** — dedicated git views (git_diff / git_log / git_blame,
+token-budgeted, verifier-whitelisted) and the silent-stop fix: an empty model
+response is nudged and retried instead of ending the run "completed" with no
+result; a persistent empty streak fails loudly (exit 1).
 
 **v89 "fast"** — agent steps 4.6× faster (adjacency-index graph traversals),
 CLI boots 218ms → 57ms (lazy subcommand imports), dead providers fail over in

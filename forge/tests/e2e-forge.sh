@@ -59,7 +59,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v89.0.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v90.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
@@ -141,7 +141,7 @@ out=$(printf 'hello\n/retry\n/exit\n' | $F chat 2>&1)
 n=$(echo "$out" | grep -c "Hello from mock!")
 if [ "${n:-0}" -ge 2 ]; then PASS=$((PASS+1)); echo "  ok  chat /retry regenerates"
 else FAIL=$((FAIL+1)); echo "  FAIL chat /retry regenerates (got $n answers)"; fi
-check "banner v30" "$out" "forge v89"
+check "banner v30" "$out" "forge v90"
 
 # 18. chat /export writes markdown transcript
 mkdir -p "$T/work"
@@ -222,7 +222,7 @@ check "chat inline final streamed" "$out" "TOOL RESULT RECEIVED"
 
 # 30. /tools lists the 18 tools
 out=$(printf '/tools\n/exit\n' | $F chat 2>&1)
-check "/tools lists tools" "$out" "forge tools (19)"
+check "/tools lists tools" "$out" "forge tools (22)"
 check "/tools shows glob" "$out" "glob_files"
 check "/tools shows apply_patch" "$out" "apply_patch"
 
@@ -383,7 +383,7 @@ check "config menu probe ok" "$out" "connection OK"
 
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
-check "autopick banner" "$out" "forge v89"
+check "autopick banner" "$out" "forge v90"
 check "autopick provider" "$out" "provider: custom"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"
@@ -681,6 +681,32 @@ check "**/*.md finds nested files" "$out" "FORGE_GLOB_NESTED.md"
 check "**/*.md glob final answer" "$out" "TOOL RESULT RECEIVED"
 out=$($F agent --cwd "$T/work" "USE_GLOB list the markdown files" 2>&1 </dev/null)
 check "plain *.md glob still works" "$out" "FORGE_GLOB_ME.md"
+
+# 85b. v90 git views: dedicated diff/log/blame tools through a real agent turn
+mkdir -p "$T/gitwork"
+printf 'one\ntwo\nthree\n' > "$T/gitwork/blamed.txt"
+git -C "$T/gitwork" init -q
+git -C "$T/gitwork" add -A
+git -C "$T/gitwork" -c user.email=e2e@forge.local -c user.name=e2e commit -q -m "e2e base"
+printf 'one\nTWO!\nthree\n' > "$T/gitwork/blamed.txt"
+out=$($F agent --cwd "$T/gitwork" "USE_GITDIFF show me the diff" 2>&1 </dev/null)
+check "agent git_diff ran" "$out" "TOOL RESULT RECEIVED"
+check "agent git_diff shows the file" "$out" "blamed.txt"
+out=$($F agent --cwd "$T/gitwork" "USE_GITLOG show recent commits" 2>&1 </dev/null)
+check "agent git_log shows the commit" "$out" "e2e base"
+out=$($F agent --cwd "$T/gitwork" "USE_GITBLAME who wrote the file" 2>&1 </dev/null)
+check "agent git_blame ran" "$out" "TOOL RESULT RECEIVED"
+
+# 85c. v90 empty-response resilience — a model turn with NO text and NO tool
+# calls must never silently end the run: one empty turn is nudged and recovers;
+# a persistent empty streak fails loudly (no fake completion, no "(empty answer)")
+out=$($F agent --cwd "$T/work" "EMPTY_ONCE please answer" 2>&1 </dev/null)
+check "empty response nudged and recovered" "$out" "RECOVERED AFTER NUDGE"
+check_absent "no silent empty answer" "$out" "(empty answer)"
+out=$($F agent --cwd "$T/work" "EMPTY_ALWAYS please answer" 2>&1 </dev/null)
+check "persistent empty streak fails loudly" "$out" "3 times in a row"
+check "failure names the empty-response problem" "$out" "empty response"
+check_absent "empty streak never fakes completion" "$out" "COMPLETED"
 
 # 86. context-overflow recovery: 400 context_length_exceeded → compress → retry
 out=$($F chat -m "OVERFLOW_ONCE please answer" 2>&1 </dev/null)

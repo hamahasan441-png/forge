@@ -3,6 +3,34 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v90.0.0 — "gitwise"
+
+### Fixed (v90.0 — the silent stop)
+- **An empty model response no longer ends the run as "completed".** If a
+  provider returned a turn with NO text and NO tool calls (hiccup, truncated
+  stream, filtered content), the agent loop broke out and reported success
+  with "(empty answer)" — the task silently died mid-run, steps just ended
+  without a result. Now the model is nudged ("your last response was empty —
+  continue the task") and the turn retried on the SAME step budget (up to 3
+  attempts, nudges replace each other instead of stacking); a persistent
+  empty streak fails the run loudly with a clear provider error and
+  exit code 1. Successful tool turns reset the streak. Covered end-to-end
+  (EMPTY_ONCE recovers → exit 0, EMPTY_ALWAYS fails → exit 1) in e2e,
+  pinned in test-v90 §6.
+
+### Added (v90.0)
+- **`git_diff` / `git_log` / `git_blame`** — dedicated read-only git views so
+  the agent stops parsing raw git output through bash. `git_diff`: HEAD /
+  stage / worktree / any ref, path filter, context lines, and a line budget —
+  over-budget diffs are truncated WITH the diffstat and an explicit "… N more
+  lines" notice, never silently cut. `git_log`: compact history with optional
+  path filter and per-commit diffstat. `git_blame`: windowed line provenance,
+  capped at 200 lines. All three: execFile argument arrays (no shell), base
+  can never be a git flag, LOW-risk READ class, parallel-safe (join the
+  existing read-only parallel batch), verifier-whitelisted (verification
+  agents can review what changed), doctor-self-tested, mock + e2e covered.
+  19 → 22 tools.
+
 ## v89.0.0 — "fast"
 
 Performance work with ZERO behavior change — every result is byte-identical,

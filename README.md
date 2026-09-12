@@ -3,7 +3,9 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 89.0.0 — "fast".** Agent steps 4.6× faster, CLI boots in ~57ms,
+**Version 90.0.0 — "gitwise".** New git views (git_diff / git_log /
+git_blame) + the silent-stop fix (empty model responses are retried, never
+end a run without a result). Agent steps 4.6× faster, CLI boots in ~57ms,
 dead providers fail over in 8s, parallel tests. Carries **v88 "noguard +
 worker clamp"**: no guards, no blocks, workers 2–8. One folder: `forge/`.
 

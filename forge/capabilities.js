@@ -205,6 +205,42 @@ export const BUILTIN_CAPABILITIES = [
     mutates: [],
   },
   {
+    name: "git_diff",
+    description: "Unified diff of changes vs HEAD / stage / worktree / any ref, token-budgeted.",
+    capabilities: [CAPABILITY.VCS_INSPECTION],
+    klass: CLASS.READ, classes: [CLASS.READ],
+    risk: RISK.LOW, read_only: true, reversible: true, parallel_safe: true,
+    requires_confirmation: false, requires_network: false, requires_filesystem: true,
+    timeout: 20, cost: C(150, 500, 6000), verification_required: false, idempotent: true,
+    preferred_for: ["review exactly what changed before answering or committing", "diff the working tree vs a branch or base"],
+    avoid_when: ["only file names/status are needed (git_status is cheaper)", "the directory is not a git repository"],
+    mutates: [],
+  },
+  {
+    name: "git_log",
+    description: "Compact commit history with optional path filter and diffstat.",
+    capabilities: [CAPABILITY.VCS_INSPECTION],
+    klass: CLASS.READ, classes: [CLASS.READ],
+    risk: RISK.LOW, read_only: true, reversible: true, parallel_safe: true,
+    requires_confirmation: false, requires_network: false, requires_filesystem: true,
+    timeout: 20, cost: C(100, 300, 3000), verification_required: false, idempotent: true,
+    preferred_for: ["read recent intent before editing an area", "find the commit that introduced a change"],
+    avoid_when: ["file contents are needed, not history", "the directory is not a git repository"],
+    mutates: [],
+  },
+  {
+    name: "git_blame",
+    description: "Per-line provenance (commit, author, date) for a tracked file.",
+    capabilities: [CAPABILITY.VCS_INSPECTION],
+    klass: CLASS.READ, classes: [CLASS.READ],
+    risk: RISK.LOW, read_only: true, reversible: true, parallel_safe: true,
+    requires_confirmation: false, requires_network: false, requires_filesystem: true,
+    timeout: 20, cost: C(150, 400, 4000), verification_required: false, idempotent: true,
+    preferred_for: ["find when and why a line changed"],
+    avoid_when: ["whole-file understanding (read_file) or area history (git_log) is enough", "the file is not tracked by git"],
+    mutates: [],
+  },
+  {
     name: "think",
     description: "Record a reasoning step (no side effects).",
     capabilities: [CAPABILITY.REASONING],
@@ -657,6 +693,9 @@ export function operationRisk(name, args = {}, ctx = {}) {
     case "glob_files":
     case "list_dir":
     case "git_status":
+    case "git_diff":
+    case "git_log":
+    case "git_blame":
     case "think":
     case "todo":
     case "load_skill":
