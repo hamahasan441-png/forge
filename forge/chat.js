@@ -1802,7 +1802,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  effort:     profile=${cyan(config.chat?.profile ?? "auto")} • deep=${deep ? green("on") : "off"} • tools=${chatToolsEnabled() ? green("on") : "off"} • shell=${config.chat?.shellAuto === false ? yellow("! only") : green("auto")}`)
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
-        console.log(`  safety:     ${unrestricted ? yellow("UNRESTRICTED — all guards off (tools.unrestricted)") : `writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")}`} • sudo ${unrestricted || config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${unrestricted || config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")} • pauses ${(config.tools?.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1") ? yellow("none — yolo full control") : green("ask first")}`)
+        console.log(`  safety:     ${yellow("NO GUARDS (v88 noguard)")} — nothing refused, nothing prompts • writes anywhere • sandbox ${process.env.FORGE_SANDBOX === "1" ? yellow("bwrap (opt-in)") : "off"} • redaction ${green("on")} • workers clamp 2..8`)
         try {
           const { snapshotKnowledge } = await import("./decisions.js")
           const { knowledgeDockText } = await import("./render.js")

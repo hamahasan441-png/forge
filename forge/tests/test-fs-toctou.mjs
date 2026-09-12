@@ -45,24 +45,34 @@ const clean = () => { for (const e of fs.readdirSync(PROJ)) if (e !== "src") fs.
 console.log(`== environment: descriptor-relative ops ${DESCRIPTOR_RELATIVE ? "AVAILABLE" : "unavailable (fallback mode)"} ==`)
 
 // ---------------------------------------------------------------------------
-console.log("== direct / encoded / absolute traversal ==")
+console.log("== direct / encoded / absolute traversal (v88 noguard: outside writes ALLOWED) ==")
 {
+  // v88: the project write boundary is gone — traversal and absolute outside
+  // targets WRITE SUCCESSFULLY. System paths (/etc/passwd, ~/.forge) are
+  // checked as VERDICTS only: a test never attempts a real system write.
   const attempts = [
     "../outside/victim.txt", "../../" + path.basename(T) + "/outside/victim.txt", "src/../../outside/victim.txt",
-    "src/deep/../../../outside/victim.txt", VICTIM, "src/%2e%2e/%2e%2e/outside/victim.txt", "..%2foutside%2fvictim.txt",
-    "~/.forge/tools/pwn.mjs", "/etc/passwd", "src\0/../../outside/victim.txt",
+    "src/deep/../../../outside/victim.txt", VICTIM,
   ]
   for (const p of attempts) {
     let r
     try { r = await tool.exec("write_file", { path: p, content: "PWNED" }) } catch (e) { r = "THREW " + e.message }
-    const encoded = /%2e|%2f/i.test(p)
-    // encoded sequences are NOT decoded by the fs → they create a literal
-    // in-project file named "%2e%2e" — that is inside the project and fine
-    const okResult = encoded ? true : String(r).startsWith("ERROR")
-    ok(`write_file ${JSON.stringify(p).slice(0, 50)} → ${encoded ? "literal in-project name" : "refused"}`, okResult && victimIntact(), String(r).slice(0, 100))
+    ok(`v88 write_file ${JSON.stringify(p).slice(0, 50)} → ALLOWED (writes outside)`, String(r).includes("OK wrote"), String(r).slice(0, 100))
+    resetVictim()
   }
-  ok("nothing new appeared outside", outsideFiles().join() === "victim.txt")
-  ok("/etc/passwd intact", fs.statSync("/etc/passwd").size > 0)
+  // encoded sequences are NOT decoded by the fs → literal in-project file
+  for (const p of ["src/%2e%2e/%2e%2e/outside/victim.txt", "..%2foutside%2fvictim.txt"]) {
+    let r
+    try { r = await tool.exec("write_file", { path: p, content: "PWNED" }) } catch (e) { r = "THREW " + e.message }
+    ok(`write_file ${JSON.stringify(p).slice(0, 50)} → literal name or mechanics error (never a boundary refusal)`, !String(r).startsWith("BLOCKED"), String(r).slice(0, 100))
+  }
+  // system targets: verdict-only (never executed)
+  const { safePath } = await import("../tools.js")
+  for (const p of ["~/.forge/tools/pwn.mjs", "/etc/passwd", "src\0/../../outside/victim.txt"]) {
+    const v = safePath({ cwd: PROJ, root: PROJ, allowOutsideProject: false }, p, { write: true })
+    ok(`v88 safePath verdict for ${JSON.stringify(p).slice(0, 40)} is ALLOWED (no boundary)`, v.ok, v.error)
+  }
+  ok("/etc/passwd intact (never touched)", fs.statSync("/etc/passwd").size > 0)
   clean()
 }
 
@@ -73,23 +83,42 @@ console.log("== symlink to outside (file + dir + nested + dangling) ==")
   fs.symlinkSync(path.join(PROJ, "linkdir"), path.join(PROJ, "src", "nested"))
   fs.symlinkSync(path.join(OUT, "dangling-target.txt"), path.join(PROJ, "dangling"))
   fs.symlinkSync("../outside", path.join(PROJ, "rellink"))
-  const cases = ["linkfile", "linkdir/victim.txt", "linkdir/new.txt", "src/nested/victim.txt", "src/nested/new2.txt", "dangling", "rellink/victim.txt", "rellink/new3.txt"]
-  for (const p of cases) {
+  // v88: an EXISTING outside target reached through a symlinked directory now
+  // writes (no boundary). A NEW file through a symlinked dir, or a trailing
+  // symlink, is still refused by securefs MECHANICS (ESYMLINK) — that is
+  // TOCTOU safety, not a permission guard.
+  const allowedThrough = ["linkdir/victim.txt", "src/nested/victim.txt", "rellink/victim.txt"]
+  for (const p of allowedThrough) {
     const r = await tool.exec("write_file", { path: p, content: "PWNED" })
-    ok(`write_file through ${p} refused`, String(r).startsWith("ERROR") && victimIntact(), String(r).slice(0, 100))
+    ok(`v88 write_file through ${p} → ALLOWED (existing outside target)`, String(r).includes("OK wrote"), String(r).slice(0, 100))
+    resetVictim()
   }
-  for (const p of ["linkfile", "linkdir/victim.txt", "src/nested/victim.txt"]) {
+  const refusedThrough = ["linkfile", "linkdir/new.txt", "src/nested/new2.txt", "dangling", "rellink/new3.txt"]
+  for (const p of refusedThrough) {
+    const r = await tool.exec("write_file", { path: p, content: "PWNED" })
+    ok(`write_file through ${p} refused (ESYMLINK mechanics)`, String(r).startsWith("ERROR") && victimIntact(), String(r).slice(0, 100))
+  }
+  // v88: through a trailing FILE symlink the edit still fails on mechanics;
+  // through a symlinked DIR to an existing outside file the edit now APPLIES.
+  const rLf = await tool.exec("edit_file", { path: "linkfile", old: "UNTOUCHED", new: "PWNED" })
+  ok("edit_file through trailing symlink refused (mechanics)", /ERROR|BLOCKED/.test(String(rLf)) && victimIntact(), String(rLf).slice(0, 100))
+  const r2Lf = await tool.exec("multi_edit", { path: "linkfile", edits: [{ old: "UNTOUCHED", new: "PWNED" }] })
+  ok("multi_edit through trailing symlink refused (mechanics)", /ERROR|BLOCKED/.test(String(r2Lf)) && victimIntact(), String(r2Lf).slice(0, 100))
+  for (const p of ["linkdir/victim.txt", "src/nested/victim.txt"]) {
     const r = await tool.exec("edit_file", { path: p, old: "UNTOUCHED", new: "PWNED" })
-    ok(`edit_file through ${p} refused`, /ERROR|BLOCKED/.test(String(r)) && victimIntact(), String(r).slice(0, 100))
+    ok(`v88 edit_file through ${p} → ALLOWED (existing outside target)`, String(r).includes("OK"), String(r).slice(0, 100))
+    resetVictim()
     const r2 = await tool.exec("multi_edit", { path: p, edits: [{ old: "UNTOUCHED", new: "PWNED" }] })
-    ok(`multi_edit through ${p} refused`, /ERROR|BLOCKED/.test(String(r2)) && victimIntact(), String(r2).slice(0, 100))
+    ok(`v88 multi_edit through ${p} → ALLOWED (existing outside target)`, String(r2).includes("OK"), String(r2).slice(0, 100))
+    resetVictim()
   }
   const patch = `--- a/linkfile\n+++ b/linkfile\n@@ -1,1 +1,1 @@\n-${SENTINEL}\n+PWNED\n`
   const r = await tool.exec("apply_patch", { patch })
-  ok("apply_patch through symlink refused", String(r).startsWith("ERROR") && victimIntact(), String(r).slice(0, 100))
+  ok("apply_patch through trailing symlink refused (mechanics)", String(r).startsWith("ERROR") && victimIntact(), String(r).slice(0, 100))
   const del = `--- a/linkdir/victim.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-${SENTINEL}\n`
   const r2 = await tool.exec("apply_patch", { patch: del })
-  ok("apply_patch delete through symlink refused", String(r2).startsWith("ERROR") && victimIntact(), String(r2).slice(0, 100))
+  ok("v88 apply_patch delete through symlinked dir → ALLOWED (existing outside target)", /OK|deleted|removed/i.test(String(r2)), String(r2).slice(0, 100))
+  resetVictim()
   ok("nothing new appeared outside", outsideFiles().join() === "victim.txt")
   clean()
 }

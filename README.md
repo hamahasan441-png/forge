@@ -3,21 +3,29 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 86.0.0.** One folder: `forge/`.
+**Version 90.0.0 — "gitwise".** New git views (git_diff / git_log /
+git_blame) + the silent-stop fix (empty model responses are retried, never
+end a run without a result). Agent steps 4.6× faster, CLI boots in ~57ms,
+dead providers fail over in 8s, parallel tests. Carries **v88 "noguard +
+worker clamp"**: no guards, no blocks, workers 2–8. One folder: `forge/`.
 
-## Layout
+## v88 in one line
+
+Every command gate is gone (nothing is refused, nothing prompts — block-class
+included), the project write boundary is gone, `fetch_url` has no SSRF gate,
+the sandbox is opt-in (`FORGE_SANDBOX=1`), and workers are clamped: **low tier
+= 2, absolute max = 8**. The risk classifier still labels every command for
+logs and `/status` — the verdict is just always *run*.
 
 ```
 forge/                 the npm package (CLI + tests + bundled skills)
-  forge.js
-  skills/
-  tests/
-PACKAGE_INFO.txt
-README.md
+  forge.js             CLI entry
+  skills/              80 bundled skills
+  tests/               130 suites (npm test, zero network)
+LICENSE                MIT
+PACKAGE_INFO.txt       capability summary
+FORGE-AUDIT-REPORT*.md engineering reports (history)
 ```
-
-`agentv19/` is gone. History lives in [`forge/CHANGELOG.md`](forge/CHANGELOG.md).
-Leftovers: [`forge/TODO.md`](forge/TODO.md).
 
 ## Install
 
@@ -27,26 +35,23 @@ forge                            # first run: provider → model → key → tes
 forge doctor
 ```
 
-Needs Node ≥ 18.
+Needs Node ≥ 20.
 
 ## Daily
 
 ```bash
-forge                            # AUTOPICK: chat, tools on
+forge                            # AUTOPICK: chat, tools on, no prompts
 forge --pick                     # choose model
 forge ask "question"
-forge agent "task"
-forge agent --plan "task"
+forge agent "task"               # coding agent, 19 tools
+forge agent --auto "task"        # full autonomous lifecycle (DAG + verify + repair)
 forge resume <n|id>
 forge undo
 forge doctor
 ```
 
 In chat: Linux commands run in the project folder. Sentences go to the model.
-`! cmd` always executes. Risky commands ask y/N. Catastrophic ones are blocked.
-v85: `tools.unrestricted` (default ON, owner-only) removes all of that — every
-command runs, no prompts, no block list. `forge config set tools.unrestricted
-false` brings the guards back.
+`! cmd` always executes. **v88: nothing is blocked and nothing asks y/N.**
 
 ```
 /status   /profile [p]   /deep   /shell off
@@ -62,11 +67,8 @@ only. Indexing is not learned. Nothing auto-ACTIVE. Data lives under
 
 ```bash
 cd forge
-npm test                         # all suites
-FORGE_FAST=1 npm test            # Node suites only
-FORGE_SKIP_E2E=1 npm test
+npm test                         # all suites (e2e + cleanroom included)
+FORGE_FAST=1 npm test            # Node suites only (~39 s, 4-way parallel)
 ```
 
 `npm test` is the source of truth. Suite counts are not duplicated here.
-
-Known reds (not this land): plugin-iso on Node 22; chat-compact flake.

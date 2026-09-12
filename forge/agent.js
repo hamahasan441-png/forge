@@ -403,11 +403,27 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
+  // v89 perf: FORGE_DEBUG_PROMPT=<path> dumps the exact first request payload —
+  // the ground truth for prompt-economy work (sizes per block, no guessing).
+  if (process.env.FORGE_DEBUG_PROMPT) {
+    try {
+      const fsD = await import("node:fs")
+      const payload = { systemChars: messages[0].content.length, systemPrompt: messages[0].content, userChars: messages[1].content.length, toolDefsChars: JSON.stringify((pickedPlugins.length ? null : null) ?? []).length }
+      fsD.writeFileSync(process.env.FORGE_DEBUG_PROMPT, JSON.stringify(payload, null, 2))
+    } catch { /* debug aid — never break a run */ }
+  }
 
   let steps = 0
   let finalText = ""
   let retryBudget = 3
   let overflowBudget = 2
+  // v90 empty-response resilience: a model turn with NO text and NO tool calls
+  // used to end the run as "completed" with "(empty answer)" — a single
+  // provider hiccup silently killed the task. Now the model is nudged and the
+  // turn retried (same step budget); a persistent streak fails the run loudly.
+  const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
+  const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
+  let emptyStreak = 0
   let switchedOk = false
   let toolCallCount = 0
   const toolLog = []
@@ -518,6 +534,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       } catch { }
 
       if (msg.toolCalls?.length) {
+        emptyStreak = 0
         toolCallCount += msg.toolCalls.length
         if (toolCallCount > maxToolCalls) {
           messages.push({ role: "user", content: `(system) tool-call budget exhausted (${maxToolCalls} calls) — stop calling tools and produce your final answer now with what you have.` })
@@ -577,6 +594,24 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         continue
       }
 
+      // v90: an empty model response (no tool calls, no text) is a provider
+      // hiccup, not a final answer. Nudge and retry on the same step budget;
+      // only a persistent streak (3 in a row) ends the run — as a real error,
+      // never as a silent "completed".
+      if (!String(msg.content ?? "").trim()) {
+        if (emptyStreak < EMPTY_RESPONSE_RETRIES) {
+          emptyStreak++
+          onEvent?.({ type: "retry", error: `empty model response (attempt ${emptyStreak} of ${EMPTY_RESPONSE_RETRIES + 1}) — nudging the model to answer`, step: steps, left: EMPTY_RESPONSE_RETRIES + 1 - emptyStreak, ...identityMeta() })
+          // replace the previous nudge instead of stacking duplicates
+          const lastMsg = messages[messages.length - 1]
+          if (lastMsg?.role === "user" && String(lastMsg.content).startsWith(EMPTY_NUDGE_PREFIX)) messages.pop()
+          messages.push({ role: "user", content: `${EMPTY_NUDGE_PREFIX} — no text and no tool calls. Continue the task: call a tool or write your final answer now.` })
+          steps--
+          continue
+        }
+        throw new ProviderError(`model returned an empty response ${EMPTY_RESPONSE_RETRIES + 1} times in a row — provider or model issue (or the response was filtered); no final answer was produced`, { retryable: false })
+      }
+      emptyStreak = 0
       finalText = msg.content || "(empty answer)"
       break
     }

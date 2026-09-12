@@ -15,7 +15,7 @@
 #   (No network pre-flight: forge has zero dependencies, so installing this local
 #    folder never hits the registry.)
 #
-# Earlier fixes kept: Node >= 18 guard, EACCES guidance, reachability check with
+# Earlier fixes kept: Node >= 20 guard, EACCES guidance, reachability check with
 # the exact PATH line, Windows note.
 set -u
 cd "$(dirname "$0")"
@@ -42,14 +42,14 @@ done
 
 echo "forge installer — $(pwd)"
 
-# 1. Node present + version >= 18
+# 1. Node present + version >= 20
 if ! command -v node >/dev/null 2>&1; then
-  echo "✗ node missing — install Node.js >= 18 first (https://nodejs.org; on Termux: pkg install nodejs-lts)"
+  echo "✗ node missing — install Node.js >= 20 first (https://nodejs.org; on Termux: pkg install nodejs-lts)"
   exit 1
 fi
 NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
-if [ "${NODE_MAJOR:-0}" -lt 18 ]; then
-  echo "✗ forge needs Node.js >= 18 — found $(node --version)."
+if [ "${NODE_MAJOR:-0}" -lt 20 ]; then
+  echo "✗ forge needs Node.js >= 20 — found $(node --version)."
   echo "  Upgrade node, then re-run this script."
   exit 1
 fi

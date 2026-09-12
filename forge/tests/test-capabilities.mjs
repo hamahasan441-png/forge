@@ -96,8 +96,10 @@ console.log("== lifecycle: enabled / disabled / deprecated / experimental (§19)
   ok("deprecated tool ranks last / is skipped when alternatives exist", disc[0] !== "list_dir")
 
   // a deprecated tool is still usable when nothing else provides the capability
-  const r3 = createRegistry({ config: { tools: { deprecated: ["git_status"] } } })
-  ok("deprecated tool is used when it is the only provider", r3.providersOf("vcs_inspection").map((m) => m.name)[0] === "git_status")
+  // (v90: vcs_inspection now has four providers — git_status/diff/log/blame —
+  // so the single-provider case is demonstrated with reasoning/think)
+  const r3 = createRegistry({ config: { tools: { deprecated: ["think"] } } })
+  ok("deprecated tool is used when it is the only provider", r3.providersOf("reasoning").map((m) => m.name)[0] === "think")
 
   const r4 = createRegistry({ config: {} })
   r4.register({ name: "beta_tool", description: "an experimental capability", capabilities: ["beta_capability"], status: STATUS.EXPERIMENTAL, read_only: true })

@@ -172,12 +172,16 @@ export function nextCompatibleFallback(chain, fromIdx, need, opts = {}) {
 }
 
 export class ProviderError extends Error {
-  constructor(message, { status, retryable, contextOverflow, retryAfterMs } = {}) {
+  constructor(message, { status, retryable, contextOverflow, retryAfterMs, kind } = {}) {
     super(message)
     this.status = status
     this.contextOverflow = Boolean(contextOverflow)
     this.retryAfterMs = retryAfterMs ?? null
     this.retryable = retryable ?? (status === 429 || status === 408 || status >= 500)
+    // v89: "connect" = the connect-guard expired (endpoint accepted nothing
+    // for connectMs). Retrying the SAME provider then just stacks dead waits —
+    // streamChatResilient short-circuits these straight to failover.
+    this.kind = kind ?? null
   }
 }
 
@@ -264,7 +268,7 @@ function makeGuard(signal, connectMs, nextMs, nextName) {
 function abortToError(e, guard, connectMs, nextMs, nextName, userAborted) {
   if (userAborted) return e // genuine user Ctrl+C — propagate as-is
   const reason = e?.cause?.message ?? e?.message ?? ""
-  if (reason === "connect") return new ProviderError(`provider did not respond within ${connectMs / 1000}s (connect guard)`, { retryable: true })
+  if (reason === "connect") return new ProviderError(`provider did not respond within ${connectMs / 1000}s (connect guard)`, { retryable: true, kind: "connect" })
   if (reason && reason === nextName) {
     return nextName === "request"
       ? new ProviderError(`provider request exceeded ${nextMs / 1000}s (request guard)`, { retryable: true })
@@ -552,6 +556,12 @@ export async function* streamChatResilient(opts, { attempts = 3, backoffMs = 150
     } catch (e) {
       const retryable = e instanceof ProviderError ? e.retryable : (e?.name === "AbortError" ? false : true)
       if (!retryable || emitted || attempt >= attempts) throw e
+      // v89 perf: a connect-guard expiry means the endpoint accepted NOTHING
+      // for connectMs — retrying the same provider stacks attempts×connectMs
+      // of dead waiting (was ~94s worst case at 30s×3). Throw immediately:
+      // callers classify it as failover-worthy and switch providers; without
+      // a fallback chain it surfaces to the user unchanged.
+      if (e instanceof ProviderError && e.kind === "connect") throw e
       // v20: honor the provider's Retry-After when present (bounded, polite)
       const wait = Math.max(backoffMs * attempt, e instanceof ProviderError ? (e.retryAfterMs ?? 0) : 0)
       onRetry?.({ attempt, attempts, error: e.message, waitMs: wait })
@@ -561,7 +571,7 @@ export async function* streamChatResilient(opts, { attempts = 3, backoffMs = 150
 }
 
 async function* streamOpenAI(opts, base) {
-  const { apiKey, model, messages, temperature, maxTokens, signal, connectMs = 30000, firstByteMs = 120000 } = opts
+  const { apiKey, model, messages, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const body = { model, messages, stream: true }
   if (temperature !== undefined) body.temperature = temperature
   if (maxTokens) body.max_tokens = maxTokens
@@ -619,13 +629,22 @@ async function* streamOpenAI(opts, base) {
 }
 
 async function* streamAnthropic(opts, base) {
-  const { apiKey, model, temperature, maxTokens, signal, connectMs = 30000, firstByteMs = 120000 } = opts
+  const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
   const system = opts.system || conv.system
   const messages = conv.messages
   const body = { model, messages, max_tokens: maxTokens || 8192, stream: true }
-  if (system) body.system = system
-  if (Array.isArray(opts.tools) && opts.tools.length) body.tools = opts.tools.map(toAnthropicTool)
+  // v89 perf: prompt caching. The static prefix (tool schemas + system
+  // prompt ≈ 16 KB / 4 k tokens on a stock agent) is re-sent on EVERY step of
+  // a multi-step run — with cache_control on the last tool and the system
+  // block, the provider serves that prefix from cache: same content, same
+  // answers, materially lower per-step latency and cost. Content is unchanged;
+  // this only tells the provider the prefix is stable.
+  if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
+  if (Array.isArray(opts.tools) && opts.tools.length) {
+    body.tools = opts.tools.map(toAnthropicTool)
+    body.tools[body.tools.length - 1].cache_control = { type: "ephemeral" }
+  }
   if (temperature !== undefined) body.temperature = temperature
   // v19 deep think: extended thinking budget (deep mode only)
   if (opts.deep) body.thinking = { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }

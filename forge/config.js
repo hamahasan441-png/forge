@@ -120,7 +120,7 @@ export function defaultConfig() {
       },
     },
 
-    retry: { attempts: 3, backoffMs: 1500, connectMs: 30000, firstByteMs: 120000, requestTimeoutMs: 180000 },
+    retry: { attempts: 3, backoffMs: 1500, connectMs: 8000, firstByteMs: 120000, requestTimeoutMs: 180000 },
   }
 }
 

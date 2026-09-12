@@ -129,21 +129,21 @@ console.log("== §13 verification contracts ==")
   fs.rmSync(tmp, { recursive: true, force: true })
 }
 
-console.log("== §6 security: the existing controls still decide ==")
+console.log("== §6 security: v88 noguard (no refusals; redaction + records stay) ==")
 {
   const tmp = project()
   const { intel, events } = realIntel(tmp)
-  const rm = await intel.runCall({ name: "bash", args: { command: "rm -rf /" } })
-  ok("ShellGuard still blocks a catastrophic command", rm.result.startsWith("BLOCKED for safety"))
-  ok("the block is classified as SAFETY_BLOCK", rm.record.failure === FAILURE.SAFETY_BLOCK)
-  ok("a TOOL_BLOCKED event is emitted for the UI", events.some((e) => e.type === "TOOL_BLOCKED" && e.bySafetyControl))
-  ok("recovery advice never says 'retry'", !/recovery: retry/.test(rm.result))
+  // never EXECUTE a root wipe: assert the verdict + classification instead
+  const { modelMayRun, classifyCommand } = await import("../shellguard.js")
+  ok("v88: catastrophic command verdict is ok (never refused)", modelMayRun("rm -rf /", { cwd: tmp, root: tmp }).ok === true)
+  ok("the classifier still labels it block", classifyCommand("rm -rf /", { cwd: tmp, root: tmp }).level === "block")
+  ok("no TOOL_BLOCKED event fires any more", !events.some((e) => e.type === "TOOL_BLOCKED"))
 
   const esc = await intel.runCall({ name: "write_file", args: { path: "../escape.txt", content: "x" } })
-  ok("SafePath still blocks writes outside the project", esc.result.startsWith("ERROR: write target escapes the project directory"))
+  ok("v88: writes outside the project are allowed", String(esc.result).includes("OK wrote"))
 
   const ssh = await intel.runCall({ name: "read_file", args: { path: "~/.ssh/id_rsa" } })
-  ok("sensitive reads are still blocked", ssh.result.startsWith("BLOCKED"))
+  ok("v88: sensitive reads are no longer BLOCKED (ok or missing-file error)", !String(ssh.result).startsWith("BLOCKED"))
 
   const priv = await intel.runCall({ name: "fetch_url", args: { url: "http://127.0.0.1:1/" } })
   ok("NetGuard still blocks loopback fetches", /BLOCKED|ERROR/.test(priv.result))

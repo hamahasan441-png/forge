@@ -3,6 +3,114 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v90.0.0 — "gitwise"
+
+### Fixed (v90.0 — the silent stop)
+- **An empty model response no longer ends the run as "completed".** If a
+  provider returned a turn with NO text and NO tool calls (hiccup, truncated
+  stream, filtered content), the agent loop broke out and reported success
+  with "(empty answer)" — the task silently died mid-run, steps just ended
+  without a result. Now the model is nudged ("your last response was empty —
+  continue the task") and the turn retried on the SAME step budget (up to 3
+  attempts, nudges replace each other instead of stacking); a persistent
+  empty streak fails the run loudly with a clear provider error and
+  exit code 1. Successful tool turns reset the streak. Covered end-to-end
+  (EMPTY_ONCE recovers → exit 0, EMPTY_ALWAYS fails → exit 1) in e2e,
+  pinned in test-v90 §6.
+
+### Added (v90.0)
+- **`git_diff` / `git_log` / `git_blame`** — dedicated read-only git views so
+  the agent stops parsing raw git output through bash. `git_diff`: HEAD /
+  stage / worktree / any ref, path filter, context lines, and a line budget —
+  over-budget diffs are truncated WITH the diffstat and an explicit "… N more
+  lines" notice, never silently cut. `git_log`: compact history with optional
+  path filter and per-commit diffstat. `git_blame`: windowed line provenance,
+  capped at 200 lines. All three: execFile argument arrays (no shell), base
+  can never be a git flag, LOW-risk READ class, parallel-safe (join the
+  existing read-only parallel batch), verifier-whitelisted (verification
+  agents can review what changed), doctor-self-tested, mock + e2e covered.
+  19 → 22 tools.
+
+## v89.0.0 — "fast"
+
+Performance work with ZERO behavior change — every result is byte-identical,
+proven by a reference implementation of the old algorithm in `test-v89.mjs`.
+
+### Fixed (v89.0 — the agent loop was 5× slower than it needed to be)
+- **Cross-language graph traversals were O(V×E), repeated ~40× per agent run**
+  (~60% of agent-step CPU: `testsForFiles` 35% + `neighbors` 13% +
+  `radiusOf` 12.5%). xlang.js now builds an adjacency index (by-path,
+  by-basename, in/out edge lists) once per graph object (WeakMap — graphs are
+  immutable once built) and memoizes `testsForFiles` per (graph, file-set,
+  cwd). A 400-file repo agent step: **1.80s → 0.39s**; 200 traversals of a
+  1000-file graph: ~6s (est.) → 143ms. `test-v89.mjs` proves the new results
+  equal the old linear-scan algorithm on the real repo graph (all 400 files)
+  and a synthetic 1000-file graph, and pins the perf budget.
+- **CLI startup tax 218ms → 57ms.** `forge.js` statically imported the chat
+  REPL (a ~38-module graph), the agent engine, the agent console, the tool
+  registry and the router for EVERY subcommand. They now load lazily in the
+  branches that need them (same pattern as the existing `loadOnboard`).
+  `forge version`-class commands no longer pay for a REPL they never open.
+
+### Added (v89.0)
+- **Provider fail-fast.** A connect-guard expiry (endpoint accepted nothing
+  for `connectMs`) now skips the two remaining same-provider retries and goes
+  straight to the failover chain — worst-case dead-provider stall was
+  `attempts × 30s + backoff ≈ 94s`, now `8s` once (default `retry.connectMs`
+  30s → 8s). Transient errors (429/5xx/Retry-After) retry exactly as before.
+- **Anthropic prompt caching.** The static request prefix (19 tool schemas
+  ≈ 8.6 KB + system prompt ≈ 7.4 KB, re-sent on every agent step) now carries
+  `cache_control` breakpoints on the Anthropic wire: same content, cache-served
+  from step 2 — lower per-step latency and cost with zero information change.
+- **`FORGE_DEBUG_PROMPT=<path>`** dumps the exact first-request payload from
+  `forge agent` — ground truth for prompt-size work (system prompt chars,
+  full text).
+- **Parallel test runner.** The 130 node suites run through a worker pool
+  (`FORGE_TEST_CONCURRENCY`, default 4; `1` restores the old sequential
+  behavior). They are independent (per-suite mkdtemp `FORGE_HOME`, ephemeral
+  ports). The two bash suites share port 8787 and stay sequential. Fast lane:
+  **~85s → ~39s**. Suite output is buffered and printed in full on failure
+  (live interleaved output from 4 suites was unreadable); the summary table
+  and GitHub annotations are unchanged.
+
+## v88.0.0 — "noguard + worker clamp"
+
+### Changed (v88.0 — the owner's standing decision, made permanent)
+- **Every command gate is GONE.** `userMayRun()` / `modelMayRun()` always return
+  `ok: true` — no block class, no danger/confirm refusals, no sudo consent, no
+  interpreter-eval consent, no project-boundary refusal, no y/N prompt, in any
+  mode, whatever the config says (a config that sets `tools.unrestricted: false`
+  cannot bring a gate back — the refusal code paths no longer exist).
+  `classifyCommand()` is UNTOUCHED: every command is still labeled
+  block/danger/confirm/low/safe for logs, `/status`, tool-intelligence and
+  verification risk. v88 suite pins all of this.
+- **No project write boundary.** `safePath` write checks allow any target
+  (inside or outside the project); sensitive-file READ protection (.env/.ssh/
+  keys) is removed too. securefs MECHANICS are unchanged — atomic writes, no
+  final-component symlink following (ESYMLINK), TOCTOU anchoring, race
+  detection. Those are correctness, not permission gates.
+- **No SSRF gate on `fetch_url`.** Private/loopback/metadata URLs fetch like
+  public ones (`allowPrivate: true`). Pinned-socket integrity remains (a
+  connection must match the validated addresses — that is anti-rebinding
+  mechanics, not a gate) and skill/tool downloads still go through the full
+  netguard `pinnedFetch` policy.
+- **Sandbox is OPT-IN.** Model bash runs unsandboxed `/bin/sh` unless
+  `FORGE_SANDBOX=1` asks for the bwrap wrap (when bwrap actually works).
+- **Worker clamp: low tier = 2, absolute max = 8.** `workerCeiling()` gives
+  low-tier/low-RAM machines 2 workers (was 1); RAM-pressure adaptation clamps
+  to the same floor; nothing ever exceeds `AGENT_BUDGETS.maxParallelSubAgents`
+  (8) — burst scaling included.
+- **Kept on purpose (correctness, not guards):** read-only verifier/plan agents
+  still cannot write (VERIFY ⇒ READ_ONLY is the anti-fake-evidence contract),
+  secret redaction still masks key shapes in tool results, checkpoints/undo and
+  the verification ledger are unchanged.
+
+### Fixed (v88.0 — test honesty)
+- Test suites that used to assert guard refusals now assert the v88 behavior —
+  and **no test executes a destructive command any more**: root wipes and
+  system-file writes that were previously "safe" because a guard refused them
+  are now checked as VERDICTS (`modelMayRun(...).ok`), never run.
+
 ## v87.0.0 — "full control"
 
 ### Fixed (v87.0 — bash works on kernels where bwrap cannot)

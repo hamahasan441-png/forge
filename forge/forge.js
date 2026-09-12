@@ -33,22 +33,26 @@ import { resourceProfile, loadProfile } from "./profile.js"
 // v19 performance: onboard.js (readline + probing — the heaviest module) is
 // loaded LAZILY, only when a wizard/menu path actually runs.
 const loadOnboard = () => import("./onboard.js")
+// v89 performance: the interactive surfaces load LAZILY too. chat.js pulls a
+// ~38-module graph (terminal, uistate, render, editor, markdown, compaction,
+// vision, browser…), agent.js its own ~28 — `forge version|models|sessions|
+// config|use|doctor` must not pay ~110ms of module compile for a REPL they
+// never open. Loaded once per invocation inside the branch that needs them.
+const loadChat = () => import("./chat.js")
+const loadAgent = () => import("./agent.js")
+const loadAgentView = () => import("./agentview.js")
+const loadToolsMod = () => import("./tools.js")
+const loadCapabilities = () => import("./capabilities.js")
+const loadRouter = () => import("./router.js")
+const loadPlugins = () => import("./plugins.js")
+const loadExtend = () => import("./extend.js")
 import { readHealth, recordHealth } from "./health.js"
-import { runChat } from "./chat.js"
-import { runAgent, agentEventPrinter } from "./agent.js"
-import { createAgentConsole } from "./agentview.js"
-import { selfTestTools, toolCount } from "./tools.js"
 import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
 import { savePlan, listPlans, readPlan } from "./plans.js"
-import { loadToolPlugins, PLUGINS_DIR } from "./plugins.js"
-import { indexLearnedPlugins, learnedPluginsDir } from "./extend.js"
-import { BUILTIN_TOOL_NAMES } from "./tools.js"
-import { createRegistry, registerPlugins, checkWriteClassification, costScore } from "./capabilities.js"
-import { route, describeRoute, planExecution } from "./router.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -249,7 +253,7 @@ function resolveProvider(config) {
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
  *  — which working model to use (Enter = default, type any id to switch, ✓
  *  badges from the health cache, FREE badges from the model cache) — then
- *  drops into chat with all 19 tools + skills ON. Non-TTY never prompts. */
+ *  drops into chat with all 22 tools + skills ON. Non-TTY never prompts. */
 async function smartStart(cfg, p) {
   if (!process.stdin.isTTY) return p
   const conf = cfg.providers?.[p.name] ?? {}
@@ -384,6 +388,7 @@ async function main() {
       // v19 AutoPick: zero questions — best working model, straight into chat.
       // --pick brings back the v17 chooser.
       p = flags.pick ? await smartStart(cfg, p) : autoPick(cfg, p)
+      const { runChat } = await loadChat()
       await runChat({ config: cfg, provider: p, oneShot: null, deep: flags.deep === true ? true : undefined })
       return
     }
@@ -401,6 +406,7 @@ async function main() {
       if (typeof flags.resume === "string" && !resume) { err(`no session matches "${flags.resume}" — try: forge sessions`); process.exit(1); return }
       // v19: interactive chat without a message uses AutoPick too (--pick = chooser)
       if (!msg && !resume) p = flags.pick && process.stdin.isTTY ? await smartStart(cfg, p) : autoPick(cfg, p)
+      const { runChat } = await loadChat()
       await runChat({ config: cfg, provider: p, oneShot: msg, resumeFile: resume, deep: flags.deep === true ? true : undefined })
       return
     }
@@ -412,6 +418,7 @@ async function main() {
       const ref = positional[1]
       const file = ref ? findSession(ref) : lastSessionFile()
       if (!file) { err(ref ? `no session matches "${ref}" — try: forge sessions` : "no saved sessions yet"); process.exit(1); return }
+      const { runChat } = await loadChat()
       await runChat({ config: cfg, provider: p, resumeFile: file, deep: flags.deep === true ? true : undefined })
       return
     }
@@ -426,6 +433,7 @@ async function main() {
         if (raw) msg = raw
       }
       if (!msg) { err('usage: forge ask "question"   (or: echo question | forge ask)'); process.exit(1); return }
+      const { runChat } = await loadChat()
       await runChat({ config: cfg, provider: p, oneShot: msg, deep: flags.deep === true ? true : undefined })
       return
     }
@@ -443,6 +451,8 @@ async function main() {
       const t0 = Date.now()
       // v20.4: in a terminal the run is rendered from UI state (live dock,
       // honest Ctrl+C); piped runs keep the classic line printer verbatim.
+      const { createAgentConsole } = await loadAgentView()
+      const { runAgent } = await loadAgent()
       const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd(), planOnly: planMode })
       if (planMode) {
         // v16 plan mode: read-only planning pass first, then optional execution
@@ -562,6 +572,7 @@ async function main() {
         const rec = readTask(flags.resume)
         if (!rec) { err(`no task matches "${flags.resume}" — try: forge tasks`); process.exit(1); return }
         const { runMeta } = await import("./meta.js")
+        const { createAgentConsole } = await loadAgentView()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
         const t0 = Date.now()
         try {
@@ -637,6 +648,8 @@ async function main() {
       // v20.5: the capability registry must agree with the shipped safety
       // classification — a drift here would mis-route or mis-gate a tool.
       {
+        const { createRegistry, checkWriteClassification } = await loadCapabilities()
+        const { BUILTIN_TOOL_NAMES } = await loadToolsMod()
         const regDoc = createRegistry({ config })
         const problems = checkWriteClassification(regDoc)
         const unregistered = [...BUILTIN_TOOL_NAMES].filter((n) => !regDoc.has(n))
@@ -646,6 +659,7 @@ async function main() {
         console.log(`  ${dim("registry:")}  ${line}`)
       }
       if (flags.tools) {
+        const { selfTestTools } = await loadToolsMod()
         const results = await selfTestTools({ searchUrl: config.tools?.searchUrl || "", memoryPath: path.join(DEFAULT_DIR, "memory.md"), todoPath: path.join(DEFAULT_DIR, "todo.json") })
         let okN = 0, skipN = 0, failN = 0
         for (const r of results) {
@@ -655,7 +669,8 @@ async function main() {
           else failN++
           console.log(`  ${dim("tool").padEnd(10)} ${r.name.padEnd(12)} ${tag} ${dim(String(r.ms) + "ms")} ${dim(r.note ?? "")}`)
         }
-        console.log(failN === 0 ? `  ${dim("tools:")} ${green(`${okN} ok`)}, ${skipN} skipped, ${failN} failed  ${dim(`(${toolCount()} total)`)}` : `  ${dim("tools:")} ${red(`${failN} FAILED`)}, ${okN} ok, ${skipN} skipped`)
+        const { toolCount } = await loadToolsMod()
+      console.log(failN === 0 ? `  ${dim("tools:")} ${green(`${okN} ok`)}, ${skipN} skipped, ${failN} failed  ${dim(`(${toolCount()} total)`)}` : `  ${dim("tools:")} ${red(`${failN} FAILED`)}, ${okN} ok, ${skipN} skipped`)
         if (!flags.all) return
       }
       // providers
@@ -1214,6 +1229,8 @@ async function main() {
         console.log()
         const t0 = Date.now()
         const task = `Execute the following implementation plan step by step. Verify each step (run tests/builds) before moving on, and keep edits minimal.\n\n${r.text}`
+        const { createAgentConsole } = await loadAgentView()
+        const { runAgent } = await loadAgent()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
         let res
         try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
@@ -1351,9 +1368,12 @@ async function main() {
     case "tools": {
       // v20.5: the capability registry — what every tool IS, what the router
       // would choose for a task, and how a batch would be scheduled.
+      const { createRegistry, registerPlugins, checkWriteClassification } = await loadCapabilities()
+      const { BUILTIN_TOOL_NAMES } = await loadToolsMod()
       const reg = createRegistry({ config })
       if (config.tools?.plugins !== false) {
         try {
+          const { loadToolPlugins } = await loadPlugins()
           const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
           registerPlugins(reg, loaded.tools)
         } catch { /* best-effort */ }
@@ -1363,6 +1383,7 @@ async function main() {
       // forge tools --route "task"  → the routing decision + the chain
       const routeTask = typeof flags.route === "string" ? flags.route : positional.slice(1).join(" ")
       if (flags.route !== undefined && routeTask) {
+        const { route, describeRoute } = await loadRouter()
         const decision = route({ task: routeTask, registry: reg, context: { cwd }, constraints: { readOnly: flags["read-only"] === true } })
         if (JSON_OUT) { emitJson({ task: routeTask, ...decision, chain: { ...decision.chain, steps: decision.chain.steps } }); return }
         console.log(bold(`routing — ${routeTask}`))
@@ -1428,6 +1449,9 @@ async function main() {
     case "plugins": {
       // list user tool plugins from ~/.forge/tools. Learned playbooks are
       // data (indexLearnedPlugins, no plugin-host), not live tools.
+      const { loadToolPlugins, PLUGINS_DIR } = await loadPlugins()
+      const { BUILTIN_TOOL_NAMES } = await loadToolsMod()
+      const { indexLearnedPlugins, learnedPluginsDir } = await loadExtend()
       const loaded = await loadToolPlugins(undefined, { reserved: BUILTIN_TOOL_NAMES })
       const playbooks = indexLearnedPlugins(process.cwd())
       const learnedDir = learnedPluginsDir(process.cwd())
@@ -1891,7 +1915,7 @@ ${bold("usage")}
   ${cyan('forge ask "summarize git log"')} quick one-shot answer ${dim('(or: echo q | forge ask)')}
   ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
-  ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 19 tools (bash, files, images, browser, web, memory, sub-agents)
+  ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)
   ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
   ${cyan("forge --yolo …")}            FULL CONTROL — all guards off, zero permission pauses ${dim("(tools.autoApprove in ~/.forge/config.json makes it permanent)")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
@@ -1901,7 +1925,7 @@ ${bold("usage")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
   ${cyan("forge config show|path|get|set|unset")}
-  ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 19 tools")}
+  ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 22 tools")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)

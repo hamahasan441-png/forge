@@ -1,7 +1,7 @@
 /**
- * forge — shell safety engine (v20): defense-in-depth command risk classification.
+ * forge — shell risk classification engine (v20, ungated since v88).
  *
- * Replaces the v19 regex-only FORBIDDEN list with a structural pass:
+ * Structural pass, unchanged:
  *   1. split the command into sub-commands (; && || | newlines — quote aware)
  *   2. tokenize each sub-command (quote aware), strip env-assignment prefixes
  *   3. resolve the program name + normalize every path-like argument/redirect
@@ -9,17 +9,11 @@
  *   4. classify with layered rules: program identity, flags, and WHERE the
  *      targets live (inside the project vs. system dirs vs. $HOME vs. devices)
  *
- * Levels:
- *   "block"   catastrophic — refused everywhere, always (root wipe, mkfs,
- *             dd to raw devices, fork bombs, shutdown, device redirects…)
- *   "danger"  destructive outside the project / credentials — refused for the
- *             MODEL's bash tool unless assumeYes OR (v25) a narrow autonomous
- *             in-project git exception; the interactive terminal asks y/N
- *   "confirm" plausible damage (rm, git reset, sudo, installs…) — the
- *             interactive terminal asks y/N; the model may run it only when
- *             its file targets stay inside the project (normal dev work)
- *   "low"     ordinary mutating dev commands (mkdir, npm test, make…)
- *   "safe"    read-only-ish commands
+ * Levels (DIAGNOSTIC ONLY since v88 "noguard"):
+ *   "block" / "danger" / "confirm" / "low" / "safe" still label every command
+ *   — logs, /status, tool-intelligence and verification keep the risk picture.
+ *   But NOTHING is refused and NOTHING prompts any more: userMayRun() and
+ *   modelMayRun() always return ok (owner's standing decision: full control).
  *
  * Zero dependencies. Pure functions — trivially testable.
  */
@@ -794,50 +788,24 @@ export function autonomousWorkAllowed(c, ctx = {}, command = "") {
  *  metadata, apt-get, npm publish, npm -g, force-push, filter-branch,
  *  CODE_DANGER, interpreter-eval (that is `allowInterpreterEval`). */
 export function modelMayRun(command, ctx, opts = {}) {
-  // v85 `unrestricted`: the machine owner's master switch (tools.unrestricted
-  // / FORGE_UNRESTRICTED=1). Every guard off — block, danger, confirm, the
-  // project boundary, sudo, interpreter eval, all of it. The command is still
-  // classified so the level stays visible in logs; the verdict is always ok.
-  if (opts.unrestricted === true || ctx?.unrestricted === true) {
-    const c = classifyCommand(command, { ...ctx, allowSudo: true, allowNetworkUpload: true, allowInterpreterEval: true })
-    return { ok: true, level: c.level, reason: c.reasons[0], unrestricted: true }
-  }
-  const c = classifyCommand(command, { ...ctx, allowSudo: opts.allowSudo, allowNetworkUpload: opts.allowNetworkUpload, allowInterpreterEval: opts.allowInterpreterEval === true || ctx?.allowInterpreterEval === true })
-  if (c.level === "block") return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "catastrophic command"}. Refine the command.` }
-  if (c.level === "danger") {
-    if (opts.assumeYes) return { ok: true, reason: c.reasons[0], level: c.level }
-    if ((opts.autonomous === true || ctx?.autonomous === true) && autonomousWorkAllowed(c, ctx, command)) {
-      return { ok: true, reason: c.reasons[0], level: c.level }
-    }
-    return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "destructive outside the project"}. This needs explicit user consent — ask the user to run it in the terminal (or set tools.assumeYes: true).`, level: c.level }
-  }
-  if (c.level === "confirm") {
-    // targets must stay inside the project boundary for autonomous execution
-    const root = path.resolve((ctx && (ctx.root || ctx.cwd)) || process.cwd())
-    const outside = c.targets.find((t) => !insideDir(t, root))
-    if (outside) return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "command"} targets a path outside the project (${outside}). Ask the user, or keep changes inside the working directory.`, level: c.level }
-    if (c.programs.includes("sudo") && !opts.allowSudo) return { ok: false, reason: "BLOCKED: sudo needs explicit consent — set tools.allowSudo: true in config to permit agent sudo use.", level: c.level }
-    return { ok: true, level: c.level }
-  }
-  return { ok: true, level: c.level }
+  // v88 "noguard": every command gate is GONE — no block class, no danger
+  // refusal, no confirm gate, no sudo consent, no project boundary, no
+  // interpreter-eval consent. The machine owner's standing decision: full
+  // control, permanently, regardless of config. The command is still
+  // CLASSIFIED so the risk level stays visible in logs and tool-intelligence
+  // — the verdict is always ok.
+  const c = classifyCommand(command, { ...ctx, allowSudo: true, allowNetworkUpload: true, allowInterpreterEval: true })
+  return { ok: true, level: c.level, reason: c.reasons[0], unrestricted: true }
 }
 
 /** Policy: may the USER's typed terminal line run this? (block always refused;
  *  danger/confirm need a TTY y/N or FORGE_ASSUME_YES=1 when piped). */
 export function userMayRun(command, ctx, opts = {}) {
-  // v85: owner master switch — the user's own terminal line has no guards.
-  if (ctx?.unrestricted === true || opts.unrestricted === true) {
-    const c = classifyCommand(command, ctx)
-    return { ok: true, needsConfirm: false, level: c.level, reason: c.reasons[0], unrestricted: true }
-  }
+  // v88 "noguard": the user's own terminal line has no guards — and never
+  // pauses for confirmation. Nothing is blocked, nothing asks y/N, in any
+  // mode, whatever the config says. Still classified for the log level.
   const c = classifyCommand(command, ctx)
-  if (c.level === "block") return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "catastrophic command"}`, needsConfirm: false, level: c.level }
-  if (c.level === "danger" || c.level === "confirm") {
-    if (opts.assumeYes) return { ok: true, needsConfirm: false, level: c.level, reason: c.reasons[0] }
-    if (opts.interactive) return { ok: true, needsConfirm: true, level: c.level, reason: c.reasons[0] }
-    return { ok: false, needsConfirm: false, level: c.level, reason: `BLOCKED (non-interactive): ${c.reasons[0] ?? "risky command"} — needs confirmation. Re-run with FORGE_ASSUME_YES=1 to allow it.` }
-  }
-  return { ok: true, needsConfirm: false, level: c.level }
+  return { ok: true, needsConfirm: false, level: c.level, reason: c.reasons[0], unrestricted: true }
 }
 
 /** v19 compat: the old FORBIDDEN export — now derived from the real engine. */

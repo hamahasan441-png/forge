@@ -10,6 +10,9 @@
  *   - OVERFLOW_ONCE user msg      → 400 context_length_exceeded once, then success
  *   - SUBTASK_SLOW user msg       → success after 3s (delegate timeout test)
  *   - user msg USE_TOOL           → tool_call: bash echo forge-e2e-ok
+ *   - user msg USE_GITDIFF/USE_GITLOG/USE_GITBLAME → tool_call: the matching v90 git view
+ *   - user msg EMPTY_ONCE           → empty response once, nudge message → RECOVERED AFTER NUDGE
+ *   - user msg EMPTY_ALWAYS         → empty response every turn (agent must fail loudly)
  *   - user msg USE_PATH_ESCAPE    → tool_call: write_file ../../forge-escape-test.txt
  *   - user msg USE_SENSITIVE_READ → tool_call: read_file ~/.ssh/id_rsa
  *   - user msg USE_SKILL_TRAVERSAL→ tool_call: load_skill ../../etc/passwd
@@ -250,6 +253,10 @@ const server = http.createServer((req, res) => {
       if (branch("USE_DELEGATE_SLOW", "delegate", { task: "SUBTASK_SLOW investigate slowly" }, "call_slowdel")) return
       if (branch("USE_OUTSIDE_RM", "bash", { command: "rm -rf /tmp/forge-e2e-outside-target" }, "call_outrm")) return
       if (branch("USE_GLOB", "glob_files", { pattern: "*.md" }, "call_glob")) return
+      // v90 git views
+      if (branch("USE_GITDIFF", "git_diff", { base: "HEAD" }, "call_gitdiff")) return
+      if (branch("USE_GITLOG", "git_log", { limit: 3 }, "call_gitlog")) return
+      if (branch("USE_GITBLAME", "git_blame", { path: "blamed.txt" }, "call_gitblame")) return
       // v20.0.1: "**/*.md" must match files in the search ROOT too (the old
       // glob compiler required at least one "/" and silently found nothing).
       if (branch("USE_DEEPGLOB", "glob_files", { pattern: "**/*.md" }, "call_deepglob")) return
@@ -285,6 +292,29 @@ const server = http.createServer((req, res) => {
         ])
         res.writeHead(200, { "content-type": "application/json" })
         return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 8, completion_tokens: 9 } }))
+      }
+
+      // v90 empty-response resilience: EMPTY_ALWAYS → every turn is empty
+      // (the agent must fail loudly after a streak, never silently
+      // "complete"); EMPTY_ONCE → empty first turn, then the agent's nudge
+      // message recovers it.
+      const hasNudge = msgs.some((m) => m.role === "user" && String(m.content).startsWith("(system) your last response was empty"))
+      const wantsEmpty = !hasNudge && msgs.some((m) => m.role === "user" && /EMPTY_(ALWAYS|ONCE)\b/.test(String(m.content)))
+      if (msgs.some((m) => m.role === "user" && String(m.content).includes("EMPTY_ALWAYS")) || wantsEmpty) {
+        if (j.stream) return sse(res, [{ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 0 } }])
+        res.writeHead(200, { "content-type": "application/json" })
+        return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "" }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 0 } }))
+      }
+      if (hasNudge) {
+        if (j.stream) {
+          return sse(res, [
+            { choices: [{ delta: { content: "RECOVERED " }, finish_reason: null }] },
+            { choices: [{ delta: { content: "AFTER NUDGE" }, finish_reason: null }] },
+            { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 4 } },
+          ])
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "RECOVERED AFTER NUDGE" }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 4 } }))
       }
 
       // plain chat (with reasoning delta to test deep-think rendering)

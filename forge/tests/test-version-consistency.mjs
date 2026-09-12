@@ -110,8 +110,10 @@ console.log("== documented versions agree with the package ==")
   const firstLine = readme.split("\n")[0]
   ok("the README title does not claim a stale version", !/v(19|20)\b/.test(firstLine))
 
-  const topReadme = fs.readFileSync(path.join(ROOT, "README.txt"), "utf8")
-  ok("PACKAGE_INFO does not claim a stale version", !/forge v20\.0\.0/.test(topReadme) || true)
+  // v88: README.txt is gone (dead install path); root README.md must not be stale
+  const rootReadme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8")
+  ok("root README title does not claim a stale version", !/v(19|20)\b/.test(rootReadme.split("\n")[0]))
+  ok("root README names the current version", rootReadme.includes(VERSION))
   const pkgInfo = fs.readFileSync(path.join(ROOT, "PACKAGE_INFO.txt"), "utf8")
   ok(`PACKAGE_INFO title matches (${pkgInfo.split("\n")[0].slice(0, 24)})`, pkgInfo.split("\n")[0].includes(VERSION) || !/v\d+\.\d+\.\d+/.test(pkgInfo.split("\n")[0]))
 }

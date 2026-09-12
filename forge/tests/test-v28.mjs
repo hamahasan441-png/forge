@@ -79,7 +79,7 @@ console.log("== burst scales class workers; MICRO/SMALL stay 0; ceiling still 8 
   eq("strategyFor LARGE is still 6", strategyFor(TASK_CLASS.LARGE).workers, 6)
   eq("strategyFor ARCH is still 8", strategyFor(TASK_CLASS.ARCHITECTURAL).workers, 8)
   eq("ceiling high is still 8", workerCeiling({}, "high"), 8)
-  eq("ceiling low is still 1", workerCeiling({ agent: { maxParallelSubAgents: 8 } }, "low"), 1)
+  eq("ceiling low is 2 (v88 floor)", workerCeiling({ agent: { maxParallelSubAgents: 8 } }, "low"), 2)
   eq("AGENT_BUDGETS ceiling is 8", AGENT_BUDGETS.maxParallelSubAgents, 8)
 }
 
@@ -108,7 +108,7 @@ console.log("== resource manager carries burst ==")
 
   rm.setFreeMB(200)
   const ev = rm.evaluate()
-  eq("low RAM on 13T Pro still serializes to 1", ev.limits.maxWorkers, 1)
+  eq("low RAM on 13T Pro clamps to the v88 floor (2)", ev.limits.maxWorkers, 2)
   ok("REDUCE_CONCURRENCY fired", ev.actions.some((a) => a.action === ADAPT.REDUCE_CONCURRENCY))
 }
 
@@ -196,8 +196,8 @@ console.log("== safety + wiring (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 87.0.0", VERSION, "87.0.0")
-  eq("package.json is 87.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "87.0.0")
+  eq("VERSION is 90.0.0", VERSION, "90.0.0")
+  eq("package.json is 90.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "90.0.0")
 }
 
 console.log(`\n== v28 suite: ${PASS} passed, ${FAIL} failed ==`)

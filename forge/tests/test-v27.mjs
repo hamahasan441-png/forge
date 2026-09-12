@@ -74,8 +74,8 @@ console.log("== class caps + ceiling 8 ==")
   eq("ARCH is 8", strategyFor(TASK_CLASS.ARCHITECTURAL).workers, 8)
   eq("AGENT_BUDGETS ceiling is 8", AGENT_BUDGETS.maxParallelSubAgents, 8)
   eq("defaultConfig uses the ceiling", defaultConfig().agent.maxParallelSubAgents, 8)
-  eq("low tier is always 1", workerCeiling({ agent: { maxParallelSubAgents: 8 } }, "low"), 1)
-  eq("low ignores a huge config", workerCeiling({ agent: { maxParallelSubAgents: 99 } }, "low"), 1)
+  eq("low tier is 2 (v88 floor)", workerCeiling({ agent: { maxParallelSubAgents: 8 } }, "low"), 2)
+  eq("low ignores a huge config", workerCeiling({ agent: { maxParallelSubAgents: 99 } }, "low"), 2)
   eq("high with default is 8", workerCeiling({}, "high"), 8)
   eq("normal with default is 4", workerCeiling({}, "normal"), 4)
   eq("config 3 is respected on high", workerCeiling({ agent: { maxParallelSubAgents: 3 } }, "high"), 3)
@@ -112,7 +112,7 @@ console.log("== high-tier: deeper auto, bigger budgets ==")
 
   rm.setFreeMB(200)
   const ev = rm.evaluate()
-  eq("low RAM on a 12GB box still serializes to 1", ev.limits.maxWorkers, 1)
+  eq("low RAM on a 12GB box clamps to the v88 floor (2)", ev.limits.maxWorkers, 2)
   ok("REDUCE_CONCURRENCY fired", ev.actions.some((a) => a.action === ADAPT.REDUCE_CONCURRENCY))
 }
 
@@ -186,7 +186,7 @@ exit 0
   ok("fake-bwrap wrap actually runs", (ran.status === 0) && /sandboxed-ok/.test(ran.stdout || ""), `status=${ran.status} out=${(ran.stdout || "").slice(0, 80)} err=${(ran.stderr || "").slice(0, 80)}`)
 
   const blocked = modelMayRun("rm -rf /", { cwd: WORK, root: WORK }, {})
-  ok("block-class still refused before any wrap", blocked.ok === false)
+  ok("v88 noguard: block-class is allowed too (classified, never refused)", blocked.ok === true && blocked.level === "block")
 }
 
 console.log("== runBash still classifies before wrapping (source) ==")
@@ -207,8 +207,8 @@ console.log("== runBash still classifies before wrapping (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 87.0.0", VERSION, "87.0.0")
-  eq("package.json is 87.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "87.0.0")
+  eq("VERSION is 90.0.0", VERSION, "90.0.0")
+  eq("package.json is 90.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "90.0.0")
 }
 
 console.log(`\n== v27 suite: ${PASS} passed, ${FAIL} failed ==`)
