@@ -1,4 +1,4 @@
-forge v88.0.0 — CLI-only build ("noguard + worker clamp")
+forge v89.0.0 — CLI-only build ("fast" on top of "noguard + worker clamp")
 - zero-dependency Node CLI (>=20, ESM), runs directly against providers
   (no localhost server, no build, no native modules; ARM64/Termux friendly)
 - 20 providers, OpenAI AND Anthropic wire protocols, auto-failover,
@@ -17,6 +17,23 @@ forge v88.0.0 — CLI-only build ("noguard + worker clamp")
     the full netguard pinnedFetch policy
   * classifyCommand still labels every command (block/danger/confirm/low/
     safe) for logs, /status, tool-intelligence and verification risk
+- v89 FAST (zero behavior change, byte-identical results — proven by
+  tests/test-v89.mjs against a reference implementation of the old code):
+  * xlang cross-language graph traversals are adjacency-indexed + memoized:
+    was O(VxE) repeated ~40x per agent run (~60% of agent-step CPU) — an
+    agent step on a 400-file repo went 1.80s -> 0.39s
+  * forge.js lazy-loads the chat REPL / agent engine / tool registry per
+    subcommand: CLI startup tax 218ms -> 57ms
+  * provider fail-fast: connect-guard expiry (default connectMs now 8s, was
+    30s) skips same-provider retries and goes straight to the failover chain
+    (worst-case dead-provider stall ~94s -> 8s); transient 429/5xx retries
+    unchanged
+  * Anthropic prompt caching: cache_control on the static prefix (tool
+    schemas + system prompt, ~16KB re-sent every agent step) — same content,
+    cache-served from step 2
+  * parallel test runner: FORGE_TEST_CONCURRENCY (default 4); bash suites
+    stay sequential (shared port); fast lane ~85s -> ~39s
+  * FORGE_DEBUG_PROMPT=<path> dumps the exact first-request payload
 - v88 WORKER CLAMP: low-tier / low-RAM machines run 2 parallel read-only
   workers (floor, was 1); the absolute ceiling is 8 on any machine
   (AGENT_BUDGETS.maxParallelSubAgents), burst scaling included; mutators

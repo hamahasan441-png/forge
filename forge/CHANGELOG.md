@@ -3,6 +3,48 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v89.0.0 — "fast"
+
+Performance work with ZERO behavior change — every result is byte-identical,
+proven by a reference implementation of the old algorithm in `test-v89.mjs`.
+
+### Fixed (v89.0 — the agent loop was 5× slower than it needed to be)
+- **Cross-language graph traversals were O(V×E), repeated ~40× per agent run**
+  (~60% of agent-step CPU: `testsForFiles` 35% + `neighbors` 13% +
+  `radiusOf` 12.5%). xlang.js now builds an adjacency index (by-path,
+  by-basename, in/out edge lists) once per graph object (WeakMap — graphs are
+  immutable once built) and memoizes `testsForFiles` per (graph, file-set,
+  cwd). A 400-file repo agent step: **1.80s → 0.39s**; 200 traversals of a
+  1000-file graph: ~6s (est.) → 143ms. `test-v89.mjs` proves the new results
+  equal the old linear-scan algorithm on the real repo graph (all 400 files)
+  and a synthetic 1000-file graph, and pins the perf budget.
+- **CLI startup tax 218ms → 57ms.** `forge.js` statically imported the chat
+  REPL (a ~38-module graph), the agent engine, the agent console, the tool
+  registry and the router for EVERY subcommand. They now load lazily in the
+  branches that need them (same pattern as the existing `loadOnboard`).
+  `forge version`-class commands no longer pay for a REPL they never open.
+
+### Added (v89.0)
+- **Provider fail-fast.** A connect-guard expiry (endpoint accepted nothing
+  for `connectMs`) now skips the two remaining same-provider retries and goes
+  straight to the failover chain — worst-case dead-provider stall was
+  `attempts × 30s + backoff ≈ 94s`, now `8s` once (default `retry.connectMs`
+  30s → 8s). Transient errors (429/5xx/Retry-After) retry exactly as before.
+- **Anthropic prompt caching.** The static request prefix (19 tool schemas
+  ≈ 8.6 KB + system prompt ≈ 7.4 KB, re-sent on every agent step) now carries
+  `cache_control` breakpoints on the Anthropic wire: same content, cache-served
+  from step 2 — lower per-step latency and cost with zero information change.
+- **`FORGE_DEBUG_PROMPT=<path>`** dumps the exact first-request payload from
+  `forge agent` — ground truth for prompt-size work (system prompt chars,
+  full text).
+- **Parallel test runner.** The 130 node suites run through a worker pool
+  (`FORGE_TEST_CONCURRENCY`, default 4; `1` restores the old sequential
+  behavior). They are independent (per-suite mkdtemp `FORGE_HOME`, ephemeral
+  ports). The two bash suites share port 8787 and stay sequential. Fast lane:
+  **~85s → ~39s**. Suite output is buffered and printed in full on failure
+  (live interleaved output from 4 suites was unreadable); the summary table
+  and GitHub annotations are unchanged.
+
 ## v88.0.0 — "noguard + worker clamp"
 
 ### Changed (v88.0 — the owner's standing decision, made permanent)

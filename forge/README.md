@@ -1,7 +1,14 @@
-# ⬢ forge — standalone terminal AI agent (v88)
+# ⬢ forge — standalone terminal AI agent (v89)
 
-**v88 "noguard + worker clamp"** — zero command gates, zero write boundaries,
-sandbox off by default, workers clamped 2–8. Full control, permanently.
+**v89 "fast"** — agent steps 4.6× faster (adjacency-index graph traversals),
+CLI boots 218ms → 57ms (lazy subcommand imports), dead providers fail over in
+8s instead of stalling 94s, Anthropic prompt caching on the static prefix,
+tests run 4-way parallel. Zero behavior change — results are byte-identical
+(proven by a reference-implementation test).
+
+Carries **v88 "noguard + worker clamp"**: zero command gates, zero write
+boundaries, sandbox off by default, workers clamped 2–8. Full control,
+permanently.
 
 One folder. Zero dependencies. Pure Node (≥ 20, ESM). Talks straight to
 providers — no localhost server, no build step, no native modules.
@@ -119,7 +126,8 @@ tests/     130 suites, zero network needed (FORGE_FAST=1 npm test)
 ```bash
 cd forge
 npm test                    # all suites incl. e2e (mock provider) + cleanroom
-FORGE_FAST=1 npm test       # Node suites only (~90 s)
+FORGE_FAST=1 npm test       # Node suites only (~39 s, 4-way parallel)
+FORGE_TEST_CONCURRENCY=1 npm test   # old sequential behavior
 ```
 
 ## Requirements

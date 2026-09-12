@@ -1,7 +1,7 @@
 # FORGE — Performance Report
 
 **Why is it slow, and what makes it faster WITHOUT damaging quality or intelligence.**
-Repo: `hamahasan441-png/forge` · forge v88.0.0 · Node v22.22.3 (2-core sandbox) · Date: 2026-09-12
+Repo: `hamahasan441-png/forge` · forge v89.0.0 (measured on v88 baseline) · Node v22.22.3 (2-core sandbox) · Date: 2026-09-12
 Method: everything below was **measured on this machine** (timings, CPU profiles, payload captures) — not guessed. Mock provider on localhost isolates forge's own overhead from provider latency.
 
 ---
@@ -156,13 +156,21 @@ These are the tempting "speedups" that would make forge dumber — explicitly re
 
 ## 6. Expected end-state after P0+P1
 
-| Metric | Today | After |
-|---|---|---|
-| `forge agent` step overhead (mock, this repo) | 1.8 s | **~0.6–0.9 s** |
-| `forge version` / light commands | 218 ms | **~80–100 ms** |
-| Worst-case dead-provider stall | ~94 s | **≤ 20 s** |
-| Agent payload per step | 15.4 KB | **~8–10 KB** (+ prompt caching where available) |
-| `npm test` full | 135 s | **~50–60 s** |
-| Chat turn overhead | ~100 ms | unchanged (already fine) |
+**SHIPPED as v89.0.0 "fast" — all 134 suites green, zero behavior change
+(proven by a reference-implementation equivalence test).** Measured before → after on this machine:
+
+| Metric | Before | After (measured) | |
+|---|---|---|---|
+| `forge agent` step overhead (mock, this repo) | 1.80 s | **0.37–0.39 s** | ✅ 4.7× |
+| `forge version` / light commands | 218 ms | **57–62 ms** | ✅ 3.6× |
+| Worst-case dead-provider stall | ~94 s | **8 s once** (connectMs 8s, straight to failover) | ✅ |
+| Agent payload per step (Anthropic) | 15.4 KB re-sent | same content, **cache-served from step 2** (`cache_control`) | ✅ |
+| `npm test` fast lane | ~85 s | **~35 s** (4-way parallel, `FORGE_TEST_CONCURRENCY`) | ✅ 2.4× |
+| e2e suite | ~107 s | **~40 s** (lazy CLI × hundreds of invocations) | ✅ 2.7× |
+| Chat turn overhead | ~100 ms | unchanged | — |
+
+What shipped (v89): xlang adjacency index + `testsForFiles` memoization (O(V×E) → O(V+E); equivalence proven against a reference implementation of the old algorithm on the real repo graph — all files — and a 1000-file synthetic graph) · lazy subcommand imports in `forge.js` · provider fail-fast (`connectMs` 30s→8s, connect-guard expiry skips same-provider retries; transient 429/5xx retry semantics untouched) · Anthropic prompt caching on the static prefix · parallel test runner (bash suites stay sequential — shared port) · `FORGE_DEBUG_PROMPT` payload dump · `test-v89.mjs` perf-regression suite (32 assertions incl. perf budgets).
+
+Not done / next: P1-3 prompt *content* trimming beyond caching (measured: 8.6 KB is protocol-required tool schemas, 4.0 KB repo-map is capped and load-bearing — little honest fat to cut without touching intelligence), P2-2 calibration checks (profile auto→deep trigger rate, fanout early-return), and the `test-ui.mjs` scripted sleeps (47 s of waits → event-driven `waitfor`).
 
 *Reproduce every number: mock provider (`node tests/mock-llm.mjs`), the config from §2, `time` loops, `node --cpu-prof`, and the 20-line capture server used for payload sizes.*

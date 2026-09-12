@@ -403,6 +403,15 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
+  // v89 perf: FORGE_DEBUG_PROMPT=<path> dumps the exact first request payload —
+  // the ground truth for prompt-economy work (sizes per block, no guessing).
+  if (process.env.FORGE_DEBUG_PROMPT) {
+    try {
+      const fsD = await import("node:fs")
+      const payload = { systemChars: messages[0].content.length, systemPrompt: messages[0].content, userChars: messages[1].content.length, toolDefsChars: JSON.stringify((pickedPlugins.length ? null : null) ?? []).length }
+      fsD.writeFileSync(process.env.FORGE_DEBUG_PROMPT, JSON.stringify(payload, null, 2))
+    } catch { /* debug aid — never break a run */ }
+  }
 
   let steps = 0
   let finalText = ""

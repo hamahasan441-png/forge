@@ -3,7 +3,9 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 88.0.0 — "noguard + worker clamp".** One folder: `forge/`.
+**Version 89.0.0 — "fast".** Agent steps 4.6× faster, CLI boots in ~57ms,
+dead providers fail over in 8s, parallel tests. Carries **v88 "noguard +
+worker clamp"**: no guards, no blocks, workers 2–8. One folder: `forge/`.
 
 ## v88 in one line
 
@@ -64,7 +66,7 @@ only. Indexing is not learned. Nothing auto-ACTIVE. Data lives under
 ```bash
 cd forge
 npm test                         # all suites (e2e + cleanroom included)
-FORGE_FAST=1 npm test            # Node suites only
+FORGE_FAST=1 npm test            # Node suites only (~39 s, 4-way parallel)
 ```
 
 `npm test` is the source of truth. Suite counts are not duplicated here.

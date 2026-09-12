@@ -12,6 +12,8 @@
  * provider, so this runner starts nothing itself and simply sequences them.
  *
  * Env switches (all opt-out, default = run everything):
+ *   FORGE_TEST_CONCURRENCY=N node suites run N-at-a-time (default 4; 1 = old
+ *                           sequential behavior; bash suites always sequential)
  *   FORGE_SKIP_E2E=1        skip the ~6.5-min e2e suite
  *   FORGE_SKIP_CLEANROOM=1  skip the clean-room npm-install suite
  *   FORGE_FAST=1            fast lane: node suites only (skips both bash suites)
@@ -164,6 +166,7 @@ const suites = [
   ["v86", "node", ["test-v86.mjs"]],
   ["v87", "node", ["test-v87.mjs"]],
   ["v88", "node", ["test-v88.mjs"]],
+  ["v89", "node", ["test-v89.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])
@@ -202,23 +205,45 @@ function run([label, cmd, args]) {
     const t0 = Date.now()
     let buf = ""
     const child = spawn(cmd, args, { cwd: here, stdio: ["ignore", "pipe", "pipe"] })
-    const forward = (chunk) => { const s = String(chunk); buf += s; process.stdout.write(s) }
-    child.stdout?.on("data", forward)
-    child.stderr?.on("data", forward)
+    // v89 perf: output is buffered and printed only when a suite FAILS (full
+    // output + GitHub annotation) — with the parallel pool, live interleaved
+    // forwarding from 4+ suites was unreadable. The summary table is unchanged.
+    const collect = (chunk) => { buf += String(chunk) }
+    child.stdout?.on("data", collect)
+    child.stderr?.on("data", collect)
     child.on("error", (e) => {
       console.log(`\x1b[31m  cannot launch ${cmd}: ${e.message}\x1b[0m`)
       resolve({ label, ok: false, ms: Date.now() - t0, output: buf })
     })
     child.on("close", (code) => {
       const ok = code === 0
-      if (!ok) annotate(label, buf)
+      if (!ok) { process.stdout.write(buf); annotate(label, buf) }
       resolve({ label, ok, ms: Date.now() - t0, output: buf })
     })
   })
 }
 
-const results = []
-for (const s of suites) results.push(await run(s)) // sequential: bash suites share port 8787
+// v89 perf: the node suites run through a worker pool — they are independent
+// (per-suite mkdtemp FORGE_HOME, ephemeral ports, no shared fixtures), so the
+// old one-at-a-time loop just serialized ~85s of mostly-idle waits. The two
+// bash suites share port 8787 and stay sequential at the end.
+// FORGE_TEST_CONCURRENCY=1 restores the old sequential behavior exactly.
+const CONCURRENCY = Math.max(1, Number(process.env.FORGE_TEST_CONCURRENCY || 0) || 4)
+const nodeSuites = suites.filter((s) => s[1] === "node")
+const bashSuites = suites.filter((s) => s[1] !== "node")
+const byLabel = new Map()
+async function pool(jobs, n) {
+  const queue = [...jobs.entries()]
+  await Promise.all(Array.from({ length: Math.min(n, queue.length) }, async () => {
+    while (queue.length) {
+      const [, job] = queue.shift()
+      byLabel.set(job[0], await run(job))
+    }
+  }))
+}
+await pool(nodeSuites, CONCURRENCY)
+for (const s of bashSuites) byLabel.set(s[0], await run(s))
+const results = suites.map((s) => byLabel.get(s[0])).filter(Boolean)
 
 const fmt = (ms) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`)
 console.log("\n" + "─".repeat(48))
