@@ -27,7 +27,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS } from "./config.js"
-import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId } from "./providers.js"
+import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
 // v19 performance: onboard.js (readline + probing — the heaviest module) is
@@ -657,6 +657,13 @@ async function main() {
           const cat = getCatalog(name)
           targets.push({ name, protocol: cat?.protocol ?? "openai", baseUrl: conf.baseUrl, apiKey: conf.apiKey, model: conf.model || cat?.models?.[0] || "unknown" })
         }
+        // v86 auto strategy: env-keyed catalog providers are probeable too —
+        // a green probe here is what puts them FIRST in the failover chain.
+        for (const c of CATALOG) {
+          if (!c.envKey || !process.env[c.envKey] || !c.baseUrl) continue
+          if (targets.some((t) => t.name === c.name)) continue
+          targets.push({ name: c.name, protocol: c.protocol, baseUrl: config.providers?.[c.name]?.baseUrl || c.baseUrl, apiKey: config.providers?.[c.name]?.apiKey || process.env[c.envKey] || "", model: config.providers?.[c.name]?.model || c.models?.[0] || "unknown" })
+        }
       } else {
         const p = resolveProvider(config)
         if (p) targets.push(p)
@@ -819,6 +826,102 @@ async function main() {
         console.log((m === activeModel ? green("● ") : "  ") + freeTag + m + (m === activeModel ? dim("  (active)") : "") + ctxTag)
       }
       console.log(dim(live ? `${listed.length} models (live)` : `${listed.length} suggestions (offline)`))
+      return
+    }
+    case "provider": {
+      // v86: first-class custom providers. `forge provider add` registers any
+      // OpenAI-compatible endpoint under its own name (not the shared
+      // "custom" slot), auto-discovers its model list, probes it and records
+      // health — after which autopick, failover, doctor and `forge use` treat
+      // it exactly like a built-in.
+      const sub = (positional[1] || "").toLowerCase()
+      if (sub === "add" || sub === "register") {
+        const name = (positional[2] || "").trim().toLowerCase()
+        const baseUrl = (positional[3] || flags["base-url"] || "").trim().replace(/\/$/, "")
+        if (!name || !/^[a-z0-9][a-z0-9._-]{0,30}$/.test(name)) { err("usage: forge provider add <name> <baseUrl> [--model m] [--key k] [--protocol openai|anthropic]"); process.exit(1); return }
+        if (!baseUrl || !/^https?:\/\//.test(baseUrl)) { err(`usage: forge provider add ${name} <https://base-url>  (got "${baseUrl || ""}")`); process.exit(1); return }
+        if (getCatalog(name)) { err(`"${name}" is a built-in provider — configure it with: forge config set providers.${name}.apiKey <KEY>`); process.exit(1); return }
+        const apiKey = flags.key ? String(flags.key) : (config.providers[name]?.apiKey || "")
+        const protocol = flags.protocol ? String(flags.protocol) : (config.providers[name]?.protocol || "openai")
+        let model = flags.model ? String(flags.model) : (config.providers[name]?.model || "")
+        const entry = { apiKey, baseUrl, protocol }
+        // auto-discover: with no --model, ask the endpoint for its model list
+        // and keep the first chat-sounding id. Best-effort — a gateway without
+        // /models still registers; you just set the model yourself.
+        let discovered = []
+        if (!model) {
+          try {
+            process.stdout.write(`  discovering models on ${baseUrl} … `)
+            const { entries, models, live } = await listModels({ protocol, baseUrl, apiKey })
+            discovered = live ? (entries.length ? entries.map((e) => e.id) : models) : []
+            const skip = /^(embed|whisper|tts|dall-e|image|rerank|moderation)/i
+            model = discovered.find((id) => !skip.test(id)) || discovered[0] || ""
+            console.log(model ? green(`${discovered.length} found — using ${model}`) : yellow("no /models endpoint — set --model"))
+          } catch { console.log(yellow("unreachable during discovery — registered anyway")) }
+        }
+        if (model) entry.model = model
+        if (discovered.length) entry.models = discovered.slice(0, 64)
+        config.providers[name] = entry
+        if (!config.activeProvider) config.activeProvider = name
+        saveConfig(config)
+        ok(`${name} → ${baseUrl}${model ? dim(`  model ${model}`) : ""}${!config.providers[name].apiKey ? yellow("  (no key yet — forge provider set-key " + name + " <KEY>") : ""}`)
+        // probe immediately so the ✓ tested badge and failover ordering work
+        try {
+          const r = await probe({ protocol, baseUrl, apiKey, model: model || undefined })
+          recordHealth(name, { ok: !!r.ok, ms: r.ms, model, baseUrl })
+          console.log(r.ok ? dim(`  probe: ok ${r.ms}ms`) : dim(`  probe: ${r.status ? "HTTP " + r.status + " " : ""}${r.error ?? "fail"} ${r.ms}ms`))
+        } catch {}
+        console.log(dim(`  switch to it: ${cyan(`forge use ${name}`)}`))
+        return
+      }
+      if (sub === "remove" || sub === "rm") {
+        const name = (positional[2] || "").trim().toLowerCase()
+        if (!name || !config.providers[name]) { err(`no such configured provider: ${name || "(none)"}`); process.exit(1); return }
+        if (getCatalog(name)) { err(`${name} is built-in — it stays in the catalog; use "forge config unset providers.${name}" to clear its settings`); process.exit(1); return }
+        delete config.providers[name]
+        if (config.activeProvider === name) config.activeProvider = ""
+        saveConfig(config)
+        ok(`${name} removed`)
+        return
+      }
+      if (sub === "set-key" || sub === "key") {
+        const name = (positional[2] || "").trim().toLowerCase()
+        const key = positional.slice(3).join(" ")
+        if (!name || !key || !config.providers[name]) { err("usage: forge provider set-key <name> <KEY>"); process.exit(1); return }
+        config.providers[name].apiKey = key
+        saveConfig(config)
+        ok(`apiKey for ${name} = ${maskKey(key)}  (saved to ${USER_CONFIG_PATH})`)
+        return
+      }
+      if (sub === "test" || sub === "probe") {
+        const names = positional[2] ? [positional[2].toLowerCase()] : Object.keys(config.providers || {})
+        if (!names.length) { warn("no providers configured"); return }
+        let okN = 0
+        for (const name of names) {
+          const p = buildProvider(config, name)
+          if (!p) { err(`${name}: not usable (no baseUrl or missing key)`); continue }
+          process.stdout.write(`  ${bold(name.padEnd(15))} ${dim((p.model || "?").padEnd(28))} `)
+          const r = await probe({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model })
+          recordHealth(name, { ok: !!r.ok, ms: r.ms, model: p.model, baseUrl: p.baseUrl })
+          if (r.ok) { okN++; console.log(green(`ok  ${r.ms}ms`)) }
+          else console.log(red(`fail ${r.ms}ms  ${r.status ? "HTTP " + r.status + " " : ""}${r.error ?? ""}`))
+        }
+        console.log(dim(`  ${okN}/${names.length} probe(s) ok — health feeds failover ordering (fastest first)`))
+        return
+      }
+      if (sub === "list" || sub === "") { /* list == `forge providers` */ }
+      else { err(`unknown: forge provider ${sub} (add|remove|set-key|test|list)`); process.exit(1); return }
+      console.log(bold("providers  (✓ = key set, ● = active)"))
+      for (const c of CATALOG) {
+        const set = config.providers[c.name]?.apiKey || (c.envKey && process.env[c.envKey])
+        const active = config.activeProvider === c.name ? green(" ●") : ""
+        console.log(`  ${bold(c.name.padEnd(15))} ${dim(c.label.padEnd(26))} ${set ? green("✓") : dim("·")}${active}`)
+      }
+      for (const [name, conf] of Object.entries(config.providers || {})) {
+        if (getCatalog(name)) continue
+        const active = config.activeProvider === name ? green(" ●") : ""
+        console.log(`  ${bold(name.padEnd(15))} ${dim(String(conf.baseUrl || "custom").padEnd(26))} ${conf.apiKey ? green("✓") : dim("·")}${active}`)
+      }
       return
     }
     case "providers": {
@@ -1841,6 +1944,10 @@ ${bold("flags")}
 
 ${bold("config file")}  ${USER_CONFIG_PATH}  (chmod 600, env vars as fallback)
 ${bold("providers")}     ${CATALOG.map((c) => c.name).join(", ")}
+${bold("custom provider")}  ${cyan("forge provider add <name> <https://baseUrl>")} ${dim("[--model m] [--key k] [--protocol openai|anthropic]")}
+              auto-discovers models, probes, records health → first-class provider
+              ${cyan("forge provider test [name]")}  ${cyan("forge provider set-key <name> <KEY>")}  ${cyan("forge provider remove <name>")}
+              env keys join failover after a green probe (forge provider test)
 ${bold("uninstall")}     ${cyan("npm uninstall -g forge-agent-cli")}
 `)
 }

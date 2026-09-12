@@ -32,8 +32,8 @@ const ok = (name, cond, extra = "") => {
 const eq = (name, got, want) => ok(name, got === want, `got ${JSON.stringify(got)} want ${JSON.stringify(want)}`)
 
 console.log("== version ==")
-eq("VERSION is 85.0.0", VERSION, "85.0.0")
-eq("package.json is 85.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "85.0.0")
+eq("VERSION is 86.0.0", VERSION, "86.0.0")
+eq("package.json is 86.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "86.0.0")
 
 console.log("== default config: unrestricted ON ==")
 {

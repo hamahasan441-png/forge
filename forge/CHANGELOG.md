@@ -3,6 +3,20 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v86.0.0 — "gonka-uno"
+
+### Fixed (v86.0 — provider URLs & models verified against official docs)
+- **github-models was dead.** The Azure endpoint `models.inference.ai.azure.com` was retired (GitHub shutdown it Oct 17 2025). Now `https://models.github.ai/inference` with org-prefixed ids (`openai/gpt-4o`).
+- **Model IDs refreshed to the current (Sep 2026) lineups:** OpenAI `gpt-5.6-{terra,luna,sol}`; Anthropic `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5`; Gemini `gemini-3.5-flash` / `gemini-3.1-pro-preview` / `gemini-3.1-flash-lite`; xAI `grok-4.6` / `grok-4.5` (500k window); Z.ai `glm-5.3-flash` / `glm-5.2` (1M); Groq `llama-3.3-70b-versatile`, `llama-4-scout`, `gpt-oss-120b`; Cerebras `gpt-oss-120b`, `zai-glm-4.7`; Qwen `qwen3-max`; SiliconFlow `DeepSeek-V3.2`; DeepSeek window now 1M (V4-backed aliases); Mistral 256k. **openrouter untouched** (owner instruction).
+
+### Added (v86.0 — routers + custom-provider auto strategy)
+- **`gonkarouter`** — GonkaRouter (Gonka Network): `https://api.gonkarouter.io/v1`, `GONKAROUTER_API_KEY`, keys at gonkarouter.io/dashboard. Featured models from their own docs (`deepseek-ai/DeepSeek-V4-Flash-0731`, `moonshotai/Kimi-K2.6`).
+- **`unorouter`** — UnoRouter: `https://api.unorouter.com/v1`, `UNOROUTER_API_KEY`, 300+ models, automatic upstream failover.
+- **`forge provider add <name> <baseUrl>`** — first-class custom providers: auto-discovers the model list (`/models`), keeps a chat-capable default, probes and records health, then autopick/failover/doctor/`forge use` treat it like a built-in. Plus `forge provider set-key|remove|test|list`.
+- **Auto failover widened.** Any catalog provider whose API key is in the environment joins the failover chain automatically once it has a green probe (`forge provider test` / `forge doctor --all`) — zero-config, but never a blind switch (a CI GITHUB_TOKEN alone must not become an inference fallback). Tested providers are ordered fastest-first by probed latency.
+- **`forge doctor --all`** probes env-keyed providers too, so the health cache reflects your real failover options.
+- **v86 suite** covers the new catalog entries, the env-backed chain, latency ordering, and `provider add/remove` end-to-end.
+
 ## v85.0.0 — "unrestricted"
 
 ### Changed (v85.0 — the owner's master switch, by explicit owner request)
