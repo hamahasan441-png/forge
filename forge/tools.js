@@ -689,6 +689,25 @@ function killTree(child, signal = "SIGKILL") {
   try { child.kill(signal) } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// v87 — broken-bwrap auto-fallback
+//
+// Some kernels/containers ship a bwrap binary that can never start (hidden
+// overflowuid, userns disabled): every sandboxed command exits 1 with a
+// `bwrap: …` setup error before the real command runs. Detect that exact
+// signature ONCE, remember it for the session, and re-run the command
+// directly through /bin/sh. A missing isolator is "unsandboxed", never a
+// fake sandbox — and never a permission prompt the user has to answer.
+// ---------------------------------------------------------------------------
+let bwrapBroken = false // session-wide: once bwrap fails to start, stop wrapping
+
+function isBwrapStartFailure(out) {
+  const s = String(out || "")
+  return /\[exit code: 1\]\s*$/.test(s) && /^\s*bwrap:\s/m.test(s)
+}
+
+const plainWrap = (command) => ({ file: "/bin/sh", args: ["-c", command], sandboxed: false, kind: "none" })
+
 async function runBash(ctx, command, timeoutSec) {
   if (ctx.readOnly) {
     const mutationCheck = getMutationClass("bash", { command })
@@ -700,13 +719,13 @@ async function runBash(ctx, command, timeoutSec) {
   if (!verdict.ok) return verdict.reason
   const t = Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
   if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"
-  return new Promise((resolve) => {
+
+  const attempt = (wrapped) => new Promise((resolve) => {
     const MAX_BUF = 4 * 1024 * 1024
     let stdout = "", stderr = "", bytes = 0, overflow = false, done = false
     let timedOut = false, aborted = false
     const startedAt = Date.now()
     // detached → own process group, so killTree() can reach grandchildren
-    const wrapped = wrapBash(command, { cwd: ctx.cwd, root: ctx.root })
     const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
     const timer = setTimeout(() => { timedOut = true; killTree(child) }, t)
     const onAbort = () => { aborted = true; killTree(child) }
@@ -754,6 +773,19 @@ async function runBash(ctx, command, timeoutSec) {
     child.on("error", (e) => finish(null, null, e))
     child.on("close", (code, sig) => finish(code, sig, null))
   })
+
+  // v87: wrap only while the sandbox has not proven broken; if the sandboxed
+  // spawn dies with a bwrap setup error, re-run the same command unsandboxed
+  // and remember — later commands skip the dead wrapper entirely.
+  let wrapped = bwrapBroken ? plainWrap(command) : wrapBash(command, { cwd: ctx.cwd, root: ctx.root })
+  let out = await attempt(wrapped)
+  if (wrapped.sandboxed && isBwrapStartFailure(out)) {
+    bwrapBroken = true
+    const why = (out.split("\n").find((l) => /^\s*bwrap:/.test(l)) || "bwrap failed to start").trim().slice(0, 160)
+    out = await attempt(plainWrap(command))
+    out += `\n[forge] sandbox skipped: ${why} — command re-run WITHOUT the sandbox (FORGE_SANDBOX=0 makes this permanent).`
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------

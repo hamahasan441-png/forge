@@ -96,6 +96,7 @@ export const COMMANDS = [
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
+  ["yolo", "[on|off]", "FULL CONTROL — never pause to ask permission (default ON)"],
   ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
   ["compact", "", "force context compaction (older turns → summary)"],
   ["usage", "", "session token totals + est. cost"],
@@ -165,6 +166,7 @@ ${bold("setup")}
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
+  /yolo [on|off]        FULL CONTROL — run everything, never pause to ask (default ON)
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
   /deep                 toggle DEEP THINKING (high reasoning effort + bigger budgets)
@@ -532,8 +534,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const res = resourceProfile()
   // v85: owner master switch — implies every privileged tools.* flag and
   // bypasses both shellguard policy gates (user terminal AND model bash).
-  const unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
-  const assumeYes = unrestricted || config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
+  // v87: `let` so /yolo can flip them live in the running session.
+  let unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
+  let assumeYes = unrestricted || config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
   const pluginStartedAt = Date.now()
   // v21.2: plugins + MCP for the interactive loop (same path as runAgent).
   // pluginStartedAt is task-scoped so /agent segments cannot import() a plugin
@@ -715,8 +718,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       return
     }
     if (verdict.needsConfirm) {
+      // v87: yolo/full-control never pauses to ask — the run continues on its own
       const risk = verdict.reason ?? verdict.level
-      const yes = await confirmPrompt(risk)
+      const yes = (config.tools?.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1") || await confirmPrompt(risk)
       if (!yes) { warn("skipped"); noteTerminal(cmd, "(user declined to run this command)"); return }
     }
     shellState.history.push(cmd)
@@ -1798,7 +1802,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  effort:     profile=${cyan(config.chat?.profile ?? "auto")} • deep=${deep ? green("on") : "off"} • tools=${chatToolsEnabled() ? green("on") : "off"} • shell=${config.chat?.shellAuto === false ? yellow("! only") : green("auto")}`)
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
-        console.log(`  safety:     ${unrestricted ? yellow("UNRESTRICTED — all guards off (tools.unrestricted)") : `writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")}`} • sudo ${unrestricted || config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${unrestricted || config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")}`)
+        console.log(`  safety:     ${unrestricted ? yellow("UNRESTRICTED — all guards off (tools.unrestricted)") : `writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")}`} • sudo ${unrestricted || config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${unrestricted || config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")} • pauses ${(config.tools?.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1") ? yellow("none — yolo full control") : green("ask first")}`)
         try {
           const { snapshotKnowledge } = await import("./decisions.js")
           const { knowledgeDockText } = await import("./render.js")
@@ -2264,6 +2268,38 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  ${dim("shell").padEnd(13)} bash, git_status`)
         console.log(`  ${dim("agent-brain").padEnd(13)} think, todo, memory, delegate, load_skill`)
         console.log(dim("  /tools off = plain chat • /tools on = model auto-calls tools mid-chat • writes auto-checkpointed (/undo restores)"))
+        break
+      }
+      case "yolo": {
+        // v87: FULL CONTROL — the agent decides and continues on its own; it
+        // never pauses a run with "needs your decision". Persists so CLI
+        // runs (`forge agent …`) get the same behaviour.
+        const arg2 = (arg || "").trim().toLowerCase()
+        const currentlyOn = config.tools?.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1"
+        const on = arg2 === "on" ? true : arg2 === "off" ? false : !currentlyOn
+        config.tools = { ...(config.tools || {}), autoApprove: on }
+        if (on) {
+          config.tools.unrestricted = true
+          config.tools.assumeYes = true
+          process.env.FORGE_AUTO_APPROVE = "1"
+          process.env.FORGE_UNRESTRICTED = "1"
+          process.env.FORGE_ASSUME_YES = "1"
+          unrestricted = true
+          assumeYes = true
+          const c = toolsRef?.ctx
+          if (c) { c.unrestricted = true; c.assumeYes = true; c.allowSudo = true; c.allowOutsideProject = true; c.allowInterpreterEval = true; c.allowNetworkUpload = true; c.fetchPrivateUrls = true }
+        } else {
+          process.env.FORGE_AUTO_APPROVE = "0"
+          process.env.FORGE_UNRESTRICTED = "0"
+          process.env.FORGE_ASSUME_YES = "0"
+          unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
+          assumeYes = unrestricted || config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
+          const c = toolsRef?.ctx
+          if (c) { c.unrestricted = unrestricted; c.assumeYes = assumeYes }
+        }
+        saveConfig(config)
+        if (on) ok(`YOLO — FULL CONTROL ON • no permission pauses • guards off • every command runs ${dim("(saved: tools.autoApprove in ~/.forge/config.json)")}`)
+        else ok(`yolo OFF — forge asks before risky operations again (saved)`)
         break
       }
       case "shell": {

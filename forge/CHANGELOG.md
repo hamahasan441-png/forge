@@ -3,6 +3,17 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v87.0.0 — "full control"
+
+### Fixed (v87.0 — bash works on kernels where bwrap cannot)
+- **Broken-bwrap auto-fallback.** Containers and hardened kernels often ship a `bwrap` binary that can never start (`bwrap: Can't read /proc/sys/kernel/overflowuid: Permission denied`), so EVERY model bash command died before running — and the error text mis-classified as PERMISSION_DENIED, stalling the agent on "needs your decision" forever. `sandbox.js` now probes the kernel once (overflowuid/overflowgid readable; setuid bwrap exempt) and treats an unusable bwrap as missing; `tools.js` `runBash` additionally detects the bwrap-startup signature at runtime, re-runs the command directly through `/bin/sh`, and remembers for the session. A missing isolator is "unsandboxed", never a fake sandbox.
+
+### Added (v87.0 — FULL CONTROL: zero permission pauses)
+- **`tools.autoApprove` (default ON, owner-only key).** The agent decides and continues on its own — no "[forge] ask the user:" lines, no `TOOL_ESCALATION`/`needs your decision` pauses, no `!`-command y/N (shellguard block-class refusals still apply). Set `tools.autoApprove:false` in `~/.forge/config.json` (never project config) to be asked again.
+- **`/yolo [on|off]`** — live FULL CONTROL toggle in chat; persists to the user config and flips the running session (guards, terminal confirm, tool ctx) immediately.
+- **`forge --yolo …`** — force full control for any invocation (implies unrestricted + assumeYes + autoApprove via env).
+- **v87 suite** covers the kernel probe, the unsandboxed re-run, the escalation suppression, the privileged-key guard, and the CLI flag.
+
 ## v86.0.0 — "gonka-uno"
 
 ### Fixed (v86.0 — provider URLs & models verified against official docs)

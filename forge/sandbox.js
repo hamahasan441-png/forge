@@ -12,12 +12,34 @@
  *
  * Escape hatch: FORGE_SANDBOX=0 disables the wrap even when bwrap exists.
  * FORGE_BWRAP=/path/to/bwrap pins the binary (tests).
+ *
+ * v87: a bwrap binary on PATH is NOT enough. Unprivileged bwrap needs the
+ * kernel's overflow uid/gid sysctls to build its user namespace; inside
+ * containers / hardened kernels it exists but EVERY command dies before it
+ * runs with:  bwrap: Can't read /proc/sys/kernel/overflowuid: Permission denied
+ * A missing isolator is "unsandboxed", not a fake sandbox — so we probe once
+ * and treat such a bwrap as missing (commands then run directly via /bin/sh).
  */
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
 const RO_TRY = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt"]
+
+let kernProbe = undefined // undefined = not probed yet
+
+/** Can unprivileged bwrap actually build a user namespace on this kernel? */
+function bwrapKernelSupport() {
+  if (process.platform !== "linux") return false
+  if (kernProbe !== undefined) return kernProbe
+  const readable = (p) => { try { fs.readFileSync(p); return true } catch { return false } }
+  kernProbe = readable("/proc/sys/kernel/overflowuid") && readable("/proc/sys/kernel/overflowgid")
+  return kernProbe
+}
+
+function isSetuid(p) {
+  try { return !!(fs.statSync(p).mode & 0o4000) } catch { return false }
+}
 
 function exists(p) {
   try { return !!p && fs.existsSync(p) } catch { return false }
@@ -39,10 +61,15 @@ function which(name) {
 export function findSandboxBinary() {
   const off = process.env.FORGE_SANDBOX
   if (off === "0" || off === "false" || off === "off") return null
-  if (process.env.FORGE_BWRAP) {
-    return exists(process.env.FORGE_BWRAP) ? process.env.FORGE_BWRAP : null
-  }
-  return which("bwrap")
+  const bin = process.env.FORGE_BWRAP
+    ? (exists(process.env.FORGE_BWRAP) ? process.env.FORGE_BWRAP : null)
+    : which("bwrap")
+  if (!bin) return null
+  // v87: setuid bwrap does not need unprivileged userns; a plain binary on a
+  // kernel that hides overflowuid/overflowgid can never start — treat it as
+  // missing instead of failing every single command.
+  if (!isSetuid(bin) && !bwrapKernelSupport()) return null
+  return bin
 }
 
 /**

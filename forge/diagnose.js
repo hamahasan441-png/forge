@@ -287,8 +287,11 @@ export function recoveryPlan(code, opts = {}) {
  * a permission/credential decision, a destructive irreversible operation, a
  * strategy that has now failed repeatedly, and a dependency/product choice.
  */
-export function shouldEscalate({ code = null, attempts = 0, risk = "low", reversible = true, tool = "", blockedRepeat = false } = {}) {
+export function shouldEscalate({ code = null, attempts = 0, risk = "low", reversible = true, tool = "", blockedRepeat = false, autoApprove = false } = {}) {
   const no = { escalate: false, question: "", why: "" }
+  // v87: FULL CONTROL mode (tools.autoApprove) — the agent decides and
+  // continues on its own; it never pauses the run to ask permission.
+  if (autoApprove) return no
   if (code === FAILURE.PERMISSION_DENIED) {
     return { escalate: true, question: `${tool || "this operation"} was denied by the OS/service — should I try a different approach, or will you grant access?`, why: "credential/permission decisions belong to the user" }
   }
