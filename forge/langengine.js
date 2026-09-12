@@ -87,14 +87,19 @@ export function generatedBoundary(abs, cwd) {
 }
 
 /**
- * Native test/typecheck for the files' language, from manifests that exist.
- * Empty when no stack matches. Never invents a command.
+ * The toolchain stack that covers these files, from manifests that exist.
+ * Null when nothing matches. Never invents a stack.
+ *
+ * v92: extracted from recommendedVerify so the verification pipeline can ask for
+ * the whole stack (test AND lint AND typecheck AND build) instead of only the
+ * first command that happens to exist — the matching rule stays in one place.
+ * @returns {{id,language,test,build,lint,format,typecheck}|null}
  */
-export function recommendedVerify(cwd = process.cwd(), files = []) {
+export function stackFor(cwd = process.cwd(), files = []) {
   let info
-  try { info = inspectProject(cwd) } catch { return "" }
+  try { info = inspectProject(cwd) } catch { return null }
   const stacks = info.stacks || []
-  if (!stacks.length) return ""
+  if (!stacks.length) return null
   const langs = new Set()
   for (const f of files || []) {
     try {
@@ -107,7 +112,15 @@ export function recommendedVerify(cwd = process.cwd(), files = []) {
       || (s.id === "javascript" && langs.has("typescript"))
       || (s.id === "typescript" && langs.has("javascript")))
     : null
-  const s = hit || (langs.size === 0 ? stacks[0] : null)
+  return hit || (langs.size === 0 ? stacks[0] : null) || null
+}
+
+/**
+ * Native test/typecheck for the files' language, from manifests that exist.
+ * Empty when no stack matches. Never invents a command.
+ */
+export function recommendedVerify(cwd = process.cwd(), files = []) {
+  const s = stackFor(cwd, files)
   if (!s) return ""
   return s.test || s.typecheck || s.build || ""
 }

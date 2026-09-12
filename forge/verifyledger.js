@@ -100,7 +100,10 @@ export const FAILURE_SHAPES = [
   { kind: "not_found", test: /command not found|not found:|\bnot found\b|ENOENT|No such file or directory|module not found|can'?t (find|open)/i },
   { kind: "no_tests", test: /no tests? (found|ran|executed|matched)|no test files|0 tests? (found|ran|executed)|No test suite/i },
   { kind: "build_failure", test: /BUILD FAILED|build failed|compile error|compilation failed|error TS\d+|error\[E\d+\]|SyntaxError:|tsc.*error/i },
-  { kind: "test_failure", test: /tests? failed|failures:|AssertionError|FAILED\s|\bFAIL\b|✗|✘|Expected .*Received|1\)\s/i },
+  // NB `(?! 0\b)`: a TAP summary prints "# fail 0" for a clean run, and a bare
+  // \bFAIL\b matched it — so a project whose runner reports zero failures was
+  // diagnosed as a test failure. A zero COUNT is not a failure; a non-zero one is.
+  { kind: "test_failure", test: /tests? failed|failures:|AssertionError|FAILED\s|\bFAIL\b(?! 0\b)|✗|✘|Expected .*Received|1\)\s/i },
   { kind: "generic_failure", test: /\b(failed|failure|fatal|error|exception|traceback)\b/i },
 ]
 

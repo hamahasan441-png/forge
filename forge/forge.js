@@ -69,7 +69,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "apply", "dry-run", "crew", "markdown"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -1871,11 +1871,202 @@ async function main() {
     case "roles": {
       const { roleCatalog } = await import("./agentmanager.js")
       const rows = roleCatalog()
+      // v91 ULTIMATE — --crew prints the orchestration roster: which named
+      // agent owns which phase, who may write (exactly one), and which roles
+      // are deterministic (no model call).
+      if (flags.crew === true) {
+        const { rosterFor, formatRoster, singleWriterOk, phasesFor, approvalRequired } = await import("./orchestra.js")
+        const klass = String(flags.class || "LARGE").toUpperCase()
+        const crew = rosterFor(klass)
+        if (JSON_OUT) { emitJson({ class: klass, crew, phases: phasesFor(klass), approvalRequired: approvalRequired(klass), singleWriter: singleWriterOk(crew) }); return }
+        console.log(bold(`orchestration crew`) + dim(`  class ${klass} • ${crew.length} role(s) • approval ${approvalRequired(klass) ? "required" : "not required"}`))
+        console.log(formatRoster(crew))
+        const sw = singleWriterOk(crew)
+        console.log(sw.ok ? dim(`  single writer: ${green(sw.writers[0])} — every other role is dispatched read-only`) : red(`  WRITER INVARIANT BROKEN: ${sw.writers.join(", ")}`))
+        if (!sw.ok) process.exit(1)
+        return
+      }
       if (JSON_OUT) { emitJson({ roles: rows }); return }
       console.log(bold("agent roles"))
       for (const r of rows) console.log(`  ${r.role.padEnd(12)} ${r.readOnly ? "read-only" : "writer (main only)"}`)
+      console.log(dim("  the orchestration roster (named agents per phase): forge roles --crew"))
       return
     }
+    case "self-review": {
+      // v91 ULTIMATE — deterministic static review (selfup.js). No model, no
+      // network: the same tree always yields the same findings, so it is safe
+      // to run before AND after an edit and diff the two.
+      const { selfReview, formatSelfReview, CATEGORY } = await import("./selfup.js")
+      const target = positional[1] ? path.resolve(positional[1]) : process.cwd()
+      const r = selfReview({ cwd: target, maxFindings: Number(flags.limit) || 200 })
+      if (JSON_OUT) { emitJson(r); return }
+      console.log(bold(`self-review`) + dim(`  ${target}`))
+      console.log(formatSelfReview(r, { limit: Number(flags.limit) || 40 }))
+      const byCat = r.byCategory || {}
+      console.log(dim(`  ${r.duplicates} duplicated block(s) • ${r.cycles.length} import cycle(s) • ${byCat[CATEGORY.DEAD_CODE] || 0} dead export(s) • ${byCat[CATEGORY.SECURITY] || 0} security smell(s) • ${byCat[CATEGORY.UNFINISHED] || 0} unfinished marker(s)`))
+      console.log(dim(`  upgrade proposals from these findings: ${cyan("forge self-upgrade --plan")}`))
+      return
+    }
+    case "self-upgrade": {
+      // v91 ULTIMATE — evidence → proposal → reversible apply. A self-upgrade
+      // never rewrites forge's own source: config, project memory and additive
+      // files only, each with a recorded inverse (see selfup.js).
+      const { selfReview, upgradePlan, applyUpgrades, formatUpgradePlan, listUpgrades, syntaxCheck } = await import("./selfup.js")
+      const cwd = process.cwd()
+      const review = selfReview({ cwd, maxFindings: 200 })
+      const plan = upgradePlan({ cwd, review, config })
+      const applied = listUpgrades(cwd).applied.map((a) => a.id)
+      const doApply = flags.apply === true
+      const dryRun = flags["dry-run"] === true
+      if (JSON_OUT) {
+        if (!doApply) { emitJson({ mode: "plan", review: { files: review.files, findings: review.totalFindings, bySeverity: review.bySeverity, cycles: review.cycles }, plan, applied }); return }
+        const only = String(flags.only || "").split(",").map((x) => x.trim()).filter(Boolean)
+        emitJson({ mode: dryRun ? "dry-run" : "apply", ...applyUpgrades({ cwd, plan, only: only.length ? only : null, dryRun }) })
+        return
+      }
+      console.log(bold(`self-upgrade ${doApply ? (dryRun ? "(dry run)" : "(apply)") : "(plan)"}`))
+      console.log(formatUpgradePlan(plan, { applied }))
+      if (!doApply) {
+        console.log(dim(`  apply the reversible ones: ${cyan("forge self-upgrade --apply")}   undo: ${cyan("forge rollback")}`))
+        return
+      }
+      const only = String(flags.only || "").split(",").map((x) => x.trim()).filter(Boolean)
+      const res = applyUpgrades({ cwd, plan, only: only.length ? only : null, dryRun })
+      for (const r of res.results) {
+        if (r.skipped) console.log(yellow(`  · ${r.id} skipped — ${r.skipped}`))
+        else if (r.error) console.log(red(`  ✗ ${r.id} — ${r.error}`))
+        else console.log(green(`  ✓ ${r.id}${r.dryRun ? " (dry run)" : ""}`))
+      }
+      // verification is part of the upgrade, not an afterthought
+      if (!dryRun && res.results.some((r) => r.ok)) {
+        const v = await syntaxCheck(path.dirname(new URL(import.meta.url).pathname))
+        console.log(v.ok ? dim(`  verified: node --check on ${v.checked} module(s) — all parse`) : red(`  verification FAILED: ${v.failed.map((f) => `${f.file}: ${f.error}`).join("; ")}`))
+        if (!v.ok) process.exitCode = 1
+      }
+      return
+    }
+    case "rollback": {
+      // v91 ULTIMATE — undo applied self-upgrades from their recorded inverse.
+      // (`forge undo` is the FILE rollback for agent edits; this one is for
+      // self-upgrade changes.)
+      const { rollbackUpgrades, listUpgrades } = await import("./selfup.js")
+      const cwd = process.cwd()
+      const id = flags.id ? String(flags.id) : (positional[1] || null)
+      const res = rollbackUpgrades({ cwd, id, all: flags.all === true })
+      if (JSON_OUT) { emitJson(res); if (!res.ok) process.exit(1); return }
+      if (!res.undone.length) { warn(`nothing to roll back${id ? ` for "${id}"` : ""} — ${listUpgrades(cwd).applied.length} applied upgrade(s) on record`); return }
+      for (const u of res.undone) console.log(u.ok ? green(`  ✓ rolled back ${u.id} — ${u.restored || "ok"}`) : red(`  ✗ ${u.id} — ${u.error}`))
+      console.log(dim(`  ${res.remaining} applied upgrade(s) remain • manifest: ${res.manifest}`))
+      if (!res.ok) process.exit(1)
+      return
+    }
+    case "report": {
+      // v91 ULTIMATE — the final report of an autonomous run (report.js).
+      const { latestReport, loadReport, listReports, formatReport } = await import("./report.js")
+      const cwd = process.cwd()
+      const sub = (positional[1] || "").trim()
+      if (sub === "list") {
+        const { latestObjective, formatObjective } = await import("./objective.js")
+        const rows = listReports(cwd)
+        if (JSON_OUT) { emitJson({ reports: rows }); return }
+        if (!rows.length) { warn("no reports yet — run an autonomous task first (forge agent --auto \"…\")"); return }
+        console.log(bold(`reports`) + dim(`  (newest first)`))
+        for (const r of rows) {
+          console.log(`  ${cyan(String(r.id).padEnd(22))} ${String(r.status).padEnd(10)} ${String(r.pct + "%").padEnd(5)} ${r.gateOk ? green("gate ok") : yellow("gate open")}  ${dim(String(r.objective || "").slice(0, 60))}`)
+          // the objective record behind the report: phases, pivots, blockers
+          const o = latestObjective(cwd, r.taskId)
+          if (o) console.log(dim(`      ${formatObjective(o)}`))
+        }
+        return
+      }
+      const rep = sub ? loadReport(sub, cwd) : latestReport(cwd)
+      if (JSON_OUT) { emitJson({ report: rep }); if (!rep) process.exit(1); return }
+      if (!rep) { warn("no report found — run an autonomous task first (forge agent --auto \"…\")"); return }
+      console.log(formatReport(rep, { markdown: flags.markdown !== false }))
+      return
+    }
+    case "docs": {
+      // v91 ULTIMATE — documentation & git intelligence (docsintel.js): what the
+      // current diff obliges you to document, plus a commit message and the
+      // breaking-change list. The diff comes from the existing git_diff tool.
+      const { parseUnifiedDiff, detectBreakingChanges, docPlan, commitMessage, formatDocPlan, changelogSection } = await import("./docsintel.js")
+      const { makeToolContext, execTool } = await import("./tools.js")
+      const { listSourceFiles } = await import("./selfup.js")
+      const cwd = process.cwd()
+      // docPlan decides "does this repo have a README/CHANGELOG?" from real
+      // files, never from a guess.
+      const listRepoFiles = (root) => listSourceFiles(root, { exts: new Set([".md", ".markdown", ".txt", ".js", ".mjs", ".json"]) })
+      const base = String(flags.base || "HEAD")
+      let diffText = ""
+      if (flags.diff) { try { diffText = fs.readFileSync(String(flags.diff), "utf8") } catch (e) { err(`cannot read ${flags.diff}: ${e?.message ?? e}`); process.exit(1); return } }
+      else {
+        const ctx = makeToolContext({ cwd, root: cwd, readOnly: true, timeoutSec: 20, maxToolOutput: 400_000, signal: null, skillsDir: null })
+        diffText = String(await execTool(ctx, "git_diff", { base, context: 3, max_lines: 4000 }) ?? "")
+        if (/^(ERROR|BLOCKED|not a git)/i.test(diffText)) { err(diffText.split("\n")[0]); process.exit(1); return }
+      }
+      const parsed = parseUnifiedDiff(diffText)
+      const breaking = detectBreakingChanges("", { diffParsed: parsed })
+      const repoFiles = listRepoFiles(cwd)
+      const plan = docPlan({ diffParsed: parsed, breaking, repoFiles, files: parsed.files.map((f) => f.path) })
+      const commit = commitMessage({ objective: String(flags.message || "update"), diffParsed: parsed, breaking, files: parsed.files.map((f) => f.path) })
+      if (JSON_OUT) { emitJson({ files: parsed.files.length, insertions: parsed.insertions, deletions: parsed.deletions, truncated: parsed.truncated, breaking, docPlan: plan, commit }); return }
+      console.log(bold(`docs & git intelligence`) + dim(`  ${parsed.files.length} file(s) +${parsed.insertions}/-${parsed.deletions}${parsed.truncated ? " (diff truncated)" : ""} • base ${base}`))
+      if (breaking.length) {
+        console.log(red(`  ${breaking.length} BREAKING change(s):`))
+        for (const b of breaking) console.log(`    ! ${b.kind} ${b.symbol ? cyan(b.symbol) : ""} ${dim(`(${b.file})`)} — ${b.why}`)
+      } else console.log(dim("  no breaking changes detected"))
+      console.log(formatDocPlan(plan, { commit }))
+      const ver = (() => { try { return JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8")).version } catch { return "" } })()
+      if (breaking.length || parsed.files.length) {
+        console.log("")
+        console.log(bold("  CHANGELOG section (ready to paste)"))
+        console.log(changelogSection({ version: ver, title: "", changed: parsed.files.slice(0, 6).map((f) => `\`${f.path}\` (+${f.added}/-${f.removed})`), breaking }).trimEnd().split("\n").map((l) => `    ${l}`).join("\n"))
+      }
+      return
+    }
+
+    case "verify": {
+      // v92 PROCREW — run the verification pipeline on demand: the same stages
+      // an autonomous run executes before it may claim DONE (build, lint,
+      // typecheck, test, validate), taken from THIS project's manifests. A stage
+      // with no real command is reported skipped, never faked, and pass/fail is
+      // decided by the same verifyledger rules the completion gate uses.
+      const { planPipeline, runPipeline, formatPipeline, pipelineVerdict, PIPELINE_DEFAULTS } = await import("./pipeline.js")
+      const cwd = process.cwd()
+      const files = positional.slice(1).map(String)
+      const only = String(flags.only || "").split(",").map((x) => x.trim()).filter(Boolean)
+      const skip = String(flags.skip || "").split(",").map((x) => x.trim()).filter(Boolean)
+      const plan = planPipeline({ cwd, files, only: only.length ? only : null, skip: skip.length ? skip : null })
+      if (!plan.stages.length) {
+        if (JSON_OUT) { emitJson({ ok: false, stages: [], skipped: plan.skipped }); process.exit(1); return }
+        warn("no verification stage this project can run — nothing faked")
+        for (const s of plan.skipped) console.log(dim(`  · ${s.id.padEnd(10)} ${s.reason}`))
+        process.exit(1)
+        return
+      }
+      const timeoutMs = Number(flags.timeout) || PIPELINE_DEFAULTS.timeoutMs
+      if (!JSON_OUT) console.log(bold(`verification pipeline`) + dim(`  ${plan.stages.map((x) => x.id).join(" → ")}  (per-stage timeout ${Math.round(timeoutMs / 1000)}s)`))
+      const res = await runPipeline({
+        plan, cwd,
+        opts: { timeoutMs, stopOnFailure: flags["fail-fast"] !== false, maxRepairs: 0 },
+        onEvent: JSON_OUT ? null : (ev) => {
+          if (ev.type === "PIPELINE_STAGE_STARTED") console.log(dim(`  ▶ ${ev.stage}: ${ev.command}`))
+        },
+      })
+      if (JSON_OUT) {
+        emitJson({
+          ok: res.ok, ms: res.ms, verdict: pipelineVerdict(res),
+          stages: res.stages.map((x) => ({ id: x.id, command: x.command, passed: x.passed, skipped: x.skippedRun === true, exitCode: x.exitCode ?? null, failureShape: x.failureShape || null, attempts: x.attempts || 1, evidence: x.evidence || "" })),
+          skipped: plan.skipped.map((x) => ({ id: x.id, reason: x.reason })),
+        })
+        process.exit(res.ok ? 0 : 1)
+        return
+      }
+      console.log(formatPipeline(res))
+      process.exit(res.ok ? 0 : 1)
+      return
+    }
+
     default:
       err(`unknown command "${cmd}"`)
       printHelp()
@@ -1948,6 +2139,16 @@ ${bold("usage")}
   ${cyan("forge knowtype list")}          typed knowledge ${dim("FACT | EXPERIENCE | LESSON | HYPOTHESIS — hypothesis is never a fact")}
   ${cyan("forge variant add <fam> <s>")}  author a CANDIDATE sibling ${dim("--repair \"…\"  never overwrites ACTIVE")}
   ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
+  ${cyan("forge roles --crew")}           orchestration roster ${dim("(named agent per phase, exactly one writer; --class LARGE)")}
+
+${bold("autonomous intelligence (v91 ULTIMATE)")}
+  ${cyan("forge self-review")}            deterministic static review ${dim("(duplicates, dead exports, import cycles, hotspots, security smells, TODO/FIXME; --json)")}
+  ${cyan("forge self-upgrade --plan")}    evidence -> reversible proposals ${dim("(impact, risk, verify command)")}
+  ${cyan("forge self-upgrade --apply")}   apply them through a versioned manifest ${dim("(config/memory/additive files only - never forge's own source; --dry-run, --only id,id)")}
+  ${cyan("forge rollback")}               undo the last self-upgrade from its recorded inverse ${dim("(--all, --id <id>; forge undo = file rollback)")}
+  ${cyan("forge report [id]")}            the final report of an autonomous run ${dim("(analysis -> findings -> plan -> progress -> verification -> files -> bugs -> perf -> remaining -> next; report list)")}
+  ${cyan("forge verify")}                 run the verification pipeline ${dim("(build -> lint -> typecheck -> test -> validate, from this project's manifests; --only test, --skip lint, --timeout <ms>, --json; exit 1 on failure)")}
+  ${cyan("forge docs")}                   docs & git intelligence ${dim("(breaking changes, README/CHANGELOG/API/migration deltas, commit message; --base <ref>, --diff <file>)")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 16 deterministic eval cases, no live model ${dim("(--list, --json)")}

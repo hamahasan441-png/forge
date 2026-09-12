@@ -18,6 +18,8 @@ import { renderDock, renderToolLine, renderPlan, renderWorkers, renderCompletion
 import { renderMarkdown } from "./ui.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore } from "./uistate.js"
+// v91: the objective engine's event wording, shared with chat.js's meta printer
+import { formatObjectiveEvent } from "./objective.js"
 
 const THINK_VERBS = { THINKING: "Thinking", PLANNING: "Planning", EXECUTING: "Working", VERIFYING: "Verifying", RECOVERING: "Recovering", WAITING: "Waiting" }
 
@@ -243,6 +245,9 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
   }
 }
 
+/** Plain text for an objective-engine event (the piped printer writes no colour). */
+const objectiveLine = (ev) => formatObjectiveEvent(ev)?.text ?? null
+
 /**
  * One-shot agent console for `forge agent` / `forge plan apply`:
  *   TTY   → live dock + status (monitor mode: no input row), Ctrl+C cancels
@@ -267,7 +272,17 @@ export async function createAgentConsole({ provider = "", model = "", cwd = proc
     })
   } else {
     const { agentEventPrinter } = await import("./agent.js")
-    printer = agentEventPrinter()
+    const agentPrinter = agentEventPrinter()
+    // v91: the objective engine's events are meta-level, so the tool printer
+    // ignores them. Wrap it — same formatter the chat printer uses.
+    printer = (ev) => {
+      if (ev?.type?.startsWith("OBJECTIVE_") || ev?.type === "LOOP_DETECTED" || ev?.type === "FINAL_REPORT" || ev?.type === "CONTEXT_COMPRESSION_REQUESTED") {
+        const line = objectiveLine(ev)
+        if (line) process.stdout.write(`  ${line}\n`)
+        return
+      }
+      agentPrinter(ev)
+    }
   }
   return {
     tty,

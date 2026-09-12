@@ -420,7 +420,7 @@ function lessonDocs(lessons) {
   return lessons.map((l, i) => ({ i, text: lessonText(l) }))
 }
 
-function formatLessons(hits) {
+export function formatLessons(hits) {
   if (!hits.length) return ""
   const lines = hits.map((l) => `- failure: ${l.failure || "?"} • cause: ${l.cause || "?"} • fix that worked: ${l.successful_repair}`)
   return "LEARNED FROM PAST FAILURES (do not repeat the failed approach):\n" + lines.join("\n")

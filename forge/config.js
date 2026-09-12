@@ -76,6 +76,25 @@ export function defaultConfig() {
       // low-RAM still clamps to 1).
       // Privileged tools.* flags stay false.
       autonomous: true, segmentSteps: b.segmentSteps, maxSegments: b.maxSegments, maxContinuations: b.maxContinuations, modelStrategy: true,
+      // v91 ULTIMATE orchestration. `orchestration` attaches the named crew's
+      // deterministic advisories (memory, blast radius, ledger, gate) to the
+      // plan; `objective` runs the objective engine (phases, checkpoints, loop
+      // detection, honest progress) alongside the existing lifecycle; `report`
+      // writes the final report. All three are additive: setting any of them to
+      // false restores the exact v90 path. selfUpgrade.autoApply stays false —
+      // a self-upgrade is applied by an explicit `forge self-upgrade --apply`,
+      // never implicitly mid-task.
+      orchestration: true, objective: true, report: true,
+      // v92 PROCREW. `crew` makes the named sub-agents EXECUTE (parallel
+      // read-only specialists through the existing runner: duplicate work
+      // refused, conflicting edits split into waves, self-review before merge,
+      // failure reassigned to another specialist, previously-rejected approaches
+      // skipped). `pipeline` runs build → lint → typecheck → test → validate
+      // from the project's own manifests and records the evidence in the
+      // completion ledger before the gate is judged. `verifyTimeoutMs` is the
+      // per-stage wall clock. Both are additive: false restores the v91 path.
+      crew: true, pipeline: true, verifyTimeoutMs: 300_000,
+      selfUpgrade: { autoApply: false },
     },
     chat: { stream: true, system: "", showReasoning: true, maxHistoryMessages: 40, tools: true, compact: true, compactAtChars: 48000, profile: "auto", restoreCwd: true, historySize: 300 },
     // v20.5: `intelligence` is the master switch for the capability/router/

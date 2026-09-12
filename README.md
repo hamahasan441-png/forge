@@ -3,11 +3,49 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 90.0.0 — "gitwise".** New git views (git_diff / git_log /
-git_blame) + the silent-stop fix (empty model responses are retried, never
-end a run without a result). Agent steps 4.6× faster, CLI boots in ~57ms,
-dead providers fail over in 8s, parallel tests. Carries **v88 "noguard +
-worker clamp"**: no guards, no blocks, workers 2–8. One folder: `forge/`.
+**Version 92.0.0 — "PROCREW".** `/agent` is now a team of senior engineers, not
+one agent with a plan: the named 13-role crew **executes** as real sub-agents in
+parallel under one scheduler (duplicate work refused before it costs a call,
+clashing edits split into waves, every finding self-reviewed before merge, a
+failed unit retried under a different specialist), every task runs the same
+verification pipeline — build → lint → typecheck → test → validate, from the
+project's own manifests, recorded in the completion ledger *before* the gate is
+judged — and the Memory Agent remembers accepted and rejected approaches so a
+refused solution is never bought twice. Carries **v91 "ULTIMATE"** (objective
+engine: verified objective satisfaction instead of a step count, checkpoints,
+resume, loop detection, ten-section final report, docs & git intelligence,
+self-review → self-upgrade → rollback) and **v88 "noguard"**: no guards, no
+blocks. One folder: `forge/`.
+
+## v92 in one line
+
+```bash
+forge verify                   # build -> lint -> typecheck -> test -> validate (from THIS project's manifests)
+forge verify --only test --json # one stage, machine-readable, exit 1 on failure
+forge agent --auto "<task>"    # the crew runs: parallel specialists, self-review, reassignment, pipeline, report
+forge report                   # the final report — now with the crew run and the pipeline table
+```
+
+A stage this project cannot really run is reported skipped with the reason and
+**never faked**; pass/fail is the completion ledger's call, so `exit 0` with a
+failure in the output still fails. `agent.pipeline: false` restores v91 verification; `agent.crew: false` turns the fan-out off.
+
+## v91 in one line
+
+```bash
+forge self-review              # deterministic static review (dupes, dead code, cycles, hotspots, security)
+forge self-upgrade --plan      # evidence → reversible proposals (impact, risk, verify)
+forge self-upgrade --apply     # apply through a versioned manifest (never writes forge's own source)
+forge rollback                 # undo the last self-upgrade from its recorded inverse
+forge report [id]              # the final report of an autonomous run (10 sections)
+forge docs                     # breaking changes + doc deltas + commit message for the current diff
+forge roles --crew             # who does what, and who is allowed to write (exactly one)
+```
+
+Additive by construction: `agent.orchestration|objective|report: false` in
+`~/.forge/config.json` restores the exact v90 path. Self-upgrades touch config,
+project memory and additive files only — code changes are proposed, never
+auto-applied, and never to the kernel.
 
 ## v88 in one line
 
@@ -21,7 +59,7 @@ logs and `/status` — the verdict is just always *run*.
 forge/                 the npm package (CLI + tests + bundled skills)
   forge.js             CLI entry
   skills/              80 bundled skills
-  tests/               130 suites (npm test, zero network)
+  tests/               131 suites (npm test, zero network)
 LICENSE                MIT
 PACKAGE_INFO.txt       capability summary
 FORGE-AUDIT-REPORT*.md engineering reports (history)
@@ -43,7 +81,8 @@ Needs Node ≥ 20.
 forge                            # AUTOPICK: chat, tools on, no prompts
 forge --pick                     # choose model
 forge ask "question"
-forge agent "task"               # coding agent, 19 tools
+forge agent "task"               # coding agent, 22 tools
+forge report                     # final report of the last autonomous run
 forge agent --auto "task"        # full autonomous lifecycle (DAG + verify + repair)
 forge resume <n|id>
 forge undo
@@ -55,6 +94,7 @@ In chat: Linux commands run in the project folder. Sentences go to the model.
 
 ```
 /status   /profile [p]   /deep   /shell off
+/report   /self-review   /self-upgrade   /rollback   /docs
 /skills   /skill download <https-url>
 /skill verify <name|all>   /skill learn <name>
 ```

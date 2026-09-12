@@ -4,6 +4,9 @@ node_modules/
 dist/
 build/
 coverage/
+# npm's cache, created in-tree by the cleanroom suite (npm install from the
+# packed tarball). A cache is never a source file.
+.npm/
 
 # Python bytecode shipped inside some bundled skills (build artifacts from
 # the packaging machine — regenerated on demand, never committed)
