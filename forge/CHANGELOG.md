@@ -3,6 +3,16 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v85.0.0 — "unrestricted"
+
+### Changed (v85.0 — the owner's master switch, by explicit owner request)
+- **`tools.unrestricted` (default `true`).** One user-config switch that implies every privileged flag — `assumeYes`, `allowSudo`, `allowOutsideProject`, `allowInterpreterEval`, `allowNetworkUpload`, `fetchPrivateUrls`, `allowNewPlugins` — and bypasses both shellguard policy gates (`modelMayRun` / `userMayRun`), block class included. Fresh installs run with zero command guards; the interactive y/N prompt is gone.
+- **`FORGE_UNRESTRICTED=1`** env alias for one-shot runs.
+- **Off switch.** `forge config set tools.unrestricted false` restores the exact v84 guarded behavior (prompts, project boundary, sudo gate, catastrophic block list).
+- **Still user-config only.** `unrestricted` joined `PRIVILEGED_TOOL_KEYS`: a project-local `forge.config.json` cannot set it (either way). Only the machine owner decides.
+- **Classifier untouched.** `classifyCommand` still labels every command; unrestricted only changes the verdict, so logs keep the level. Read-only/plan/verifier agent modes keep their own no-write semantics.
+- **v85 suite** covers: default-on, project-config immunity, all-blocker bypass at both gates, and unchanged v84 semantics when the switch is off.
+
 ## v84.0.0 — "promote"
 
 ### Added (v84.0 — gated auto-promote + capability extract, kernel still frozen)

@@ -28,6 +28,11 @@ export FORGE_CONFIG="$T/config.json"
 export FORGE_HOME="$T/home"
 export NO_COLOR=1
 export FORGE_ALLOW_PRIVATE_URLS=1   # mock provider runs on 127.0.0.1
+# v85: this cleanroom verifies the GUARDED install (y/N prompts, block list).
+# Since v85 the shipped default is tools.unrestricted:true (the owner's master
+# switch — every guard off). Pin it OFF here so the safety checks below keep
+# testing the guards; the v85 node suite covers the unrestricted semantics.
+printf '{"tools":{"unrestricted":false}}\n' > "$T/config.json"
 PASS=0; FAIL=0
 check() { local name="$1" got="$2" want="$3"
   if echo "$got" | grep -qF -- "$want"; then PASS=$((PASS+1)); echo "  ok  $name"
@@ -62,7 +67,7 @@ check "resolves to temp prefix" "$RESOLVED" "$PREFIX/bin/forge"
 cd "$WORK"   # foreign cwd — nowhere near the repo
 
 # 2. version + help from anywhere
-check "foreign cwd version" "$(forge version 2>&1)" "forge v84.0.0"
+check "foreign cwd version" "$(forge version 2>&1)" "forge v85.0.0"
 check "help mentions AutoPick" "$(forge help 2>&1)" "AutoPick"
 check "help mentions terminal" "$(forge help 2>&1)" "like a real terminal"
 check "help mentions --deep" "$(forge help 2>&1)" "--deep"
@@ -89,7 +94,7 @@ check "wizard health recorded" "$(cat "$T/home/health.json" 2>/dev/null)" '"ok":
 
 # 5. v19/v20 AutoPick: bare `forge` (non-TTY) = zero questions, one notice line
 out=$(printf '' | forge 2>&1)
-check "autopick banner" "$out" "forge v84.0.0"
+check "autopick banner" "$out" "forge v85.0.0"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"
 

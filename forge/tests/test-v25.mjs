@@ -154,14 +154,17 @@ console.log("== RB-1 timeout cap + real eval execution ==")
 console.log("== runAgent never auto-flips assumeYes ==")
 {
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
-  ok("assumeYes is still config.tools.assumeYes === true", /assumeYes:\s*config\.tools\?\.assumeYes === true/.test(src))
-  ok("autonomous does not assign assumeYes true", !/assumeYes:\s*true/.test(src) && !/assumeYes:\s*autonomous/.test(src))
-  ok("allowInterpreterEval ORs autonomous", /allowInterpreterEval:\s*config\.tools\?\.allowInterpreterEval === true \|\| autonomous/.test(src))
+  // v85: assumeYes is implied only by the owner's tools.unrestricted switch —
+  // never by `autonomous` or any model/skill-reachable path.
+  ok("assumeYes is unrestricted || config.tools.assumeYes === true", /assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/.test(src))
+  ok("autonomous does not assign assumeYes true", !/assumeYes:\s*true\b/.test(src.replace(/assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/g, "")) && !/assumeYes:\s*autonomous/.test(src))
+  ok("allowInterpreterEval ORs unrestricted + autonomous", /allowInterpreterEval:\s*unrestricted \|\| config\.tools\?\.allowInterpreterEval === true \|\| autonomous/.test(src))
+  ok("unrestricted is a privileged key (project configs cannot set it)", /PRIVILEGED_TOOL_KEYS = \["unrestricted"/.test(fs.readFileSync(new URL("../config.js", import.meta.url), "utf8")))
 }
 
 console.log("== package version ==")
-ok("VERSION is 84.0.0", VERSION === "84.0.0")
-ok("package.json is 84.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === "84.0.0")
+ok("VERSION is 85.0.0", VERSION === "85.0.0")
+ok("package.json is 85.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === "85.0.0")
 
 console.log(`\n== v25 suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

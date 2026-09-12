@@ -200,13 +200,15 @@ console.log("== runBash still classifies before wrapping (source) ==")
   ok("meta uses fanoutWaitMs", /fanoutWaitMs\(/.test(meta))
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   ok("runAgent passes tier into resolveEffort", /resolveEffort\([^)]*tier:\s*resProfile\.tier/.test(agent) || /resolveEffort\(profile,\s*task,\s*\{\s*tier:/.test(agent))
-  ok("assumeYes is still not auto-flipped", /assumeYes:\s*config\.tools\?\.assumeYes === true/.test(agent) && !/assumeYes:\s*true/.test(agent) && !/assumeYes:\s*autonomous/.test(agent))
+  // v85: assumeYes may only be implied by the owner's tools.unrestricted switch.
+  const agentNoUnrestricted = agent.replace(/assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/g, "")
+  ok("assumeYes is still not auto-flipped", /assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/.test(agent) && !/assumeYes:\s*true\b/.test(agentNoUnrestricted) && !/assumeYes:\s*autonomous/.test(agent))
 }
 
 console.log("== package version ==")
 {
-  eq("VERSION is 84.0.0", VERSION, "84.0.0")
-  eq("package.json is 84.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "84.0.0")
+  eq("VERSION is 85.0.0", VERSION, "85.0.0")
+  eq("package.json is 85.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "85.0.0")
 }
 
 console.log(`\n== v27 suite: ${PASS} passed, ${FAIL} failed ==`)

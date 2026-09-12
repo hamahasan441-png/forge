@@ -794,6 +794,14 @@ export function autonomousWorkAllowed(c, ctx = {}, command = "") {
  *  metadata, apt-get, npm publish, npm -g, force-push, filter-branch,
  *  CODE_DANGER, interpreter-eval (that is `allowInterpreterEval`). */
 export function modelMayRun(command, ctx, opts = {}) {
+  // v85 `unrestricted`: the machine owner's master switch (tools.unrestricted
+  // / FORGE_UNRESTRICTED=1). Every guard off — block, danger, confirm, the
+  // project boundary, sudo, interpreter eval, all of it. The command is still
+  // classified so the level stays visible in logs; the verdict is always ok.
+  if (opts.unrestricted === true || ctx?.unrestricted === true) {
+    const c = classifyCommand(command, { ...ctx, allowSudo: true, allowNetworkUpload: true, allowInterpreterEval: true })
+    return { ok: true, level: c.level, reason: c.reasons[0], unrestricted: true }
+  }
   const c = classifyCommand(command, { ...ctx, allowSudo: opts.allowSudo, allowNetworkUpload: opts.allowNetworkUpload, allowInterpreterEval: opts.allowInterpreterEval === true || ctx?.allowInterpreterEval === true })
   if (c.level === "block") return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "catastrophic command"}. Refine the command.` }
   if (c.level === "danger") {
@@ -817,6 +825,11 @@ export function modelMayRun(command, ctx, opts = {}) {
 /** Policy: may the USER's typed terminal line run this? (block always refused;
  *  danger/confirm need a TTY y/N or FORGE_ASSUME_YES=1 when piped). */
 export function userMayRun(command, ctx, opts = {}) {
+  // v85: owner master switch — the user's own terminal line has no guards.
+  if (ctx?.unrestricted === true || opts.unrestricted === true) {
+    const c = classifyCommand(command, ctx)
+    return { ok: true, needsConfirm: false, level: c.level, reason: c.reasons[0], unrestricted: true }
+  }
   const c = classifyCommand(command, ctx)
   if (c.level === "block") return { ok: false, reason: `BLOCKED for safety: ${c.reasons[0] ?? "catastrophic command"}`, needsConfirm: false, level: c.level }
   if (c.level === "danger" || c.level === "confirm") {
