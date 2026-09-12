@@ -5,7 +5,7 @@ import { toAnthropicContent } from "./vision.js"
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
  * Two wire protocols:
- *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 18 providers
+ *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 20 providers
  *   "anthropic" POST {baseUrl}/v1/messages       (x-api-key)  — anthropic
  *
  * streamChat()          → SSE streaming: text / reasoning / tool_calls / usage / done events
@@ -14,25 +14,31 @@ import { toAnthropicContent } from "./vision.js"
  * probe()               → connectivity + latency probe (forge doctor)
  */
 export const CATALOG = [
-  { name: "openai",        label: "OpenAI",                   protocol: "openai",    baseUrl: "https://api.openai.com/v1",                               envKey: "OPENAI_API_KEY",     needsKey: true,  models: ["gpt-4o", "gpt-4o-mini", "o3-mini"], contextWindow: 128000,  keyUrl: "https://platform.openai.com/api-keys" },
-  { name: "anthropic",     label: "Anthropic Claude",         protocol: "anthropic", baseUrl: "https://api.anthropic.com",                               envKey: "ANTHROPIC_API_KEY",  needsKey: true,  models: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"], contextWindow: 200000, keyUrl: "https://console.anthropic.com/settings/keys" },
-  { name: "zai",           label: "Z.ai (GLM)",               protocol: "openai",    baseUrl: "https://api.z.ai/api/paas/v4",                            envKey: "ZAI_API_KEY",        needsKey: true,  models: ["glm-4.6", "glm-4.5", "glm-4.5-air"], contextWindow: 128000, keyUrl: "https://z.ai/manage-apikey/apikey-list" },
-  { name: "deepseek",      label: "DeepSeek",                 protocol: "openai",    baseUrl: "https://api.deepseek.com/v1",                             envKey: "DEEPSEEK_API_KEY",   needsKey: true,  models: ["deepseek-chat", "deepseek-reasoner"], contextWindow: 128000, keyUrl: "https://platform.deepseek.com/api_keys" },
-  { name: "groq",          label: "Groq (fastest)",           protocol: "openai",    baseUrl: "https://api.groq.com/openai/v1",                          envKey: "GROQ_API_KEY",       needsKey: true,  models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"], contextWindow: 128000, keyUrl: "https://console.groq.com/keys" },
+  { name: "openai",        label: "OpenAI",                   protocol: "openai",    baseUrl: "https://api.openai.com/v1",                               envKey: "OPENAI_API_KEY",     needsKey: true,  models: ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"], contextWindow: 128000,  keyUrl: "https://platform.openai.com/api-keys" },
+  { name: "anthropic",     label: "Anthropic Claude",         protocol: "anthropic", baseUrl: "https://api.anthropic.com",                               envKey: "ANTHROPIC_API_KEY",  needsKey: true,  models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"], contextWindow: 200000, keyUrl: "https://console.anthropic.com/settings/keys" },
+  { name: "zai",           label: "Z.ai (GLM)",               protocol: "openai",    baseUrl: "https://api.z.ai/api/paas/v4",                            envKey: "ZAI_API_KEY",        needsKey: true,  models: ["glm-5.3-flash", "glm-5.2", "glm-4.6"], contextWindow: 1048576, keyUrl: "https://z.ai/manage-apikey/apikey-list" },
+  { name: "deepseek",      label: "DeepSeek",                 protocol: "openai",    baseUrl: "https://api.deepseek.com/v1",                             envKey: "DEEPSEEK_API_KEY",   needsKey: true,  models: ["deepseek-chat", "deepseek-reasoner"], contextWindow: 1000000, keyUrl: "https://platform.deepseek.com/api_keys" },
+  { name: "groq",          label: "Groq (fastest)",           protocol: "openai",    baseUrl: "https://api.groq.com/openai/v1",                          envKey: "GROQ_API_KEY",       needsKey: true,  models: ["llama-3.3-70b-versatile", "llama-4-scout", "gpt-oss-120b", "llama-3.1-8b-instant"], contextWindow: 128000, keyUrl: "https://console.groq.com/keys" },
   { name: "openrouter",    label: "OpenRouter (400+ models)", protocol: "openai",    baseUrl: "https://openrouter.ai/api/v1",                            envKey: "OPENROUTER_API_KEY", needsKey: true,  models: ["openai/gpt-4o-mini", "anthropic/claude-sonnet-4.5"], contextWindow: 128000, keyUrl: "https://openrouter.ai/keys" },
-  { name: "gemini",        label: "Google Gemini",            protocol: "openai",    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", envKey: "GEMINI_API_KEY",     needsKey: true,  models: ["gemini-2.5-pro", "gemini-2.5-flash"], contextWindow: 1048576, keyUrl: "https://aistudio.google.com/apikey" },
-  { name: "mistral",       label: "Mistral",                  protocol: "openai",    baseUrl: "https://api.mistral.ai/v1",                               envKey: "MISTRAL_API_KEY",    needsKey: true,  models: ["mistral-large-latest", "mistral-small-latest"], contextWindow: 128000, keyUrl: "https://console.mistral.ai/api-keys" },
-  { name: "xai",           label: "xAI Grok",                 protocol: "openai",    baseUrl: "https://api.x.ai/v1",                                     envKey: "XAI_API_KEY",        needsKey: true,  models: ["grok-4", "grok-3-mini"], contextWindow: 131072, keyUrl: "https://console.x.ai" },
+  { name: "gemini",        label: "Google Gemini",            protocol: "openai",    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", envKey: "GEMINI_API_KEY",     needsKey: true,  models: ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"], contextWindow: 1048576, keyUrl: "https://aistudio.google.com/apikey" },
+  { name: "mistral",       label: "Mistral",                  protocol: "openai",    baseUrl: "https://api.mistral.ai/v1",                               envKey: "MISTRAL_API_KEY",    needsKey: true,  models: ["mistral-large-latest", "mistral-small-latest"], contextWindow: 256000, keyUrl: "https://console.mistral.ai/api-keys" },
+  { name: "xai",           label: "xAI Grok",                 protocol: "openai",    baseUrl: "https://api.x.ai/v1",                                     envKey: "XAI_API_KEY",        needsKey: true,  models: ["grok-4.6", "grok-4.5", "grok-3-mini"], contextWindow: 500000, keyUrl: "https://console.x.ai" },
   { name: "together",      label: "Together AI",              protocol: "openai",    baseUrl: "https://api.together.xyz/v1",                             envKey: "TOGETHER_API_KEY",   needsKey: true,  models: ["meta-llama/Llama-3.3-70B-Instruct-Turbo"], contextWindow: 128000, keyUrl: "https://api.together.ai/settings/api-keys" },
-  { name: "cerebras",      label: "Cerebras",                 protocol: "openai",    baseUrl: "https://api.cerebras.ai/v1",                              envKey: "CEREBRAS_API_KEY",   needsKey: true,  models: ["llama-3.3-70b", "llama3.1-8b"], contextWindow: 128000, keyUrl: "https://cloud.cerebras.ai" },
+  { name: "cerebras",      label: "Cerebras",                 protocol: "openai",    baseUrl: "https://api.cerebras.ai/v1",                              envKey: "CEREBRAS_API_KEY",   needsKey: true,  models: ["gpt-oss-120b", "zai-glm-4.7"], contextWindow: 131072, keyUrl: "https://cloud.cerebras.ai" },
   { name: "nvidia",        label: "NVIDIA NIM",               protocol: "openai",    baseUrl: "https://integrate.api.nvidia.com/v1",                     envKey: "NVIDIA_API_KEY",     needsKey: true,  models: ["meta/llama-3.3-70b-instruct"], contextWindow: 128000, keyUrl: "https://build.nvidia.com/settings/api-keys" },
-  { name: "siliconflow",   label: "SiliconFlow",              protocol: "openai",    baseUrl: "https://api.siliconflow.cn/v1",                           envKey: "SILICONFLOW_API_KEY", needsKey: true, models: ["deepseek-ai/DeepSeek-V3"], contextWindow: 128000, keyUrl: "https://cloud.siliconflow.cn/account/ak" },
-  { name: "qwen",          label: "Qwen (DashScope)",         protocol: "openai",    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",       envKey: "QWEN_API_KEY",       needsKey: true,  models: ["qwen-max", "qwen-plus"], contextWindow: 131072, keyUrl: "https://bailian.console.aliyun.com/?apiKey=1" },
-  { name: "github-models", label: "GitHub Models",            protocol: "openai",    baseUrl: "https://models.inference.ai.azure.com",                   envKey: "GITHUB_TOKEN",       needsKey: true,  models: ["gpt-4o", "gpt-4o-mini"], contextWindow: 128000, keyUrl: "https://github.com/settings/tokens" },
+  { name: "siliconflow",   label: "SiliconFlow",              protocol: "openai",    baseUrl: "https://api.siliconflow.cn/v1",                           envKey: "SILICONFLOW_API_KEY", needsKey: true, models: ["deepseek-ai/DeepSeek-V3.2", "Qwen/Qwen3.5-397B-A17B"], contextWindow: 128000, keyUrl: "https://cloud.siliconflow.cn/account/ak" },
+  { name: "qwen",          label: "Qwen (DashScope)",         protocol: "openai",    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",       envKey: "QWEN_API_KEY",       needsKey: true,  models: ["qwen3-max", "qwen-plus"], contextWindow: 131072, keyUrl: "https://bailian.console.aliyun.com/?apiKey=1" },
+  { name: "github-models", label: "GitHub Models",            protocol: "openai",    baseUrl: "https://models.github.ai/inference",                      envKey: "GITHUB_TOKEN",       needsKey: true,  models: ["openai/gpt-4o", "openai/gpt-4o-mini"], contextWindow: 128000, keyUrl: "https://github.com/settings/tokens" },
   { name: "huggingface",   label: "Hugging Face",             protocol: "openai",    baseUrl: "https://router.huggingface.co/v1",                        envKey: "HF_TOKEN",           needsKey: true,  models: ["meta-llama/Llama-3.3-70B-Instruct"], contextWindow: 128000, keyUrl: "https://huggingface.co/settings/tokens" },
   { name: "ollama",        label: "Ollama (local, no key)",   protocol: "openai",    baseUrl: "http://localhost:11434/v1",                               envKey: "",                   needsKey: false, models: ["llama3.2", "qwen2.5-coder"], contextWindow: 128000, keyUrl: "" },
   { name: "custom",        label: "Custom OpenAI-compatible", protocol: "openai",    baseUrl: "",                                                        envKey: "CUSTOM_API_KEY",     needsKey: true,  models: [], contextWindow: 128000, keyUrl: "" },
   { name: "apinex",        label: "APInex (all models)",      protocol: "openai",    baseUrl: "https://api.apinex.bond/v1",                             envKey: "APINEX_API_KEY",     needsKey: true,  models: ["gpt-5.6-luna", "grok-4.6", "claude-sonnet-5", "free/gemini-3.8-flash"], contextWindow: 1048576, keyUrl: "https://apinex.bond" },
+  // v86: two more OpenAI-compatible routers, verified against their own docs.
+  // GonkaRouter — base_url https://api.gonkarouter.io/v1, Bearer key, keys at
+  // the dashboard (gonkarouter.io). UnoRouter — base_url
+  // https://api.unorouter.com/v1, Bearer key, automatic upstream failover.
+  { name: "gonkarouter",   label: "GonkaRouter (Gonka Network)", protocol: "openai", baseUrl: "https://api.gonkarouter.io/v1",                          envKey: "GONKAROUTER_API_KEY", needsKey: true, models: ["deepseek-ai/DeepSeek-V4-Flash-0731", "moonshotai/Kimi-K2.6"], contextWindow: 1000000, keyUrl: "https://gonkarouter.io/dashboard" },
+  { name: "unorouter",     label: "UnoRouter (300+ models)",  protocol: "openai",    baseUrl: "https://api.unorouter.com/v1",                           envKey: "UNOROUTER_API_KEY",  needsKey: true,  models: ["claude-sonnet-5", "deepseek-chat", "gemini-3.5-flash"], contextWindow: 128000, keyUrl: "https://unorouter.com" },
 ]
 
 export function getCatalog(name) {
@@ -84,20 +90,33 @@ export function isFailoverWorthy(e) {
 
 /**
  * Ordered list of usable fallback providers (excluding `activeName`), for
- * automatic failover. Health-tested providers come first, then the rest in
- * config order. Every entry is a runnable provider object from buildProvider().
+ * automatic failover. v86 "auto strategy": any CATALOG provider whose API key
+ * is in the environment AND whose health probe came back green joins the chain
+ * automatically — zero-config failover, but never a blind switch: an env key
+ * alone (CI often sets GITHUB_TOKEN for git auth!) is not consent to send your
+ * conversation there. Run `forge provider test` / `forge doctor --all` once;
+ * after that the provider is a first-class fallback. Tested providers come
+ * first (fastest probed latency first), then the rest in config order.
  */
 export function fallbackChain(config, activeName, { health = {} } = {}) {
-  const names = Object.keys(config?.providers || {}).filter((n) => n && n !== activeName)
+  const names = [...Object.keys(config?.providers || {})]
+  // v86: env-keyed catalog providers join once they have a green probe
+  for (const c of CATALOG) {
+    if (c.envKey && process.env[c.envKey] && health[c.name]?.ok && !names.includes(c.name)) names.push(c.name)
+  }
   const built = []
   const seen = new Set()
   for (const n of names) {
     if (seen.has(n)) continue
+    if (n === activeName) continue
     const p = buildProvider(config, n)
     if (p) { built.push(p); seen.add(n) }
   }
-  // stable partition: tested-ok providers first
-  const tested = built.filter((p) => health[p.name]?.ok)
+  // stable partition: tested-ok providers first, fastest first; the rest keep
+  // config order
+  const tested = built
+    .filter((p) => health[p.name]?.ok)
+    .sort((a, b) => (health[a.name]?.ms ?? Infinity) - (health[b.name]?.ms ?? Infinity))
   const rest = built.filter((p) => !health[p.name]?.ok)
   return [...tested, ...rest]
 }

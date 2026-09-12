@@ -256,7 +256,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         grants: config.tools?.pluginGrants ?? {},
         cwd: process.cwd(),
         startedAt: pluginStartedAt,
-        allowNewPlugins: config.tools?.allowNewPlugins === true,
+        allowNewPlugins: unrestricted || config.tools?.allowNewPlugins === true,
       })
       // v48: learned plugins are playbooks (indexLearnedPlugins / compose),
       // never a live plugin-host spawn. User ~/.forge/tools still load.
@@ -294,6 +294,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // paths stay on explicit consent. assumeYes is NEVER auto-flipped — that
   // would also permit outside-project rm, sudo, metadata, apt-get, npm publish.
   const autonomous = !readonly && config.agent?.autonomous !== false
+  // v85: owner master switch — implies every privileged tools.* flag.
+  const unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
   const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
   const pickedPlugins = selectPlugins(task || "", plugins, { klass })
   const tools = makeToolContext({
@@ -309,13 +311,14 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     runId,
     readOnly: readonly || verifier,
     mode: verifier ? "verifier" : "default",
-    allowOutsideProject: config.tools?.allowOutsideProject === true,
-    allowSudo: config.tools?.allowSudo === true,
-    allowNetworkUpload: config.tools?.allowNetworkUpload === true,
-    allowInterpreterEval: config.tools?.allowInterpreterEval === true || autonomous,
-    assumeYes: config.tools?.assumeYes === true,
+    allowOutsideProject: unrestricted || config.tools?.allowOutsideProject === true,
+    allowSudo: unrestricted || config.tools?.allowSudo === true,
+    allowNetworkUpload: unrestricted || config.tools?.allowNetworkUpload === true,
+    allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true || autonomous,
+    assumeYes: unrestricted || config.tools?.assumeYes === true,
     autonomous,
-    fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
+    unrestricted,
+    fetchPrivateUrls: unrestricted || config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     signal,
@@ -339,10 +342,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       cwd: process.cwd(),
       root: process.cwd(),
       readOnly: readonly,
-      allowSudo: config.tools?.allowSudo === true,
-      allowInterpreterEval: config.tools?.allowInterpreterEval === true || autonomous,
-      assumeYes: config.tools?.assumeYes === true,
+      allowSudo: unrestricted || config.tools?.allowSudo === true,
+      allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true || autonomous,
+      assumeYes: unrestricted || config.tools?.assumeYes === true,
       autonomous,
+      unrestricted,
     },
     config,
     onEvent,

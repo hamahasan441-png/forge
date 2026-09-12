@@ -486,7 +486,7 @@ export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt =
         grants: config.tools?.pluginGrants ?? {},
         cwd,
         startedAt,
-        allowNewPlugins: config.tools?.allowNewPlugins === true,
+        allowNewPlugins: unrestricted || config.tools?.allowNewPlugins === true,
       })
       // v48: learned plugins are playbooks, never a live plugin-host spawn.
       out.plugins = loaded.tools
@@ -530,7 +530,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
   const resolvedSkillsDir = resolveSkillsDir(config.skills?.dir)
   const res = resourceProfile()
-  const assumeYes = config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
+  // v85: owner master switch — implies every privileged tools.* flag and
+  // bypasses both shellguard policy gates (user terminal AND model bash).
+  const unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
+  const assumeYes = unrestricted || config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
   const pluginStartedAt = Date.now()
   // v21.2: plugins + MCP for the interactive loop (same path as runAgent).
   // pluginStartedAt is task-scoped so /agent segments cannot import() a plugin
@@ -555,12 +558,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     memoryPath,
     todoPath: path.join(DEFAULT_DIR, "todo.json"),
     readOnly: false,
-    allowOutsideProject: config.tools?.allowOutsideProject === true,
-    allowSudo: config.tools?.allowSudo === true,
-    allowNetworkUpload: config.tools?.allowNetworkUpload === true,
-    allowInterpreterEval: config.tools?.allowInterpreterEval === true,
+    allowOutsideProject: unrestricted || config.tools?.allowOutsideProject === true,
+    allowSudo: unrestricted || config.tools?.allowSudo === true,
+    allowNetworkUpload: unrestricted || config.tools?.allowNetworkUpload === true,
+    allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true,
     assumeYes,
-    fetchPrivateUrls: config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
+    unrestricted,
+    fetchPrivateUrls: unrestricted || config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     vision: config.tools?.vision !== false,
@@ -583,7 +587,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let chatUIEvent = null // set once the terminal UI exists (declared below)
   const chatIntel = createToolIntel({
     exec: tools.exec,
-    ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: config.tools?.allowSudo === true, allowInterpreterEval: config.tools?.allowInterpreterEval === true, assumeYes },
+    ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: unrestricted || config.tools?.allowSudo === true, allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true, assumeYes, unrestricted },
     config,
     onEvent: (ev) => chatUIEvent?.(ev),
     taskId: "chat",
@@ -704,7 +708,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (!cmd) { warn("usage: !<command> — or just type a Linux command"); return }
     const force = raw.startsWith("!")
     const interactive = process.stdin.isTTY === true
-    const verdict = userMayRun(cmd, { cwd: shellState.cwd, root: process.cwd(), allowInterpreterEval: config.tools?.allowInterpreterEval === true }, { interactive, assumeYes })
+    const verdict = userMayRun(cmd, { cwd: shellState.cwd, root: process.cwd(), allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true, unrestricted }, { interactive, assumeYes, unrestricted })
     if (!verdict.ok) {
       err(verdict.reason)
       noteTerminal(cmd, `BLOCKED for safety: ${verdict.reason}`)
@@ -1575,7 +1579,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           try { command = loadProfile(process.cwd()).scripts?.test || "" } catch { command = "" }
         }
         if (!command) { warn("no test command detected for this project — /verify <command> to run one explicitly"); break }
-        const verdict = userMayRun(command, { cwd: process.cwd(), root: process.cwd(), allowInterpreterEval: config.tools?.allowInterpreterEval === true }, { interactive: !!ui, assumeYes })
+        const verdict = userMayRun(command, { cwd: process.cwd(), root: process.cwd(), allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true, unrestricted }, { interactive: !!ui, assumeYes, unrestricted })
         if (!verdict.ok) { err(verdict.reason); break }
         if (verdict.needsConfirm && !(await confirmPrompt(verdict.reason ?? verdict.level))) { warn("skipped"); break }
         info(`verify: ${bold(command)}`)
@@ -1794,7 +1798,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  effort:     profile=${cyan(config.chat?.profile ?? "auto")} • deep=${deep ? green("on") : "off"} • tools=${chatToolsEnabled() ? green("on") : "off"} • shell=${config.chat?.shellAuto === false ? yellow("! only") : green("auto")}`)
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
-        console.log(`  safety:     writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")} • sudo ${config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")}`)
+        console.log(`  safety:     ${unrestricted ? yellow("UNRESTRICTED — all guards off (tools.unrestricted)") : `writes in-project only${config.tools?.allowOutsideProject ? yellow(" (boundary OFF)") : green("")}`} • sudo ${unrestricted || config.tools?.allowSudo ? yellow("allowed") : green("blocked")} • ssrf guard ${unrestricted || config.tools?.fetchPrivateUrls || process.env.FORGE_ALLOW_PRIVATE_URLS === "1" ? yellow("private allowed") : green("on")}`)
         try {
           const { snapshotKnowledge } = await import("./decisions.js")
           const { knowledgeDockText } = await import("./render.js")

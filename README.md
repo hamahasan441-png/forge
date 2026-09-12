@@ -3,7 +3,7 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 84.0.0.** One folder: `forge/`.
+**Version 86.0.0.** One folder: `forge/`.
 
 ## Layout
 
@@ -44,6 +44,9 @@ forge doctor
 
 In chat: Linux commands run in the project folder. Sentences go to the model.
 `! cmd` always executes. Risky commands ask y/N. Catastrophic ones are blocked.
+v85: `tools.unrestricted` (default ON, owner-only) removes all of that — every
+command runs, no prompts, no block list. `forge config set tools.unrestricted
+false` brings the guards back.
 
 ```
 /status   /profile [p]   /deep   /shell off

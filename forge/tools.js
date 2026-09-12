@@ -577,6 +577,7 @@ export function makeToolContext(opts = {}) {
     allowNetworkUpload = false, // v21.1: curl -d / wget --post-file / scp … from the model
     allowInterpreterEval = false, // v21.2: node -e / python -c / perl -e …
     autonomous = false, // v25: in-project git danger without assumeYes
+    unrestricted = false, // v85: owner master switch — every shell guard off
     fetchPrivateUrls = process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
     delegateTimeoutSec = AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates = 2,
@@ -604,7 +605,7 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     mode,
-    allowOutsideProject, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, fetchPrivateUrls,
+    allowOutsideProject, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,
@@ -695,7 +696,7 @@ async function runBash(ctx, command, timeoutSec) {
       return `BLOCKED: write tools are disabled in this read-only agent — bash command "${String(command).slice(0, 80)}" is a filesystem mutation. Read-only workers may run approved verification commands (test/build/lint) but not arbitrary mutations.`
     }
   }
-  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload, allowInterpreterEval: ctx.allowInterpreterEval, autonomous: ctx.autonomous === true })
+  const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload, allowInterpreterEval: ctx.allowInterpreterEval, autonomous: ctx.autonomous === true, unrestricted: ctx.unrestricted === true })
   if (!verdict.ok) return verdict.reason
   const t = Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
   if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"
