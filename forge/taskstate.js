@@ -33,27 +33,63 @@ const MAX_ERRORS = 100
 const MAX_DECISIONS = 200
 const MAX_FILES = 500
 
-/** Lifecycle states. */
+/**
+ * Lifecycle states.
+ *
+ * v91 (∞ CORE): the spec's unified lifecycle names more phases than v90 did.
+ * The original 12 states are untouched (compatibility), the new ones are
+ * added alongside and are legal transitions from/into the states they
+ * naturally sit between:
+ *
+ *   CREATED          task accepted, nothing done yet (before UNDERSTANDING)
+ *   UNDERSTANDING    reading the objective, forming requirements/constraints
+ *   READY            plan + DAG exist, nothing running yet
+ *   REVIEWING        adversarial/final review in progress (pre-completion)
+ *   REPLANNING       evidence invalidated the plan; planner is rebuilding
+ *   BLOCKED          a dependency outside Forge's control blocks progress
+ *   WAITING_FOR_AGENT  waiting for a sub-agent/worker to settle
+ *   WAITING_FOR_USER   a genuine human decision is pending (§40)
+ *   PAUSED           the user paused the task; resumable, not a failure
+ *
+ * WAITING remains the durable "cannot continue" state; WAITING_FOR_USER is
+ * the specific, resumable form of it for the decision engine.
+ */
 export const TASK_STATUS = {
   IDLE: "IDLE",
+  CREATED: "CREATED",
+  UNDERSTANDING: "UNDERSTANDING",
   PLANNING: "PLANNING",
   DISCOVERING: "DISCOVERING",
+  READY: "READY",
   EXECUTING: "EXECUTING",
   VERIFYING: "VERIFYING",
+  REVIEWING: "REVIEWING",
+  REPLANNING: "REPLANNING",
   REPAIRING: "REPAIRING",
   CHECKPOINTING: "CHECKPOINTING",
   WAITING: "WAITING",
+  WAITING_FOR_AGENT: "WAITING_FOR_AGENT",
+  WAITING_FOR_USER: "WAITING_FOR_USER",
+  BLOCKED: "BLOCKED",
+  PAUSED: "PAUSED",
   RECOVERING: "RECOVERING",
   COMPLETED: "COMPLETED",
   FAILED: "FAILED",
   CANCELLED: "CANCELLED",
 }
 
+/** v91 phase families — used by the TUI and the decision engine. */
+export const WAITING_STATUSES = new Set([
+  TASK_STATUS.WAITING, TASK_STATUS.WAITING_FOR_AGENT, TASK_STATUS.WAITING_FOR_USER, TASK_STATUS.BLOCKED, TASK_STATUS.PAUSED,
+])
+
 /** Terminal states — once here a task never moves. */
 export const TERMINAL = new Set([TASK_STATUS.COMPLETED, TASK_STATUS.FAILED, TASK_STATUS.CANCELLED])
 
-/** Final statuses that must be preserved verbatim (directive P0). */
-export const FINAL_STATUSES = new Set([TASK_STATUS.COMPLETED, TASK_STATUS.FAILED, TASK_STATUS.WAITING, TASK_STATUS.CANCELLED])
+/** Final statuses that must be preserved verbatim (directive P0).
+ *  v91: WAITING_FOR_USER joins — a pending human decision is never degraded
+ *  to FAILED, and PAUSED is preserved the same way. */
+export const FINAL_STATUSES = new Set([TASK_STATUS.COMPLETED, TASK_STATUS.FAILED, TASK_STATUS.WAITING, TASK_STATUS.WAITING_FOR_USER, TASK_STATUS.PAUSED, TASK_STATUS.CANCELLED])
 
 /** Durability classes (P1). */
 export const DURABILITY = {
@@ -66,6 +102,10 @@ export const DURABILITY = {
 const CRITICAL_EVENTS = new Set([
   TASK_STATUS.CHECKPOINTING,
   TASK_STATUS.WAITING,
+  TASK_STATUS.WAITING_FOR_USER,
+  TASK_STATUS.WAITING_FOR_AGENT,
+  TASK_STATUS.BLOCKED,
+  TASK_STATUS.PAUSED,
   TASK_STATUS.RECOVERING,
   TASK_STATUS.COMPLETED,
   TASK_STATUS.FAILED,
@@ -73,14 +113,23 @@ const CRITICAL_EVENTS = new Set([
 ])
 
 export const TRANSITIONS = {
-  IDLE: new Set(["PLANNING", "DISCOVERING", "EXECUTING", "WAITING", "CANCELLED", "FAILED"]),
-  PLANNING: new Set(["DISCOVERING", "EXECUTING", "WAITING", "FAILED", "CANCELLED", "PLANNING"]),
-  DISCOVERING: new Set(["PLANNING", "EXECUTING", "VERIFYING", "WAITING", "FAILED", "CANCELLED", "DISCOVERING"]),
-  EXECUTING: new Set(["VERIFYING", "REPAIRING", "CHECKPOINTING", "WAITING", "RECOVERING", "DISCOVERING", "PLANNING", "COMPLETED", "FAILED", "CANCELLED", "EXECUTING"]),
-  VERIFYING: new Set(["EXECUTING", "REPAIRING", "CHECKPOINTING", "COMPLETED", "FAILED", "WAITING", "CANCELLED", "VERIFYING"]),
-  REPAIRING: new Set(["EXECUTING", "VERIFYING", "CHECKPOINTING", "FAILED", "WAITING", "CANCELLED", "REPAIRING"]),
-  CHECKPOINTING: new Set(["EXECUTING", "VERIFYING", "REPAIRING", "WAITING", "RECOVERING", "COMPLETED", "FAILED", "CANCELLED"]),
+  IDLE: new Set(["CREATED", "PLANNING", "DISCOVERING", "EXECUTING", "WAITING", "CANCELLED", "FAILED"]),
+  CREATED: new Set(["UNDERSTANDING", "PLANNING", "DISCOVERING", "EXECUTING", "WAITING", "CANCELLED", "FAILED"]),
+  UNDERSTANDING: new Set(["DISCOVERING", "PLANNING", "EXECUTING", "WAITING", "BLOCKED", "FAILED", "CANCELLED", "UNDERSTANDING"]),
+  PLANNING: new Set(["DISCOVERING", "READY", "EXECUTING", "REPLANNING", "WAITING", "WAITING_FOR_USER", "FAILED", "CANCELLED", "PLANNING"]),
+  DISCOVERING: new Set(["PLANNING", "READY", "EXECUTING", "VERIFYING", "WAITING", "FAILED", "CANCELLED", "DISCOVERING"]),
+  READY: new Set(["EXECUTING", "DISCOVERING", "PLANNING", "REPLANNING", "WAITING", "WAITING_FOR_USER", "PAUSED", "CANCELLED", "FAILED"]),
+  EXECUTING: new Set(["VERIFYING", "REVIEWING", "REPLANNING", "REPAIRING", "CHECKPOINTING", "WAITING", "WAITING_FOR_AGENT", "WAITING_FOR_USER", "BLOCKED", "PAUSED", "RECOVERING", "DISCOVERING", "PLANNING", "COMPLETED", "FAILED", "CANCELLED", "EXECUTING"]),
+  VERIFYING: new Set(["EXECUTING", "REVIEWING", "REPLANNING", "REPAIRING", "CHECKPOINTING", "COMPLETED", "FAILED", "WAITING", "WAITING_FOR_USER", "CANCELLED", "VERIFYING"]),
+  REVIEWING: new Set(["COMPLETED", "EXECUTING", "VERIFYING", "REPLANNING", "REPAIRING", "CHECKPOINTING", "FAILED", "WAITING", "CANCELLED"]),
+  REPLANNING: new Set(["PLANNING", "DISCOVERING", "READY", "EXECUTING", "FAILED", "WAITING", "CANCELLED", "REPLANNING"]),
+  REPAIRING: new Set(["EXECUTING", "VERIFYING", "CHECKPOINTING", "REPLANNING", "FAILED", "WAITING", "CANCELLED", "REPAIRING"]),
+  CHECKPOINTING: new Set(["EXECUTING", "VERIFYING", "REVIEWING", "REPAIRING", "WAITING", "RECOVERING", "COMPLETED", "FAILED", "CANCELLED"]),
   WAITING: new Set(["EXECUTING", "PLANNING", "DISCOVERING", "RECOVERING", "CANCELLED", "FAILED", "COMPLETED", "WAITING"]),
+  WAITING_FOR_AGENT: new Set(["EXECUTING", "VERIFYING", "REPLANNING", "REPAIRING", "WAITING", "CANCELLED", "FAILED", "COMPLETED"]),
+  WAITING_FOR_USER: new Set(["EXECUTING", "PLANNING", "DISCOVERING", "VERIFYING", "REPLANNING", "REVIEWING", "CANCELLED", "FAILED", "COMPLETED", "WAITING"]),
+  BLOCKED: new Set(["EXECUTING", "PLANNING", "REPLANNING", "WAITING", "CANCELLED", "FAILED", "COMPLETED"]),
+  PAUSED: new Set(["EXECUTING", "PLANNING", "DISCOVERING", "VERIFYING", "REPLANNING", "CANCELLED", "FAILED"]),
   RECOVERING: new Set(["EXECUTING", "PLANNING", "DISCOVERING", "WAITING", "FAILED", "CANCELLED", "RECOVERING"]),
   COMPLETED: new Set([]),
   FAILED: new Set([]),
@@ -170,9 +219,15 @@ export function blankTask({ taskId, runId = null, objective = "", cwd = process.
  */
 export function finalizeStatus(current, desired) {
   if (!FINAL_STATUSES.has(desired)) return current
-  // WAITING must be preserved, never converted to FAILED
+  // WAITING (and its v91 resumable forms) must be preserved, never converted to FAILED
   if (desired === TASK_STATUS.WAITING) return TASK_STATUS.WAITING
+  if (desired === TASK_STATUS.WAITING_FOR_USER) return TASK_STATUS.WAITING_FOR_USER
+  if (desired === TASK_STATUS.PAUSED) return TASK_STATUS.PAUSED
   if (desired === TASK_STATUS.COMPLETED) return TASK_STATUS.COMPLETED
+  // P0 directive extended (v91): a task parked in a waiting state (WAITING,
+  // WAITING_FOR_USER, PAUSED, BLOCKED) is never silently converted to FAILED —
+  // the user must explicitly cancel it. Everything else finalizes normally.
+  if (desired === TASK_STATUS.FAILED && WAITING_STATUSES.has(current)) return current
   if (desired === TASK_STATUS.FAILED) return TASK_STATUS.FAILED
   if (desired === TASK_STATUS.CANCELLED) return TASK_STATUS.CANCELLED
   return current
@@ -243,7 +298,7 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
         return false
       }
       rec.status = to
-      if (to === TASK_STATUS.WAITING) rec.waiting_reason = reason || null
+      if (to === TASK_STATUS.WAITING || WAITING_STATUSES.has(to)) rec.waiting_reason = reason || null
       else rec.waiting_reason = null
       push(rec.decisions, { at: Date.now(), kind: "state", detail: `${from} → ${to}${reason ? `: ${String(reason).slice(0, 160)}` : ""}` }, MAX_DECISIONS)
       if (rec.started_at == null && to !== TASK_STATUS.IDLE) rec.started_at = Date.now()
@@ -266,7 +321,7 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
       if (final === rec.status) return true
       if (TERMINAL.has(rec.status)) return false
       rec.status = final
-      if (final === TASK_STATUS.WAITING) rec.waiting_reason = reason || rec.waiting_reason || "explicit finalization"
+      if (WAITING_STATUSES.has(final)) rec.waiting_reason = reason || rec.waiting_reason || "explicit finalization"
       else rec.waiting_reason = null
       push(rec.decisions, { at: Date.now(), kind: "finalize", detail: `finalized → ${final}${reason ? `: ${String(reason).slice(0, 160)}` : ""}` }, MAX_DECISIONS)
       if (TERMINAL.has(final)) rec.ended_at = Date.now()

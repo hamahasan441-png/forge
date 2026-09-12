@@ -58,12 +58,17 @@ import { createTerminal } from "./terminal.js"
 import { createUIStore, parseCheckOutput } from "./uistate.js"
 import { createAgentView } from "./agentview.js"
 import { createMarkdownStream } from "./markdown.js"
-import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, renderOmegaPanel, renderTaskPanel, renderOptions, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify } from "./render.js"
+import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, renderOmegaPanel, renderTaskPanel, renderOptions, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify, renderDagView, renderCommView, renderResourceView } from "./render.js"
 import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
 import { unifiedDiff } from "./textdiff.js"
 import { interruptedRuns, verifyRun, markRun, listRuns, resolveRunId } from "./runlog.js"
+// v91 ∞ CORE introspection commands
+import { listTasks } from "./taskstate.js"
+import { busPath } from "./bus.js"
+import { loadCrewPerf } from "./crewroute.js"
+import { roleCatalog } from "./agentmanager.js"
+import { loadAskings, formatDecisionPanel } from "./decisionengine.js"
 import { memoryStats, memoryEntries } from "./memory.js"
-import { formatObjectiveEvent } from "./objective.js"
 
 /** Command palette — one source of truth for /help, Tab completion and "did you mean". */
 export const COMMANDS = [
@@ -75,11 +80,13 @@ export const COMMANDS = [
   ["plan", "<task>", "plan first (read-only), confirm, then execute"],
   ["tasks", "", "recent agent runs — interrupted ones are flagged"],
   ["agents", "[n]", "sub-agents of the current/last run (/agent NN for one)"],
-  ["report", "[id|list]", "final report of the last autonomous run (analysis → … → next steps)"],
-  ["self-review", "", "deterministic static review: duplicates, dead code, cycles, hotspots, security"],
-  ["self-upgrade", "--plan|--apply", "evidence → reversible self-upgrade proposals (never rewrites forge's source)"],
-  ["rollback", "[id]", "undo the last self-upgrade from its recorded inverse (forge undo = files)"],
-  ["docs", "[--base ref]", "docs & git intelligence: breaking changes, README/CHANGELOG/API deltas, commit message"],
+  ["dag", "", "dependency graph of the latest task (∞ CORE)"],
+  ["crew", "", "crew roles + measured per-role model performance (∞ CORE)"],
+  ["comm", "", "agent-to-agent communication log (∞ CORE)"],
+  ["resources", "", "resource pressure: RAM, workers, tokens, fuses (∞ CORE)"],
+  ["decision", "", "pending human decisions (WAITING_FOR_USER) (∞ CORE)"],
+  ["log", "", "run journal entries for this directory"],
+  ["diagnose", "", "classify the latest task error (∞ CORE)"],
   ["checkpoints", "", "file checkpoints for this directory (newest first)"],
   ["diff", "[file]", "what changed this session, as a unified diff"],
   ["verify", "[command]", "run the project's test command (or yours) — shows exactly what ran"],
@@ -133,17 +140,14 @@ ${bold("modes")}
 ${bold("task & recovery")}
   /status               session + context + safety snapshot
   /tasks                recent agent runs — interrupted ones are flagged
-  /report [id|list]     final report: analysis, findings, plan, progress, verification, files, bugs, perf, remaining, next
-  /self-review          deterministic static review (duplicates, dead exports, cycles, hotspots, security, TODOs)
-  /self-upgrade [f]     --plan (default) or --apply; every change has a recorded inverse
-  /rollback [id]        undo the last self-upgrade (/undo --run = roll back files)
-  /docs [ref]           docs & git intelligence for the current diff (breaking changes + commit message)
   /agents [n]           sub-agents of the current/last run (/agent NN for one)
-  /agent crew [class]   the orchestration roster for a class (who may write: exactly one)
-  /agent self-review    static review of this project (same tree ⇒ same findings)
-  /agent self-upgrade --plan | --apply   reversible self-upgrade proposals
-  /agent rollback       undo the last self-upgrade
-  /agent report [id]    the final report of the last autonomous run
+  /dag                  dependency graph of the latest task (∞ CORE)
+  /crew                 crew roles + measured per-role model performance
+  /comm                 agent-to-agent communication log (∞ CORE)
+  /resources            resource pressure: RAM, workers, tokens, fuses
+  /decision             pending human decisions (task is WAITING_FOR_USER)
+  /log                  run journal entries for this directory
+  /diagnose             classify the latest task error
   /checkpoints          file checkpoints for this directory (newest first)
   /diff [file]          what changed this session, as a unified diff
   /verify [command]     run the project's test command (or yours) — shows exactly what ran
@@ -460,20 +464,6 @@ function metaEventPrinter(agentPrinter) {
       case "RECOVERY_COMPLETED":
         console.log(dim(`  ⤺ recovery: ${ev.recommended}`))
         break
-      // v91 ULTIMATE: the objective engine's own progress line. One row per
-      // phase change, so a long run shows where it is instead of only how many
-      // steps it burned. Wording lives in objective.formatObjectiveEvent (shared
-      // with the piped CLI printer) so it cannot drift between the two.
-      case "OBJECTIVE_STARTED":
-      case "OBJECTIVE_PHASE":
-      case "LOOP_DETECTED":
-      case "CONTEXT_COMPRESSION_REQUESTED":
-      case "OBJECTIVE_VERDICT":
-      case "FINAL_REPORT": {
-        const line = formatObjectiveEvent(ev)
-        if (line) console.log(line.tone === "warn" ? yellow(`  ${line.text}`) : line.tone === "ok" ? green(`  ${line.text}`) : dim(`  ${line.text}`))
-        break
-      }
       case "TASK_COMPLETED":
         console.log(green(`  ✓ task completed after ${ev.segment} segment(s)`))
         break
@@ -1463,8 +1453,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     try {
       if (useMeta) {
         // v21 autonomous lifecycle through the meta controller.
-        const { runMeta } = await import("./meta.js")
-        const m = await runMeta({ config, provider: p, task, onEvent, signal: abort.signal, deep: eff.deep, resumeTaskId, pluginStartedAt })
+        // v91: entered through the ∞ Core (bus, crew routing, decisions,
+        // episodes, world model — one coherent engineering system).
+        const { createForgeCore } = await import("./core.js")
+        const core = createForgeCore({ config, provider: p, onEvent, signal: abort.signal })
+        const m = await core.run(task, { deep: eff.deep, resumeTaskId, pluginStartedAt })
         // adapt the task result to the shape the UI/result renderer expects.
         res = {
           text: m.text || `Task ${m.status.toLowerCase()}.`,
@@ -1573,6 +1566,94 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           break
         }
         outLines(renderWorkers(workers, termWidth(), o ?? (await import("./render.js")).renderOptions({})))
+        break
+      }
+      // ── v91 ∞ CORE views (§63-69) ────────────────────────────────────────
+      case "dag": {
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        const tasks = listTasks({ cwd: process.cwd(), max: 1 })
+        const rec = arg ? null : tasks[0]
+        const dag = rec?.dag ?? null
+        if (!dag) { info("no DAG recorded yet — DAGs are built by `forge agent --auto` (or /agent) tasks with a plan"); break }
+        outLines(renderDagView(dag, termWidth(), ro))
+        break
+      }
+      case "comm": {
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        const tasks = listTasks({ cwd: process.cwd(), max: 5 })
+        let msgs = []
+        for (const t of tasks) {
+          try {
+            const text = fs.readFileSync(busPath(t.task_id), "utf8")
+            for (const line of text.split("\n")) {
+              if (!line.trim()) continue
+              try { msgs.push(JSON.parse(line)) } catch { }
+            }
+          } catch { }
+        }
+        msgs = msgs.filter((m) => m.message_type !== "PROGRESS").slice(-30)
+        outLines(renderCommView(msgs, termWidth(), ro))
+        break
+      }
+      case "crew": {
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        const rows = [bold("CREW") + dim("  roles available to the planner (read-only except coder)")]
+        for (const r of roleCatalog()) rows.push(`  ${padRight(r.role, 22)} ${r.readOnly ? dim("read-only") : "mutating"}${r.dynamic ? dim("  (dynamic)") : ""}`)
+        const perf = loadCrewPerf(process.cwd())
+        const entries = Object.entries(perf).filter(([, e]) => (e?.runs ?? 0) > 0).slice(0, 12)
+        if (entries.length) {
+          rows.push("")
+          rows.push(dim("  measured performance (task-class | role | model):"))
+          for (const [k, e] of entries) {
+            const okPct = Math.round(((e.ok ?? 0) + 1) / ((e.runs ?? 0) + 2) * 100)
+            rows.push(`  ${padRight(k, 52)} ${String(e.runs)} runs · ~${okPct}% success`)
+          }
+        }
+        outLines(rows)
+        break
+      }
+      case "resources": {
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        const t = listTasks({ cwd: process.cwd(), max: 1 })[0]
+        const prof = resourceProfile()
+        const ru = t?.resource_usage ?? {}
+        outLines(renderResourceView({
+          freeMB: prof.freeMB, totalMB: prof.totalMB, diskFreeMB: null,
+          workers: 0, maxWorkers: prof.maxWorkers ?? null, peakWorkers: ru.workers ?? 0,
+          tokensIn: ru.tokens_in ?? 0, tokensOut: ru.tokens_out ?? 0, tokenBudget: prof.tokenBudget ?? 2_000_000,
+          modelCalls: null, toolCalls: ru.tool_calls ?? 0, lastLatencyMs: null,
+          elapsedMs: t && t.started_at ? Date.now() - t.started_at : 0,
+          failures: (t?.errors ?? []).length, recoveries: null, checkpoints: (t?.checkpoints ?? []).length,
+          segments: ru.segments ?? 0,
+        }, termWidth(), ro))
+        break
+      }
+      case "decision": {
+        const ro = o ?? (await import("./render.js")).renderOptions({})
+        const items = loadAskings(process.cwd())
+        const pending = items.filter((d) => d.status === "PENDING")
+        if (!items.length) { info("no decisions asked yet — forge asks only when a genuine decision is required"); break }
+        if (!pending.length) {
+          const last = items[items.length - 1]
+          out(dim(`  no pending decisions · last: ${last.title || last.key} → ${last.answer ?? last.status}`))
+          break
+        }
+        for (const d of pending.slice(-3)) outLines(formatDecisionPanel(d, { width: Math.min(64, termWidth() - 2) }))
+        out(dim("  answer in the running forge session (the task is WAITING_FOR_USER)"))
+        break
+      }
+      case "log": {
+        const runs = listRuns({ cwd: process.cwd(), max: 15 })
+        if (!runs.length) { info("no run journal entries yet"); break }
+        for (const r of runs) out(`  ${padRight(shortRun(r.runId), 9)} ${padRight(r.status ?? "?", 12)} ${dim(r.task ?? "")}`)
+        break
+      }
+      case "diagnose": {
+        const t = listTasks({ cwd: process.cwd(), max: 1 })[0]
+        const errs = t?.errors ?? []
+        if (!errs.length) { info("no recorded errors in the latest task — nothing to diagnose"); break }
+        const last = errs[errs.length - 1]
+        outLines([bold("DIAGNOSE") + dim("  latest task error, classified"), `  code: ${last.code}`, last.detail ? `  detail: ${last.detail}` : "", dim(`  at: ${new Date(last.at).toLocaleTimeString()}`)])
         break
       }
       case "checkpoints": {
@@ -2372,86 +2453,6 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(JSON.stringify(safe, null, 2))
         break
       }
-      // ---- v91 ULTIMATE: orchestration, self-upgrade, report, docs ----------
-      case "crew": {
-        const { rosterFor, formatRoster, singleWriterOk, approvalRequired } = await import("./orchestra.js")
-        const klass = (arg || "LARGE").toUpperCase()
-        const crewRows = rosterFor(klass)
-        const sw = singleWriterOk(crewRows)
-        outLines([
-          bold("CREW") + dim(`  class ${klass} • ${crewRows.length} role(s) • approval ${approvalRequired(klass) ? "required" : "not required"}`),
-          ...formatRoster(crewRows).split("\n"),
-          sw.ok ? dim(`  single writer: ${crewRows.find((r) => r.writer).label} — every other role is dispatched read-only`) : red(`  WRITER INVARIANT BROKEN: ${sw.writers.join(", ")}`),
-        ])
-        break
-      }
-      case "self-review": {
-        const { selfReview, formatSelfReview } = await import("./selfup.js")
-        const r = selfReview({ cwd: process.cwd(), maxFindings: 200 })
-        outLines([
-          bold("SELF-REVIEW") + dim(`  ${r.files} file(s), ${r.lines} lines, ${(r.bytes / 1024).toFixed(0)} KB`),
-          ...formatSelfReview(r, { limit: 20 }).split("\n"),
-          dim(`  ${r.duplicates} duplicated block(s) • ${r.cycles.length} import cycle(s) • proposals: /self-upgrade --plan`),
-        ])
-        break
-      }
-      case "self-upgrade": {
-        const { selfReview, upgradePlan, applyUpgrades, formatUpgradePlan, listUpgrades } = await import("./selfup.js")
-        const cwd = process.cwd()
-        const review = selfReview({ cwd, maxFindings: 200 })
-        const plan = upgradePlan({ cwd, review, config })
-        const applied = listUpgrades(cwd).applied.map((a) => a.id)
-        const doApply = /--apply\b/.test(arg)
-        const dryRun = /--dry-run\b/.test(arg)
-        const only = (arg.match(/--only\s+([^\s]+)/) || [])[1]
-        outLines([bold(doApply ? (dryRun ? "SELF-UPGRADE (dry run)" : "SELF-UPGRADE (apply)") : "SELF-UPGRADE (plan)"), ...formatUpgradePlan(plan, { applied }).split("\n")])
-        if (!doApply) { out(dim("  apply: /self-upgrade --apply   undo: /rollback")); break }
-        const res = applyUpgrades({ cwd, plan, only: only ? only.split(",").filter(Boolean) : null, dryRun })
-        outLines(res.results.map((r) => r.skipped ? yellow(`  · ${r.id} skipped — ${r.skipped}`) : r.error ? red(`  ✗ ${r.id} — ${r.error}`) : green(`  ✓ ${r.id}${r.dryRun ? " (dry run)" : ""}`)))
-        out(dim(`  manifest: ${res.manifest}`))
-        break
-      }
-      case "rollback": {
-        const { rollbackUpgrades } = await import("./selfup.js")
-        const res = rollbackUpgrades({ cwd: process.cwd(), id: arg.trim() || null })
-        if (!res.undone.length) { warn("nothing to roll back — no applied self-upgrade on record (/undo --run rolls back FILES)"); break }
-        outLines(res.undone.map((u) => u.ok ? green(`  ✓ rolled back ${u.id} — ${u.restored || "ok"}`) : red(`  ✗ ${u.id} — ${u.error}`)))
-        out(dim(`  ${res.remaining} applied upgrade(s) remain`))
-        break
-      }
-      case "report": {
-        const { latestReport, loadReport, listReports, formatReport } = await import("./report.js")
-        const cwd = process.cwd()
-        if (arg.trim() === "list") {
-          const rows = listReports(cwd)
-          if (!rows.length) { warn("no reports yet — run an autonomous task first (/agent <task>)"); break }
-          outLines([bold("REPORTS") + dim("  (newest first)"), ...rows.map((r) => `  ${padRight(String(r.id), 22)} ${padRight(String(r.status), 10)} ${padRight(r.pct + "%", 5)} ${r.gateOk ? green("gate ok") : yellow("gate open")}  ${dim(String(r.objective || "").slice(0, 48))}`)])
-          break
-        }
-        const rep = arg.trim() ? loadReport(arg.trim(), cwd) : latestReport(cwd)
-        if (!rep) { warn("no report found — run an autonomous task first (/agent <task>)"); break }
-        outLines(formatReport(rep, { markdown: false }).split("\n"))
-        break
-      }
-      case "docs": {
-        const { parseUnifiedDiff, detectBreakingChanges, docPlan, commitMessage, formatDocPlan } = await import("./docsintel.js")
-        const cwd = process.cwd()
-        const base = arg.trim() || "HEAD"
-        const ctx = makeToolContext({ cwd, root: cwd, readOnly: true, timeoutSec: 20, maxToolOutput: 400_000, signal: null, skillsDir: null })
-        const { execTool } = await import("./tools.js")
-        const diffText = String(await execTool(ctx, "git_diff", { base, context: 3, max_lines: 4000 }) ?? "")
-        if (/^(ERROR|BLOCKED|not a git)/i.test(diffText)) { err(diffText.split("\n")[0]); break }
-        const parsed = parseUnifiedDiff(diffText)
-        const breaking = detectBreakingChanges("", { diffParsed: parsed })
-        const plan = docPlan({ diffParsed: parsed, breaking, repoFiles: parsed.files.map((f) => f.path), files: parsed.files.map((f) => f.path) })
-        const commit = commitMessage({ objective: "update", diffParsed: parsed, breaking, files: parsed.files.map((f) => f.path) })
-        outLines([
-          bold("DOCS & GIT") + dim(`  ${parsed.files.length} file(s) +${parsed.insertions}/-${parsed.deletions} • base ${base}`),
-          ...(breaking.length ? [red(`  ${breaking.length} BREAKING:`), ...breaking.map((b) => `    ! ${b.kind} ${b.symbol || ""} ${dim(`(${b.file})`)} — ${b.why}`)] : [dim("  no breaking changes detected")]),
-          ...formatDocPlan(plan, { commit }).split("\n"),
-        ])
-        break
-      }
       case "normal":
       case "chat": {
         setMode("normal")
@@ -2465,13 +2466,6 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           break
         }
         if (/^\d+$/.test(arg)) { await handleCommand(`/agents ${arg}`); break } // /agent NN → worker detail
-        // v91 ULTIMATE: /agent <subcommand> — the orchestration surface. The
-        // words below are not tasks; anything else still runs as a task.
-        {
-          const [sub, ...subRest] = arg.split(/\s+/)
-          const route = { "self-review": "self-review", "self-upgrade": "self-upgrade", rollback: "rollback", report: "report", docs: "docs", crew: "crew" }[sub]
-          if (route) { await handleCommand(`/${route}${subRest.length ? " " + subRest.join(" ") : ""}`); break }
-        }
         await runAgentTask(arg)
         break
       }

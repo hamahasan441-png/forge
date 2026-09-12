@@ -98,6 +98,15 @@ export function createResourceManager({ config = {}, cwd = process.cwd(), profil
     slowStreak: 0,
     repoSizeFiles: 0,
     adaptations: [],
+    // v91 §4/§57 — the full Resource-Aware Execution Controller metric set.
+    // Fuses derived from these trigger CHECKPOINT → RECOVER/REPLAN, never a
+    // false completion.
+    modelCalls: 0,
+    failures: 0,
+    recoveries: 0,
+    checkpoints: 0,
+    recoveryCostMs: 0,
+    peakWorkers: 0,
   }
 
   const sample = () => {
@@ -121,7 +130,11 @@ export function createResourceManager({ config = {}, cwd = process.cwd(), profil
     if (ev.tokensIn) state.tokensIn += ev.tokensIn
     if (ev.tokensOut) state.tokensOut += ev.tokensOut
     if (ev.toolCalls) state.toolCalls += ev.toolCalls
-    if (ev.workers != null) state.workers = ev.workers
+    if (ev.modelCalls) state.modelCalls += ev.modelCalls
+    if (ev.workers != null) {
+      state.workers = ev.workers
+      state.peakWorkers = Math.max(state.peakWorkers, ev.workers)
+    }
     if (ev.latencyMs != null) {
       state.lastLatencyMs = ev.latencyMs
       // a "slow" response is >20s; three in a row is a slow-provider signal
@@ -130,7 +143,34 @@ export function createResourceManager({ config = {}, cwd = process.cwd(), profil
     }
     if (ev.repoSizeFiles != null) state.repoSizeFiles = ev.repoSizeFiles
     if (ev.segment) state.segments++
+    if (ev.failure) state.failures++
+    if (ev.failures) state.failures += Math.max(0, Number(ev.failures) || 0)
+    if (ev.recovery) { state.recoveries++; state.recoveryCostMs += Math.max(0, Number(ev.recoveryCostMs) || 0) }
+    if (ev.checkpoint) state.checkpoints++
     return evaluate()
+  }
+
+  /**
+   * v91 §4 — safety-fuse evaluation. A fuse NEVER reports completion; it
+   * returns the recovery action the controller must take (checkpoint →
+   * persist → compact → reduce → resume, or replan).
+   */
+  const fuses = () => {
+    const elapsed = Date.now() - state.startedAt
+    const failureRate = state.modelCalls + state.toolCalls > 0
+      ? state.failures / Math.max(1, state.modelCalls + state.toolCalls)
+      : 0
+    const out = []
+    if (failureRate > 0.5 && state.failures >= 6) {
+      out.push({ fuse: "failure_rate", value: Math.round(failureRate * 100) + "%", action: "replan", why: "majority of operations failing — strategy is wrong" })
+    }
+    if (state.recoveries >= 5) {
+      out.push({ fuse: "recovery_loop", value: state.recoveries, action: "replan", why: "recovered 5+ times — the plan keeps breaking" })
+    }
+    if (elapsed > 4 * 3600 * 1000) {
+      out.push({ fuse: "wall_clock", value: "4h", action: "checkpoint_and_wait", why: "very long task — checkpoint and wait for resources/user" })
+    }
+    return out
   }
 
   /**
@@ -213,13 +253,20 @@ export function createResourceManager({ config = {}, cwd = process.cwd(), profil
     tokensOut: state.tokensOut,
     tokenBudget: state.tokenBudget,
     toolCalls: state.toolCalls,
+    modelCalls: state.modelCalls,
     workers: state.workers,
+    peakWorkers: state.peakWorkers,
     maxWorkers: state.maxWorkers,
     segments: state.segments,
+    failures: state.failures,
+    recoveries: state.recoveries,
+    recoveryCostMs: state.recoveryCostMs,
+    checkpoints: state.checkpoints,
     elapsedMs: Date.now() - state.startedAt,
     lastLatencyMs: state.lastLatencyMs,
     slowStreak: state.slowStreak,
     repoSizeFiles: state.repoSizeFiles,
+    fuses: fuses(),
   })
 
   return {
@@ -227,6 +274,7 @@ export function createResourceManager({ config = {}, cwd = process.cwd(), profil
     sample,
     record,
     evaluate,
+    fuses,
     snapshot,
     setFreeMB: _setFreeMB,
     /** Compact one-line for the UI. */

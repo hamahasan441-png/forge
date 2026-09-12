@@ -3,274 +3,172 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
-## v93.0.0 — "DOCSMITH"
+## v91.0.0 — "corewise" (∞ CORE)
 
-The Documentation Writer was the one crew member with a duty and no job: a
-roster row, no advisory, no execution. `docPlan` computed what the diff obliged
-and the report listed it — then nothing was ever written. In v93 it writes.
+The unified upgrade: Forge Core binds every subsystem into one coherent
+engineering intelligence. Nothing was rewritten — the existing engines
+(meta controller, DAG, verification ledger, completion gate, checkpoints,
+recovery, model strategy) remain the source of truth and gained new
+first-class collaborators.
 
-### Added (v93.0)
+### New: Agent Communication Bus (`bus.js`, §27-29)
+- First-class messages between workers, Core and the Crew Manager —
+  Agent→Agent, Agent→Core, Core→Agent, Agent→Crew, Crew→Agent — with the
+  full schema: sender, receiver, task_id, node_id, message_id, type,
+  priority, content, evidence_refs, file_refs, symbol_refs, confidence,
+  requires_action, in_reply_to, causal_context, timestamp.
+- 14 message types: DISCOVERY, FINDING, QUESTION, REQUEST, HYPOTHESIS,
+  EVIDENCE, WARNING, CONFLICT, PROGRESS, BLOCKED, HANDOFF, VERIFIED,
+  REJECTED, COMPLETED.
+- Anti-flood: identical (from,to,type,content) inside a 1.5 s window is
+  dropped; inboxes are bounded (oldest PROGRESS evicted first); the per-task
+  JSONL log is size-capped and reloadable.
+- `ask()`/`reply()` — a worker can ask another worker a targeted question and
+  the asker blocks (with a timeout) until the reply arrives. The timeout
+  timer is deliberately NOT unref'd: a blocked asker must always wake.
 
-- **`docsintel.docsBrief()`** — the deterministic brief the writer works from.
-  Every target in it is obliged by the change, files that exist resolve to their
-  real path, files that do not are named as `create MIGRATION.md`, breaking
-  changes and changed exports are listed, and a ready-to-paste CHANGELOG section
-  is included. An empty brief means "there is nothing to write", never "write
-  something plausible".
-- **`meta.runDocsPhase()`** — the DOCUMENT phase as a module-level, injectable
-  unit, the same shape as the existing `repairSegment` / `requestVerification`.
-  That matters for a concrete reason: the DOCUMENT phase only runs on a run that
-  reached `COMPLETED`, so the docs step is otherwise unreachable from a test
-  that cannot satisfy the completion gate. As a seam it is testable directly.
-  Flow: brief → *read-only drafting pass* (LARGE/ARCHITECTURAL only, because a
-  draft costs a model call and a small change usually needs one changelog line)
-  → apply. (`runMeta` itself did not shrink — it is 1828 lines, up from 1817,
-  because the call site replaced a one-line phase note; splitting that function
-  is still open, see TODO.) Events: `DOCS_BRIEF`, `DOCS_DRAFTED`, `DOCS_DRAFT_FAILED`,
-  `DOCS_APPLIED`, `DOCS_APPLY_FAILED`.
-- **`agent.docsAgent`** (default `true`) — `false` restores the v92 behaviour
-  exactly: deltas listed in the report, nothing written.
+### New: Formal Handoffs (`handoff.js`, §30)
+- Ten-field handoff record: current state, completed work, remaining work,
+  files, symbols, hypotheses, evidence, failed approaches, recommended next
+  action, verification status. Structurally validated — a handoff missing a
+  field throws, it is never silently truncated.
+- The receiver ACKNOWLEDGES explicitly; a ledger keeps pending/accepted/
+  superseded records (history is never deleted); `handoffContextBlock`
+  renders the preserved context for the receiving worker's prompt.
 
-### Changed (v93.0)
+### New: Evidence-Based Conflict Resolution (`crewconflict.js`, §31)
+- When workers disagree: both findings preserved → evidence compared on the
+  claim ladder (PROOF > VERIFIED/FACT > OBSERVATION > INFERENCE >
+  HYPOTHESIS; STALE scores zero) → world model consulted → ties ESCALATE to
+  a discriminating experiment instead of guessing → winner recorded with
+  rejected reasoning preserved. Never majority vote. Evidence wins.
 
-- **The writer is the executor.** The documentation specialist stays read-only
-  and is dispatched read-only; the roster's single writer applies the updates.
-  `singleWriterOk` is a structural invariant and a docs agent with its own write
-  authority would be a second writer — so the specialist supplies the brief and
-  the draft, and the executor writes.
-- What the docs agent writes is added to the run's changed files, so the final
-  report's *Files Changed* stays truthful instead of describing only the code.
+### New: Worker Self-Review (`selfreview.js`, §34)
+- Before a worker's findings become evidence they must survive the
+  deterministic 7-question review (objective coverage, context depth,
+  assumptions, evidence, regressions, verification, uncertainty). Empty
+  results, zero-inspection claims and unverified "done" claims fail with
+  explicit flags; uncertainty is extracted and reported upward, never hidden.
 
-### Fixed (v93.0)
+### New: Specialist Model Routing + Crew Performance Memory (`crewroute.js`, §36-37)
+- Role → capability class: explorer→fast, coder→coding, debugger→reasoning,
+  reviewer→independent security-review, tester→efficient (16 roles mapped,
+  dynamic roles degrade by heuristic).
+- Per-role model selection runs through the SAME `selectModel` scoring as
+  the main run (no new model sources, `agent.crewRouting: false` disables).
+- Every (task class, role, model) outcome is recorded per-project with
+  add-two damping — one failure never blacklists a model; verified outcomes
+  dominate future routing.
 
-- **`docPlan` ignored an explicit change set.** It derived "did code change?"
-  only from the diff's file list, and an autonomous run knows *which* files
-  changed without carrying the hunks — so the plan came back empty and the
-  documentation writer was told there was nothing to do. It now honours both,
-  and the brief tells the writer to run `git_diff` itself when no diff was
-  supplied, so breaking changes are still found.
-- The docs advisory would have reported a README that exists as
-  "missing — create" (it was built from the changed-file list alone). It now
-  walks the repo for real `.md` / `.markdown` / `.txt` files.
+### New: Human Decision Engine (`decisionengine.js`, §40)
+- Forge asks only when a genuine decision exists (unrepairable plan,
+  authorization). Schema: DECISION NEEDED → OPTIONS (+consequences) →
+  RECOMMENDATION → REASON → WAIT. Types: INFORMATION / DECISION /
+  CLARIFICATION / AUTHORIZATION.
+- Pending decisions put the task in the new WAITING_FOR_USER state (never
+  FAILED); per-key 30-minute cooldown means the same question is never
+  nagged; answered decisions are never re-asked in the same project.
 
-### Verified
+### New: Semantic World Model (`worldmodel.js`, §5)
+- One queryable model over the incremental index + semantic graph +
+  cross-language graph + impact engine: locate, dependents (import
+  specifiers resolved), dependenciesOf, impact, testsFor, languageOf,
+  consumers, implementations, controllingConfig, recentChanges, and a
+  natural-question `answer()` router. World Model = current truth;
+  Memory = history. Degraded builds are reported, never thrown.
 
-`npm test` — 138 suites, including `e2e` and `cleanroom`. `tests/test-v93.mjs`
-adds 77 assertions: the brief's grounding (including that an existing CHANGELOG
-is never reported missing, and that an empty diff yields an empty brief), the
-single-writer invariant across MEDIUM/LARGE/ARCHITECTURAL, the full
-brief → draft → apply flow against the real `runDocsPhase`, the switch off, the
-no-change case (zero model calls), a failing writer (reported, never thrown),
-and two `runMeta` runs proving the DOCUMENT phase calls it.
+### New: Engineering Episodes (`episodes.js`, §11/§78)
+- PROBLEM → CONTEXT → HYPOTHESES → EXPERIMENTS → EVIDENCE → FIX →
+  VERIFICATION → REVIEW → RESULT → LESSON, persisted per project. Failed
+  approaches are first-class (never repeat them); an unverified "success"
+  is demoted to PARTIAL; BM25 retrieves similar episodes as compact planner
+  context. Core records one episode per autonomous run.
 
-## v92.0.0 — "PROCREW"
+### New: Language Adapter System (`langadapter.js`, §6-§8)
+- Formal adapter interface + 8-layer parsing ladder with honest
+  UNAVAILABLE reporting (native AST and tree-sitter are never faked in a
+  zero-dependency build; LSP, compilers, build/package metadata, structured
+  tooling and lexical fallback are probed for real).
+- 23 deep adapters (lang.js) + 44 extension adapters = **67 languages**,
+  including Scala, Groovy, Objective-C, Perl, Lua, R, Julia, Erlang,
+  Haskell, OCaml, F#, Lisp/Clojure/Scheme, Fortran, COBOL, Pascal, Ada,
+  Assembly, MATLAB, PowerShell, Batch, PL/SQL, T-SQL, HTML/CSS/SCSS,
+  XML/JSON/YAML/TOML, Markdown, LaTeX, CMake, Meson, Bazel, Gradle, Maven,
+  Nix, HCL, Kubernetes, Helm, GitHub Actions, OpenAPI.
+- Unknown languages get the §7 adaptive plan (DISCOVER → IDENTIFY → INSPECT
+  TOOLCHAIN → PARSE → INDEX → LEARN CONVENTIONS → OPERATE CONSERVATIVELY →
+  VERIFY) with conservative rules — unknown never fails.
 
-`/agent` becomes a team of senior engineers instead of one agent with a plan.
-The named crew from v91 was advisory — it produced text. In v92 it **executes**:
-specialists run as real sub-agents, in parallel, under one scheduler; every
-completed task runs the same verification pipeline; and the Memory Agent records
-what worked and what was refused, so a rejected approach is never bought twice.
-`agent.pipeline:false` restores the exact v91 verification path, and
-`agent.crew:false` turns the sub-agent fan-out off.
+### New: Forge Core (`core.js`, §1/§2/§94)
+- The orchestration facade that owns the shared subsystem instances (bus,
+  handoffs, decision engine, episodes, crew router, resources, world model)
+  and records the §2 unified lifecycle (19 phases) from REAL meta events —
+  never speculative. `forge agent --auto`, `forge tasks --resume` and
+  chat's agent runs are all entered through the Core; the meta controller
+  still executes (no duplicated loop, no second truth).
+- `status()` returns the full dashboard state; `answerDecision()` closes the
+  WAITING_FOR_USER loop; episodes are opened/closed per run with real gate
+  outcomes.
 
-### Added (v92.0)
+### Extended: task states (§3)
+- Nine new lifecycle states alongside the original twelve: CREATED,
+  UNDERSTANDING, READY, REVIEWING, REPLANNING, WAITING_FOR_AGENT,
+  WAITING_FOR_USER, BLOCKED, PAUSED — with explicit transitions. The loop
+  now honestly reports READY after the DAG, WAITING_FOR_AGENT while the
+  crew runs, REVIEWING before completion, REPLANNING on mid-task replans.
+- P0 directive extended: a task parked in ANY waiting state (including
+  WAITING_FOR_USER / PAUSED / BLOCKED) is never silently finalized to
+  FAILED — explicit cancellation is required.
 
-- **`crew.js` — the crew as an executable scheduler.** `workUnits()` turns a plan
-  into named-specialist units (the plan's own role wins; otherwise the wording
-  picks the specialist). `dedupeUnits()` refuses duplicate work *before* it costs
-  a model call. `waves()` groups units so two units that touch the same file are
-  never in flight together — using `dag.canonicalConflictKeys`, the same key
-  space the DAG scheduler uses, so the two schedulers cannot disagree.
-  `reassignFor()` retries a failed unit under a *different* specialist (the same
-  role asked twice is a loop, not a retry) and returns `null` when the ladder is
-  honestly exhausted. `selfReview()` reviews each finding against the existing
-  adversarial checklist before it may be merged; a finding that fails review is
-  re-run once with the issues attached. A sub-agent is never promoted to writer —
-  the executor stays the only mutating role.
-- **`pipeline.js` — the verification pipeline.** Every task runs
-  build → lint → typecheck → test → validate, taken from the project's OWN
-  manifests. A stage with no real command is reported **skipped with the reason**
-  and never faked. Pass/fail is `verifyledger.evaluateVerification`'s call, not a
-  second opinion: an unobserved exit status, a timeout, a truncated capture or a
-  killed process is still not a pass, and `exit 0` with a failure shape in the
-  output still fails. A repair hook re-runs the stage; without one there is
-  exactly one attempt, because re-running an unchanged command is not a strategy.
-  `diagnose()` returns shape + hint + tail from the ledger's own vocabulary.
-- **Memory Agent verdicts (`memory.js`).** `recordVerdict`, `verdicts`,
-  `isRejectedApproach`, `verdictBlock`: accepted and rejected *approaches*,
-  stored as tagged bullets in the project tier (same file, lock, redaction and
-  dedup as the rest of memory, still plain text a human can edit). A later
-  `accepted` verdict for the same shape cancels the rejection. `lessons.js` keeps
-  failure *classes*; this records *decisions*, which had no home before.
-- **`forge verify`** — run the pipeline on demand
-  (`--only`, `--skip`, `--timeout`, `--json`; exits 1 on failure).
+### Extended: DAG node states (§21/§74)
+- INVALIDATED (cascade to transitive dependents; settled downstream work on
+  invalid ground truth is invalidated too; valid completed work preserved),
+  SKIPPED (deliberate, never blocks the completion gate), RETRYING (must
+  carry a changed-strategy reason — no blind retries). New APIs:
+  `invalidateNodes`, `skipNode`, `markRetrying`.
 
-### Changed (v92.0)
+### Extended: evidence (§19)
+- Claim ladder completed: OBSERVATION, FINDING, ANALYSIS, VERIFICATION and
+  PROOF join FACT/INFERENCE/HYPOTHESIS/UNKNOWN/VERIFIED/STALE. Structured
+  provenance (command, file, line, symbol, task, node, reproducibility,
+  command hash); `provenance.file` participates in staleness; a PROOF
+  without reproducibility honestly downgrades to VERIFICATION.
 
-- **meta.js**: the read-only fan-out is now routed through `crew.runCrew` — one
-  scheduler for sub-agent work instead of a per-call-site loop. What did NOT
-  change: the runner is still `agentmanager.spawn` → `runAgent` (one tool loop,
-  one set of budgets), evidence still lands in the same ledger, a node still
-  completes only WITH evidence, and the fan-out is still bounded by the same
-  deadline. New events: `CREW_DISPATCH`, `CREW_UNIT`, `CREW_REASSIGNED`,
-  `CREW_UNIT_SKIPPED`, `CREW_MERGED`, `CREW_DUPLICATE_SKIPPED`,
-  `CREW_REJECTED_APPROACH`, `CREW_DEADLINE`, `CREW_FAILED`, `PIPELINE_PLANNED`,
-  `PIPELINE_STAGE(_STARTED)`, `PIPELINE_REPAIR`, `PIPELINE_RESULT`,
-  `PIPELINE_DIAGNOSIS`, `PIPELINE_ERROR`. `runMeta` now returns `crew` and
-  `pipeline` alongside `objective` and `report`.
-- **The pipeline runs BEFORE the completion gate is judged**, so its evidence is
-  in the ledger the gate reads. A repair invalidates it (`pipelineStale`) and the
-  next verification pass re-runs it on the fixed code instead of trusting
-  evidence that predates the fix.
-- **report.js**: the final report's Analysis section now carries the crew run
-  (findings/units, model calls, reassignments, duplicates refused, rejected
-  approaches skipped) and its Verification section carries the pipeline table.
-  An empty report still says so — neither is ever invented.
-- **langengine.js**: `stackFor(cwd, files)` extracted from `recommendedVerify` so
-  the pipeline can ask for the whole stack (test AND lint AND typecheck AND
-  build) instead of only the first command that happens to exist. The matching
-  rule stays in exactly one place; `recommendedVerify` is unchanged.
-- **config.js**: `agent.crew`, `agent.pipeline`, `agent.verifyTimeoutMs`
-  (default 300s per stage). `agent.pipeline:false` restores the exact v91
-  verification behaviour. `agent.crew:false` turns the sub-agent fan-out OFF —
-  there is one scheduler, so there is no second code path to fall back to; the
-  DAG's read-only nodes are then executed one at a time by the main agent
-  through the existing no-mutating-node-ready path, so nothing is orphaned.
+### Extended: crew manager (§23-26/32/35)
+- 8 new specialist roles (explorer, build_engineer, performance_engineer,
+  dependency_analyst, doc_engineer, release_engineer, language_specialist,
+  runtime_specialist) — all read-only; dynamic roles via `registerRole()`
+  are read-only by construction (the single-writer discipline is permanent).
+- Worker records carry the §25 state: parentAgentId, model, hypothesis,
+  confidence, evidenceRefs, progress, resourceUsage, history,
+  performanceHistory.
+- Duplicate-work prevention: a spawn on an already-claimed node/file is
+  flagged (`duplicateOf`) and announced — never hidden.
+- Reassignment (`manager.reassign`): ONE successor per node with full
+  context transfer (previous findings + failure + handoff), meta wires it
+  into the fan-out automatically; the original record is preserved.
 
-### Fixed (v92.0)
+### Extended: resource governor (§4/§57)
+- Full Resource-Aware Execution Controller metrics: model calls, failures,
+  recoveries (+recovery cost), checkpoints, peak workers. Safety fuses
+  (failure-rate > 50% with ≥6 failures; recovery loop ≥5; 4 h wall clock)
+  return RECOVERY actions — CHECKPOINT → REPLAN → RESUME — and never a
+  false completion.
 
-- Duplicate DAG nodes were never completed: the duplicate record carried the
-  *unit* id while the graph is keyed by *node* id, so the lookup silently matched
-  nothing. Duplicates now carry `stepId` and the node completes with its twin as
-  the recorded evidence.
-- `runMeta` referenced a `planOnly` binding that does not exist in its scope —
-  a `ReferenceError` on every autonomous run the moment the pipeline was enabled
-  (plan-only runs never reach `runMeta` at all).
-- `crew.js` and `pipeline.js` were missing from `package.json` `files[]`, so a
-  published tarball would have shipped `meta.js` importing two files that were
-  not there.
-- "run the unit tests and report which fail" was dispatched to the debugger
-  because the debug pattern matched `fail` first; the tester's pattern is now
-  narrow ("run the tests", "test suite", "coverage") and ordered first.
-- `forge verify --json` exited 0 when the project defines no runnable stage. It
-  now exits 1 — "nothing to verify" is not a pass.
+### New: Premium TUI views + commands (§63-69)
+- `/dag` — dependency graph with per-node status marks; `/crew` — role
+  catalog + measured per-role model performance; `/comm` — agent
+  communication log (noise-filtered); `/resources` — RAM/disk/workers/
+  tokens/latency/fuses pressure view; `/decision` — pending human decision
+  panels; `/log` — run journal; `/diagnose` — latest task error classified.
+  All registered in the command palette and /help.
 
-### Verified
-
-`npm test` — 137 suites, including `e2e` and `cleanroom` (npm install from the
-packed tarball). `tests/test-v92.mjs` adds 150 assertions covering work units,
-dedupe, conflict waves, reassignment, self-review, the verdict store, every
-pipeline branch (pass, fail, lying-green, unknown status, repair, no-repair,
-stop-on-failure, empty plan), the `stackFor` refactor, and the CLI exit codes.
-
-## v91.0.0 — "ULTIMATE"
-
-`/agent` becomes a permanent autonomous engineering intelligence: a named crew,
-an objective engine that stops on *verified objective satisfaction* instead of a
-step count, a ten-section final report, docs & git intelligence, and a
-self-review → self-upgrade → rollback loop. Everything is **additive**:
-`agent.orchestration` / `agent.objective` / `agent.report` set to `false`
-restore the exact v90 path (pinned in test-v91 §10). No new dependency, no new
-model call in the deterministic paths, no second data root.
-
-### Added (v91.0)
-
-- **`objective.js` — the objective-based task engine.** A run ends when the
-  existing 9-check completion gate says the objective is met (`DONE`,
-  `GATE_SATISFIED`), when an unrecoverable blocker is recorded (`BLOCKED`), or
-  when the operator cancels. A budget or segment fuse lands in `WAITING` /
-  `FUSE` — **never** in `DONE`. Twelve explicit phases
-  (ANALYZE → RESEARCH → REVIEW → PLAN → APPROVE → EXECUTE → VERIFY → REPAIR →
-  OPTIMIZE → DOCUMENT → REPORT → LEARN) with per-phase state, timing and
-  checkpoints persisted under the one forge data root
-  (`~/.forge/projects/<hash>/objectives/`, atomic 0600 via `securefs`), so a
-  crashed run resumes from the last completed phase and re-verifies instead of
-  trusting inherited evidence. Loop detection fingerprints
-  `(phase, action, args)`: the same action three times with identical arguments
-  is a stuck agent, not progress — it emits `LOOP_DETECTED`, records a strategy
-  pivot, and writes a lesson so the next plan skips that approach. Progress is
-  derived from phase state + gate checks (never steps burned), and a
-  `CONTEXT_COMPRESSION_REQUESTED` event fires when carried context passes the
-  budget instead of silently dropping history.
-- **`orchestra.js` — the master orchestrator roster.** Thirteen named roles
-  (Intent Analyzer, Researcher, Reviewer, Planner, Project Architect, Executor,
-  Tester, Debugger, Optimizer, Documentation Writer, Git Manager, Memory
-  Manager, Reporter) mapped onto the **existing** `agentmanager.ROLES`, so
-  read-only/write authority cannot drift between two vocabularies. The crew is
-  derived from `strategyFor(klass).workflow` plus a class floor (MICRO 5 →
-  LARGE/ARCHITECTURAL 13) — no second strategy table. Exactly one mutating
-  member, always the Executor; every other role is dispatched read-only, and the
-  row states both authorities where they differ (agentmanager allows `debugger`
-  to mutate; the orchestration does not grant it — repairs go through the single
-  writer). `advisories()` assembles the deterministic evidence pack (memory,
-  learnings, typed knowledge, claims, decisions, blast radius from the compose
-  graph, verification ledger, worker findings, gate) with **zero** model calls.
-- **`report.js` — the final report.** Ten sections in a fixed order (Analysis,
-  Review Findings, Execution Plan, Progress, Verification Results, Files
-  Changed, Bugs Fixed, Performance Improvements, Remaining Issues, Recommended
-  Next Improvements), built from evidence that already exists (objective record,
-  task state, gate, ledger, review checklist, advisory crew, doc deltas). A
-  section with no evidence says so in one line — it never invents a plausible
-  sentence. Persisted to `~/.forge/projects/<hash>/reports/`.
-- **`docsintel.js` — documentation & git intelligence.** Pure over diff text
-  (the v90 `git_diff` view supplies it; nothing here shells out to git).
-  Detects breaking changes — removed/renamed exports, removed CLI subcommands,
-  removed environment variables, newly required parameters, tightened schema
-  `required` lists, major version bumps — and turns them into a doc plan
-  (README / CHANGELOG / API / migration, each saying whether the file actually
-  exists), a CHANGELOG section in this repo's format, per-break migration notes,
-  and a conventional commit message with a `BREAKING CHANGE:` footer and real
-  diff numbers.
-- **`selfup.js` — self-review, self-upgrade, rollback.** `selfReview()` is
-  deterministic static analysis (same tree ⇒ same findings, so it can be diffed
-  before and after an edit): duplicate logic (formatting- and literal-insensitive
-  6-line windows), dead export surface (with importers resolved across
-  multi-line import lists), import cycles (Tarjan SCC), oversized modules and
-  over-long functions, security smells (eval, shell interpolation, world-writable
-  modes, credential-shaped literals, weak randomness for security values) and
-  unfinished work (TODO/FIXME/HACK/XXX). Comments, string contents and regex
-  literals are stripped before pattern matching, so the checker never flags its
-  own pattern table. `upgradePlan()` turns findings into proposals that each
-  carry evidence, impact, risk and a verification command; `applyUpgrades()`
-  writes through a versioned manifest whose entries record their **inverse**,
-  and `rollbackUpgrades()` restores from it. **Hard invariant:** a self-upgrade
-  never writes source files — config, project memory and additive files only
-  (code changes are proposed, never auto-applied). `syntaxCheck()` verifies with
-  real `node --check` runs.
-- **CLI:** `forge self-review`, `forge self-upgrade --plan|--apply`
-  (`--dry-run`, `--only`), `forge rollback` (`--all`, `--id`),
-  `forge report [id|list]`, `forge docs` (`--base`, `--diff`, `--message`),
-  `forge roles --crew [--class]`.
-- **Chat:** `/agent crew|self-review|self-upgrade|rollback|report|docs` plus the
-  same five as top-level commands, in the palette, Tab completion and `/help`.
-- **meta.js integration:** `OBJECTIVE_STARTED`, `OBJECTIVE_PHASE`,
-  `LOOP_DETECTED`, `CONTEXT_COMPRESSION_REQUESTED`, `OBJECTIVE_VERDICT` and
-  `FINAL_REPORT` events; `runMeta()` now returns `objective` and `report`.
-  A planning failure is recorded as a blocker with a report, not swallowed.
-
-### Fixed (v91.0 — found by the new suites, before release)
-
-- **`gate.checks` is an object map, not an array.** `completion.js` returns
-  `{ checkName: bool }`; three new consumers assumed a list and threw
-  (`x.map is not a function`), which silently suppressed the final report.
-  Every consumer now reads gates through one normalizer
-  (`objective.gateChecks` / `gateBlockers`) that accepts either shape.
-- **A changed signature line lost its second fact.** `+export function f(a, b, c)`
-  matched the export-name rule and returned early, so the tightened signature
-  was never recorded and no `SIGNATURE_TIGHTENED` break was reported. One line
-  can now carry several facts.
-- **Multi-line import lists were invisible to dead-export analysis**, inflating
-  findings with false positives (e.g. `riskAtLeast`, imported by
-  `tests/test-capabilities.mjs`, was reported dead). The import matcher now
-  crosses newlines but never a `;`.
-- **A truncated finding list could drop every HIGH finding.** The review cut is
-  now severity-ordered after a per-category ceiling, so the most severe findings
-  always survive.
-- **Token counts were mangled by secret redaction** (`12in/34out` matches a
-  key/value shape). The report phrases them as words; `secrets.js` is unchanged
-  and stays exactly as strict.
-- **A re-run verdict left negative phase durations**; the phase table now clamps
-  and `finish()` always stamps the current time.
+### Compatibility
+- All v90 CLI commands, config, provider integrations, tool/skill interfaces,
+  memory formats, task persistence and checkpoint formats are unchanged;
+  the 12 original task states and 10 original DAG statuses keep their exact
+  semantics. New JSON fields are additive. 132 existing suites pass
+  unmodified (only version-string assertions moved to 91.0.0).
 
 ## v90.0.0 — "gitwise"
 
