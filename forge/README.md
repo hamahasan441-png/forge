@@ -1,203 +1,156 @@
-# ⬢ forge — standalone terminal AI agent (v94)
+# forge
+
+Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
+straight to providers.
+
+**Version 94.0.0 — "gapwise" (gap fix / integration patch).
+
+**v94 follow-ons (masterwise + tokenwise)** — no version bump, no rewrite,
+same architecture: the **Engineering Intelligence Core** (adaptive search
+providers with honest failure, an execution controller that can never mistake
+a step budget for completion, the layered engineering memory with provenance,
+the predictive risk-aware planner); the **TokenRouter** provider — one
+OpenAI-compatible `/v1` key over 300+ upstream models (`TOKENROUTER_API_KEY`);
+and the bundled **understand-anything** skills pack (codebase → knowledge
+graph: analyze, chat, dashboard, diff, domain, explain, figma, knowledge,
+onboard — the graph feeds project memory retrieval on later tasks). **toolwise**
+follow-on: three new read-only, deterministic tools — `kg_query` (project
+knowledge graph: dependents, blast radius, tests, .ua graph), `plan_whatif`
+(simulate plan changes through the predictive risk engine before committing),
+`code_context` (semantic hits + structural wiring in one call). 29 tools,
+89 bundled skills at that point, 155/155 suites green. **skillwise**
+follow-on: the **obra/superpowers** engineering-process pack bundled as
+first-party skills (MIT, github.com/obra/superpowers) — brainstorming,
+TDD, systematic-debugging, verification-before-completion, plan writing &
+execution, code review requesting/receiving, subagent-driven development,
+parallel dispatch, git worktrees, skill authoring: 13 of 14 upstream skills
+byte-identical (upstream `writing-plans` not re-bundled — forge ships its own
+adapted one; the 5 platform-seam skills carry appended forge execution notes
+over a byte-identical upstream prefix). 102 bundled skills, 34 first-party
+catalog skills, 156/156 suites green at that point. The **knowwise**
+follow-on made the project itself a living knowledge source: the first task
+in any project auto-writes a deterministic FLOOR knowledge graph
+(`.ua/knowledge-graph.json` from the world-model extractors — no LLM, no
+network; real understand-anything graphs are never touched; rebuilds only on
+fingerprint drift) that feeds memory retrieval and `kg_query` from run one;
+every successful file edit now carries a bounded blast-radius prediction
+(radius · importers · tests — one advisory line, additive record field +
+event, `FORGE_BLAST_RADIUS=0` disables); and shell resolution is
+Termux/NetHunter-ready (`FORGE_SHELL` > /bin/sh > $PREFIX/bin/sh > $SHELL),
+so every bash call, background process, and typed `!` command works on
+Android out of the box. 157/157 suites green at that point.
+
+**v94 "deepwise"** — judgment before action, all deterministic, zero model
+calls, zero network: plan **competition + adoption** (the original plan now
+competes against its reshaped variants on expected verified progress; when a
+variant wins by a real margin at equal-or-better risk and success, the
+planner ADOPTS it — the inspect/verify guard node becomes real executed DAG
+work, predictions re-stamped, live risk restarted at the adopted estimate;
+shapes that drop declared dependencies are advised but never auto-adopted);
+a **pre-mutation self-critique** (one deterministic checklist before every
+file mutation — secret paths, edit targets that do not exist, same-file edit
+thrash, and hub files read straight from the knowwise floor graph; one
+advisory line + event, never blocks, `FORGE_CRITIQUE=0` disables); and the
+reality→risk loop closed for experiments (repair outcomes move LIVE risk).
+158/158 suites green.
+
+**v94 "gapwise"**
 
 **v94 "gapwise"** — the confirmed v93 gaps fixed inside the existing
 architecture, zero fake completion: ONE completion contract for every
 execution path (budget exhaustion → INCOMPLETE + checkpoint + resume, never
-a fabricated COMPLETED); exhausted workers classified and retried; Runtime
-Intelligence (discovery with per-fact evidence, real health probes, claim
-gates, crash reconcile — `runtime` tool #26); a persistent incremental
-world model; a persisted core bus + engineering-event ledger with restart
-reconstruction; LSP-first structured extraction; a tool-creation pipeline
-with behavioral verification; strict learned-skill promotion; strategy 3.0
-with contextual factors and justifications. 26 tools.
+a fabricated COMPLETED); exhausted workers classified and retried; **Runtime
+Intelligence** (discovery with per-fact evidence, real health probes,
+claim gates, crash reconcile — `runtime` tool #26); **persistent
+incremental world model** (survives restart, re-extracts only what changed,
+honest truncation); **persisted core bus + engineering-event ledger** with
+restart reconstruction; **LSP-first structured extraction** (lexical is a
+labeled fallback, not a silent default); **tool creation pipeline** with
+behavioral verification in a real child process; **strict learned-skill
+promotion** (equivalent to downloads: behavioral evidence + freshness +
+staleness); **strategy 3.0** with contextual factors and justifications.
+26 tools, 148/148 suites green.
 
 **v93 "sensewise"** — three new senses: a background **process manager**
 (dev servers survive the tool call; ports detected from output and the OS
-socket table, never guessed), a **persistent Node REPL** (variables and
-loaded data survive between calls; timeout = "still running", never
-fabricated), and **semantic code search** (BM25 + embedding hybrid). The
-last v91 islands (skillforge, embeddings, memgraph) are wired.
+socket table, never guessed; kill hits the whole group; the lifetime fuse
+is a resource fuse, never a completion claim), a **persistent Node REPL**
+(variables and loaded data survive between calls; timeout = "still
+running", never fabricated), and **semantic code search** (BM25 +
+embedding hybrid, find code by meaning when grep finds nothing literal).
+The last v91 islands (skillforge, embeddings, memgraph) are wired. 25
+tools, 140/140 suites green, 99 new assertions.** Nothing rewritten — the
+v91 engines remain the source of truth; every module that shipped but was
+never consulted is now wired into the living system: a **prediction
+ledger** (predict before each segment → settle against observed reality →
+calibrate future plans from real prediction errors), **language-adapter
+coverage** in every agent prompt (67 languages, honest deep-vs-conservative),
+**world-model consultation** at planning (blast radius + covering tests),
+**integrator conflicts** reported and resolved instead of discarded, and the
+P0 plugin-load TDZ fix (user tool plugins work again). Carries **v91
+"corewise"** (∞ CORE), **v90 "gitwise"**, **v89 "fast"** and **v88 "noguard
++ worker clamp"**: no guards, no blocks, workers 2–8. One folder: `forge/`.
 
-**v92 "wirewise"** — nothing rewritten; every island module is now consulted
-by the living system: a prediction ledger (predict → settle → calibrate),
-language-adapter coverage in every agent prompt, world-model consultation at
-planning, integrator conflicts reported instead of discarded, and the P0
-plugin-load TDZ fix (user tool plugins work again).
+## v88 in one line
 
-**v91 "corewise" (∞ CORE)** — the unified upgrade: Forge Core binds every
-subsystem into one coherent engineering intelligence. New first-class
-collaborators: an **agent communication bus** (Agent↔Agent, Core↔Agent,
-questions, 14 message types, anti-flood), **formal handoffs** with
-acknowledgment and full context transfer, **evidence-based conflict
-resolution** (evidence wins, never majority vote; ties escalate to a
-discriminating experiment), **worker self-review** before findings become
-evidence, **specialist model routing** with measured per-role performance
-memory, a **human decision engine** (asks well, never nags, WAITING_FOR_USER
-is never a fake failure), a queryable **semantic world model**, **engineering
-episodes** (problem → … → lesson, failed approaches preserved), a
-**67-language adapter system** with an 8-layer honest parsing ladder, 9 new
-task states, INVALIDATED/SKIPPED/RETRYING DAG semantics, resource fuses that
-trigger recovery instead of false completion, and new TUI views
-(`/dag /crew /comm /resources /decision /log /diagnose`). Nothing was
-rewritten — the meta controller, DAG, verification ledger, completion gate,
-checkpoints and recovery remain the source of truth.
-
-**v90 "gitwise"** — dedicated git views (git_diff / git_log / git_blame,
-token-budgeted, verifier-whitelisted) and the silent-stop fix: an empty model
-response is nudged and retried instead of ending the run "completed" with no
-result; a persistent empty streak fails loudly (exit 1).
-
-**v89 "fast"** — agent steps 4.6× faster (adjacency-index graph traversals),
-CLI boots 218ms → 57ms (lazy subcommand imports), dead providers fail over in
-8s instead of stalling 94s, Anthropic prompt caching on the static prefix,
-tests run 4-way parallel. Zero behavior change — results are byte-identical
-(proven by a reference-implementation test).
-
-Carries **v88 "noguard + worker clamp"**: zero command gates, zero write
-boundaries, sandbox off by default, workers clamped 2–8. Full control,
-permanently.
-
-One folder. Zero dependencies. Pure Node (≥ 20, ESM). Talks straight to
-providers — no localhost server, no build step, no native modules.
+Every command gate is gone (nothing is refused, nothing prompts — block-class
+included), the project write boundary is gone, `fetch_url` has no SSRF gate,
+the sandbox is opt-in (`FORGE_SANDBOX=1`), and workers are clamped: **low tier
+= 2, absolute max = 8**. The risk classifier still labels every command for
+logs and `/status` — the verdict is just always *run*.
 
 ```
-npm i -g .        # or: bash install.sh
-forge             # first run: provider → model → key → test
+forge/                 the npm package (CLI + tests + bundled skills)
+  forge.js             CLI entry
+  skills/              102 bundled skills
+  tests/               158 suites (npm test, zero network)
+LICENSE                MIT
+PACKAGE_INFO.txt       capability summary
+FORGE-AUDIT-REPORT*.md engineering reports (history)
 ```
 
-## What it is
-
-A CLI coding agent + interactive chat that runs entirely in your terminal:
-
-- **`forge`** — interactive chat with terminal-in-chat: type Linux commands and
-  they execute in your project folder; plain sentences go to the model
-- **`forge agent "task"`** — coding agent, 26 tools (bash, files, edits,
-  patches, web, images, browser, memory, sub-agents, git views, process,
-  repl, semantic search, runtime)
-- **`forge agent --auto "task"`** — full autonomous lifecycle: plan → DAG →
-  parallel workers → verification ledger → repair → recovery, crash-resumable
-- **`forge ask "question"`** — one-shot answer
-- 20 providers (OpenAI, Anthropic, Gemini, DeepSeek, Groq, OpenRouter, Z.ai,
-  Groq, Cerebras, Mistral, xAI, Qwen, GitHub Models, Ollama, custom + routers)
-  with automatic failover and measured model routing
-
-## v88 — full control, no guards
-
-| What used to gate actions | v88 behavior |
-|---|---|
-| Catastrophic commands (`rm -rf /`, `mkfs`, `dd` to devices, fork bombs) | **Run.** Nothing is refused |
-| Risky/confirm commands, sudo, `node -e`/`python -c` | **Run.** No y/N prompts, ever |
-| Writes outside the project directory | **Allowed** (no project boundary) |
-| Sensitive reads (`.env`, `~/.ssh`, forge config) | **Allowed** |
-| SSRF guard on `fetch_url` (loopback/metadata) | **Off** — private URLs fetch like public |
-| bwrap sandbox | **Opt-in only** (`FORGE_SANDBOX=1`) |
-
-Still on purpose (correctness features, not guards):
-
-- **Read-only verifier/plan agents can't write** — VERIFY ⇒ READ_ONLY is what
-  keeps autonomous verification honest (a verifier that can write its own
-  evidence proves nothing)
-- **Secret redaction** — known key shapes (`sk-…`, `AKIA…`, JWTs, assignments)
-  are masked in tool results before they reach the model or session files
-- **Socket pinning** — a fetched connection must match its validated DNS
-  addresses (anti-rebinding mechanics); skill/tool downloads keep full
-  `netguard` policy
-- **Classifiers still label everything** — commands keep their risk level in
-  logs, `/status`, and tool-intelligence; the verdict is just always *run*
-
-**Workers:** low-tier / low-RAM machines run **2** parallel read-only workers
-(v88 floor), high-tier machines up to **8** — never more, burst scaling
-included. A single mutating writer serializes writes.
-
-## Daily use
+## Install
 
 ```bash
-forge                            # AUTOPICK best model → chat, all tools ON
-forge --pick                     # model chooser (✓ tested / FREE badges)
-forge ask "summarize git log"    # one-shot
-forge agent "fix the failing test in src/auth.js"
-forge agent --plan "task"        # plan first (read-only), confirm, execute
-forge agent --auto "task"        # full autonomous lifecycle
-forge agent --deep "task"        # DEEP THINKING (high reasoning effort)
-forge resume <n|id>              # resume a session (messages + cwd + usage)
-forge tasks                      # list autonomous tasks / --resume <id>
-forge undo                       # restore files changed by the last tool edit
-forge doctor                     # connectivity + latency check (--all, --tools)
-forge config                     # interactive config menu
-forge provider add <name> <url>  # custom provider, auto model discovery
-forge models <provider> --free   # list FREE models (live or cached)
-forge use deepseek --model deepseek-chat
+cd forge && bash install.sh      # or: npm i -g .
+forge                            # first run: provider → model → key → test
+forge doctor
 ```
 
-### In chat
+Needs Node ≥ 20.
 
-- Linux commands execute in your folder (`ls`, `git status`, `npm test`, …);
-  plain sentences go to the model; `! cmd` always executes
-- `cd` / `export` persist per session; every run is shared with the model
-  (secret-redacted) — ask "what did that print?"
-- `/status` — session + context + safety snapshot
-- `/profile [fast|balanced|deep|auto]` — effort profile
-- `/deep` — toggle deep thinking · `/shell off` — stop command autodetect
-- `/skills`, `/skill download <url>`, `/skill verify <name|all>`,
-  `/skill learn <name>` — see below
+## Daily
 
-## Skills — DOWNLOAD ≠ TRUST
-
-80 skills ship in the box (coding, git, docs, pdf/docx/xlsx/pptx, web, vision).
-Downloaded skills follow a strict lifecycle:
-
-```
-download → CANDIDATE → verify → VERIFIED → promote/autopromote → ACTIVE
-                └─ fail → INACTIVE          └─ TTL/drift → STALE → re-verify
+```bash
+forge                            # AUTOPICK: chat, tools on, no prompts
+forge --pick                     # choose model
+forge ask "question"
+forge agent "task"               # coding agent, 19 tools
+forge agent --auto "task"        # full autonomous lifecycle (DAG + verify + repair)
+forge resume <n|id>
+forge undo
+forge doctor
 ```
 
-Indexing is not learning. Nothing auto-ACTIVEs because a download succeeded.
-Learned plugins are hostless playbooks, never spawned. Data lives under
-`~/.forge` (`FORGE_HOME` / `FORGE_DATA_DIR`).
-
-## Architecture (one screen)
+In chat: Linux commands run in the project folder. Sentences go to the model.
+`! cmd` always executes. **v88: nothing is blocked and nothing asks y/N.**
 
 ```
-forge.js   CLI (40+ subcommands)      chat.js   terminal-in-chat + sessions
-agent.js   bounded tool loop           meta.js   autonomous controller:
-                                          PLAN → DAG → segments → VERIFY →
-                                          REPAIR → RECOVER (crash-resumable)
-tools.js   26 tools + redaction        shellguard.js  risk classifier (labels only)
-providers.js  20 providers, failover   modelstrategy.js  measured routing
-memory/lessons/evolve   hierarchical memory + failure learning
-verifyledger/completion  evidence ledger + 9-check completion gate
-tests/     148 suites, zero network needed (FORGE_FAST=1 npm test)
+/status   /profile [p]   /deep   /shell off
+/skills   /skill download <https-url>
+/skill verify <name|all>   /skill learn <name>
 ```
+
+`DOWNLOAD ≠ TRUST`. A download is CANDIDATE until verify. Learn is VERIFIED
+only. Indexing is not learned. Nothing auto-ACTIVE. Data lives under
+`~/.forge` (`FORGE_DATA_DIR` aliases `FORGE_HOME`).
 
 ## Self-test (Node only, no network)
 
 ```bash
 cd forge
-npm test                    # all suites incl. e2e (mock provider) + cleanroom
-FORGE_FAST=1 npm test       # Node suites only (~39 s, 4-way parallel)
-FORGE_TEST_CONCURRENCY=1 npm test   # old sequential behavior
+npm test                         # all suites (e2e + cleanroom included)
+FORGE_FAST=1 npm test            # Node suites only (~39 s, 4-way parallel)
 ```
 
-## Requirements
-
-- Node.js **≥ 20** (18 is EOL and untested)
-- Linux / macOS / Termux / proot (bash required; Windows: use WSL)
-- No npm dependencies at runtime; install never touches the registry
-
-## Where things live
-
-```
-~/.forge/config.json        provider + model + keys (chmod 600)
-~/.forge/sessions/          chat history, resumable
-~/.forge/projects/<hash>/   per-project memory, claims, decisions, gaps
-~/.forge/skill-downloads/   CANDIDATE downloads (never auto-trusted)
-.forge/plans/               plan-mode plans (project-local)
-```
-
-Config precedence: defaults → `~/.forge/config.json` → project
-`forge.config.json` (privileged keys like `tools.*` are user-config only —
-a project file cannot set them).
-
-## License
-
-MIT. Bundled skills keep their own `LICENSE.txt` where present.
+`npm test` is the source of truth. Suite counts are not duplicated here.

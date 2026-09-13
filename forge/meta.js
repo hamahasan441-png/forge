@@ -29,6 +29,9 @@ import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, 
 import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
 import { canCompleteTask, CHECK as GATE_CHECK } from "./completion.js"
 import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./resources.js"
+import { createExecutionController } from "./execcontroller.js"
+import { createEngMemory } from "./engmemory.js"
+import { assessPlan, predictNodes, alternatives, adoptDecision, informationGainExperiments, classifyRealityDelta, createLiveRisk, verificationPlanForRisk, gatherPlannerEvidence } from "./plannerisk.js"
 import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
@@ -65,6 +68,7 @@ import { predictForNode, settlePrediction, recordPrediction, predictionsForPromp
 import { adapterBrief } from "./langadapter.js"
 import { reportConflict } from "./crewconflict.js"
 import { createWorldModel } from "./worldmodel.js"
+import { ensureKnowledgeGraph } from "./knowgraph.js" // v94 knowwise: auto KG bootstrap
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -87,7 +91,7 @@ function explicitFinalization(desired) {
   return FINAL.FAILED
 }
 
-export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null } = {}) {
+export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null } = {}) {
   const emit = (ev) => { try { onEvent?.(ev) } catch { } }
 
   let taskId = resumeTaskId
@@ -110,6 +114,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const ledger = createLedger()
   if (Array.isArray(state.verification_results)) ledger.load(state.verification_results)
   const resources = createResourceManager({ config, cwd: process.cwd() })
+  // v94 masterwise (§8/§10/§29): ONE authoritative ExecutionController. It owns
+  // adaptive segment sizing, stuck detection, resource-fuse enforcement and
+  // the continuation policy. It never declares completion — the completion
+  // gate (completion.js, via attemptCompletion) remains the only authority.
+  const xctl = createExecutionController({ config, taskId, runId: taskRunId, cwd: process.cwd(), onEvent: emit, resources, signal })
+  // v94 masterwise (§11–§18): the Engineering Memory Core — layered memory
+  // with provenance, freshness and conversation continuity, composed over
+  // the existing stores. Never a second truth: memory is history, the world
+  // model is current truth.
+  const engMem = createEngMemory({ cwd: process.cwd(), taskId, runId: taskRunId, conversationId })
+  engMem.setTask(state.objective)
   // v23 semantic retrieval: when retrieval.embeddings resolves, the context
   // engine reranks memory/learnings BM25 shortlists with provider embeddings.
   // Off by default; a failed resolution simply leaves embedder = null (BM25).
@@ -220,7 +235,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     return true
   }
 
-  const segSteps = segmentSteps ?? config?.agent?.segmentSteps ?? SEGMENT_STEPS
+  // v94 masterwise: a PINNED segment size (explicit caller arg or config)
+  // is honored verbatim; otherwise the ExecutionController sizes each
+  // segment adaptively (§8) — task class, failure rate, resource pressure,
+  // tool latency. A segment boundary is never a task boundary.
+  const segStepsPinned = segmentSteps ?? config?.agent?.segmentSteps ?? null
   let maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
   // P0 segment safety fuse: a continuation is a RESUME, not a failure. The
   // continuation budget bounds it so "resume later" cannot loop forever.
@@ -299,7 +318,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       planDefs = []
       planValidation = { ok: true, errors: [], stage: "RESTORED", code: "RESTORED", recoverable: true }
       emit({ type: "PLAN_RESTORED", taskId, runId: taskRunId, nodes: state.dag?.nodes?.length ?? 0, reason: "resuming an interrupted task — the recorded DAG is authoritative" })
-      ts.setPlan((state.plan ?? []).map((p) => (typeof p === "string" ? p : p?.objective ?? p?.title ?? p?.id)), "resumed")
+      // v94 masterwise (§17 continuity fix): setPlan persists an object
+      // ({ steps, source, at }) — the resume path used to call .map() on it
+      // directly, which threw "state.plan.map is not a function" and turned
+      // EVERY fuse-parked (WAITING) resume into a fake "planning failed".
+      // Accept both the historical array shape and the record shape.
+      const restoredPlan = Array.isArray(state.plan)
+        ? state.plan
+        : (Array.isArray(state.plan?.steps) ? state.plan.steps : [])
+      ts.setPlan(restoredPlan.map((p) => (typeof p === "string" ? p : p?.objective ?? p?.title ?? p?.id)), "resumed")
       ts.transition(TASK_STATUS.PLANNING, { reason: "plan restored from the task record" })
     }
     const fastPath = !restoredDAG && classified.strategy.plan === "synthesize" && classified.class === TASK_CLASS.MICRO
@@ -329,6 +356,37 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (predictionPrefix) {
       const cal = predictionCalibration(process.cwd())
       emit({ type: "PLAN_PREDICTION_CALIBRATION", taskId, runId: taskRunId, calibration: cal })
+    }
+    // v94 masterwise (§18 LONG PROMPT INTELLIGENCE): a very long objective is
+    // ingested into requirement RECORDS (deterministic, ids R1..Rn) so that
+    // compaction can never silently drop a requirement — they are retrieved
+    // verbatim whenever needed. The planner prompt carries them explicitly.
+    let requirementsPrefix = ""
+    if (!restoredDAG && !fastPath && !recoveryPath && String(state.objective ?? "").length > 1500) {
+      try {
+        const reqs = engMem.ingestRequirements(state.objective)
+        if (reqs.length) {
+          requirementsPrefix = engMem.requirementsBlock(state.objective)
+          emit({ type: "REQUIREMENTS_INGESTED", taskId, runId: taskRunId, count: reqs.length })
+        }
+      } catch { /* requirement extraction is best-effort */ }
+    }
+    // v94 knowwise: bounded KG bootstrap — the first task in a project without
+    // a .ua/knowledge-graph.json writes a deterministic FLOOR graph (world-model
+    // extractors; no LLM, no network) so the engmemory bridge and kg_query have
+    // project knowledge from run one. A real understand-anything graph is
+    // detected and NEVER touched. Deferred + unref'd so planning is never
+    // delayed; every failure is swallowed (best-effort, off-path).
+    if (!restoredDAG) {
+      try {
+        const kgTimer = setTimeout(() => {
+          try {
+            const kg = ensureKnowledgeGraph({ cwd: process.cwd() })
+            if (kg?.ok && kg?.built) emit({ type: "KG_BOOTSTRAPPED", taskId, runId: taskRunId, files: kg.files, edges: kg.edges, truncated: !!kg.truncated })
+          } catch { /* KG bootstrap is best-effort */ }
+        }, 0)
+        if (typeof kgTimer.unref === "function") kgTimer.unref()
+      } catch { /* KG bootstrap is best-effort */ }
     }
     // v92 §5/§10 (wirewise): consult the semantic world model BEFORE planning.
     // Project shape + blast radius of files the objective names — bounded,
@@ -389,7 +447,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -543,6 +601,98 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   let dag = null
   const persistDAG = () => { if (dag) ts.setDAG(dagLib.serializeDAG(dag)) }
+
+  // v94 masterwise (§19–§24): the PREDICTIVE PLANNER — before the graph is
+  // built, the validated plan is PREDICTED, SCORED and (when risky) compared
+  // against alternatives. Deterministic: node shape + class prior + lesson
+  // history + prediction calibration. Estimates, never proof — weak evidence
+  // lowers the reported confidence instead of faking precision.
+  let planRisk = null
+  let liveRisk = null
+  if (planDefs.length && !restoredDAG) {
+    try {
+      const evidence = gatherPlannerEvidence(process.cwd(), state.objective)
+      planRisk = assessPlan(planDefs, {
+        klass: classified.class,
+        resources,
+        calibration: evidence.calibration,
+        lessons: evidence.lessons,
+        task: state.objective,
+        securitySensitive: riskLevel === "critical",
+      })
+      // §21 node-level predictions are stamped ONTO the nodes so they persist
+      // with the graph (checkpoint/resume keeps them).
+      const preds = predictNodes(planDefs, { klass: classified.class, lessons: evidence.lessons, calibration: evidence.calibration })
+      for (const def of planDefs) {
+        const p = preds.get(def.id)
+        if (p) def.prediction = p
+      }
+      // §26 live risk starts at the plan estimate and is updated by reality
+      liveRisk = createLiveRisk(planRisk.successProbability)
+      emit({
+        type: "PLAN_RISK_ASSESSED", taskId, runId: taskRunId,
+        risk: planRisk.risk, riskLadder: planRisk.riskLadder,
+        successProbability: planRisk.successProbability,
+        uncertainty: planRisk.uncertainty, confidence: planRisk.confidence,
+        factors: planRisk.factors, criticalPath: planRisk.criticalPath,
+        estimatesNotProof: true,
+        text: `plan risk ${planRisk.riskLadder} (${planRisk.risk}), success estimate ${Math.round(planRisk.successProbability * 100)}% (confidence: ${planRisk.confidence})`,
+      })
+      // §23 alternative plans — only for high-risk plans. v94 deepwise: the
+      // original plan now COMPETES as a candidate, and the winning shape is
+      // actually ADOPTED when it beats the original by a meaningful margin at
+      // equal-or-better risk and success (adoptDecision — deterministic, no
+      // model call). The adopted defs flow into the DAG below: the guard node
+      // (inspect/verify) becomes real executed work, not advice.
+      if (planRisk.riskLadder === "high" || planRisk.riskLadder === "critical") {
+        const alts = alternatives(planRisk, planDefs)
+        if (alts?.recommended) {
+          let adoptedName = null, adoptWhy = ""
+          const decision = adoptDecision(alts)
+          if (decision.adopt && Array.isArray(alts.winnerDefs) && alts.winnerDefs.length) {
+            try {
+              planDefs = alts.winnerDefs
+              planRisk = assessPlan(planDefs, {
+                klass: classified.class,
+                resources,
+                calibration: evidence.calibration,
+                lessons: evidence.lessons,
+                task: state.objective,
+                securitySensitive: riskLevel === "critical",
+              })
+              const preds2 = predictNodes(planDefs, { klass: classified.class, lessons: evidence.lessons, calibration: evidence.calibration })
+              for (const def of planDefs) {
+                const p = preds2.get(def.id)
+                if (p) def.prediction = p
+              }
+              liveRisk = createLiveRisk(planRisk.successProbability)
+              adoptedName = decision.name
+              adoptWhy = decision.why
+            } catch { /* adoption is advisory — on any failure keep the original plan */ }
+          }
+          emit({
+            type: "PLAN_ALTERNATIVES", taskId, runId: taskRunId,
+            recommended: alts.recommended.name, basis: alts.basis,
+            variants: alts.all, adopted: adoptedName,
+            ...(adoptedName ? { why: adoptWhy, successProbability: planRisk.successProbability } : {}),
+            note: adoptedName
+              ? `executing the ${adoptedName} shape — ${adoptWhy}`
+              : "executing the original plan; alternatives recorded for replan decisions",
+          })
+        }
+      }
+      // §24 information gain — when uncertainty is high, run the CHEAPEST
+      // uncertainty-reducing experiment first (recommendation; the planner
+      // prompt carries it and inspect-first nodes are natural)
+      const ig = informationGainExperiments({ assessment: planRisk, planDefs, knowledgeGaps: composedSnap?.gaps?.gaps ?? [] })
+      if (ig.needed) {
+        emit({ type: "PLAN_INFOGAIN", taskId, runId: taskRunId, why: ig.why, experiments: ig.experiments })
+      }
+    } catch (e) {
+      emit({ type: "PLAN_RISK_ASSESSMENT_FAILED", taskId, runId: taskRunId, error: String(e?.message ?? e).slice(0, 160) })
+    }
+  }
+
   try {
     if (planDefs.length) {
       dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(planDefs)
@@ -589,6 +739,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let finalText = ""
   let finalState = null
   let consecutiveFailures = 0
+  // v94 masterwise: worker node completions this run (feeds stuck detection —
+  // settled workers count as progress even when the main segment mutates nothing)
+  let workerCompletionsTotal = 0
   let repairCount = 0
   let replanCount = 0
   let evidenceRequests = 0
@@ -692,7 +845,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const fr = recomputeFinalRisk()
     const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
     const vv = ledger.status(fr.risk, changedRel)
-    if (classified.strategy.requireReview) {
+    // v94 masterwise (§28): RISK-BASED VERIFICATION — the intensity follows
+    // the FINAL risk: LOW targeted; MEDIUM +regression; HIGH +integration;
+    // CRITICAL full relevant verification + ADVERSARIAL REVIEW + runtime
+    // validation. The class strategy may require review earlier; critical
+    // risk always does.
+    const vPlan = verificationPlanForRisk(fr.risk)
+    const needReview = classified.strategy.requireReview || vPlan.adversarialReview
+    if (needReview) {
       // v91 §3: REVIEWING is a real, persisted state before completion.
       ts.transition(TASK_STATUS.REVIEWING, { reason: "adversarial final review" })
       emit({ type: "REVIEW_STARTED", taskId, runId: taskRunId, segmentId, nodeId, class: classified.class })
@@ -738,6 +898,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       type: "COMPLETION_GATE", taskId, runId: taskRunId, segmentId, nodeId,
       ok: gate.ok, status: gate.status, checks: gate.checks, blockers: gate.blockers,
       finalRisk: fr.risk, initialRisk: fr.initialRisk,
+      verificationPlan: { level: vPlan.level, targeted: vPlan.targeted, regression: vPlan.regression, integration: vPlan.integration, adversarialReview: vPlan.adversarialReview, runtimeValidation: vPlan.runtimeValidation },
+      planRisk: planRisk ? { riskLadder: planRisk.riskLadder, successProbability: planRisk.successProbability, confidence: planRisk.confidence } : null,
+      liveSuccessProbability: liveRisk ? liveRisk.get() : null,
     })
     if (!gate.ok) return { done: false, gate }
     finalStatus = explicitFinalization(FINAL.COMPLETED)
@@ -747,6 +910,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     ts.setNextAction(null)
     ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
     emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, text: String(finalText).slice(0, 400), verification: vv.status, finalRisk: fr.risk, gate: gate.checks })
+    // v94 masterwise (§16/§17): consolidation — raw events → observations →
+    // verified facts → reusable knowledge; provenance and evidence preserved.
+    try {
+      const cons = engMem.onTaskCompleted({ verification: vv, files: changedRel, summary: String(finalText ?? "").slice(0, 300) })
+      emit({ type: "MEMORY_CONSOLIDATED", taskId, runId: taskRunId, segmentId, nodeId, merged: cons.merged, contradictions: cons.contradictions, total: cons.total })
+    } catch { /* memory consolidation is best-effort */ }
     try {
       const evo = evolveRun({
         cwd: process.cwd(),
@@ -800,7 +969,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         agent, config, provider: prov, signal, emit, state,
         error: gate.reasons.join("; ") || v?.reason || "completion gate refused",
         segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
-        finalRisk: finalRiskLevel,
+        finalRisk: finalRiskLevel, liveRisk,
       })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
@@ -837,7 +1006,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   ts.transition(TASK_STATUS.EXECUTING, { reason: "starting segments" })
 
   /** v28: rewrite remaining DAG from verification evidence. MICRO never. At most maxReplans. */
-  const tryMidTaskReplan = async ({ reason, evidence }) => {
+  const tryMidTaskReplan = async ({ reason, evidence, stuck = false }) => {
     let escalate = false
     let causalHint = ""
     try {
@@ -852,6 +1021,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       replanCount,
       profile: resources.state,
       escalate,
+      stuck,
     })) return { ok: false }
     if (!dag) return { ok: false }
     // v91 §3/§74: evidence changed the situation — REPLANNING is the honest
@@ -988,12 +1158,50 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     ts.setSegmentId(segmentId)
     if (currentNodeId) ts.setNodeId(currentNodeId)
     ts.transition(TASK_STATUS.EXECUTING, { reason: `segment ${segment}${currentNodeId ? ` node ${currentNodeId}` : ""}` })
-    emit({ type: "SEGMENT_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, objective: state.objective, maxSteps: segSteps })
     resources.record({ segment: true })
 
     const adaptation = resources.evaluate()
     manager.setMaxWorkers(adaptation.limits.maxWorkers)
     if (adaptation.actions.length) emit({ type: "RESOURCE_ADAPTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, level: adaptation.level, actions: adaptation.actions.map((a) => a.action), summary: resources.summary() })
+
+    // v94 masterwise (§29): resource fuses are ENFORCED here, not merely
+    // displayed. failure_rate/recovery_loop → strategy change + replan;
+    // wall_clock → checkpoint → WAIT (resumable). Resource pressure is
+    // NEVER completion.
+    const segSteps = segStepsPinned ?? xctl.segmentSize({
+      klass: classified.class,
+      failureRate: (() => { const s = resources.state; return (s.modelCalls + s.toolCalls) > 0 ? s.failures / (s.modelCalls + s.toolCalls) : 0 })(),
+      pressureLevel: adaptation.level,
+      avgToolLatencyMs: resources.state.slowStreak >= 3 ? 20000 : 0,
+    })
+    emit({ type: "SEGMENT_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, objective: state.objective, maxSteps: segSteps, adaptive: !segStepsPinned })
+    const fuseAction = xctl.enforceFuses(resources.fuses(), { segment })
+    if (fuseAction.action === "checkpoint_wait") {
+      // wall-clock fuse: the honest move is checkpoint → persist → WAIT for
+      // resources/user. The task is resumable; this is not a failure and
+      // never a completion.
+      try {
+        const touched = [...changedFiles].filter((f) => { try { return fs.existsSync(f) } catch { return false } })
+        const cpId = touched.length
+          ? snapshotBefore(touched, process.cwd(), [], taskRunId)
+          : boundaryCheckpoint(process.cwd(), { runId: taskRunId, label: `resource-fuse-${segment}`, objective: state.objective })
+        if (cpId) { ts.noteCheckpoint(cpId); try { engMem.rememberCheckpoint(cpId) } catch { } }
+        emit({ type: "CHECKPOINT_CREATED", taskId, runId: taskRunId, boundary: "resource-fuse", segment, checkpointId: cpId })
+      } catch {}
+      persistDAG()
+      finalStatus = explicitFinalization(FINAL.WAITING)
+      finalState = TASK_STATUS.WAITING
+      finalText = `resource fuse (${fuseAction.fuse}) — checkpointed and waiting (CONTINUE_REQUIRED), not failed`
+      ts.transition(TASK_STATUS.WAITING, { reason: `resource fuse ${fuseAction.fuse}: checkpoint and wait` })
+      ts.setNextAction("continue_required: resource pressure — resume later")
+      persistCritical()
+      ts.noteError("RESOURCE_FUSE_WAIT", finalText)
+      break
+    }
+    if (fuseAction.action === "replan") {
+      const rp = await tryMidTaskReplan({ reason: `resource fuse ${fuseAction.fuse}: ${fuseAction.why}`, evidence: fuseAction.why })
+      if (rp.ok) { currentNodeId = null; currentNode = null }
+    }
 
     const riskNow = riskForChange({ filesChanged: changedFiles.size, task: state.objective, securitySensitive: riskLevel === "critical" })
     if (riskNow === "high" || riskNow === "critical" || segment === 1) {
@@ -1006,7 +1214,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           ? snapshotBefore(touched, cwd, [], taskRunId)
           : boundaryCheckpoint(cwd, { runId: taskRunId, label: `segment-${segment}`, objective: state.objective })
       } catch (e) { ts.noteError("CHECKPOINT_FAILED", e?.message ?? String(e)) }
-      if (cpId) ts.noteCheckpoint(cpId)
+      if (cpId) { ts.noteCheckpoint(cpId); try { engMem.rememberCheckpoint(cpId) } catch { } }
       emit({ type: "CHECKPOINT_CREATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, boundary: "segment", segment, checkpointId: cpId })
       ts.transition(TASK_STATUS.EXECUTING, { reason: "resume after checkpoint boundary" })
     }
@@ -1066,6 +1274,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               })
               ts.noteVerification(rec)
               dagLib.markCompleted(dag, n.id, String(r.result ?? "").slice(0, 2000), { verification: rec })
+              workerCompletionsTotal++
               dagFindings += `\n\n--- finding from ${n.role} (${n.id}) ---\n${String(r.result ?? "").slice(0, 1200)}`
               if (sr.flags.length) dagFindings += `\n[self-review flags: ${sr.flags.join("; ")}]`
               if (sr.uncertainties.length) dagFindings += `\n[uncertain: ${sr.uncertainties[0]}]`
@@ -1242,6 +1451,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         id: segPrediction.id, expectedFiles: segPrediction.expectedFiles, expectedRisk: segPrediction.expectedRisk,
         expectedOutcome: segPrediction.expectedOutcome, derived: segPrediction.derived,
       },
+      nodePrediction: currentNode?.prediction ?? null,
       text: formatPrediction(segPrediction),
     })
     // v92 §7/§8 (wirewise): honest language-adapter brief for the node's
@@ -1263,7 +1473,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         runId: taskRunId,
         segmentId,
         nodeId: currentNodeId,
-        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : ""].filter(Boolean).join("\n\n") || undefined,
+        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : "", (() => { try { return engMem.retrievalBlock(segTask, { limit: 6, maxChars: 1200 }) } catch { return "" } })()].filter(Boolean).join("\n\n") || undefined,
         maxStepsOverride: segSteps, deep, onEvent: segmentEvents(emit, segment, { taskId, runId: taskRunId, segmentId, nodeId: currentNodeId }),
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
@@ -1303,6 +1513,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     if (changedFiles.size) {
       ctxEngine.invalidateFor([...changedFiles])
+      // v94 masterwise (§14): memory freshness — every memory record citing a
+      // changed file goes STALE (POTENTIALLY STALE until revalidated). Never
+      // silently used while stale.
+      try { engMem.markFilesChanged([...changedFiles].map((f) => path.relative(process.cwd(), f))) } catch { }
       // affected symbols feed the risk escalation rules (auth/crypto/exec …)
       try {
         const syms = detectAffectedSymbols([...changedFiles], process.cwd())
@@ -1331,6 +1545,30 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         text: formatSettlement(settled),
       })
       try { recordPrediction(settled, process.cwd()) } catch { /* best-effort persistence */ }
+      // v94 masterwise (§25/§26): classify the REALITY DELTA and update the
+      // live risk estimate. MATCH/MINOR → keep going; SIGNIFICANT → world
+      // model + risk + plan get updated (replan triggers already exist on
+      // verification failure); CONTRADICTION → recorded as a required action.
+      try {
+        const delta = classifyRealityDelta(settled)
+        emit({
+          type: "REALITY_DELTA", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+          cls: delta.cls, why: delta.why, driftScore: settled.driftScore, riskDelta: settled.riskDelta,
+        })
+        if (liveRisk) {
+          liveRisk.realityDelta(delta.cls)
+          if (res.error) liveRisk.failure(2)
+          else if (settled.filesHit?.length) liveRisk.milestone()
+          emit({
+            type: "PLAN_RISK_UPDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+            successProbability: liveRisk.get(), basis: "live estimate from observed reality — not proof",
+            history: liveRisk.history.slice(-6),
+          })
+        }
+        if (delta.cls === "CONTRADICTION") {
+          addRequiredAction(`reconcile: reality contradicted the prediction (${delta.why})`)
+        }
+      } catch { /* delta classification is advisory */ }
     }
 
     // Exact node identity + P0 verification gate.
@@ -1482,12 +1720,55 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     emit({ type: "SEGMENT_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, status: segStatus, steps: res.steps, toolCalls: segToolCalls, budgetHit: !!res.budgetHit })
 
+    // v94 masterwise (§8/§10): the ExecutionController observes EVERY finished
+    // segment. Stuck signals (tool loops, repeated identical failures, no
+    // meaningful state change) trigger DIAGNOSE → CHANGE STRATEGY → REPLAN →
+    // CONTINUE — never completion. A budget-only segment is telemetry: the
+    // loop continues below regardless.
+    {
+      let nodesCompletedNow = 0
+      let nodesExecSucceededNow = 0
+      if (dag) {
+        try {
+          for (const n of dag.nodes.values()) {
+            if (n.status === dagLib.NODE_STATUS.COMPLETED) nodesCompletedNow++
+            else if (n.status === dagLib.NODE_STATUS.EXECUTION_SUCCEEDED || n.status === dagLib.NODE_STATUS.VERIFYING) nodesExecSucceededNow++
+          }
+        } catch { }
+      }
+      const xDecision = xctl.observeSegment({
+        segment, budgetHit: !!res.budgetHit, error: res.error ?? null,
+        filesChanged: segChanged.size, nodesCompleted: nodesCompletedNow,
+        nodesExecutionSucceeded: nodesExecSucceededNow,
+        workerCompletions: workerCompletionsTotal,
+        toolRecords: recs,
+      })
+      // v94 masterwise (§11 L1/L2): the observation stream — one bounded
+      // working-memory record per segment (what happened, which files).
+      try {
+        engMem.observeSegment({ segment, status: res.error ? "error" : "ok", files: [...segChanged].map((f) => path.relative(process.cwd(), f)), error: res.error ?? null })
+        if (res.error) engMem.noteEvidence(`segment ${segment} failed: ${String(res.error).slice(0, 120)}`)
+      } catch { }
+      if (xDecision.action === "replan" && xDecision.stuck && !res.error) {
+        ts.noteError("STUCK_STRATEGY_ESCAPE", `${xDecision.stuck.reason}: ${xDecision.stuck.detail}`)
+        const rp = await tryMidTaskReplan({ reason: `stuck (${xDecision.stuck.reason}): ${xDecision.stuck.detail}`, evidence: xDecision.stuck.detail, stuck: true })
+        if (rp.ok) {
+          currentNodeId = null
+          currentNode = null
+          ts.transition(TASK_STATUS.EXECUTING, { reason: "stuck escape: changed strategy, continuing with the replanned graph" })
+          continue
+        }
+        // replan unavailable (budget/class policy): continue anyway — stuck
+        // is never allowed to become a terminal state by the controller.
+      }
+    }
+
     if (res.error) {
       consecutiveFailures++
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
       ts.noteError("SEGMENT_FAILED", res.error)
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles] })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       if (consecutiveFailures >= 3 || !recovered) {
@@ -1579,7 +1860,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (dag && currentNodeId) { try { dagLib.markRepairing(dag, currentNodeId, v.reason); persistDAG() } catch { } }
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: repairCount + 1, error: v.reason })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles] })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0
@@ -1646,6 +1927,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
 
     // If the segment merely spent its budget, continue to the next one.
+    // v94 masterwise (§6): a budget end is CHECKPOINT → OBSERVE → CONTINUE.
+    // The budgetHit flag means the AGENT WANTED MORE STEPS — it is never a
+    // completion trigger, even when the DAG looks finished (a later segment
+    // may still invalidate evidence). The completion gate runs only on a
+    // segment that ended cleanly, below.
     if (!finished) {
       evidenceRequests = 0
       ts.setNextAction("continue: segment budget spent, work remains")
@@ -1698,7 +1984,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       cpId = touched.length
         ? snapshotBefore(touched, cwd, [], taskRunId)
         : boundaryCheckpoint(cwd, { runId: taskRunId, label: `safety-fuse-${segment}`, objective: state.objective })
-      if (cpId) ts.noteCheckpoint(cpId)
+      if (cpId) { ts.noteCheckpoint(cpId); try { engMem.rememberCheckpoint(cpId) } catch { } }
       emit({ type: "CHECKPOINT_CREATED", taskId, runId: taskRunId, boundary: "safety-fuse", segment, checkpointId: cpId })
     } catch {}
     continuationCount++
@@ -1819,7 +2105,7 @@ function segmentEvents(emit, segment, ids = {}) {
   }
 }
 
-async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [] }) {
+async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
   const ctxBlock = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1600 })
   const failText = String(error ?? verification?.reason ?? "")
@@ -1909,6 +2195,9 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
     if (omega && observed?.hypothesis) {
       omega.hypotheses.recordTest(observed.hypothesis.id, { name: "repair-pass", result: fixed ? "pass" : "fail" })
       if (omega.noteExperiment && next?.experiment?.id) omega.noteExperiment(next.experiment.id, fixed ? "pass" : "fail")
+      // v94 deepwise: experiment outcomes move LIVE risk — the reality→risk
+      // loop closes for the experiment path too (a failed repair is evidence).
+      try { liveRisk?.experiment(fixed) } catch { }
       if (fixed) omega.confirmRootCause(observed.hypothesis.id)
       else if (omega.hypotheses.looping(observed.hypothesis.id, "repair-pass")) {
         omega.rejectCause(observed.hypothesis.id, "same repair already failed twice")

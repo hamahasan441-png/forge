@@ -28,6 +28,39 @@ export const FIRST_PARTY = [
   { name: "forge-sql", tags: ["sql", "schema", "migration", "index", "query"], aliases: ["database", "postgres"], desc: "Schema and query changes with rollback and indexes" },
   { name: "forge-frontend", tags: ["ui", "css", "react", "dom", "a11y"], aliases: ["ui", "frontend"], desc: "UI change: structure, state, accessibility, no layout regressions" },
   { name: "forge-devops", tags: ["ci", "docker", "deploy", "yaml", "pipeline"], aliases: ["ci", "ops"], desc: "CI/CD and container edits without leaking secrets" },
+  // v94b: understand-anything pack (bundled, Egonex-AI/Understand-Anything) —
+  // codebase → knowledge graph. Tags route tasks to the right skill; the
+  // playbooks are the authority once loaded via load_skill.
+  { name: "understand", tags: ["architecture", "knowledge-graph", "codebase", "analyze", "structure", "map", "overview", "dependencies"], aliases: ["ua", "code-map", "analyze-codebase"], desc: "Analyze a codebase into a knowledge graph of files, symbols, and relationships (.ua/)" },
+  { name: "understand-chat", tags: ["ask", "question", "codebase", "qa", "graph", "where", "how-does"], aliases: ["ua-chat"], desc: "Answer questions about a codebase using its knowledge graph" },
+  { name: "understand-dashboard", tags: ["dashboard", "visualize", "graph", "explore", "browser"], aliases: ["ua-dashboard"], desc: "Launch the interactive web dashboard for a project's knowledge graph" },
+  { name: "understand-diff", tags: ["diff", "pr", "change", "risk", "impact", "affected", "review"], aliases: ["change-impact"], desc: "Analyze a diff/PR for affected components and risks using the knowledge graph" },
+  { name: "understand-domain", tags: ["domain", "business", "entities", "flows", "ubiquitous-language"], aliases: ["domain-model"], desc: "Extract business domain knowledge and an interactive domain flow graph" },
+  { name: "understand-explain", tags: ["explain", "deep-dive", "module", "function", "walkthrough", "teach"], aliases: ["walkthrough", "explain-code"], desc: "Deep-dive explanation of a specific file, function, or module" },
+  { name: "understand-figma", tags: ["figma", "design", "tokens", "ui", "mockup"], aliases: ["design-graph"], desc: "Analyze a Figma file into a design knowledge graph (pages, components, tokens)" },
+  { name: "understand-knowledge", tags: ["wiki", "knowledge-base", "entities", "topics", "notes"], aliases: ["kb-graph"], desc: "Turn a knowledge base / LLM wiki into an entity-relationship knowledge graph" },
+  { name: "understand-onboard", tags: ["onboarding", "new-team", "guide", "tour", "ramp-up"], aliases: ["onboarding-guide", "onboard-me"], desc: "Generate an onboarding guide for engineers joining the project" },
+  // v94 skillwise: obra/superpowers pack (bundled, MIT, github.com/obra/superpowers)
+  // — engineering PROCESS discipline: 13 of 14 upstream skills imported
+  // byte-identical (upstream `writing-plans` NOT bundled: forge already ships
+  // its own adapted writing-plans; no-overwrite policy). 5 skills that touch
+  // platform seams (subagent dispatch, script paths, harness mapping) carry an
+  // appended "## Forge execution notes" section — upstream content preserved
+  // as a byte-identical prefix (v94b precedent). Tags route tasks to the right
+  // skill; the playbooks are the authority once loaded via load_skill.
+  { name: "brainstorming", tags: ["brainstorm", "requirements", "design", "spec", "creative", "intent"], aliases: ["ideate", "pre-implementation-design"], desc: "Explore user intent, requirements, and design BEFORE any creative work or new feature" },
+  { name: "dispatching-parallel-agents", tags: ["parallel", "subagents", "fan-out", "independent-tasks", "concurrency"], aliases: ["parallel-agents", "fan-out"], desc: "Dispatch 2+ independent tasks to parallel subagents with self-contained briefs" },
+  { name: "executing-plans", tags: ["execute-plan", "implementation-plan", "checkpoints", "review-gates"], aliases: ["plan-execution"], desc: "Execute a written implementation plan with review checkpoints per task" },
+  { name: "finishing-a-development-branch", tags: ["merge", "integration", "branch", "pr", "cleanup"], aliases: ["finish-branch", "merge-branch"], desc: "Decide how to integrate completed, verified work: merge, PR, or keep" },
+  { name: "receiving-code-review", tags: ["code-review", "feedback", "critique", "technical-rigor"], aliases: ["review-feedback", "handle-review"], desc: "Receive review feedback with rigor: verify claims before implementing, no performative agreement" },
+  { name: "requesting-code-review", tags: ["code-review", "review-request", "pre-merge", "quality"], aliases: ["request-review", "code-reviewer"], desc: "Dispatch a thorough code review subagent against your completed work" },
+  { name: "subagent-driven-development", tags: ["subagents", "orchestration", "delegation", "plan-execution", "isolation"], aliases: ["sdd", "subagent-development"], desc: "Execute plans task-by-task through specialized subagents with fresh context and inter-task review" },
+  { name: "systematic-debugging", tags: ["bug", "root-cause", "debugging", "repro", "isolation", "failure"], aliases: ["root-cause", "debugging-process"], desc: "Four-phase root-cause process for any bug or test failure BEFORE proposing fixes" },
+  { name: "test-driven-development", tags: ["tdd", "red-green", "tests-first", "discipline", "unit-tests"], aliases: ["tdd", "red-green-refactor"], desc: "RED-GREEN-REFACTOR: write the failing test first, then implement, then refactor" },
+  { name: "using-git-worktrees", tags: ["worktree", "git", "isolation", "workspace", "parallel-work"], aliases: ["worktrees", "git-worktree"], desc: "Isolate feature work in a git worktree before starting or executing plans" },
+  { name: "using-superpowers", tags: ["skills", "meta", "discipline", "process", "skill-routing"], aliases: ["superpowers", "skill-discipline"], desc: "Check for a relevant skill BEFORE any response; process skills before implementation skills" },
+  { name: "verification-before-completion", tags: ["verification", "evidence", "completion", "claims", "honesty"], aliases: ["verify-before-done", "evidence-first"], desc: "Run verification commands and confirm output BEFORE claiming any work is done" },
+  { name: "writing-skills", tags: ["skill-creation", "authoring", "skill-design", "testing-skills"], aliases: ["create-skill", "skill-authoring"], desc: "Create, edit, and test agent skills with rigorous quality gates" },
 ]
 
 const BY_NAME = new Map(FIRST_PARTY.map((s) => [s.name, s]))

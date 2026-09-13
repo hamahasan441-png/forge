@@ -86,6 +86,7 @@ export function createForgeCore({
   cwd = process.cwd(),
   onEvent = null,
   signal = null,
+  conversationId = null, // v94 masterwise (§17): chat session / conversation identity
 } = {}) {
   config = config && typeof config === "object" ? config : {}
   // --- shared subsystems (the Core owns the instances) --------------------
@@ -254,7 +255,7 @@ export function createForgeCore({
    * This is the §2 loop made real: meta drives, the Core coordinates,
    * observes, remembers and proves.
    */
-  async function run(objective, { resumeTaskId = null, deep = null, segmentSteps = null, maxSegments = null, runAgent = null, pluginStartedAt = null } = {}) {
+  async function run(objective, { resumeTaskId = null, deep = null, segmentSteps = null, maxSegments = null, runAgent = null, pluginStartedAt = null, conversationId: convOverride = null } = {}) {
     if (running) throw new Error("core is already running a task")
     running = true
     const t0 = Date.now()
@@ -275,6 +276,7 @@ export function createForgeCore({
         config, provider, task: objective,
         onEvent: coreEventTap, signal,
         resumeTaskId, segmentSteps, maxSegments, deep, runAgent, pluginStartedAt,
+        conversationId: convOverride ?? conversationId,
       })
       lastResult = result
       // close the episode with what actually happened (§78)

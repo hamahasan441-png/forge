@@ -33,6 +33,7 @@ import { snapshotBefore, sealCreated, restoreTransactional } from "./checkpoint.
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun } from "./shellguard.js"
 import { wrapBash } from "./sandbox.js"
+import { resolveShell } from "./sysshell.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
@@ -54,6 +55,9 @@ import { createProcessManager } from "./runtime.js"
 import { createRuntimeSession, formatDiscovery } from "./runtimesession.js"
 import { createReplManager } from "./repl.js"
 import { semanticSearch, formatSemanticSearch } from "./codesearch.js"
+import { createWorldModel } from "./worldmodel.js"
+import { assessPlan, gatherPlannerEvidence, alternatives } from "./plannerisk.js"
+import { knowledgeGraphFacts } from "./engmemory.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -497,6 +501,52 @@ export const TOOL_DEFS = [
       }, required: ["action"] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "kg_query",
+      description: "Query the project's knowledge graph — deterministic reads over the real indexes, no model calls: who imports/depends on a file, the blast radius of changing it, which tests cover it, where a symbol lives, what changed recently, plus the understand-anything knowledge graph when one was built (.ua/knowledge-graph.json). Use it to navigate architecture before editing. Every fact carries its source; nothing is invented.",
+      parameters: { type: "object", properties: {
+        query: { type: "string", description: "natural question: 'what depends on utils.js', 'impact of changing router.js', 'tests for parser', 'where is handleAuth', 'what changed recently'" },
+        path: { type: "string", description: "project root (default: the working directory)" },
+        max_lines: { type: "number", description: "output budget in lines (default 40, max 120)" },
+      }, required: ["query"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "plan_whatif",
+      description: "Risk-simulate a plan (or a plan CHANGE) through the predictive planner BEFORE committing to it: risk ladder, success-probability estimate, factor breakdown, critical path + single points of failure, real failure lessons, and an original-vs-mutated comparison when you pass mutate (add/remove/update nodes). Deterministic and read-only — it computes, it never executes anything; the numbers are estimates, never proof. Use it to choose between plan shapes.",
+      parameters: { type: "object", properties: {
+        plan: { type: "array", description: "plan nodes: { id, objective, dependencies?, read_only?, risk?, estimated_cost?, target_files?, verification_requirements? }", items: { type: "object", properties: {
+          id: { type: "string" }, objective: { type: "string" }, dependencies: { type: "array", items: { type: "string" } },
+          read_only: { type: "boolean" }, risk: { type: "string", enum: ["trivial", "low", "medium", "high", "critical"] },
+          estimated_cost: { type: "number" }, target_files: { type: "array", items: { type: "string" } },
+          verification_requirements: { type: "array", items: { type: "string" } },
+        }, required: ["objective"] } },
+        mutate: { type: "object", description: "optional second variant assessed against the base: { add?: [node…], remove?: [id…], update?: [{ id, …patch }] }", properties: {
+          add: { type: "array", items: { type: "object" } },
+          remove: { type: "array", items: { type: "string" } },
+          update: { type: "array", items: { type: "object" } },
+        } },
+        klass: { type: "string", enum: ["MICRO", "SMALL", "MEDIUM", "LARGE", "ARCHITECTURAL", "RECOVERY"], description: "task-class prior (default MEDIUM)" },
+        task: { type: "string", description: "task text — pulls the project's REAL failure lessons into the simulation" },
+      }, required: ["plan"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code_context",
+      description: "One-call code context pack: semantic (meaning) hits over chunked sources PLUS the structural wiring of the top files — importers, covering tests, blast radius from the world model. Use it to understand how an area works before editing it. Read-only; verifiers may use it too.",
+      parameters: { type: "object", properties: {
+        query: { type: "string", description: "what to understand, in natural words ('where do we validate user sessions')" },
+        path: { type: "string", description: "root dir to search (default: the project root)" },
+        max_hits: { type: "number", description: "max semantic hits (default 5, max 12)" },
+      }, required: ["query"] },
+    },
+  },
 ]
 
 /** Tools that mutate the filesystem / run commands — serialized, and blocked
@@ -580,6 +630,9 @@ export const VERIFICATION_TOOLS = {
     "semantic_search",  // read-only meaning search (v93) — locate code without mutating
     "process",         // poll / status / list only — observe the runtime the work launched (§29)
     "runtime",         // discover / status / health / claim / reconcile — runtime EVIDENCE is verification (§11); launch/stop gated below
+    "kg_query",        // deterministic project-knowledge reads (v94c) — pure computation over indexes
+    "plan_whatif",     // risk simulation over hypothetical plans — computes, never mutates or executes
+    "code_context",    // semantic hits + wiring context — read-only like semantic_search
   ],
   forbidden: [
     "write_file", "edit_file", "multi_edit", "apply_patch",
@@ -656,6 +709,10 @@ function getMutationClass(name, args) {
     return MUTATION_CLASS.FILESYSTEM // run executes arbitrary (potentially writing) code
   }
   if (name === "semantic_search") return MUTATION_CLASS.NONE
+  // v94c "toolwise": kg_query / plan_whatif / code_context are pure reads —
+  // deterministic computation over existing indexes, no writes, no processes,
+  // no network. They are safe for read-only (plan / verifier) agents.
+  if (name === "kg_query" || name === "plan_whatif" || name === "code_context") return MUTATION_CLASS.NONE
   // v93 gap fix: runtime — discovery/health/claims are observation; launch/stop
   // drive real processes.
   if (name === "runtime") {
@@ -835,7 +892,7 @@ function isBwrapStartFailure(out) {
   return /\[exit code: 1\]\s*$/.test(s) && /^\s*bwrap:\s/m.test(s)
 }
 
-const plainWrap = (command) => ({ file: "/bin/sh", args: ["-c", command], sandboxed: false, kind: "none" })
+const plainWrap = (command) => ({ file: resolveShell(), args: ["-c", command], sandboxed: false, kind: "none" }) // v94 knowwise: resolved shell (Termux-safe)
 
 async function runBash(ctx, command, timeoutSec) {
   if (ctx.readOnly) {
@@ -1338,7 +1395,12 @@ function load_skill(ctx, args) {
     if (!insideDir(real, base)) return `ERROR: skill path escapes the skills directory`
     if (fs.existsSync(target)) {
       const md = fs.readFileSync(target, "utf8")
-      return md.length > 24000 ? md.slice(0, 24000) + "\n... (truncated)" : md
+      // v94b: serve up to 64KB (the same ceiling checkSkills enforces) so large
+      // bundled playbooks (e.g. the understand-anything pack) load intact, and
+      // prefix the resolved skill directory so the agent can locate the skill's
+      // own helper scripts / agent definitions without guessing.
+      const body = md.length > 65536 ? md.slice(0, 65536) + "\n... (truncated)" : md
+      return `[skill dir: ${path.dirname(target)}]\n\n${body}`
     }
   }
   const learned = ctx.cwd ? readLearnedSkill(ctx.cwd, name) : null
@@ -1471,62 +1533,35 @@ async function web_search(ctx, args) {
   const q = String(args.query || "").trim()
   if (!q) return "ERROR: empty query"
   const max = Math.min(10, args.max || 6)
-  const tried = []
-  // v21.1: both backends go through pinnedFetch — same DNS pinning, redirect
-  // validation and size/time bounds as fetch_url. The configured endpoint is
-  // the USER's (config-level, never model-controlled) so a private/loopback
-  // SearXNG on the LAN is allowed for it; the query string is model-controlled
-  // but cannot change the host. Redirects from either backend are validated
-  // like any other hop (a public search endpoint may not bounce us to a
-  // metadata address).
-  const searchFetch = (url, headers, allowPrivate) => pinnedFetch(url, { headers, timeoutMs: 12000, totalTimeoutMs: 15000, maxBytes: 1024 * 1024, maxRedirects: 3, allowPrivate, signal: ctx.signal ?? undefined })
-  if (ctx.searchUrl) {
-    const url = ctx.searchUrl + (ctx.searchUrl.includes("?") ? "&" : "?") + "q=" + encodeURIComponent(q)
-    tried.push(url)
-    try {
-      const res = await searchFetch(url, { "user-agent": `forge-agent/${VERSION}`, accept: "application/json,text/html;q=0.8" }, ctx.fetchPrivateUrls === true ? true : "first-hop")
-      if (res.ok) {
-        const ct = String(res.headers["content-type"] || "")
-        const body = res.body.toString("utf8")
-        const results = []
-        if (/json/i.test(ct)) {
-          const j = JSON.parse(body)
-          for (const r of (j.results ?? j ?? []).slice(0, max)) results.push({ title: stripTags(String(r.title ?? r.name ?? "")), url: String(r.url ?? r.href ?? ""), snippet: stripTags(String(r.content ?? r.snippet ?? r.body ?? "")).slice(0, 220) })
-        } else {
-          const re = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
-          let m
-          while ((m = re.exec(body)) && results.length < max) {
-            const href = m[1]
-            if (/duckduckgo|google\./i.test(href)) continue
-            results.push({ title: stripTags(m[2]).slice(0, 120), url: href, snippet: "" })
-          }
-        }
-        if (results.length) return formatSearch(q, results, tried)
-      }
-    } catch {}
-  }
-  // backend 2: DuckDuckGo Lite (zero-dependency fallback)
+  // v94 masterwise (§3/§4): adaptive multi-provider search with honest failure
+  // handling. The provider layer (searchproviders.js) keeps every historical
+  // contract: pinnedFetch-only egress, user-config searchUrl (never project
+  // config), UA forge-agent/<version>, first-hop private allowance for the
+  // configured endpoint, dedupe + BM25 ranking, and a `tried[]` disclosure on
+  // failure. Firecrawl is a first-class provider when FIRECRAWL_API_KEY is
+  // set; DuckDuckGo Lite remains the zero-config fallback. A fresh TTL cache
+  // on the normalized query avoids re-hitting the network for repeat
+  // searches; cached answers are attributed as such. Failures are NEVER
+  // reported as fabricated "no results" — they carry the real diagnosis.
   try {
-    const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(q)
-    tried.push(url)
-    const res = await searchFetch(url, { "user-agent": `Mozilla/5.0 (X11; Linux x86_64) forge/${VERSION}` }, ctx.fetchPrivateUrls === true)
-    if (!res.ok) throw new Error("HTTP " + res.status)
-    const body = res.body.toString("utf8")
-    const results = []
-    const re = /<a[^>]+href="([^"]+)"[^>]*class="result-link"[^>]*>([\s\S]*?)<\/a>/gi
-    let m
-    while ((m = re.exec(body)) && results.length < max) results.push({ title: stripTags(m[2]).slice(0, 120), url: m[1], snippet: "" })
-    if (!results.length) {
-      const re2 = /<a[^>]+rel="nofollow"[^>]+href="(https?:[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
-      while ((m = re2.exec(body)) && results.length < max) {
-        if (/duckduckgo\.com/i.test(m[1])) continue
-        results.push({ title: stripTags(m[2]).slice(0, 120), url: m[1], snippet: "" })
-      }
+    const { runWebSearch } = await import("./searchproviders.js")
+    const out = await runWebSearch({
+      query: q, max,
+      searchUrl: ctx.searchUrl || "",
+      fetchPrivateUrls: ctx.fetchPrivateUrls === true,
+      signal: ctx.signal ?? undefined,
+    })
+    if (out.ok) {
+      const body = formatSearch(q, out.results, [])
+      const tag = out.cached
+        ? `\n(provider: ${out.provider}, cached ${out.ageSec}s ago)`
+        : `\n(provider: ${out.provider})`
+      return cap(body + tag, 8000)
     }
-    if (results.length) return formatSearch(q, results, tried)
-    return `ERROR: search returned no results (${tried.join(", ")})`
+    return out.error
   } catch (e) {
-    return `ERROR: web_search failed: ${String(e?.message ?? e).slice(0, 160)} (tried: ${tried.join(", ")})`
+    // the provider layer never throws; this guard keeps it that way
+    return `ERROR: web_search failed: ${String(e?.message ?? e).slice(0, 160)}`
   }
 }
 
@@ -1989,6 +2024,9 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
   results.push(await t("think", () => execTool(ctx, "think", { thought: "probe" })))
   results.push(await t("memory", () => execTool(ctx, "memory", { action: "append", text: "probe" }).then(() => execTool(ctx, "memory", { action: "read" }))))
   results.push({ name: "load_skill", ok: null, ms: 0, note: "needs skills dir" })
+  results.push(await t("kg_query", () => execTool(ctx, "kg_query", { query: "project overview" })))
+  results.push(await t("plan_whatif", () => execTool(ctx, "plan_whatif", { plan: [{ id: "n1", objective: "doctor probe step", read_only: true }] })))
+  results.push(await t("code_context", () => execTool(ctx, "code_context", { query: "entry point" })))
   // network tools: SKIP cleanly when offline
   try {
     await pinnedFetch("https://example.com", { timeoutMs: 4000, totalTimeoutMs: 4000, maxBytes: 65536 })
@@ -2179,11 +2217,261 @@ async function runSemanticSearchTool(ctx, args) {
 }
 
 // ---------------------------------------------------------------------------
+// v94c "toolwise" — read-only intelligence tools. Each is a THIN composition
+// over engines that already exist (worldmodel, plannerisk, codesearch, the
+// engmemory knowledge-graph bridge) — no new subsystem, no model calls, no
+// network: deterministic computation over real indexes, honest bounds,
+// every failure reported, nothing invented. All three are verification-safe
+// reads (VERIFICATION_TOOLS.allowed, MUTATION_CLASS.NONE).
+// ---------------------------------------------------------------------------
+
+/** shared: normalize a heterogeneous path/score entry list to path strings */
+function pathListOf(list, max) {
+  return (Array.isArray(list) ? list : [])
+    .map((x) => (typeof x === "string" ? x : String(x?.file ?? x?.path ?? "")))
+    .filter(Boolean)
+    .slice(0, max)
+}
+
+/** kg_query — route a natural question at the world model + knowledge graph. */
+async function runKgQueryTool(ctx, args) {
+  const q = String(args?.query ?? "").trim()
+  if (!q) return "ERROR: kg_query requires a non-empty query"
+  const root = path.resolve(ctx.cwd, String(args?.path ?? "."))
+  const maxLines = Math.min(Math.max(1, Number(args?.max_lines) || 40), 120)
+  const lines = []
+  let method = "none"
+  try {
+    const world = createWorldModel({ cwd: root })
+    const res = world.answer(q)
+    method = res?.method ?? "none"
+    const a = res?.answer
+    if (a && method !== "empty") {
+      if (method === "dependents") {
+        const deps = pathListOf(a.dependents, 8)
+        const cons = pathListOf(a.consumers, 8)
+        lines.push(`dependents of ${a.target} (${deps.length}): ${deps.join(", ") || "none found"}`)
+        if (cons.length) lines.push(`runtime/contract consumers (${cons.length}): ${cons.join(", ")}`)
+      } else if (method === "impact") {
+        if (a.unknown || a.degraded) lines.push(`(impact engine could not resolve "${a.target}" — reported honestly, never guessed)`)
+        const imp = pathListOf(a.importers, 8)
+        const tst = pathListOf(a.tests, 6)
+        const cfg = pathListOf(a.configs, 4)
+        lines.push(`blast radius of ${a.target}: radius ${a.radius ?? "?"}${imp.length ? ` · importers (${imp.length}): ${imp.join(", ")}` : " · no importers found"}`)
+        if (tst.length) lines.push(`covering tests: ${tst.join(", ")}`)
+        if (cfg.length) lines.push(`related configs: ${cfg.join(", ")}`)
+      } else if (method === "tests") {
+        const tst = pathListOf(a.tests, 8)
+        lines.push(`tests covering ${a.target} (${tst.length}): ${tst.join(", ") || "none found — no test exercises it (evidence, not comfort)"}`)
+      } else if (method === "locate" || method === "locate-fallback") {
+        const ms = Array.isArray(a.matches) ? a.matches : []
+        lines.push(`${ms.length} match(es) for "${a.target ?? q.slice(0, 40)}":`)
+        for (const m of ms.slice(0, 8)) lines.push(`  ${m.path}${m.via ? ` (via ${m.via})` : ""} [${m.lang ?? "?"}]`)
+      } else if (method === "language") {
+        lines.push(`${a.target} is ${a.language}`)
+      } else if (method === "recent") {
+        const ch = Array.isArray(a.changes) ? a.changes : []
+        lines.push(`${ch.length} file(s) changed in the last 24h (mtime census):`)
+        for (const c of ch.slice(0, 8)) lines.push(`  ${c.path}`)
+      }
+    } else if (method === "empty" || !a) {
+      lines.push(`no route matched — try: "what depends on X" · "impact of changing X" · "tests for X" · "where is X" · "what changed recently"`)
+    }
+    const sum = world.summarize({ maxLines: 3 })
+    if (sum) lines.push("", sum)
+  } catch (e) {
+    lines.push(`world model unavailable: ${String(e?.message ?? e).slice(0, 160)} (reported, never fabricated)`)
+  }
+  try {
+    const kg = knowledgeGraphFacts(root)
+    if (kg.ok) {
+      lines.push("", `knowledge graph (${kg.file}):`)
+      for (const t of kg.overview.slice(0, 3)) lines.push(`  ${t}`)
+      for (const e of kg.entries.slice(0, 4)) lines.push(`  ${e.text}${e.files?.length ? ` [${e.files.join(", ")}]` : ""}`)
+    } else if (method === "none") {
+      lines.push("", kg.note)
+    }
+  } catch { /* the graph is optional garnish — it never breaks the tool */ }
+  if (!lines.length) return `kg_query: nothing answered "${q.slice(0, 80)}" (empty project indexes)`
+  const head = `KG QUERY [${method}] — deterministic reads over the project indexes (no model, no fabrication)`
+  return [head, ...lines.slice(0, maxLines)].join("\n")
+}
+
+// --- plan_whatif ------------------------------------------------------------
+
+const WHATIF_MAX_NODES = 24
+const WHATIF_RISKS = ["trivial", "low", "medium", "high", "critical"]
+const WHATIF_CLASSES = ["MICRO", "SMALL", "MEDIUM", "LARGE", "ARCHITECTURAL", "RECOVERY"]
+
+/** validate/normalize one plan node list — honest issues for anything dropped */
+function whatifNormalizeNodes(raw, label = "") {
+  const issues = []
+  const nodes = []
+  const arr = Array.isArray(raw) ? raw : []
+  const seen = new Set()
+  arr.forEach((n, i) => {
+    const at = `${label}node ${i + 1}`
+    if (!n || typeof n !== "object" || Array.isArray(n)) { issues.push(`${at}: not an object — dropped`); return }
+    const objective = String(n.objective ?? n.title ?? "").trim()
+    if (!objective) { issues.push(`${at}: missing objective — dropped`); return }
+    let id = String(n.id ?? `n${i + 1}`).trim().slice(0, 40) || `n${i + 1}`
+    if (seen.has(id)) { issues.push(`${at}: duplicate id "${id}" — renamed`); id = `${id}#${i + 1}` }
+    seen.add(id)
+    nodes.push({
+      id,
+      objective: objective.slice(0, 600),
+      dependencies: (Array.isArray(n.dependencies) ? n.dependencies : []).map((d) => String(d).trim().slice(0, 40)).filter(Boolean),
+      read_only: n.read_only === true,
+      risk: WHATIF_RISKS.includes(n.risk) ? n.risk : "low",
+      estimated_cost: Math.max(1, Number(n.estimated_cost) || 1),
+      targetFiles: (Array.isArray(n.targetFiles) ? n.targetFiles : Array.isArray(n.target_files) ? n.target_files : []).slice(0, 12).map((f) => String(f)),
+      verificationRequirements: (Array.isArray(n.verificationRequirements) ? n.verificationRequirements : Array.isArray(n.verification_requirements) ? n.verification_requirements : []).slice(0, 6).map((v) => String(v)),
+      optional: n.optional === true,
+    })
+  })
+  return { nodes, issues }
+}
+
+/** apply {add, remove, update} mutations — dangling deps cleaned with notes */
+function whatifApplyMutations(base, mutate) {
+  const issues = []
+  let out = base.map((n) => ({ ...n, dependencies: [...n.dependencies], targetFiles: [...n.targetFiles], verificationRequirements: [...n.verificationRequirements] }))
+  const m = mutate && typeof mutate === "object" && !Array.isArray(mutate) ? mutate : null
+  if (!m) return { out, issues }
+  for (const r of (Array.isArray(m.remove) ? m.remove : []).map(String)) {
+    if (!out.some((n) => n.id === r)) { issues.push(`mutate.remove: "${r}" does not exist — ignored`); continue }
+    out = out.filter((n) => n.id !== r)
+  }
+  for (const u of Array.isArray(m.update) ? m.update : []) {
+    if (!u || typeof u !== "object" || !u.id) { issues.push("mutate.update: entry without id — ignored"); continue }
+    const t = out.find((n) => n.id === String(u.id).slice(0, 40))
+    if (!t) { issues.push(`mutate.update: "${u.id}" does not exist — ignored`); continue }
+    const merged = whatifNormalizeNodes([{ ...t, ...u, id: t.id }], "mutate.update: ").nodes[0]
+    if (merged) Object.assign(t, merged)
+  }
+  const added = whatifNormalizeNodes(Array.isArray(m.add) ? m.add : [], "mutate.add: ")
+  issues.push(...added.issues)
+  for (const n of added.nodes) {
+    if (out.some((x) => x.id === n.id)) { issues.push(`mutate.add: id "${n.id}" already exists — ignored`); continue }
+    out.push(n)
+  }
+  const live = new Set(out.map((n) => n.id))
+  for (const n of out) {
+    const before = n.dependencies.length
+    n.dependencies = n.dependencies.filter((d) => live.has(d))
+    if (n.dependencies.length !== before) issues.push(`mutate: dropped ${before - n.dependencies.length} dangling dep(s) from ${n.id}`)
+  }
+  if (out.length > WHATIF_MAX_NODES) { issues.push(`mutated plan exceeds ${WHATIF_MAX_NODES} nodes — truncated honestly`); out = out.slice(0, WHATIF_MAX_NODES) }
+  return { out, issues }
+}
+
+/** compact assessment renderer (shared by BASE and MUTATED) */
+function whatifRenderAssessment(label, a) {
+  const l = [`${label}: risk ${a.risk} [${a.riskLadder}] · success estimate ${a.successProbability} (failure ${a.failureProbability}) · confidence ${a.confidence} · uncertainty ${a.uncertainty}`]
+  l.push(`  factors: ${Object.entries(a.factors ?? {}).map(([k, v]) => `${k} ${v}`).join(" · ")}`)
+  const cp = a.criticalPath
+  if (cp) l.push(`  critical path: ${(cp.path ?? []).join(" -> ") || "(single node)"}${(cp.spof ?? []).length ? ` · SPOF: ${(cp.spof ?? []).join(", ")}` : ""}${(cp.bottlenecks ?? []).length ? ` · bottlenecks: ${(cp.bottlenecks ?? []).join(", ")}` : ""}`)
+  return l
+}
+
+/** plan_whatif — deterministic what-if simulation through the risk engine. */
+async function runPlanWhatifTool(ctx, args) {
+  const { nodes: base, issues } = whatifNormalizeNodes(args?.plan)
+  if (!base.length) {
+    return `ERROR: plan_whatif needs a plan: [{ id, objective, dependencies, read_only, risk, estimated_cost, target_files }]${issues.length ? ` — ${issues.join("; ")}` : ""}`
+  }
+  const klass = WHATIF_CLASSES.includes(args?.klass) ? args.klass : "MEDIUM"
+  const task = String(args?.task ?? "")
+  let lessons = [], calibration = null
+  try { ({ lessons, calibration } = gatherPlannerEvidence(ctx.cwd, task)) } catch { /* thin evidence is honest */ }
+  const a1 = assessPlan(base, { klass, lessons, calibration, task })
+  const lines = [
+    "PLAN WHAT-IF — deterministic simulation over the predictive risk engine",
+    "(estimates, NOT proof: weak evidence means LOW confidence, never fake precision)",
+  ]
+  if (issues.length) lines.push(`input notes: ${issues.join("; ")}`)
+  lines.push(...whatifRenderAssessment(`BASE plan (${base.length} node(s))`, a1))
+  const alts = alternatives(a1, base)
+  if (alts && !Array.isArray(alts) && Array.isArray(alts.all) && alts.all.length) {
+    lines.push(`  alternatives (risk ${a1.riskLadder} — worth reshaping):`)
+    for (const v of alts.all.slice(0, 3)) lines.push(`    ${v.name}: ${v.nodes} node(s), risk ${v.risk}, success ${v.successProbability}, expected verified progress ${v.expectedVerifiedProgress}`)
+    if (alts.recommended) lines.push(`  recommended: ${alts.recommended.name} (${alts.basis})`)
+    // deepwise: the ORIGINAL plan competes too — show the honest verdict
+    if (alts.original && alts.winner) {
+      const m = Number(alts.margin ?? 0)
+      lines.push(`  vs original: ${alts.bestIsOriginal ? "the original plan already matches the best candidate" : `${alts.winner.name} by ${m >= 0 ? "+" : ""}${m} expected verified progress`} (adoption is decided by the planner, deterministically)`)
+    }
+  }
+  if (args?.mutate !== undefined) {
+    const { out: mut, issues: mi } = whatifApplyMutations(base, args.mutate)
+    if (mi.length) lines.push(`mutation notes: ${mi.join("; ")}`)
+    if (!mut.length) lines.push("MUTATED plan is empty — nothing to assess")
+    else {
+      const a2 = assessPlan(mut, { klass, lessons, calibration, task })
+      lines.push(...whatifRenderAssessment(`MUTATED plan (${mut.length} node(s))`, a2))
+      const dP = Number((a2.successProbability - a1.successProbability).toFixed(3))
+      const dR = Number((a2.risk - a1.risk).toFixed(3))
+      lines.push(`  DELTA: success ${dP >= 0 ? "+" : ""}${dP} · risk ${dR >= 0 ? "+" : ""}${dR} · ladder ${a1.riskLadder} -> ${a2.riskLadder}`)
+    }
+  }
+  lines.push(`  evidence: ${lessons.length} real lesson(s), prediction calibration ${calibration?.sufficient === true ? "sufficient" : "thin"} — the simulation reads YOUR project's history, not a generic prior`)
+  return lines.join("\n")
+}
+
+/** code_context — semantic hits + the structural wiring of the top files. */
+async function runCodeContextTool(ctx, args) {
+  const q = String(args?.query ?? "").trim()
+  if (!q) return "ERROR: code_context requires a non-empty query"
+  const root = path.resolve(ctx.cwd, String(args?.path ?? "."))
+  const embed = typeof ctx.semanticEmbed === "function" ? ctx.semanticEmbed : null
+  const maxHits = Math.min(Math.max(1, Number(args?.max_hits) || 5), 12)
+  let res
+  try {
+    res = await semanticSearch(root, q, { limit: maxHits, embed })
+  } catch (e) {
+    return `ERROR: semantic search failed: ${String(e?.message ?? e).slice(0, 200)}`
+  }
+  const lines = [`CODE CONTEXT "${q.slice(0, 100)}" — ${res.hits?.length ?? 0} hit(s) in ${res.files ?? 0} file(s), ${res.chunks ?? 0} chunk(s) [${res.mode ?? "?"}]${res.truncated ? " (scan truncated at bounds — reported, never hidden)" : ""}`]
+  if (!res.ok || !res.hits?.length) {
+    lines.push(res.note ?? "no matches — try grep_files for exact text")
+    return lines.join("\n")
+  }
+  for (const h of res.hits.slice(0, maxHits)) {
+    lines.push(`  ${h.path}:${h.start}-${h.end} (score ${h.score})`)
+    for (const s of (h.snippet ?? []).slice(0, 2)) lines.push(`    ${String(s).slice(0, 160)}`)
+  }
+  const seen = new Set()
+  const topFiles = []
+  for (const h of res.hits) {
+    if (seen.has(h.path)) continue
+    seen.add(h.path)
+    topFiles.push(h.path)
+    if (topFiles.length >= 3) break
+  }
+  try {
+    const world = createWorldModel({ cwd: root })
+    lines.push("", "wiring (world model — who imports it, what tests cover it):")
+    for (const rel of topFiles) {
+      try {
+        const im = world.impact([path.resolve(root, rel)])
+        if (!im || im.unknown) { lines.push(`  ${rel}: (impact engine could not resolve it — honest)`); continue }
+        const imp = pathListOf(im.importers, 6)
+        const tst = pathListOf(im.tests, 4)
+        lines.push(`  ${rel}: radius ${im.radius ?? "?"}${imp.length ? ` · importers: ${imp.join(", ")}` : " · no direct importers found"}${tst.length ? ` · tests: ${tst.join(", ")}` : ""}`)
+      } catch { lines.push(`  ${rel}: (wiring lookup failed — reported)`) }
+    }
+  } catch {
+    lines.push("  wiring: world model unavailable — the semantic hits above are still real")
+  }
+  return lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // dispatcher — single choke point: every string result passes through
 // secret redaction before it reaches the model / sessions / logs.
 // ---------------------------------------------------------------------------
 
-const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "browser", "delegate", "git_status", "grep_files", "memory", "process", "repl", "semantic_search", "runtime"])
+const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "browser", "delegate", "git_status", "grep_files", "memory", "process", "repl", "semantic_search", "runtime", "kg_query", "plan_whatif", "code_context"])
 
 /** v93 gap fix §7–§11 — the Runtime Intelligence tool. Backed by
  *  runtimesession.js (discovery with evidence, the shared process manager,
@@ -2278,6 +2566,9 @@ export async function execTool(ctx, name, args) {
     case "repl": result = cap(String(await runReplTool(ctx, args) ?? ""), ctx.maxToolOutput); break
     case "semantic_search": result = cap(String(await runSemanticSearchTool(ctx, args) ?? ""), ctx.maxToolOutput); break
     case "runtime": result = cap(String(await runRuntimeTool(ctx, args) ?? ""), ctx.maxToolOutput); break
+    case "kg_query": result = cap(String(await runKgQueryTool(ctx, args) ?? ""), ctx.maxToolOutput); break
+    case "plan_whatif": result = cap(String(await runPlanWhatifTool(ctx, args) ?? ""), ctx.maxToolOutput); break
+    case "code_context": result = cap(String(await runCodeContextTool(ctx, args) ?? ""), ctx.maxToolOutput); break
     default: {
       // v20.2 P3-5: user tool plugins
       const pl = ctx._plugins?.get(name)

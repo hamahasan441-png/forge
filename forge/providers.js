@@ -5,7 +5,7 @@ import { toAnthropicContent } from "./vision.js"
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
  * Two wire protocols:
- *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 20 providers
+ *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 21 providers
  *   "anthropic" POST {baseUrl}/v1/messages       (x-api-key)  — anthropic
  *
  * streamChat()          → SSE streaming: text / reasoning / tool_calls / usage / done events
@@ -39,6 +39,13 @@ export const CATALOG = [
   // https://api.unorouter.com/v1, Bearer key, automatic upstream failover.
   { name: "gonkarouter",   label: "GonkaRouter (Gonka Network)", protocol: "openai", baseUrl: "https://api.gonkarouter.io/v1",                          envKey: "GONKAROUTER_API_KEY", needsKey: true, models: ["deepseek-ai/DeepSeek-V4-Flash-0731", "moonshotai/Kimi-K2.6"], contextWindow: 1000000, keyUrl: "https://gonkarouter.io/dashboard" },
   { name: "unorouter",     label: "UnoRouter (300+ models)",  protocol: "openai",    baseUrl: "https://api.unorouter.com/v1",                           envKey: "UNOROUTER_API_KEY",  needsKey: true,  models: ["claude-sonnet-5", "deepseek-chat", "gemini-3.5-flash"], contextWindow: 128000, keyUrl: "https://unorouter.com" },
+  // v94b: TokenRouter — one OpenAI-compatible /v1 gateway, one API key, 300+
+  // upstream models (verified live: GET /v1/models → 401 "Token not provided"
+  // without a Bearer key; Bearer auth; served at api.tokenrouter.com). The
+  // documented free tier exposes DeepSeek / Qwen / NVIDIA models — those are
+  // the catalog defaults; `listModels()` still returns the LIVE /v1/models
+  // list once TOKENROUTER_API_KEY is set, so defaults are only fallbacks.
+  { name: "tokenrouter",   label: "TokenRouter (300+ models)", protocol: "openai",    baseUrl: "https://api.tokenrouter.com/v1",                         envKey: "TOKENROUTER_API_KEY", needsKey: true, models: ["deepseek-chat", "deepseek-reasoner", "qwen-plus", "meta/llama-3.3-70b-instruct"], contextWindow: 128000, keyUrl: "https://www.tokenrouter.com" },
 ]
 
 export function getCatalog(name) {

@@ -204,6 +204,23 @@ export function testingScope({ radius = 0, importers = 0, tests = 0, files = 0 }
   return ["syntax", "focused_test", "module_test", "integration", "regression_test"]
 }
 
+/**
+ * v94 knowwise: bounded blast-radius PREDICTION for the moment before a file
+ * mutation lands. Thin bounded composition — buildCrossGraph at a deliberately
+ * lower cap (400 files) than the world-model path, so a per-edit call stays
+ * cheap even on bigger repos; a graph miss degrades to UNKNOWN (never "no
+ * dependents"). Never throws; failures return an emptyBlast-shaped unknown.
+ */
+export function predictBlastRadius({ cwd = process.cwd(), files = [], maxFiles = 400 } = {}) {
+  const list = (Array.isArray(files) ? files : [files]).filter(Boolean).map((f) => path.resolve(cwd, String(f)))
+  if (!list.length) return emptyBlast()
+  try {
+    return impactRadius({ files: list, cwd, graph: buildCrossGraph(cwd, { maxFiles }) })
+  } catch {
+    return { ...emptyBlast(), files: list }
+  }
+}
+
 function stem(p) {
   const b = path.basename(String(p || ""))
   return b.replace(/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs)$/i, "")

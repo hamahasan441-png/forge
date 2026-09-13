@@ -24,6 +24,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { resolveShell } from "./sysshell.js"
 
 const RO_TRY = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt"]
 
@@ -99,7 +100,8 @@ export function wrapBash(command, { cwd, root, binary } = {}) {
   const det = detectSandbox(binary !== undefined ? { binary } : {})
   const cmd = String(command ?? "")
   if (!det.available) {
-    return { file: "/bin/sh", args: ["-c", cmd], sandboxed: false, kind: "none" }
+    // v94 knowwise: resolved shell (Termux has no /bin/sh — $PREFIX/bin/sh)
+    return { file: resolveShell(), args: ["-c", cmd], sandboxed: false, kind: "none" }
   }
   const project = path.resolve(root || cwd || process.cwd())
   const chdir = path.resolve(cwd || project)
@@ -113,12 +115,16 @@ export function wrapBash(command, { cwd, root, binary } = {}) {
   for (const p of RO_TRY) {
     if (exists(p)) args.push("--ro-bind-try", p, p)
   }
+  const shell = resolveShell()
+  // FORGE_SHELL / Termux: make sure the shell itself is visible in the sandbox
+  const shellDir = path.dirname(shell)
+  if (!RO_TRY.includes(shellDir) && exists(shellDir)) args.push("--ro-bind-try", shellDir, shellDir)
   args.push("--bind", project, project)
   const home = process.env.HOME || os.homedir()
   if (home && exists(home)) {
     const resolvedHome = path.resolve(home)
     if (resolvedHome !== project) args.push("--bind", resolvedHome, resolvedHome)
   }
-  args.push("--chdir", chdir, "/bin/sh", "-c", cmd)
+  args.push("--chdir", chdir, shell, "-c", cmd)
   return { file: det.binary, args, sandboxed: true, kind: "bwrap" }
 }

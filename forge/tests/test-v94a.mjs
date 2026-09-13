@@ -194,16 +194,19 @@ console.log("== I. package + documentation truth ==")
   }
   const { toolCount, TOOL_DEFS } = await import("../tools.js")
   const { BUILTIN_CAPABILITIES } = await import("../capabilities.js")
-  eqv("ADV: 26 tools on the wire", toolCount(), 26)
+  // v94c "toolwise": 26 -> 29 — the 3 new read-only tools (kg_query,
+  // plan_whatif, code_context) are proven by tests/test-toolwise.mjs; the
+  // exact-count lock stays, only the truth it locks onto moved.
+  eqv("ADV: 29 tools on the wire", toolCount(), 29)
   eqv("ADV: registry 1:1 with the wire", BUILTIN_CAPABILITIES.length, TOOL_DEFS.length)
   const forgeSrc = fs.readFileSync(new URL("../forge.js", here), "utf8")
-  ok("ADV: no stale tool-count claims in source comments", !/all 2[0-9] tools/.test(forgeSrc) || /all 26 tools/.test(forgeSrc))
+  ok("ADV: no stale tool-count claims in source comments", !/all 2[0-9] tools/.test(forgeSrc) || /all 29 tools/.test(forgeSrc))
   const chatSrc = fs.readFileSync(new URL("../chat.js", here), "utf8")
   ok("ADV: /tools is dynamic (no hardcoded count)", /toolCount\(\)/.test(chatSrc))
   const read = (p) => fs.readFileSync(new URL(p, here), "utf8")
   ok("ADV: inner README claims v94", /v94/.test(read("../README.md")))
   ok("ADV: PACKAGE_INFO claims v94.0.0", /v94\.0\.0/.test(read("../../PACKAGE_INFO.txt")))
-  ok("ADV: root README claims 94.0.0 + 26 tools", /94\.0\.0/.test(read("../../README.md")) && /26 tools/.test(read("../../README.md")))
+  ok("ADV: root README claims 94.0.0 + 29 tools", /94\.0\.0/.test(read("../../README.md")) && /29 tools/.test(read("../../README.md")))
 }
 function eqv(name, got, want) { ok(`${name} (got ${JSON.stringify(got)})`, got === want) }
 

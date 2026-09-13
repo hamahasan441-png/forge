@@ -460,7 +460,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // turn retried (same step budget); a persistent streak fails the run loudly.
   const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
   const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
+  const BUDGET_NUDGE_PREFIX = "(system) tool-call budget exhausted"
   let emptyStreak = 0
+  // v94 masterwise (§6/§7): budget-nudge coercion tracking — see below
+  let budgetNudgeFired = false
+  let coercedByNudge = false
   let switchedOk = false
   let toolCallCount = 0
   const toolLog = []
@@ -574,6 +578,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         emptyStreak = 0
         toolCallCount += msg.toolCalls.length
         if (toolCallCount > maxToolCalls) {
+          budgetNudgeFired = true
           messages.push({ role: "user", content: `(system) tool-call budget exhausted (${maxToolCalls} calls) — stop calling tools and produce your final answer now with what you have.` })
           continue
         }
@@ -650,6 +655,22 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       }
       emptyStreak = 0
       finalText = msg.content || "(empty answer)"
+      // v94 masterwise (§6/§7): an answer produced IMMEDIATELY after the
+      // tool-call-budget nudge is coerced, not chosen — the model was told to
+      // "stop calling tools and produce your final answer NOW". If the STEP
+      // budget also ended, this run must not report COMPLETED: the honest
+      // status is INCOMPLETE + checkpoint + resume (same as no answer).
+      // Walk backwards over the empty assistant turn(s); the first substantive
+      // message before the answer decides whether the answer was forced.
+      if (budgetNudgeFired) {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i]
+          if (m.role === "assistant") continue
+          if (m.role === "user") { coercedByNudge = String(m.content ?? "").startsWith(BUDGET_NUDGE_PREFIX); break }
+          if (m.role === "tool") continue
+          break
+        }
+      }
       break
     }
 
@@ -667,7 +688,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // last allowed step completes the run — the budgetHit flag is still
     // reported so meta may continue the segment if it wants more work.)
     const answerPresent = String(finalText ?? "").trim().length > 0
-    const exhausted = budgetHit && !answerPresent
+    // v94 masterwise (§6/§7): a step-budget end may only complete on a REAL,
+    // uncoerced final answer. A coerced answer (produced because the tool-call
+    // budget nudge ordered it) on the budget step is a resource limit, exactly
+    // like no answer at all: INCOMPLETE + checkpoint + resume. meta continues
+    // on budgetHit either way; direct callers get the honest status.
+    const exhausted = budgetHit && (!answerPresent || coercedByNudge)
     const fastGate = canCompleteFastPath({ finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks })
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
     let checkpointId = null
@@ -679,7 +705,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         checkpointId = boundaryCheckpoint(process.cwd(), { runId, label: "budget-incomplete", objective: task })
         if (checkpointId && log) log.checkpoint(checkpointId)
       } catch { /* checkpoint is best-effort, never breaks the run */ }
-      finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps — before a final answer; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
+      finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
     return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }

@@ -51,7 +51,15 @@ function listGlobalTools() {
 
 console.log("== catalog ==")
 {
-  ok("12 first-party skills", FIRST_PARTY.length === 12)
+  // v94b: the catalog grew — the understand-anything pack is bundled as
+  // first-party skills. v94 skillwise: the obra/superpowers pack joined too.
+  // The assertion is strictly stronger than the old exact-12 pin: every v53
+  // skill must still be present, uniqueness must hold, BOTH packs must be
+  // registered, and the total must be the new truth (34).
+  const V53_FIRST_PARTY = ["coding-agent", "forge-review", "forge-test", "forge-debug", "forge-refactor", "forge-security", "forge-docs", "forge-git", "forge-api", "forge-sql", "forge-frontend", "forge-devops"]
+  ok("12 v53 first-party skills still present", V53_FIRST_PARTY.every((n) => FIRST_PARTY.some((s) => s.name === n)))
+  ok("v94b understand pack registered (21 first-party skills)", ["understand", "understand-chat", "understand-dashboard", "understand-diff", "understand-domain", "understand-explain", "understand-figma", "understand-knowledge", "understand-onboard"].every((n) => FIRST_PARTY.some((s) => s.name === n)))
+  ok("v94 skillwise superpowers pack registered (34 first-party skills)", FIRST_PARTY.length === 34 && ["brainstorming", "dispatching-parallel-agents", "executing-plans", "finishing-a-development-branch", "receiving-code-review", "requesting-code-review", "subagent-driven-development", "systematic-debugging", "test-driven-development", "using-git-worktrees", "using-superpowers", "verification-before-completion", "writing-skills"].every((n) => FIRST_PARTY.some((s) => s.name === n)))
   ok("names are unique", new Set(firstPartyNames()).size === FIRST_PARTY.length)
   ok("coding-agent catalog", catalogEntry("coding-agent")?.tags.includes("code"))
   eq("missing catalog", catalogEntry("nope-skill"), null)

@@ -472,8 +472,10 @@ export function createWorldModel({ cwd = process.cwd(), maxFiles = WORLD_DEFAULT
       const consumersList = consumers(target)
       return { answer: { target, dependents: deps, consumers: consumersList }, method: "dependents" }
     }
-    // "what will break if X changes"
-    const brk = ql.match(/(?:what breaks?|what will break|impact of|blast radius of)\s+(?:if\s+)?([\w./@-]+)/)
+    // "what will break if X changes" — filler words between the trigger and
+    // the target are skipped (v94c: "impact of changing core.js" resolves
+    // core.js, not "changing"; previously the filler was captured as target)
+    const brk = ql.match(/(?:what breaks?|what will break|impact of|blast radius of)\s+(?:(?:if|when|changing|modifying|editing|updating|removing)\s+)?([\w./@-]+)/)
     if (brk) {
       const im = impact(brk[1])
       return { answer: { target: brk[1], ...im }, method: "impact" }

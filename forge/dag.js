@@ -124,6 +124,11 @@ function normalizeNode(n) {
     createdReason: n.createdReason ?? n.created_reason ?? null,
     createdEvidence: n.createdEvidence ?? n.created_evidence ?? null,
     parentNode: n.parentNode ?? n.parent_node ?? null,
+    // v94 masterwise (§21): node-level prediction from the predictive planner
+    // (expected outcome, success probability, uncertainty, failure modes,
+    // verification method). Stamped at plan time, persisted with the graph,
+    // settled against reality by prediction.js — never model self-confidence.
+    prediction: n.prediction && typeof n.prediction === "object" ? n.prediction : null,
   }
 }
 

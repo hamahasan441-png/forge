@@ -36,6 +36,7 @@ import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
+import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
@@ -777,7 +778,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     }
     const timeoutMs = Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec)) * 1000
     const out = await new Promise((resolve) => {
-      execFile("/bin/sh", ["-c", cmd], { cwd: shellState.cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, ...shellState.env, TERM: "dumb" } }, (error, stdout, stderr) => {
+      execFile(resolveShell(), ["-c", cmd], { cwd: shellState.cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, ...shellState.env, TERM: "dumb" } }, (error, stdout, stderr) => {
         let o = ""
         if (stdout) o += stdout
         if (stderr) o += (o ? "\n--- stderr ---\n" : "") + stderr
@@ -860,7 +861,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   function persist() {
     if (!messages.length) return
     const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary })
-    if (f && !sessionId) sessionId = f
+    // v94 fix: saveSession returns a FILE PATH; storing it verbatim made the
+    // next save join() it under SESSIONS_DIR again — a nested path growing
+    // every turn, invisible to listSessions. Store the session ID instead.
+    if (f && !sessionId) sessionId = path.basename(f).replace(/\.json$/, "")
     return f
   }
 
@@ -1459,7 +1463,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // episodes, world model — one coherent engineering system).
         const { createForgeCore } = await import("./core.js")
         const core = createForgeCore({ config, provider: p, onEvent, signal: abort.signal })
-        const m = await core.run(task, { deep: eff.deep, resumeTaskId, pluginStartedAt })
+        // v94 masterwise (§17): the conversation continues — the chat session id
+        // is the conversationId, so task memory, evidence and history stay linked
+        const m = await core.run(task, { deep: eff.deep, resumeTaskId, pluginStartedAt, conversationId: sessionId })
         // adapt the task result to the shape the UI/result renderer expects.
         res = {
           text: m.text || `Task ${m.status.toLowerCase()}.`,
@@ -1707,7 +1713,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (ui) { dispatchUI({ type: "TASK_STARTED", kind: "chat", title: `verify: ${command}`, id: null }); dispatchUI({ type: "TEST_STARTED", command }) }
         const timeoutMs = Math.min(AGENT_BUDGETS.bashTimeoutCapSec * 2, Math.max(1, config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec) * 4) * 1000
         const result = await new Promise((resolve) => {
-          execFile("/bin/sh", ["-c", command], { cwd: process.cwd(), timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, ...shellState.env, TERM: "dumb" } }, (error, stdout, stderr) => {
+          execFile(resolveShell(), ["-c", command], { cwd: process.cwd(), timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, killSignal: "SIGKILL", env: { ...process.env, ...shellState.env, TERM: "dumb" } }, (error, stdout, stderr) => {
             let r = ""
             if (stdout) r += stdout
             if (stderr) r += (r ? "\n--- stderr ---\n" : "") + stderr

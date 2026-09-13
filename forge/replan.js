@@ -32,10 +32,16 @@ export function shouldReplan({
   replanCount = 0,
   profile = null,
   escalate = false,
+  stuck = false,
 } = {}) {
   const k = String(klass || "")
   if (k === TASK_CLASS.MICRO || k === TASK_CLASS.SMALL) return false
   if (replanCount >= maxReplans(profile)) return false
+  // v94 masterwise (§10): a DETECTED STUCK state mandates a strategy change —
+  // repeated tool loops / repeated failures / no meaningful progress mean the
+  // current plan shape is the problem. Stuck never becomes completion; it
+  // becomes a bounded replan of the remaining graph.
+  if (stuck) return true
   if (escalate && (repairCount >= 1 || consecutiveFailures >= 1)) return true
   if (repairCount >= 2 || consecutiveFailures >= 2) return true
   return false
