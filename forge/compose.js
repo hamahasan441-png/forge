@@ -63,7 +63,7 @@ import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
 import { listClaims, pickClaims, formatClaimLines } from "./claims.js"
 import { listDecisions, pickDecisions, formatDecisionLines } from "./decisions.js"
 import { blastFromWorld, emptyBlast, formatBlast } from "./impact.js"
-import { pickStrategy } from "./strategy.js"
+import { pickStrategy, pickStrategyJustified, formatStrategyJustified } from "./strategy.js"
 import { pickModelEmpiric } from "./empirics.js"
 import { pickVariant } from "./variant.js"
 import { pickKnowledge } from "./knowtype.js"
@@ -470,6 +470,8 @@ export function compose(task = "", opts = {}) {
     try { out.decisions = pickDecisions(q, listDecisions(cwd), { klass, limit: 3 }) } catch { out.decisions = [] }
   }
   try { out.strategy = pickStrategy(q, { cwd, klass, limit: 3 }) } catch { out.strategy = [] }
+  // v93 §23: the pick carries its justification (why / why-not / evidence)
+  try { out.strategyJustified = formatStrategyJustified(pickStrategyJustified(q, { cwd, klass, limit: 3 })) } catch { out.strategyJustified = "" }
   try { out.models = pickModelEmpiric({ limit: 3 }) } catch { out.models = [] }
   try { out.variants = pickVariant(q, { cwd, klass, limit: 3 }) } catch { out.variants = [] }
   try { out.knowtype = pickKnowledge(q, { cwd, klass, limit: 4 }) } catch { out.knowtype = [] }

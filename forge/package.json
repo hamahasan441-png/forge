@@ -1,7 +1,7 @@
 {
   "name": "forge-agent-cli",
-  "version": "91.0.0",
-  "description": "forge ∞ — autonomous software engineering intelligence. Zero dependencies, pure Node, direct-to-provider. v91 corewise (∞ CORE: agent communication bus, formal handoffs, evidence-based conflict resolution, worker self-review, specialist model routing + crew performance memory, human decision engine, semantic world model, engineering episodes, 67-language adapter system, resource fuses, premium TUI views) on v90 gitwise.",
+  "version": "94.0.0",
+  "description": "forge ∞ — autonomous software engineering intelligence. Zero dependencies, pure Node, direct-to-provider. v94 gapwise (gap fix / integration patch: ONE completion contract for every execution path — budget exhaustion is INCOMPLETE, never COMPLETED; workers classify EXHAUSTED and are retried; Runtime Intelligence with evidence-based discovery, health probes, claims and crash reconcile; persistent incremental world model; persisted core bus + engineering-event ledger with restart reconstruction; LSP-first structured symbol extraction; tool creation pipeline with behavioral verification; strict learned-skill promotion gates; contextual strategy 3.0 with justification) on v93 sensewise.",
   "type": "module",
   "bin": {
     "forge": "./forge.js"
@@ -24,6 +24,7 @@
     "langadapter.js",
     "selfreview.js",
     "worldmodel.js",
+    "prediction.js",
     "version.js",
     "forge.js",
     "chat.js",
@@ -127,7 +128,12 @@
     "README.md",
     "CHANGELOG.md",
     "install.sh",
-    "skills/"
+    "skills/",
+    "runtime.js",
+    "repl.js",
+    "codesearch.js",
+    "runtimesession.js",
+    "toolcreate.js"
   ],
   "keywords": [
     "ai",

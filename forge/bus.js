@@ -116,11 +116,27 @@ export function createBus({ taskId = null, maxLog = MAX_LOG, persist = false, cl
   const pending = new Map()       // message_id → { resolve, timer } for ask/reply
   const recent = []               // dedupe ring: `${from}|${to}|${type}|${content}`
   let overflow = 0                // dropped-by-cap counter (observability, never silent)
+  let persisted = persist === true
+  let file = taskId ? busPath(taskId) : null
 
-  const file = taskId ? busPath(taskId) : null
+  /** v93 gap fix §14 — bind the bus to a task AFTER it is known (the Core
+   *  creates the bus before the task id exists). Replays prior history from
+   *  disk so a restarted process sees the conversation that already
+   *  happened. Idempotent; never throws. */
+  function bindTask(taskId2) {
+    const id = String(taskId2 ?? "").trim()
+    if (!id) return 0
+    const next = busPath(id)
+    if (next === file) return log.length
+    file = next
+    persisted = true
+    return load()
+  }
 
   function appendDisk(msg) {
-    if (!persist || !file) return
+    if (!persisted || !file) return
+    // §14: high-volume low-value PROGRESS chatter is not engineering history
+    if (msg.message_type === MESSAGE_TYPE.PROGRESS && !msg.requires_action) return
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true })
       fs.appendFileSync(file, JSON.stringify(msg) + "\n", "utf8")
@@ -301,13 +317,15 @@ export function createBus({ taskId = null, maxLog = MAX_LOG, persist = false, cl
     }
   }
 
-  function flush() { return { ok: true, file, persisted: Boolean(persist && file) } }
+  function flush() { return { ok: true, file, persisted: Boolean(persisted && file) } }
 
   return {
-    send, ask, reply, register, unregister, inbox, drain, view, stats, load, flush,
+    send, ask, reply, register, unregister, inbox, drain, view, stats, load, flush, bindTask,
     log: () => [...log],
     participants: () => new Map(participants),
     CORE_ID, CREW_ID,
+    get file() { return file },
+    get persisting() { return persisted },
   }
 }
 

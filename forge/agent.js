@@ -27,6 +27,7 @@ import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection }
 import { injectPendingVision } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
+import { loadActiveCreatedTools } from "./toolcreate.js"
 import { loadMcpTools } from "./mcp.js"
 import { createLspSession } from "./lsp.js"
 import { createToolIntel, recordToolRun } from "./toolintel.js"
@@ -37,6 +38,11 @@ import { formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
 import { pickSkills } from "./skillforge.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
+// v92 "wirewise": the 67-language adapter catalog (langadapter.js) was a
+// shipped-but-never-loaded island. languageCoverage() now tells every agent
+// run, honestly, how well Forge can parse the languages in this task —
+// deep adapters get normal treatment, shallow/unknown get conservative rules.
+import { languageCoverage } from "./langadapter.js"
 import { composeOnce, clearComposeOnce, formatCompose, playbookFilesOf } from "./compose.js"
 import { ingestAcquire } from "./knowgap.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
@@ -47,7 +53,8 @@ import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
-import { listCheckpoints } from "./checkpoint.js"
+import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
+import { canCompleteFastPath } from "./completion.js"
 import { compactHistory, shrinkToolOutput } from "./compaction.js"
 import path from "node:path"
 import fs from "node:fs"
@@ -134,8 +141,18 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     if (block) lines.push("", block)
   }
   if (task) {
-    const langBlock = formatLangReason(languagesIn(task, { cwd, klass }))
+    const taskLangs = languagesIn(task, { cwd, klass })
+    const langBlock = formatLangReason(taskLangs)
     if (langBlock) lines.push("", langBlock)
+    // v92 (wirewise): honest adapter coverage for the languages this task
+    // touches — deep adapter vs conservative mode, one bounded block.
+    try {
+      const coverage = languageCoverage((taskLangs ?? []).map((l) => typeof l === "string" ? l : (l?.id ?? l?.lang)).filter(Boolean))
+      const conservative = coverage.filter((c) => c.conservative).slice(0, 5)
+      if (conservative.length) {
+        lines.push("", `Language adapters (honest): ${conservative.map((c) => `${c.id} — ${c.note}`).join("; ")}. For those files: minimal reversible edits, no bulk rewrites, verify after every change.`)
+      }
+    } catch { /* adapter coverage is best-effort, never fatal */ }
     const engineBlock = engineFor(task, { cwd, config, klass })
     if (engineBlock) lines.push("", engineBlock)
     const composeBlock = formatCompose(composed)
@@ -247,6 +264,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role, taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
 
   const isDelegatedSubAgent = readonly && !planOnly
+  // v92 "wirewise" P0 fix: `unrestricted` must be declared BEFORE the plugin
+  // load below. It was declared ~40 lines further down (after the v85 master
+  // switch landed), so every runAgent plugin load hit a TDZ ReferenceError
+  // that the surrounding try{}catch{} silently swallowed — user tool plugins
+  // (~/.forge/tools) NEVER loaded in agent runs. Declared once, earliest.
+  const unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
   let plugins = []
   let pluginHost = null // v21.1: isolated plugin workers, closed in `finally`
   if (config.tools?.plugins !== false) {
@@ -267,6 +290,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}`, ...identityMeta() })
       }
     } catch { }
+    // v93 gap fix §19: CREATED tools register here — but ONLY lifecycle
+    // ACTIVE with passing behavioral verification (toolcreate.js loads
+    // exactly those; CANDIDATE/TESTING/INACTIVE never reach the agent).
+    try {
+      const created = await loadActiveCreatedTools(process.cwd())
+      if (created.length) {
+        const safe = created.filter((t) => !BUILTIN_TOOL_NAMES.has(t.name) && !plugins.some((p) => p.name === t.name))
+        plugins = [...plugins, ...safe]
+        if (!isDelegatedSubAgent) for (const ct of safe) onEvent?.({ type: "info", text: `created tool loaded: ${ct.name} (ACTIVE, behaviorally verified)`, ...identityMeta() })
+      }
+    } catch { /* created tools are additive, never break the agent */ }
   }
   let mcpClients = []
   if (!isDelegatedSubAgent && !noTools && config.tools?.mcp !== false) {
@@ -294,8 +328,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // paths stay on explicit consent. assumeYes is NEVER auto-flipped — that
   // would also permit outside-project rm, sudo, metadata, apt-get, npm publish.
   const autonomous = !readonly && config.agent?.autonomous !== false
-  // v85: owner master switch — implies every privileged tools.* flag.
-  const unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
   const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
   const pickedPlugins = selectPlugins(task || "", plugins, { klass })
   const tools = makeToolContext({
@@ -393,6 +425,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         memoryBlock = mem
         learningsBlock = learn
         if (map !== null) repoMapBlock = map
+        // v93 sensewise: the same embedder powers the semantic_search tool's
+        // hybrid rerank (BM25 stays the offline default; embeddings only
+        // reorder). Delegated read-only sub-agents never get it — they stay
+        // on plain BM25, same as their repo-map/memory shortlists.
+        tools.ctx.semanticEmbed = (texts) => embedder.embed(texts)
         embedder.close()
         onEvent?.({ type: "info", text: `semantic retrieval: memory+repomap ranked by ${embCfg.provider}/${embCfg.model} (alpha ${embCfg.alpha})`, ...identityMeta() })
       }
@@ -618,13 +655,34 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
 
     for (const chk of commandChecks) chk.filesWrittenAfter = writesSoFar.slice(chk.writeIndex)
     const budgetHit = steps >= maxSteps
-    if (budgetHit && !finalText) {
-      finalText = "(reached the per-segment step budget without a final answer)"
-    }
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
-    endRun("completed", { text: finalText, wrote })
-    return { status: "COMPLETED", text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
+    // v93 gap fix (§4/§5): budget exhaustion is NEVER completion. The direct
+    // fast path no longer invents its own definition of done — the SAME
+    // completion module that owns the whole-task gate owns this contract
+    // (canCompleteFastPath). A run that spent its budget WITHOUT a final
+    // answer returns INCOMPLETE (RESOURCE_LIMIT), checkpoints what exists,
+    // and is resumable; only the Core's gate may ever decide COMPLETED.
+    // ("only because" is the §5 wording: a REAL final answer produced on the
+    // last allowed step completes the run — the budgetHit flag is still
+    // reported so meta may continue the segment if it wants more work.)
+    const answerPresent = String(finalText ?? "").trim().length > 0
+    const exhausted = budgetHit && !answerPresent
+    const fastGate = canCompleteFastPath({ finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks })
+    let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
+    let checkpointId = null
+    if (!fastGate.ok && fastGate.status === "INCOMPLETE") {
+      // §32: a resource limit is an execution control — checkpoint so the
+      // work can resume (the same checkpoint module meta uses at segment
+      // boundaries; no second checkpoint system).
+      try {
+        checkpointId = boundaryCheckpoint(process.cwd(), { runId, label: "budget-incomplete", objective: task })
+        if (checkpointId && log) log.checkpoint(checkpointId)
+      } catch { /* checkpoint is best-effort, never breaks the run */ }
+      finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps — before a final answer; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
+    }
+    endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

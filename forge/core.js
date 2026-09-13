@@ -23,7 +23,7 @@
  * The Core never widens a security boundary and never fakes a phase: phases
  * are recorded from REAL meta events, not from a wishful state machine.
  */
-import { createBus, MESSAGE_TYPE } from "./bus.js"
+import { createBus, MESSAGE_TYPE, busPath } from "./bus.js"
 import { createHandoffLedger } from "./handoff.js"
 import { createDecisionEngine, DECISION_STATUS } from "./decisionengine.js"
 import { createWorldModel } from "./worldmodel.js"
@@ -33,7 +33,11 @@ import { reviewWorkerResult, formatSelfReview } from "./selfreview.js"
 import { reportConflict, resolveConflict, CONFLICT_STATUS } from "./crewconflict.js"
 import { createResourceManager } from "./resources.js"
 import { TASK_STATUS } from "./taskstate.js"
-import { openTask } from "./taskstate.js"
+import { openTask, readTask } from "./taskstate.js"
+import { listCheckpoints } from "./checkpoint.js"
+import { projectDir } from "./memory.js"
+import fs from "node:fs"
+import path from "node:path"
 
 /** §2 — the unified execution lifecycle, in order. */
 export const CORE_PHASES = [
@@ -85,7 +89,11 @@ export function createForgeCore({
 } = {}) {
   config = config && typeof config === "object" ? config : {}
   // --- shared subsystems (the Core owns the instances) --------------------
-  const bus = createBus({ taskId: null, persist: false })
+  // v93 gap fix §14: the bus persists. It binds to the task file the moment
+  // the task id exists (bindTask) and replays prior history on resume; the
+  // bounded JSONL + trim keeps it from ever becoming a bottleneck, and
+  // PROGRESS chatter is not written (appendDisk).
+  const bus = createBus({ taskId: null, persist: true })
   bus.register("core", { kind: "core" })
   bus.register("crew", { kind: "crew" })
   const handoffs = createHandoffLedger()
@@ -128,6 +136,12 @@ export function createForgeCore({
 
   /** The event tap: wires meta/agent/worker events into Core intelligence. */
   function coreEventTap(ev = {}) {
+    // 0. v93 §14: bind the persisted bus to the task as soon as it exists,
+    //    and append the engineering event to the bounded events ledger.
+    if ((ev.type === "TASK_CREATED" || ev.type === "TASK_STARTED" || ev.type === "TASK_RESUMED") && ev.taskId && !bus.file) {
+      bus.bindTask(ev.taskId)
+    }
+    persistEvent(ev)
     // 1. phase truth
     const phase = EVENT_PHASE[ev.type]
     if (phase) recordPhase(phase, ev.type)
@@ -186,6 +200,55 @@ export function createForgeCore({
     emit(ev)
   }
 
+  /** §14 — bounded, append-only engineering-event ledger (events.jsonl under
+   *  the project dir). Task/plan/DAG/segment/worker/verification/checkpoint/
+   *  recovery/decision/completion events only; raw tool traffic and huge
+   *  payloads are never written. Restart reconstruction reads it back. */
+  const PERSISTED_EVENT_RE = /^(TASK_|PLAN_|DAG_|SEGMENT_|WORKER_|VERIFICATION_|VERIFY_|CHECKPOINT|REPAIR_|RECOVER|RESUM|DECISION_|COMPLETION_|INTEGRATION_CONFLICT|CONFLICT_|SELF_REVIEW|MODEL_SELECTED|STRATEGY_CHANGED|PREDICTION_)/
+  function eventsPath() { return path.join(projectDir(cwd), "events.jsonl") }
+  function persistEvent(ev) {
+    if (!ev || !ev.type || !PERSISTED_EVENT_RE.test(ev.type)) return
+    try {
+      const line = JSON.stringify({ ts: Date.now(), ...ev, content: undefined, text: typeof ev.text === "string" ? ev.text.slice(0, 400) : undefined })
+      if (line.length > 4000) return // a huge payload is raw log material, not history
+      const p = eventsPath()
+      fs.mkdirSync(path.dirname(p), { recursive: true })
+      fs.appendFileSync(p, line + "\n", "utf8")
+      try {
+        const st = fs.statSync(p)
+        if (st.size > 2_000_000) {
+          const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean)
+          fs.writeFileSync(p, lines.slice(Math.floor(lines.length / 2)).join("\n") + "\n", "utf8")
+        }
+      } catch { }
+    } catch { /* persistence never breaks the run */ }
+  }
+
+  /** §14 — reconstruct the authoritative engineering state for a task after
+   *  a restart: event history + checkpoint + world model + task state. Read
+   *  ONLY what exists; every field says honestly what was found. */
+  function reconstruct(taskId) {
+    const out = { taskId: taskId ?? null, bus: null, events: null, task: null, checkpoints: 0, world: null }
+    try {
+      const busFile = busPath(taskId)
+      if (fs.existsSync(busFile)) {
+        const lines = fs.readFileSync(busFile, "utf8").split("\n").filter(Boolean)
+        out.bus = { file: busFile, messages: lines.length }
+      }
+    } catch { }
+    try {
+      if (fs.existsSync(eventsPath())) {
+        const lines = fs.readFileSync(eventsPath(), "utf8").split("\n").filter(Boolean)
+        const last = lines.slice(-40).map((l) => { try { return JSON.parse(l).type } catch { return null } }).filter(Boolean)
+        out.events = { file: eventsPath(), count: lines.length, lastTypes: [...new Set(last)].slice(-12) }
+      }
+    } catch { }
+    try { const t = readTask(taskId); if (t) out.task = { status: t.status, objective: String(t.objective ?? "").slice(0, 160), segment: t.segment_count ?? null } } catch { }
+    try { out.checkpoints = listCheckpoints(cwd, 50).length } catch { }
+    try { out.world = { file: path.join(projectDir(cwd), "world.json"), exists: fs.existsSync(path.join(projectDir(cwd), "world.json")) } } catch { }
+    return out
+  }
+
   /**
    * Run an objective through the whole system (delegates execution to meta).
    * This is the §2 loop made real: meta drives, the Core coordinates,
@@ -195,6 +258,11 @@ export function createForgeCore({
     if (running) throw new Error("core is already running a task")
     running = true
     const t0 = Date.now()
+    if (resumeTaskId) {
+      // §14: a resumed task reattaches to its persisted history FIRST — the
+      // conversation and events that already happened are the context
+      try { bus.bindTask(resumeTaskId) } catch { }
+    }
     const ep = episodes.start({
       problem: String(objective ?? "").slice(0, 1200),
       context: world.summarize({ maxLines: 8 }),
@@ -281,7 +349,7 @@ export function createForgeCore({
   }
 
   return {
-    run, status, pause, answerDecision, failureFlow,
+    run, status, pause, answerDecision, failureFlow, reconstruct,
     // subsystem access (wired, shared — every consumer gets THE instance)
     bus, handoffs, decisions, episodes, crewRouter, resources, world, conflicts,
     reviewWorkerResult, formatSelfReview,

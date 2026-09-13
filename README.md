@@ -3,16 +3,42 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 91.0.0 — "corewise" (∞ CORE).** Forge Core binds every subsystem
-into one engineering intelligence: an agent communication bus (A2A +
-Core↔Agent), formal handoffs, evidence-based conflict resolution, worker
-self-review, specialist model routing with performance memory, a human
-decision engine (WAITING_FOR_USER), a semantic world model, engineering
-episodes, a 67-language adapter system, INVALIDATED/SKIPPED/RETRYING DAG
-semantics, resource fuses, and TUI views /dag /crew /comm /resources
-/decision. Carries **v90 "gitwise"** (git views + silent-stop fix), **v89
-"fast"** and **v88 "noguard + worker clamp"**: no guards, no blocks, workers
-2–8. One folder: `forge/`.
+**Version 94.0.0 — "gapwise" (gap fix / integration patch).
+
+**v94 "gapwise"** — the confirmed v93 gaps fixed inside the existing
+architecture, zero fake completion: ONE completion contract for every
+execution path (budget exhaustion → INCOMPLETE + checkpoint + resume, never
+a fabricated COMPLETED); exhausted workers classified and retried; **Runtime
+Intelligence** (discovery with per-fact evidence, real health probes,
+claim gates, crash reconcile — `runtime` tool #26); **persistent
+incremental world model** (survives restart, re-extracts only what changed,
+honest truncation); **persisted core bus + engineering-event ledger** with
+restart reconstruction; **LSP-first structured extraction** (lexical is a
+labeled fallback, not a silent default); **tool creation pipeline** with
+behavioral verification in a real child process; **strict learned-skill
+promotion** (equivalent to downloads: behavioral evidence + freshness +
+staleness); **strategy 3.0** with contextual factors and justifications.
+26 tools, 148/148 suites green.
+
+**v93 "sensewise"** — three new senses: a background **process manager**
+(dev servers survive the tool call; ports detected from output and the OS
+socket table, never guessed; kill hits the whole group; the lifetime fuse
+is a resource fuse, never a completion claim), a **persistent Node REPL**
+(variables and loaded data survive between calls; timeout = "still
+running", never fabricated), and **semantic code search** (BM25 +
+embedding hybrid, find code by meaning when grep finds nothing literal).
+The last v91 islands (skillforge, embeddings, memgraph) are wired. 25
+tools, 140/140 suites green, 99 new assertions.** Nothing rewritten — the
+v91 engines remain the source of truth; every module that shipped but was
+never consulted is now wired into the living system: a **prediction
+ledger** (predict before each segment → settle against observed reality →
+calibrate future plans from real prediction errors), **language-adapter
+coverage** in every agent prompt (67 languages, honest deep-vs-conservative),
+**world-model consultation** at planning (blast radius + covering tests),
+**integrator conflicts** reported and resolved instead of discarded, and the
+P0 plugin-load TDZ fix (user tool plugins work again). Carries **v91
+"corewise"** (∞ CORE), **v90 "gitwise"**, **v89 "fast"** and **v88 "noguard
++ worker clamp"**: no guards, no blocks, workers 2–8. One folder: `forge/`.
 
 ## v88 in one line
 
@@ -26,7 +52,7 @@ logs and `/status` — the verdict is just always *run*.
 forge/                 the npm package (CLI + tests + bundled skills)
   forge.js             CLI entry
   skills/              80 bundled skills
-  tests/               130 suites (npm test, zero network)
+  tests/               139 suites (npm test, zero network)
 LICENSE                MIT
 PACKAGE_INFO.txt       capability summary
 FORGE-AUDIT-REPORT*.md engineering reports (history)

@@ -40,7 +40,7 @@ import { formatSteer } from "./evaluate.js"
 import { persistGaps } from "./knowgap.js"
 import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
-import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve } from "./evolve.js"
+import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve, markStaleSkills } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
@@ -57,6 +57,14 @@ import { createDecisionEngine, DECISION_TYPE } from "./decisionengine.js"
 import { createCrewRouter, preferredClassFor } from "./crewroute.js"
 import { reviewWorkerResult } from "./selfreview.js"
 import { createHandoffLedger, handoffContextBlock, createHandoff as createHandoffLocal } from "./handoff.js"
+// v92 "wirewise" wiring: prediction ledger (§9), language adapters (§7/§8),
+// conflict reporting (§31), semantic world-model consultation (§5/§10).
+// Nothing below replaces an existing engine — each island module is now
+// consulted by the living loop that needed it.
+import { predictForNode, settlePrediction, recordPrediction, predictionsForPrompt, predictionCalibration, formatPrediction, formatSettlement } from "./prediction.js"
+import { adapterBrief } from "./langadapter.js"
+import { reportConflict } from "./crewconflict.js"
+import { createWorldModel } from "./worldmodel.js"
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -188,7 +196,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         readOnly: readOnly !== false, maxStepsOverride: 10, worker: { role, dagNode },
         budgetHit: false,
         journal: false, suppressRunEvents: true,
-      }).then((r) => r.text)
+      })
+      // v93 gap fix: return the FULL agent result, not r.text — the worker
+      // settlement (agentmanager) must see the agent's real outcome or an
+      // exhausted worker looks like a completed one whose "findings" were
+      // the budget-exhaustion text. Meta's §35 classifier now receives
+      // status/budgetHit and reassigns instead of completing the node.
     },
   })
 
@@ -307,6 +320,44 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       : []
     const langPrefix = formatLangReason(planLangs)
     if (planLangs.length) emit({ type: "PLAN_LANG", taskId, runId: taskRunId, langs: planLangs })
+    // v92 §9 (wirewise): prediction-calibration feedback — real prediction
+    // errors from earlier runs steer this plan. The master loop demands
+    // "learn from incorrect predictions"; the ledger is the honest record.
+    const predictionPrefix = (!restoredDAG && !fastPath && !recoveryPath)
+      ? predictionsForPrompt(process.cwd())
+      : ""
+    if (predictionPrefix) {
+      const cal = predictionCalibration(process.cwd())
+      emit({ type: "PLAN_PREDICTION_CALIBRATION", taskId, runId: taskRunId, calibration: cal })
+    }
+    // v92 §5/§10 (wirewise): consult the semantic world model BEFORE planning.
+    // Project shape + blast radius of files the objective names — bounded,
+    // honest (degraded world says so), never fabricated.
+    const worldPrefix = (() => {
+      if (restoredDAG || fastPath || recoveryPath) return ""
+      try {
+        const world = createWorldModel({ cwd: process.cwd() })
+        const lines = []
+        const summary = world.summarize({ maxLines: 5 })
+        if (summary) lines.push(String(summary))
+        const mentions = [...String(state.objective ?? "").matchAll(/[\w./-]+\.[A-Za-z0-9]{1,6}/g)].map((m) => m[0]).slice(0, 6)
+        const known = [...new Set(mentions)].filter((f) => { try { return fs.existsSync(path.resolve(process.cwd(), f)) } catch { return false } })
+        if (known.length) {
+          const abs = known.map((f) => path.resolve(process.cwd(), f))
+          const imp = world.impact(abs)
+          if (imp && !imp.unknown) {
+            const importers = (imp.importers ?? []).slice(0, 6).map((i) => i.file ?? i.path ?? i)
+            const tests = (imp.tests ?? []).slice(0, 4).map((t) => t.file ?? t.path ?? t)
+            lines.push(`Blast radius of ${known.slice(0, 4).join(", ")}: radius ${imp.radius ?? "?"}${importers.length ? ` — importers: ${importers.join(", ")}` : ""}${tests.length ? ` — tests: ${tests.join(", ")}` : ""}`)
+          }
+          const tFor = world.testsFor(abs)
+          if (tFor?.length && !imp?.tests?.length) lines.push(`Tests touching these files: ${tFor.slice(0, 4).join(", ")}`)
+        }
+        if (!lines.length) return ""
+        return `--- world model (semantic project state) ---\n${lines.join("\n")}`.slice(0, 900)
+      } catch { return "" }
+    })()
+    if (worldPrefix) emit({ type: "PLAN_WORLD_CONSULTED", taskId, runId: taskRunId, blastRadius: Boolean(worldPrefix.includes("Blast radius")) })
     const enginePrefix = (!restoredDAG && !fastPath && !recoveryPath)
       ? engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
       : ""
@@ -338,7 +389,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -1028,8 +1079,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               // §35 — reassignment: ONE successor, full context transfer, the
               // failed attempt's findings preserved in the handoff. Never an
               // infinite relay; the second failure marks the node FAILED.
+              // v93 gap fix: an EXHAUSTED worker (sub-agent spent its budget
+              // without finishing) is classified like a failure — retry /
+              // reassign, never "work complete". Unresolved → markFailed →
+              // the completion gate keeps the task honestly INCOMPLETE.
               const used = reassignBudget.get(n.id) ?? 0
-              const reassignable = used < 1 && (r.status === "failed" || r.status === "timed_out")
+              const reassignable = used < 1 && (r.status === "failed" || r.status === "timed_out" || r.status === "exhausted")
               if (reassignable) {
                 reassignBudget.set(n.id, used + 1)
                 const h = createHandoffLocal({
@@ -1061,6 +1116,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             dagLib.markRunning(dag, n.id)
             if (isIntegratorRole(n.role)) {
               const merged = integrateResults({ objective: state.objective, reports: reportsFromGraph(dag) })
+              // v92 §31 (wirewise): overlapping worker claims on the same file
+              // are real conflicts — report them instead of silently dropping
+              // them. The INTEGRATION_CONFLICT event is consumed by the Core
+              // event tap, which records and resolves it with the evidence
+              // ladder (evidence wins; ties escalate to an experiment).
+              // Before this wiring the conflicts field was computed by
+              // integrate.js and discarded — core's handler was dead code.
+              for (const cf of (merged.conflicts ?? []).slice(0, 3)) {
+                try {
+                  emit({
+                    type: "INTEGRATION_CONFLICT", taskId, runId: taskRunId, segmentId, nodeId: n.id,
+                    file: cf.file,
+                    claims: {
+                      topic: `overlapping change: ${cf.file}`,
+                      a: { worker: cf.a?.from ?? "worker-a", text: `${cf.a?.action ?? ""}${cf.a?.why ? ` — ${cf.a.why}` : ""}`, evidence: [cf.file] },
+                      b: { worker: cf.b?.from ?? "worker-b", text: `${cf.b?.action ?? ""}${cf.b?.why ? ` — ${cf.b.why}` : ""}`, evidence: [cf.file] },
+                    },
+                  })
+                  bus91.send({ sender: `integrator:${n.id}`, receiver: "core", type: MESSAGE_TYPE.WARNING, content: `conflicting worker claims on ${cf.file}: ${cf.a?.from ?? "a"} vs ${cf.b?.from ?? "b"}`, node_id: n.id, file_refs: [cf.file], priority: 2 })
+                } catch { /* one bad conflict shape must never break integration */ }
+              }
               const rec = ledger.add({
                 verification_id: `ver-worker-${n.id}-integrate`,
                 taskId, nodeId: n.id, segmentId,
@@ -1152,6 +1228,32 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         ? state.objective
         : buildContinuation({ state, segment, planText, riskNow, knownBad })
 
+    // v92 §9 (wirewise): PREDICT before acting — deterministic, derived from
+    // the DAG node's declared targets and the planning risk. Never a model's
+    // self-reported confidence (that is not evidence). The prediction is
+    // settled against observed reality after the segment completes.
+    const segPrediction = predictForNode({
+      node: currentNode, objective: state.objective, riskLevel: riskNow,
+      segment, segmentId, taskId,
+    })
+    emit({
+      type: "PREDICTION_MADE", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+      prediction: {
+        id: segPrediction.id, expectedFiles: segPrediction.expectedFiles, expectedRisk: segPrediction.expectedRisk,
+        expectedOutcome: segPrediction.expectedOutcome, derived: segPrediction.derived,
+      },
+      text: formatPrediction(segPrediction),
+    })
+    // v92 §7/§8 (wirewise): honest language-adapter brief for the node's
+    // declared targets — tells the model exactly how well Forge can parse
+    // the files it is about to touch (deep vs conservative mode).
+    const segAdapterBrief = (() => {
+      try {
+        const targets = currentNode?.targetFiles ?? []
+        return targets.length ? adapterBrief(targets, { maxFiles: 6, maxChars: 480 }) : ""
+      } catch { return "" }
+    })()
+
     let res
     try {
       res = await agent({
@@ -1161,7 +1263,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         runId: taskRunId,
         segmentId,
         nodeId: currentNodeId,
-        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : ""].filter(Boolean).join("\n\n") || undefined,
+        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : ""].filter(Boolean).join("\n\n") || undefined,
         maxStepsOverride: segSteps, deep, onEvent: segmentEvents(emit, segment, { taskId, runId: taskRunId, segmentId, nodeId: currentNodeId }),
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
@@ -1206,6 +1308,29 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         const syms = detectAffectedSymbols([...changedFiles], process.cwd())
         for (const s of syms) if (!affectedSymbols.includes(s)) affectedSymbols.push(s)
       } catch { }
+    }
+
+    // v92 §9 (wirewise): settle the prediction against observed reality —
+    // Prediction → Observation → Reality Delta, then persist for calibration.
+    // Files changed in this segment + the risk recalculated from the actual
+    // change + the segment outcome are the reality; the delta is evidence.
+    {
+      const segRealityRisk = (() => { try { return recomputeFinalRisk().risk } catch { return null } })()
+      const settled = settlePrediction(segPrediction, {
+        actualFiles: [...segChanged],
+        finalRisk: segRealityRisk,
+        status: res.error ? "error" : "ok",
+      })
+      emit({
+        type: "PREDICTION_SETTLED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+        prediction: {
+          id: settled.id, driftScore: settled.driftScore, riskDelta: settled.riskDelta,
+          filesHit: settled.filesHit?.length ?? 0, filesExtra: settled.filesExtra?.length ?? 0,
+          filesMissed: settled.filesMissed?.length ?? 0, outcomeCorrect: settled.outcomeCorrect,
+        },
+        text: formatSettlement(settled),
+      })
+      try { recordPrediction(settled, process.cwd()) } catch { /* best-effort persistence */ }
     }
 
     // Exact node identity + P0 verification gate.
@@ -1290,10 +1415,38 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       } catch { /* best-effort: a broken language server must not crash the gate */ }
     }
 
+    // v93 §13 (gap fix): a mutation invalidates EXACTLY what it touched —
+    // drop the changed files from the persisted world-model snapshot so the
+    // next world build (next segment's plan, compose, or a restarted forge)
+    // re-extracts only those files instead of trusting stale records.
+    if (segChanged.size) {
+      try {
+        const changedRel = [...segChanged].map((f) => path.relative(process.cwd(), f))
+        createWorldModel({ cwd: process.cwd() }).invalidate(changedRel)
+        emit({ type: "WORLD_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, files: changedRel.slice(0, 12) })
+        // §22: knowledge verified against files that just changed is stale —
+        // mark it so promotion is blocked and consumers see the staleness
+        const stale = markStaleSkills(process.cwd(), changedRel)
+        if (stale.marked) emit({ type: "SKILLS_STALE", taskId, runId: taskRunId, segmentId, skills: stale.skills.slice(0, 8) })
+      } catch { /* invalidation is best-effort; fingerprints still catch drift */ }
+    }
+
     const u = res.usage ?? {}
     const tokIn = u.prompt ?? u.prompt_tokens ?? u.input_tokens ?? u.promptTokens ?? 0
     const tokOut = u.completion ?? u.completion_tokens ?? u.output_tokens ?? u.completionTokens ?? 0
     resources.record({ tokensIn: tokIn, tokensOut: tokOut, toolCalls: segToolCalls, latencyMs: segMs, workers: manager.stats().active })
+    // v93 §23: store the actual segment outcome WITH context (class +
+    // languages + latency) — strategy 3.0 selection learns what worked where
+    try {
+      const { recordStrategy } = await import("./strategy.js")
+      recordStrategy({
+        cwd: process.cwd(), name: `klass:${classified.class ?? "UNKNOWN"}`,
+        ok: !res.error && !res.budgetHit,
+        klass: classified.class ?? null,
+        langs: languagesIn(state.objective).slice(0, 6),
+        latencyMs: segMs,
+      })
+    } catch { /* strategy memory is best-effort */ }
     const segStatus = res.error ? "failed" : res.budgetHit ? "continued" : "completed"
     ts.addSegment({ segment_id: segmentId, node_id: currentNodeId, objective: state.objective, status: segStatus, steps: res.steps ?? 0, tool_calls: segToolCalls, continued: !!res.budgetHit })
     ts.noteUsage({ tokens_in: tokIn, tokens_out: tokOut, tool_calls: segToolCalls, ms: segMs, workers: manager.stats().active })

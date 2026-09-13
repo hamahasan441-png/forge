@@ -28,12 +28,14 @@
  * Unknown never fails; it degrades to conservative mode.
  */
 import fs from "node:fs"
+import path from "node:path"
 import {
   ADAPTERS, detectLanguage, extractSymbols, extractImports, extractExports,
   extractCalls, extractTypes, discoverToolchain,
 } from "./lang.js"
 import { binaryOnPath, lspAvailability } from "./langengine.js"
 import { semanticsFor } from "./langreason.js"
+import { serverForFile, connectServer, pathToUri, languageIdForFile } from "./lsp.js"
 
 /** §7 — capabilities an adapter MAY provide. Absent capability = honest null. */
 export const ADAPTER_CAPABILITIES = [
@@ -178,9 +180,12 @@ export function parseLayered(file, src = "", { config = null } = {}) {
   const ts = binaryOnPath("tree-sitter")
   layers.push({ layer: 2, name: "tree-sitter", available: ts, why: ts ? "external tree-sitter binary found" : "tree-sitter binary not on PATH" })
   // 3. LSP — real client when the user configured a server for this file
-  const lsp = lspAvailability(config ?? {})
-  const lspReady = Boolean(lsp?.configured?.length)
-  layers.push({ layer: 3, name: "lsp", available: lspReady, why: lspReady ? `configured servers: ${lsp.configured.join(", ")}` : "no LSP server configured" })
+  // v93 gap fix: lspAvailability returns an ARRAY of configured servers —
+  // the old `lsp?.configured?.length` read a shape that never existed, so
+  // layer 3 could never report available even with servers configured.
+  const lspServers = lspAvailability(config ?? {})
+  const lspReady = Array.isArray(lspServers) && lspServers.some((s) => s.available)
+  layers.push({ layer: 3, name: "lsp", available: lspReady, why: lspReady ? `configured servers: ${lspServers.filter((s) => s.available).map((s) => s.name).join(", ")}` : "no LSP server configured" })
   // 4. compiler / type checker
   const adapter = adapterFor(file, src)
   layers.push({ layer: 4, name: "compiler", available: Boolean(adapter.capabilities.compiler), detail: adapter.capabilities.compiler ?? null })
@@ -207,7 +212,20 @@ export function parseLayered(file, src = "", { config = null } = {}) {
       }
     } catch { extraction = null }
   }
-  return { file, language: adapter.id, layers, chosen: firstAvailable?.name ?? "none", extraction, conservative: adapter.adaptive }
+  // §15 (v93 gap fix): this SYNC extraction is honestly labeled with the
+  // layer that produced it — lexical, the fallback. When an LSP server is
+  // configured for this file, structured (layer-3) extraction is available
+  // through extractStructured(); parseLayered never CLAIMS structured
+  // semantics it did not use.
+  const lspLayer = layers.find((l) => l.name === "lsp")
+  const extractionProvenance = {
+    layer: 8,
+    source: "lexical (lang.js)",
+    note: lspLayer?.available
+      ? "sync bulk path uses the lexical fallback; LSP documentSymbol extraction is available via extractStructured() for this file type"
+      : "no structured parser available for this file; lexical is the only layer",
+  }
+  return { file, language: adapter.id, layers, chosen: firstAvailable?.name ?? "none", extraction, extractionProvenance, conservative: adapter.adaptive }
 }
 
 /** §7 unknown-language flow — the deterministic adaptive plan. */
@@ -237,6 +255,121 @@ export function adaptivePlan(file, src = "", { config = null } = {}) {
 /** Catalog size for /doctor + tests. */
 export function catalogSize() {
   return { deep: ADAPTERS.length, shallow: EXTENSION_LANGUAGES.length, total: ADAPTERS.length + EXTENSION_LANGUAGES.length }
+}
+
+/**
+ * §15 (v93 gap fix) — STRUCTURED symbol extraction, LSP-first.
+ *
+ * The ladder finally does what it reports: when an LSP server is configured
+ * for this file's extension, the file is opened in the server and its symbols
+ * come from textDocument/documentSymbol (layer 3 — the server's real parser,
+ * not regex). On ANY failure — server missing, crash, timeout — extraction
+ * degrades to the lexical adapter and SAYS so. The result always carries
+ * `provenance` = { layer, source } so no consumer can mistake regex output
+ * for parser output.
+ */
+export async function extractStructured(file, src = "", { config = null, cwd = process.cwd() } = {}) {
+  const rel = String(file ?? "")
+  const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel)
+  const found = (() => { try { return serverForFile(config, abs) } catch { return null } })()
+  if (found) {
+    let client = null
+    try {
+      client = await connectServer(found.name, found.spec, { rootUri: pathToUri(cwd) })
+      let text = src
+      if (text == null) { try { text = fs.readFileSync(abs, "utf8") } catch { text = "" } }
+      const symbols = await client.documentSymbols(pathToUri(abs), languageIdForFile(abs, found.spec), text)
+      if (Array.isArray(symbols) && symbols.length) {
+        return {
+          symbols: symbols.map((s) => s.name),
+          structured: symbols,
+          provenance: { layer: 3, source: `lsp:${found.name}` },
+          fallback: null,
+        }
+      }
+      // a server that returns zero symbols is not structured extraction —
+      // fall through honestly rather than fabricating an empty success
+      return {
+        symbols: extractSymbols(rel, src ?? ""),
+        structured: null,
+        provenance: { layer: 8, source: "lexical (lang.js)" },
+        fallback: "lsp-returned-no-symbols",
+      }
+    } catch (e) {
+      return {
+        symbols: extractSymbols(rel, src ?? ""),
+        structured: null,
+        provenance: { layer: 8, source: "lexical (lang.js)" },
+        fallback: `lsp-failed: ${String(e?.message ?? e).slice(0, 160)}`,
+      }
+    } finally {
+      try { client?.close() } catch { }
+    }
+  }
+  // no server configured — the honest default, explicitly not structured
+  return {
+    symbols: extractSymbols(rel, src ?? ""),
+    structured: null,
+    provenance: { layer: 8, source: "lexical (lang.js)" },
+    fallback: "lsp-not-configured",
+  }
+}
+
+/**
+ * v92 "wirewise" — per-language coverage lookup for runtime prompts.
+ * Maps a language id (or name) to its honest adapter status:
+ *   deep         lang.js owns symbol/import/export/call extraction
+ *   shallow      extension catalog knows it — conservative mode
+ *   unknown      not in either catalog
+ * Runtime consumers (agent.js / meta.js) use this to tell the model the
+ * truth about how well Forge can parse what it is about to touch.
+ */
+export function languageCoverage(langIds = []) {
+  const deepIds = new Set(ADAPTERS.map((a) => String(a.id ?? "").toLowerCase()))
+  const shallowById = new Map(EXTENSION_LANGUAGES.map((l) => [String(l.id).toLowerCase(), l]))
+  const byName = new Map(EXTENSION_LANGUAGES.map((l) => [String(l.name).toLowerCase(), l]))
+  const out = []
+  const seen = new Set()
+  for (const raw of langIds) {
+    const id = String(raw ?? "").trim().toLowerCase()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const shallow = shallowById.get(id) ?? byName.get(id) ?? null
+    if (deepIds.has(id)) out.push({ id, deep: true, conservative: false, note: "deep adapter (symbols/imports/exports)" })
+    else if (shallow) out.push({ id, deep: false, conservative: true, note: `shallow adapter — conservative mode${shallow.bins?.length ? `, toolchain bins: ${shallow.bins.slice(0, 3).join("/")}` : ""}` })
+    else if (id === "unknown") continue
+    else out.push({ id, deep: false, conservative: true, note: "not in the adapter catalog — conservative mode" })
+  }
+  return out
+}
+
+/**
+ * v92 "wirewise" — bounded adapter brief for concrete files about to be
+ * touched (DAG node targets / planning). One honest line per file:
+ * language, deep vs conservative, best available parse layer, compiler
+ * presence. Never invents capabilities (§100 honest-UNAVAILABLE).
+ */
+export function adapterBrief(files = [], { maxFiles = 8, maxChars = 600 } = {}) {
+  const list = (Array.isArray(files) ? files : []).filter(Boolean).slice(0, maxFiles)
+  if (!list.length) return ""
+  const lines = []
+  for (const f of list) {
+    try {
+      const a = adapterFor(String(f))
+      const compiled = a.capabilities?.compiler ? `compiler ${a.capabilities.compiler.binaries[0]}` : "no compiler found"
+      const mode = a.deep ? "deep" : "conservative"
+      lines.push(`${path$basename(String(f))}: ${a.id} [${mode}] — ${compiled}, lexical extraction${a.adaptive ? ", minimal reversible edits only" : ""}`)
+    } catch { /* one bad file must never break the brief */ }
+  }
+  if (!lines.length) return ""
+  const header = `--- language adapter status (honest capability report) ---`
+  const text = `${header}\n${lines.join("\n")}`
+  return text.length > maxChars ? text.slice(0, maxChars - 1) + "…" : text
+}
+
+function path$basename(f) {
+  const i = Math.max(f.lastIndexOf("/"), f.lastIndexOf("\\"))
+  return i === -1 ? f : f.slice(i + 1)
 }
 
 function extOf(file) {

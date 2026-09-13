@@ -29,7 +29,7 @@ import { execFile } from "node:child_process"
 import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
-import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES } from "./tools.js"
+import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
 import { injectPendingVision, stripOldVisionParts } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { createToolIntel, recordToolRun } from "./toolintel.js"
@@ -107,7 +107,7 @@ export const COMMANDS = [
   ["knowledge", "", "knowledge pane: claims, decisions, gaps, downloads"],
   ["experiment", "<domain>", "focused test for a blocking gap (never invents npm test)"],
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
-  ["tools", "[on|off]", "list the 18 agent tools, or toggle auto-tools in chat"],
+  ["tools", "[on|off]", `list the ${toolCount()} agent tools, or toggle auto-tools in chat`],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
   ["yolo", "[on|off]", "FULL CONTROL — never pause to ask permission (default ON)"],
   ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
@@ -185,7 +185,7 @@ ${bold("setup")}
   /experiment <domain>  focused test for a blocking gap (never invents npm test)
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
-  /tools [on|off]       list the 18 agent tools, or toggle auto-tools in chat
+  /tools [on|off]       list the ${toolCount()} agent tools, or toggle auto-tools in chat
   /yolo [on|off]        FULL CONTROL — run everything, never pause to ask (default ON)
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
@@ -568,6 +568,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const shutdownExternals = () => {
     closeChatPlugins(chatExternals)
     try { closeBrowserSession(toolsRef?.ctx) } catch {}
+    // v93 sensewise: background processes / REPL sessions never outlive forge
+    try { disposeToolManagers() } catch {}
   }
   process.once("exit", shutdownExternals)
   const tools = makeToolContext({
@@ -1477,7 +1479,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (ui) {
           lastAgentState = store.state
           ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
-          if (!planOnly && !(res.text || "").includes("(reached max steps")) {
+          // v93 gap fix: use the honest completion status from the ONE
+          // completion contract — no more sniffing fabricated budget text.
+          if (!planOnly && res.status === "COMPLETED" && (res.text || "").trim()) {
             messages.push({ role: "user", content: `[agent task] ${task}` })
             messages.push({ role: "assistant", content: res.text })
             persist()
@@ -1488,8 +1492,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           console.log(bold(planOnly ? cyan("── plan " + "─".repeat(54)) : green("── result " + "─".repeat(50))))
           console.log(renderMarkdown(res.text))
           console.log(dim(`  ${res.steps} steps • ${(res.toolLog || []).length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+          if (res.status && res.status !== "COMPLETED") console.log(yellow(`  status: ${res.status}${res.reason ? ` (${res.reason})` : ""}${res.resume ? ` — checkpoint ${res.resume.checkpointId} saved; the task can resume` : ""}`))
           if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
-          if (!planOnly) {
+          if (!planOnly && res.status === "COMPLETED" && (res.text || "").trim()) {
             messages.push({ role: "user", content: `[agent task] ${task}` })
             messages.push({ role: "assistant", content: res.text })
             persist()

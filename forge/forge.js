@@ -253,7 +253,7 @@ function resolveProvider(config) {
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
  *  — which working model to use (Enter = default, type any id to switch, ✓
  *  badges from the health cache, FREE badges from the model cache) — then
- *  drops into chat with all 22 tools + skills ON. Non-TTY never prompts. */
+ *  drops into chat with all 26 tools + skills ON. Non-TTY never prompts. */
 async function smartStart(cfg, p) {
   if (!process.stdin.isTTY) return p
   const conf = cfg.providers?.[p.name] ?? {}
@@ -522,9 +522,13 @@ async function main() {
       }
       else {
         console.log()
-        console.log(bold(green("── result " + "─".repeat(50))))
+        console.log(bold(res.status === "INCOMPLETE" ? yellow("── result (INCOMPLETE) " + "─".repeat(37)) : green("── result " + "─".repeat(50))))
         console.log(renderMarkdown(res.text))
         console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+        // v93 gap fix: the one-shot fast path reports the honest completion
+        // status from the ONE completion contract — budget exhaustion is
+        // INCOMPLETE, checkpointed and resumable, never "completed".
+        if (res.status && res.status !== "COMPLETED") console.log(yellow(`  status: ${res.status}${res.reason ? ` (${res.reason})` : ""}${res.resume ? ` — checkpoint ${res.resume.checkpointId} saved; the task can resume` : ""}`))
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       }
       debugRunSummary(res)
