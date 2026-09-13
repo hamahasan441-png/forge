@@ -170,6 +170,18 @@ const suites = [
   ["v90", "node", ["test-v90.mjs"]],
   ["v91", "node", ["test-v91.mjs"]],
   ["v91-core", "node", ["test-v91-core.mjs"]],
+  ["v92", "node", ["test-v92.mjs"]],
+  ["v92-core", "node", ["test-v92-core.mjs"]],
+  ["v93", "node", ["test-v93.mjs"]],
+  ["v93g", "node", ["test-v93g.mjs"]],
+  ["v93r", "node", ["test-v93r.mjs"]],
+  ["v93w", "node", ["test-v93w.mjs"]],
+  ["v93b", "node", ["test-v93b.mjs"]],
+  ["v93l", "node", ["test-v93l.mjs"]],
+  ["v93t", "node", ["test-v93t.mjs"]],
+  ["v93st", "node", ["test-v93st.mjs"]],
+  ["v94a", "node", ["test-v94a.mjs"]],
+  ["v93s", "node", ["test-v93s.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

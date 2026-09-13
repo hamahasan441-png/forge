@@ -1,3 +1,4 @@
+import path from "node:path"
 /**
  * forge — gated auto-promote (v84, zero dependencies)
  *
@@ -58,9 +59,34 @@ export function evaluatePromoteGates(name, { cwd = process.cwd(), env = process.
       blocked.push("SKILL.md unreadable")
     }
   } else {
+    // v93 gap fix §21: the LEARNED track gets gates equivalent to the
+    // download track. Before this, a learned skill only needed
+    // lifecycle VERIFIED + a parseable SKILL.md — no behavioral evidence,
+    // no freshness — weaker than downloads by construction.
     const md = readLearnedSkill(cwd, id)
     caps = extractCapabilities(md || "", { name: id })
     if (!caps.ok) blocked.push(caps.error || "no reusable capability")
+    const rec = learned
+    if (!rec.verification || rec.verification.passed !== true) {
+      blocked.push("no recorded behavioral verification (a fully-passed representative re-run is required before auto-ACTIVE)")
+    } else {
+      // §22 freshness: the fingerprint of the related files at verification
+      // time must still match — changed files mean stale knowledge
+      const fp = rec.verification.fingerprint
+      if (rec.stale) blocked.push(`stale: ${rec.staleReason || "related files changed after verification"} (re-verify before promoting)`)
+      if (Array.isArray(fp) && fp.length) {
+        const fsMod = fs
+        const pathMod = path
+        for (const e of fp.slice(0, 12)) {
+          try {
+            const st = fsMod.statSync(pathMod.isAbsolute(e.file) ? e.file : pathMod.join(cwd, e.file))
+            if (e.mtime != null && Math.round(st.mtimeMs || 0) !== e.mtime) { blocked.push(`stale fingerprint: ${e.file} changed since verification`); break }
+          } catch { blocked.push(`stale fingerprint: ${e.file} no longer exists`); break }
+        }
+      }
+      const bm = rec.verification.benchmark
+      if (bm && bm.total && bm.passed !== bm.total) blocked.push(`behavioral benchmark incomplete (${bm.passed}/${bm.total} checks passed)`)
+    }
   }
 
   if (String(dl?.lifecycle || "") === "CONTRADICTED" || learned?.lifecycle === SKILL_LIFE.SUPERSEDED) {

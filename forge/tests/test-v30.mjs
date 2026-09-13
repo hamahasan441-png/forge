@@ -170,8 +170,8 @@ console.log("== stripOldVisionParts keeps the last, stubs the rest ==")
 
 console.log("== tool: read_image still shipped, read-only, verifier-allowed ==")
 {
-  eq("toolCount 22", toolCount(), 22)
-  eq("TOOL_DEFS length 22", TOOL_DEFS.length, 22)
+  eq("toolCount 26", toolCount(), 26)
+  eq("TOOL_DEFS length 26", TOOL_DEFS.length, 26)
   ok("read_image in defs", TOOL_DEFS.some((t) => t.function.name === "read_image"))
   ok("not a write tool", !WRITE_TOOLS.has("read_image"))
   ok("BUILTIN_TOOL_NAMES", BUILTIN_TOOL_NAMES.has("read_image"))
@@ -270,8 +270,8 @@ console.log("== router: text stays read_file; a png is read_image ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 91.0.0", VERSION, "91.0.0")
-  eq("package.json is 91.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "91.0.0")
+  eq("VERSION is 94.0.0", VERSION, "94.0.0")
+  eq("package.json is 94.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "94.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
   ok("files includes vision.js", pkg.files.includes("vision.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

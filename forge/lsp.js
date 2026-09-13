@@ -196,6 +196,13 @@ class LspClient {
   async references(uri, line, character, includeDeclaration = true) {
     return normalizeLocations(await this._request("textDocument/references", { textDocument: { uri }, position: { line, character }, context: { includeDeclaration } }))
   }
+  /** §15 (v93 gap fix) — STRUCTURED symbol extraction via
+   *  textDocument/documentSymbol. Handles both shapes servers return:
+   *  hierarchical DocumentSymbol[] and flat SymbolInformation[]. */
+  async documentSymbols(uri, languageId, text) {
+    if (languageId && text != null) this.syncDoc(uri, languageId, text)
+    return normalizeSymbols(await this._request("textDocument/documentSymbol", { textDocument: { uri } }))
+  }
   async hover(uri, line, character) {
     const r = await this._request("textDocument/hover", { textDocument: { uri }, position: { line, character } })
     return hoverText(r)
@@ -263,6 +270,32 @@ export async function connectServer(name, spec, { rootUri, timeoutMs } = {}) {
   const client = new LspClient(name, { ...spec, rootUri: rootUri ?? spec?.rootUri, timeoutMs: timeoutMs ?? spec?.timeoutMs })
   await client.start()
   return client
+}
+
+/** SymbolKind → short label (LSP numbering). */
+const SYMBOL_KIND = {
+  1: "file", 2: "module", 3: "namespace", 4: "package", 5: "class", 6: "method",
+  7: "property", 8: "interface", 9: "constructor", 10: "enum", 11: "function",
+  12: "function", 13: "variable", 14: "constant", 15: "string", 16: "number",
+  17: "boolean", 18: "array", 19: "object", 20: "key", 21: "null", 22: "enummember",
+  23: "struct", 24: "event", 25: "operator", 26: "typeparameter",
+}
+
+/** Normalize documentSymbol responses (hierarchical OR flat) to
+ *  [{ name, kind, line }]. Never throws; malformed entries are dropped. */
+export function normalizeSymbols(res) {
+  const out = []
+  const walk = (items) => {
+    if (!Array.isArray(items)) return
+    for (const it of items) {
+      if (!it || typeof it.name !== "string") continue
+      const line = it.range?.start?.line ?? it.location?.range?.start?.line ?? null
+      out.push({ name: it.name, kind: SYMBOL_KIND[it.kind] ?? "symbol", line: typeof line === "number" ? line + 1 : null })
+      if (Array.isArray(it.children) && it.children.length) walk(it.children)
+    }
+  }
+  walk(res)
+  return out.slice(0, 500) // bounded — a file with 500+ symbols is machine-generated
 }
 
 /** Resolve the configured server for a file, by extension. */

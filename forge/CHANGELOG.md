@@ -3,6 +3,115 @@
 All notable changes to **forge** are recorded here. The version is defined in
 exactly one place — `package.json` — and read at runtime via `version.js`.
 
+## v94.0.0 — "gapwise" (gap fix / integration patch)
+
+No rewrite — the confirmed v93 gaps fixed in-place inside the existing
+architecture. Zero fake completion.
+
+### ONE completion contract
+- `canCompleteFastPath` shares the whole-task gate's module/shape/invariants.
+- Budget exhaustion without a final answer → INCOMPLETE/RESOURCE_LIMIT +
+  boundary checkpoint + resume — never a fabricated COMPLETED.
+- Run journals gain "incomplete" as a terminal state.
+
+### Workers
+- EXHAUSTED status (settled, ok:false, reassignable); meta's runner returns
+  the full agent outcome.
+- §35 retries exhausted workers once, then the node FAILS honestly.
+
+### New: Runtime Intelligence (`runtime.js` / `runtimesession.js`, tool #26)
+- Discovery with per-fact evidence, real health probes, claim gate,
+  ownership ledger + pid-reuse-guarded reconcile. Verifier-gated.
+
+### Persistent world model
+- Persistent `world.json` + fingerprint-diff incremental builds + honest
+  truncation + durable `invalidate()` wired to meta (WORLD_INVALIDATED).
+
+### Core bus persistence
+- `bindTask` + history replay; bounded `events.jsonl` engineering ledger;
+  `reconstruct(taskId)` after restart.
+
+### Language
+- documentSymbol structured extraction, LSP-first with lexical fallback +
+  provenance; layer-3 availability bug fixed.
+
+### New: Tool creation (`toolcreate.js`)
+- Lifecycle with BEHAVIORAL verification (child process, schema-match
+  evidence); only ACTIVE+verified tools reach the agent.
+
+### Learned skills
+- Promotion requires recorded behavioral evidence + fresh fingerprint;
+  `markStaleSkills` wired into meta.
+
+### Strategy 3.0
+- Contextual factors + justification; outcomes stored with context; meta
+  records real outcomes.
+
+## v93.0.0 — "sensewise"
+
+Nothing rewritten — three new senses, 25 tools.
+
+### New: background process manager (`process` tool)
+- spawn/poll/status/kill/list — dev servers survive the tool call; poll
+  returns only NEW output; ports DETECTED from output + OS socket table,
+  never guessed; kill signals the whole process group; the lifetime fuse is
+  a timeout-kill, never "exited 0"; live cap 8; all children reaped +
+  killed at forge exit.
+
+### New: persistent Node REPL (`repl.js`, `repl` tool)
+- Real `node -i` sessions across calls: variables, imports and loaded data
+  survive; top-level await; multiline input evaluated in one call.
+- Incomplete input is reset with `.break` and reported as an honest error;
+  a timeout reports "still running" and never fabricates a result; dead
+  sessions transparently restart (reported, not hidden).
+
+### New: semantic_search
+- Find code by meaning: BM25 (retrieval.js) reranked with provider
+  embeddings when resolved; any embedding failure degrades to plain BM25;
+  truncated scans reported; verifier-whitelisted read-only.
+
+### Island wiring completed
+- skillforge (agent/chat/compose/context), embeddings (agent/meta),
+  memgraph (memory/lessons/compose), retrieval (+codesearch).
+
+## v92.0.0 — "wirewise"
+
+Nothing rewritten — the v91 engines remain the source of truth; every
+island module is now consulted by the living system.
+
+### P0 fix: agent.js plugin-load TDZ
+- `unrestricted` was referenced before its const declaration; the swallowed
+  ReferenceError meant user tool plugins (~/.forge/tools) NEVER loaded in
+  any runAgent invocation. Declared before first use; a regression test
+  locks the source order.
+
+### New: prediction ledger (`prediction.js`, §9)
+- Predict before every segment (DAG node targets + planning risk — never
+  model self-confidence), settle against observed reality
+  (filesHit/Extra/Missed, riskDelta, outcomeCorrect, driftScore), persist
+  bounded per project, and feed real prediction errors back into the
+  planning prompt as calibration (PREDICTION_MADE / PREDICTION_SETTLED /
+  PLAN_PREDICTION_CALIBRATION).
+
+### Language adapters wired (`langadapter.js`, §7/§8)
+- Every agent system prompt carries honest deep-vs-conservative coverage
+  for the task's languages; DAG node targets get per-file adapter briefs;
+  the 8-layer parse ladder stays honest (absent = UNAVAILABLE, never
+  invented).
+
+### World-model consultation at planning (§5/§10)
+- Project shape + blast radius + covering tests of objective-named files
+  (PLAN_WORLD_CONSULTED).
+
+### Integrator conflicts reported (§31)
+- integrateResults overlaps were computed and discarded, and core's
+  INTEGRATION_CONFLICT handler was dead code — meta now emits the event in
+  the exact claims shape core resolves with the evidence ladder, plus a
+  bus WARNING mirror.
+
+### Changed
+- `/tools` help shows the real tool count (dynamic, 22).
+
 ## v91.0.0 — "corewise" (∞ CORE)
 
 The unified upgrade: Forge Core binds every subsystem into one coherent

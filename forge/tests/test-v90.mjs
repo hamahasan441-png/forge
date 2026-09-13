@@ -36,7 +36,7 @@ console.log("== 1. registry: three read-only, parallel-safe git views ==")
     ok(`${n} is a built-in name`, BUILTIN_TOOL_NAMES.has(n))
     ok(`${n} is NOT a write tool`, !WRITE_TOOLS.has(n))
   }
-  ok("toolCount is 22", toolCount() === 22, String(toolCount()))
+  ok("toolCount is 26", toolCount() === 26, String(toolCount()))
   const blameDef = TOOL_DEFS.find((t) => t.function.name === "git_blame").function
   ok("git_blame requires path", Array.isArray(blameDef.parameters.required) && blameDef.parameters.required.includes("path"))
   const diffDef = TOOL_DEFS.find((t) => t.function.name === "git_diff").function

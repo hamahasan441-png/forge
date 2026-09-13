@@ -168,10 +168,33 @@ console.log("== the agent itself cannot complete a node by claiming success ==")
 {
   const tools = makeToolContext({ cwd: WORK, readOnly: false, timeoutSec: 5, maxToolOutput: 2000 })
   ok("tool context built for the negative control", typeof tools.exec === "function")
-  const provider = { name: "fake", model: "m", call: async () => ({ choices: [{ message: { content: "done" } }] }) }
-  const res = await runAgent({
-    config: {}, provider, task: "trivial", maxStepsOverride: 0, noTools: true, suppressRunEvents: true,
+  // v93 gap fix: was maxStepsOverride: 0 + a provider with a `call` method
+  // agent.js never uses — the loop never ran, chatOnce was never called, and
+  // the assertion passed VACUOUSLY on the old false completion (budget 0
+  // "reached", no answer → COMPLETED). Now: one real step against a real
+  // mock server so the model actually answers, preserving the test's intent
+  // (the agent's own COMPLETED is execution success, not node completion).
+  const http = await import("node:http")
+  const srv = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => { body += c })
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({
+        id: "m", object: "chat.completion", created: Date.now(), model: "mock-1",
+        choices: [{ index: 0, message: { role: "assistant", content: "done" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 3, completion_tokens: 3, total_tokens: 6 },
+      }))
+    })
   })
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+  let res
+  try {
+    res = await runAgent({
+      config: {}, provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "mock-1" },
+      task: "trivial", maxStepsOverride: 1, noTools: true, suppressRunEvents: true, journal: false,
+    })
+  } finally { srv.close() }
   ok("agent reports its own COMPLETED (that is execution success, not task completion)", res.status === "COMPLETED")
   ok("…and carries no node identity by itself", res.nodeId === null)
 }

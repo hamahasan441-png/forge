@@ -227,6 +227,62 @@ function recommendStatus({ cancelled, blockers, dag, repairBudgetRemaining, veri
 }
 
 /**
+ * §4 (gap fix) — the Fast Path shares the ONE completion contract.
+ *
+ * The direct agent (one-shot `forge agent`, chat `/agent` normal mode, plan
+ * passes) has no DAG, so the whole-task gate's graph checks do not apply.
+ * But it must not invent its OWN definition of completion either — this is
+ * the same module, the same return shape, and the same invariant the whole-
+ * task gate enforces: never COMPLETED on doubt, never COMPLETED because a
+ * budget ran out. A fast-path run may only claim COMPLETED when the model
+ * actually produced a final answer, nothing errored, and the run's evidence
+ * (tool log + ordered command checks) survived to be reported.
+ */
+export const FAST_PATH_CHECK = {
+  FINAL_ANSWER_PRESENT: "finalAnswerPresent",
+  NO_ERROR: "noError",
+  NOT_BUDGET_EXHAUSTED: "notBudgetExhausted",
+  EVIDENCE_PRESERVED: "evidencePreserved",
+}
+
+export const FAST_PATH_STATUS = {
+  INCOMPLETE: "INCOMPLETE",   // budget/resource exhaustion — never completion
+  FAILED: "FAILED",
+  CANCELLED: "CANCELLED",
+}
+
+/**
+ * Evaluate the fast-path completion contract. Same shape as canCompleteTask
+ * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
+ * result reads ONE shape from ONE module.
+ */
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null } = {}) {
+  const blockers = []
+  const checks = {}
+  const add = (name, ok, reason) => {
+    checks[name] = ok === true
+    if (ok !== true) blockers.push({ check: name, reason })
+  }
+
+  const answer = String(finalText ?? "").trim()
+  // a fabricated placeholder is not an answer — budget-exhaustion text is
+  // supplied by the caller only AFTER this gate decides, never before
+  add(FAST_PATH_CHECK.FINAL_ANSWER_PRESENT, answer.length > 0, "no final answer was produced")
+  add(FAST_PATH_CHECK.NO_ERROR, !error, String(error ?? "") || "run errored")
+  add(FAST_PATH_CHECK.NOT_BUDGET_EXHAUSTED, budgetHit !== true, "step budget exhausted before a final answer")
+  add(FAST_PATH_CHECK.EVIDENCE_PRESERVED, Array.isArray(toolLog) && Array.isArray(commandChecks), "run evidence (tool log / command checks) missing")
+
+  const ok = blockers.length === 0
+  let status = "COMPLETED"
+  if (!ok) {
+    if (cancelled) status = FAST_PATH_STATUS.CANCELLED
+    else if (error) status = FAST_PATH_STATUS.FAILED
+    else status = FAST_PATH_STATUS.INCOMPLETE
+  }
+  return { ok, allowed: ok, status, blockers, checks, reasons: blockers.map((b) => b.reason) }
+}
+
+/**
  * Convenience: the DAG part of the gate only — "is the graph finished?".
  * Every non-DAG check is disabled so callers can reason about the graph in
  * isolation (verification, workers and persistence are the controller's job).

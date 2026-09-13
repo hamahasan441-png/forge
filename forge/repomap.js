@@ -55,6 +55,71 @@ function gitignoreDirs(root) {
   return out
 }
 
+/** v93 gap fix §12/§13 — a STAT-ONLY walk (no extraction): the fingerprint
+ *  scanner the world model uses to detect drift without re-parsing. Same
+ *  skip semantics as walkIndexed — one walk truth, two consumers. */
+export function listSourceFiles(root, { maxFiles = 2000, maxBytesPerFile = 512 * 1024 } = {}) {
+  const base = (() => { try { return path.resolve(root || process.cwd()) } catch { return null } })()
+  if (!base) return { files: [], truncated: false, skippedBySize: 0 }
+  const skip = new Set([...SKIP, ...gitignoreDirs(base)])
+  const out = []
+  let truncated = false
+  let skippedBySize = 0
+  const walk = (dir, depth) => {
+    if (out.length >= maxFiles || depth > 8) return
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      if (out.length >= maxFiles) { truncated = true; break }
+      if (e.name.startsWith(".") && e.name !== ".") { if (skip.has(e.name)) continue }
+      if (skip.has(e.name)) continue
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) { walk(full, depth + 1); continue }
+      if (!isSourceFile(e.name) && !isConfigFile(e.name)) continue
+      let st
+      try { st = fs.statSync(full) } catch { continue }
+      if (st.size > maxBytesPerFile) { skippedBySize++; continue }
+      out.push({ rel: path.relative(base, full).replace(/\\/g, "/"), full, size: st.size, mtime: Math.round(st.mtimeMs || 0) })
+    }
+  }
+  walk(base, 0)
+  return { files: out, truncated, skippedBySize }
+}
+
+/** v93 gap fix §12/§13 — the record → node/edges mapping, shared by the full
+ *  graph builder AND the world model's incremental path so both produce
+ *  byte-identical semantics (§36: one implementation per responsibility). */
+export function recordToGraphParts(rec) {
+  const rel = rec.rel
+  const node = {
+    path: rel,
+    imports: rec.imports || [],
+    exports: rec.exports || [],
+    symbols: rec.symbols || [],
+    calls: rec.calls || [],
+    types: rec.types || [],
+    isTest: !!rec.test,
+    isConfig: !!rec.config,
+    lang: rec.lang,
+    contracts: rec.contracts || [],
+    dependencies: [],
+  }
+  const edges = []
+  for (const imp of node.imports) {
+    edges.push({ from: rel, to: imp, kind: "IMPORT" })
+    node.dependencies.push(imp)
+  }
+  for (const exp of node.exports) edges.push({ from: rel, to: exp, kind: "EXPORT" })
+  for (const sym of node.symbols) edges.push({ from: rel, to: sym, kind: "SYMBOL" })
+  for (const call of node.calls) edges.push({ from: rel, to: call, kind: "CALL" })
+  for (const t of node.types) edges.push({ from: rel, to: t, kind: "TYPE" })
+  for (const c of node.contracts) edges.push({ from: rel, to: `${c.kind}:${c.name}`, kind: "CONTRACT" })
+  if (node.isTest) edges.push({ from: rel, kind: "TEST", to: "test" })
+  if (node.isConfig) edges.push({ from: rel, kind: "CONFIG", to: "config" })
+  for (const dep of node.dependencies) edges.push({ from: rel, to: dep, kind: "DEPENDENCY" })
+  return { node, edges }
+}
+
 export function buildRepoMap(root, {
   maxFiles = 400,
   maxListed = 60,
@@ -221,33 +286,9 @@ export function buildSemanticGraph(root, opts = {}) {
   const files = []
   const edges = []
   for (const rec of walked.records) {
-    const rel = rec.rel
-    const node = {
-      path: rel,
-      imports: rec.imports || [],
-      exports: rec.exports || [],
-      symbols: rec.symbols || [],
-      calls: rec.calls || [],
-      types: rec.types || [],
-      isTest: !!rec.test,
-      isConfig: !!rec.config,
-      lang: rec.lang,
-      contracts: rec.contracts || [],
-      dependencies: [],
-    }
-    for (const imp of node.imports) {
-      edges.push({ from: rel, to: imp, kind: "IMPORT" })
-      node.dependencies.push(imp)
-    }
-    for (const exp of node.exports) edges.push({ from: rel, to: exp, kind: "EXPORT" })
-    for (const sym of node.symbols) edges.push({ from: rel, to: sym, kind: "SYMBOL" })
-    for (const call of node.calls) edges.push({ from: rel, to: call, kind: "CALL" })
-    for (const t of node.types) edges.push({ from: rel, to: t, kind: "TYPE" })
-    for (const c of node.contracts) edges.push({ from: rel, to: `${c.kind}:${c.name}`, kind: "CONTRACT" })
-    if (node.isTest) edges.push({ from: rel, kind: "TEST", to: "test" })
-    if (node.isConfig) edges.push({ from: rel, kind: "CONFIG", to: "config" })
-    for (const dep of node.dependencies) edges.push({ from: rel, to: dep, kind: "DEPENDENCY" })
+    const { node, edges: recEdges } = recordToGraphParts(rec)
     files.push(node)
+    edges.push(...recEdges)
   }
   return {
     files,

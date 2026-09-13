@@ -3,8 +3,8 @@
  *
  * bash, read_file, read_image, write_file, edit_file, multi_edit, apply_patch, list_dir, glob_files,
  * grep_files, fetch_url, web_search, browser, todo, think, memory, delegate, load_skill, git_status,
- * git_diff, git_log, git_blame
- * (19 tools)
+ * git_diff, git_log, git_blame, process, repl, semantic_search
+ * (25 tools — v93 "sensewise": background processes, persistent REPL, meaning-ranked code search)
  *
  * v20 hardening:
  *   - safePath: project-boundary enforcement for WRITES, symlink escape checks,
@@ -50,6 +50,10 @@ import {
 import {
   runBrowser, createMockDriver, browserMutatesFilesystem, isPageMutating, isVerifyAction,
 } from "./browser.js"
+import { createProcessManager } from "./runtime.js"
+import { createRuntimeSession, formatDiscovery } from "./runtimesession.js"
+import { createReplManager } from "./repl.js"
+import { semanticSearch, formatSemanticSearch } from "./codesearch.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -432,6 +436,67 @@ export const TOOL_DEFS = [
       parameters: { type: "object", properties: { task: { type: "string" }, role: { type: "string", enum: ["researcher", "reviewer", "tester", "security", "coder"], description: "sub-agent focus (default researcher)" } }, required: ["task"] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "process",
+      description: "Run and manage BACKGROUND processes that survive this tool call (dev servers, watchers, long builds). bash dies after ~45s and cannot keep a server running; this can — spawn, then poll for new output while you browser-test or edit code. Actions: spawn | poll | status | kill | list. Ports are DETECTED from output and the OS socket table — an empty ports list means none detected, never a guess. Background processes are killed when forge exits.",
+      parameters: { type: "object", properties: {
+        action: { type: "string", enum: ["spawn", "poll", "status", "kill", "list"], description: "what to do" },
+        command: { type: "string", description: "shell command to run in the background (spawn)" },
+        id: { type: "string", description: "process id for poll/status/kill (p1, p2, … or a name you chose)" },
+        name: { type: "string", description: "optional explicit id for spawn (letters, digits, - and _; default auto p<N>)" },
+        cwd: { type: "string", description: "working directory for spawn (default: the project root)" },
+        timeout_sec: { type: "number", description: "optional auto-kill fuse for spawn (default 3600)" },
+        wait_ms: { type: "number", description: "poll: max ms to wait for new output (default 800, max 10000)" },
+        max_chars: { type: "number", description: "poll/status: output cap per stream (default 4000)" },
+        signal: { type: "string", description: "kill signal: SIGTERM (default) | SIGKILL | SIGINT | SIGHUP" },
+      }, required: ["action"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "repl",
+      description: "Persistent Node.js REPL: variables, imports and loaded data SURVIVE between calls — iterate on data analysis without restarting from zero every time. Runs the REAL node REPL (top-level await, let/const persistence, multiline). Actions: run (code; auto-starts the session) | status | kill | list. One evaluation at a time per session.",
+      parameters: { type: "object", properties: {
+        action: { type: "string", enum: ["run", "status", "kill", "list"], description: "what to do" },
+        code: { type: "string", description: "JavaScript to evaluate (action=run). Send COMPLETE statements in one call — incomplete input is reset and reported." },
+        session: { type: "string", description: "session name (default 'main'; letters, digits, - and _)" },
+        timeout_ms: { type: "number", description: "run timeout (default 15000, max 60000); a timed-out evaluation stays running — kill the session to reset" },
+      }, required: ["action"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "semantic_search",
+      description: "Find code by MEANING, not literal text: every source file is chunked and ranked against the query (BM25, reranked with provider embeddings when configured). Use for 'where is X handled' when grep_files finds no literal match. Read-only — verifiers may use it too.",
+      parameters: { type: "object", properties: {
+        query: { type: "string", description: "what to find, in natural words (e.g. 'where do we validate user sessions')" },
+        path: { type: "string", description: "root dir to search (default: the project root)" },
+        limit: { type: "number", description: "max hits (default 8, max 30)" },
+      }, required: ["query"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "runtime",
+      description: "Runtime Intelligence for the PROJECT (not arbitrary commands): discover the project's real runtime shape (type/entrypoint/package manager/build/run scripts/port hints — every fact carries its file evidence, commands are NEVER invented), then launch the DISCOVERED build/run command via the background process manager, probe health with a REAL HTTP request, and prove claims like 'server started' with process + health evidence. Also reconciles forge-owned processes after a crash (ledger + pid-reuse guard — never touches unrelated processes). Actions: discover | launch | status | health | claim | reconcile | stop.",
+      parameters: { type: "object", properties: {
+        action: { type: "string", enum: ["discover", "launch", "status", "health", "claim", "reconcile", "stop"], description: "what to do" },
+        command: { type: "string", description: "launch: explicit command (default: the DISCOVERED run/build script — never invented)" },
+        phase: { type: "string", enum: ["run", "build"], description: "launch: which discovered script (default run)" },
+        name: { type: "string", description: "launch/stop: process name (default app for run, build for build)" },
+        port: { type: "number", description: "health/claim: explicit port (default: detected from live processes)" },
+        host: { type: "string", description: "health/claim host (default 127.0.0.1)" },
+        timeout_sec: { type: "number", description: "launch auto-kill fuse (default 3600)" },
+        kill: { type: "boolean", description: "reconcile: kill forge-owned orphans (default false — report only)" },
+        signal: { type: "string", description: "stop signal (default SIGTERM)" },
+      }, required: ["action"] },
+    },
+  },
 ]
 
 /** Tools that mutate the filesystem / run commands — serialized, and blocked
@@ -512,11 +577,15 @@ export const VERIFICATION_TOOLS = {
     "think",           // reasoning never mutates
     "load_skill",      // read-only skill docs
     "browser",         // snapshot / screenshot / open / status / close only
+    "semantic_search",  // read-only meaning search (v93) — locate code without mutating
+    "process",         // poll / status / list only — observe the runtime the work launched (§29)
+    "runtime",         // discover / status / health / claim / reconcile — runtime EVIDENCE is verification (§11); launch/stop gated below
   ],
   forbidden: [
     "write_file", "edit_file", "multi_edit", "apply_patch",
     "memory", "todo",               // persistent Forge state
     "delegate",                     // no recursive write-capable sub-agent
+    "repl",                          // evaluates arbitrary code — can write; verification stays read-only
   ],
 }
 
@@ -534,6 +603,20 @@ export function verificationAllows(name, args) {
     if (isPageMutating(action)) return { ok: false, reason: `browser ${action} drives the page — verification may snapshot/screenshot/open/status/close only` }
     if (action && !isVerifyAction(action)) return { ok: false, reason: `browser ${action} is not a verification action` }
     return { ok: true }
+  }
+  if (n === "process") {
+    // §29 runtime observation is verification; starting/stopping is not
+    const action = String(args?.action ?? "")
+    if (action === "poll" || action === "status" || action === "list") return { ok: true }
+    return { ok: false, reason: `process ${action || "(no action)"} starts/stops real processes — verification may poll/status/list only` }
+  }
+  if (n === "runtime") {
+    // §11 runtime evidence IS verification evidence: a health probe proves
+    // "server started" far better than re-reading files. Launching/stopping
+    // is execution, not verification.
+    const action = String(args?.action ?? "")
+    if (["discover", "status", "health", "claim", "reconcile"].includes(action)) return { ok: true }
+    return { ok: false, reason: `runtime ${action || "(no action)"} launches/stops processes — verification may discover/status/health/claim/reconcile only` }
   }
   if (!VERIFICATION_TOOLS.allowed.includes(n)) return { ok: false, reason: `${n} is not in the verification tool set` }
   return { ok: true }
@@ -560,6 +643,26 @@ function getMutationClass(name, args) {
     return MUTATION_CLASS.FORGE_STATE
   }
   if (name === "browser" && browserMutatesFilesystem(args)) return MUTATION_CLASS.FILESYSTEM
+  // v93: process/repl mutate on their ACTING actions only — observation
+  // (poll/status/list) is read-only, exactly like memory read vs learn.
+  if (name === "process") {
+    const action = String(args?.action ?? "")
+    if (action === "poll" || action === "status" || action === "list") return MUTATION_CLASS.NONE
+    return MUTATION_CLASS.FILESYSTEM // spawn/kill run and stop real processes
+  }
+  if (name === "repl") {
+    const action = String(args?.action ?? "")
+    if (action === "status" || action === "list") return MUTATION_CLASS.NONE
+    return MUTATION_CLASS.FILESYSTEM // run executes arbitrary (potentially writing) code
+  }
+  if (name === "semantic_search") return MUTATION_CLASS.NONE
+  // v93 gap fix: runtime — discovery/health/claims are observation; launch/stop
+  // drive real processes.
+  if (name === "runtime") {
+    const action = String(args?.action ?? "")
+    if (["discover", "status", "health", "claim", "reconcile"].includes(action)) return MUTATION_CLASS.NONE
+    return MUTATION_CLASS.FILESYSTEM // launch/stop run and stop real processes
+  }
   return MUTATION_CLASS.NONE
 }
 
@@ -614,6 +717,7 @@ export function makeToolContext(opts = {}) {
     browser = true,
     browserBinary,
     browserDriver = null,
+    semanticEmbed = null, // v93: optional (texts) => Promise<number[][]> — hybrid rerank for semantic_search
   } = opts
   // register plugins: write-class ones join WRITE_TOOLS so they are serialized
   // and blocked in read-only sub-agents, exactly like built-in write tools.
@@ -640,6 +744,7 @@ export function makeToolContext(opts = {}) {
     browser: browser !== false,
     _browserDriver: browserDriver || null,
     _browser: null,
+    semanticEmbed: typeof semanticEmbed === "function" ? semanticEmbed : null,
   }
   if (browserBinary !== undefined) ctx.browserBinary = browserBinary
   ctx.checkPath = (p, opts2) => safePath(ctx, p, opts2)
@@ -1907,8 +2012,170 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
     const bad = typeof r === "string" && r.startsWith("ERROR")
     results.push({ name: "browser", ok: bad ? false : true, ms: 0, note: String(r).slice(0, 80) })
   }
+  // v93 sensewise probes — real round-trips, not existence checks
+  results.push(await t("process", async () => {
+    const spawn = await execTool(ctx, "process", { action: "spawn", command: "echo sensewise-proc-ok", name: "doctor_proc" })
+    if (typeof spawn === "string" && spawn.startsWith("ERROR")) return spawn
+    await new Promise((r) => setTimeout(r, 300))
+    const poll = await execTool(ctx, "process", { action: "poll", id: "doctor_proc", wait_ms: 1500 })
+    const kill = await execTool(ctx, "process", { action: "kill", id: "doctor_proc", signal: "SIGKILL" })
+    if (typeof poll === "string" && poll.includes("sensewise-proc-ok") && typeof kill === "string" && !kill.startsWith("ERROR")) return poll + "\n[echo verified]"
+    return `process round-trip failed — spawn: ${String(spawn).slice(0, 60)} poll: ${String(poll).slice(0, 60)}`
+  }))
+  results.push(await t("repl", async () => {
+    const r = await execTool(ctx, "repl", { action: "run", session: "doctor_repl", code: "40 + 2" })
+    const kill = await execTool(ctx, "repl", { action: "kill", session: "doctor_repl" })
+    if (typeof r === "string" && /42/.test(r) && typeof kill === "string" && !kill.startsWith("ERROR")) return r + "\n[echo verified]"
+    return r
+  }))
+  results.push(await t("semantic_search", async () => {
+    fs.writeFileSync(path.join(tmp, "semantic-probe.js"), "export function doctorSemanticProbe() {\n  // doctor probe for meaning-ranked search\n  return 'sensewise'\n}\n")
+    const r = await execTool(ctx, "semantic_search", { query: "doctor semantic probe sensewise", limit: 3 })
+    if (typeof r === "string" && r.includes("semantic-probe.js")) return r + "\n[echo verified]"
+    return r
+  }))
+  try { disposeToolManagers() } catch { }
   try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {}
   return results
+}
+
+// ---------------------------------------------------------------------------
+// v93 "sensewise" — process / repl / semantic_search
+//
+// The managers are PROCESS-level singletons: a background dev server must
+// outlive a single tool call (that is the whole point), so state lives in the
+// module, not in the per-run ctx. They are disposed when forge exits
+// (runtime.js/repl.js exit + signal handlers) and by chat.js's
+// shutdownExternals(). Read-only and verifier agents are gated at the ACTION
+// level (getMutationClass / verificationAllows) — observation is always
+// allowed, starting/stopping/executing never is.
+// ---------------------------------------------------------------------------
+
+let _processManager = null
+let _replManager = null
+const _runtimeSessions = new Map() // cwd → session (bounded by distinct project roots)
+export function getProcessManager() {
+  if (!_processManager) _processManager = createProcessManager()
+  return _processManager
+}
+export function getReplManager() {
+  if (!_replManager) _replManager = createReplManager()
+  return _replManager
+}
+/** The runtime session for a project root — wraps the ONE process manager
+ *  (§36: no second process registry; the session adds discovery, ledger,
+ *  health, evidence). Sessions are keyed by cwd so tool calls honor ctx.cwd. */
+export function getRuntimeSession(cwd = process.cwd()) {
+  const key = path.resolve(cwd || process.cwd())
+  if (!_runtimeSessions.has(key)) _runtimeSessions.set(key, createRuntimeSession({ cwd: key, mgr: getProcessManager() }))
+  return _runtimeSessions.get(key)
+}
+/** Kill every background process and REPL session (chat.js shutdown, tests). */
+export function disposeToolManagers() {
+  try { _processManager?.dispose() } catch {}
+  try { _replManager?.dispose() } catch {}
+  _processManager = null
+  _replManager = null
+  _runtimeSessions.clear()
+}
+
+function formatProcessEntry(e) {
+  const bits = [
+    `${e.id}: ${e.state}`,
+    e.command ? `cmd: ${e.command}` : "",
+    e.pid ? `pid ${e.pid}` : "",
+    e.exitCode !== null && e.exitCode !== undefined ? `exit ${e.exitCode}` : "",
+    e.signal ? `signal ${e.signal}` : "",
+    `up ${e.runtimeSec}s`,
+    e.ports?.length ? `ports: ${e.ports.join(",")}` : "ports: (none detected)",
+    `out ${e.stdoutBytes}B / err ${e.stderrBytes}B`,
+    e.outputTruncated ? "output truncated (ring buffer)" : "",
+  ].filter(Boolean)
+  return bits.join(" | ")
+}
+
+async function runProcessTool(ctx, args) {
+  const mgr = getProcessManager()
+  const action = String(args?.action ?? "")
+  if (action === "spawn") {
+    const r = mgr.spawn({
+      command: args?.command,
+      name: args?.name,
+      cwd: args?.cwd ? path.resolve(ctx.cwd, String(args.cwd)) : ctx.cwd,
+      timeoutSec: args?.timeout_sec,
+    })
+    if (!r.ok) return r.error
+    return `spawned ${r.entry.id} (pid ${r.entry.pid}) — poll: {action:"poll", id:"${r.entry.id}"} | kill: {action:"kill", id:"${r.entry.id}"}\n${formatProcessEntry(r.entry)}`
+  }
+  if (action === "poll") {
+    const r = await mgr.poll(args?.id, { waitMs: args?.wait_ms, maxChars: Math.min(Number(args?.max_chars) || 4000, 20000) })
+    if (!r.ok) return r.error
+    const parts = [formatProcessEntry(r.entry)]
+    if (r.outNewBytes > 0 || r.out.trim()) parts.push("--- new stdout ---\n" + (r.out || "(no new output)"))
+    if (r.errNewBytes > 0 || r.err.trim()) parts.push("--- new stderr ---\n" + r.err)
+    if (r.truncated) parts.push("(older output was dropped by the ring buffer — byte totals above are the truth)")
+    return parts.join("\n")
+  }
+  if (action === "status") {
+    const r = mgr.status(args?.id)
+    if (!r.ok) return r.error
+    return formatProcessEntry(r.entry)
+  }
+  if (action === "kill") {
+    const r = mgr.kill(args?.id, args?.signal)
+    if (!r.ok) return r.error
+    return `${formatProcessEntry(r.entry)}\n${r.note ?? ""}`
+  }
+  if (action === "list") {
+    const r = mgr.list()
+    const live = r.live.length ? r.live.map(formatProcessEntry).join("\n") : "(no live processes)"
+    const hist = r.history.length ? "\nrecent history:\n" + r.history.map(formatProcessEntry).join("\n") : ""
+    return `live:\n${live}${hist}`
+  }
+  return `ERROR: unknown process action "${action}" (spawn | poll | status | kill | list)`
+}
+
+async function runReplTool(ctx, args) {
+  const mgr = getReplManager()
+  const action = String(args?.action ?? "")
+  if (action === "run") {
+    const r = await mgr.run(args?.session ?? "main", args?.code, { timeoutMs: args?.timeout_ms })
+    if (!r.ok) return r.error + (r.session ? `\nsession: ${JSON.stringify(r.session)}` : "")
+    const parts = []
+    if (r.note) parts.push(`(${r.note})`)
+    parts.push(r.output || "(no output)")
+    return parts.join("\n")
+  }
+  if (action === "status") {
+    const r = args?.session !== undefined ? mgr.status(args.session) : mgr.status()
+    if (!r.ok) return r.error
+    return JSON.stringify(r.session ?? r.sessions)
+  }
+  if (action === "kill") {
+    const r = mgr.kill(args?.session ?? "main")
+    if (!r.ok) return r.error
+    return r.note
+  }
+  if (action === "list") {
+    const r = mgr.list()
+    return r.sessions.length
+      ? r.sessions.map((s) => `${s.name}: ${s.state}${s.pid ? ` (pid ${s.pid})` : ""}, ${s.calls} call(s)${s.restarted ? ", restarted" : ""}${s.lastError ? `, last: ${s.lastError}` : ""}`).join("\n")
+      : "(no repl sessions — the first run starts one)"
+  }
+  return `ERROR: unknown repl action "${action}" (run | status | kill | list)`
+}
+
+async function runSemanticSearchTool(ctx, args) {
+  const q = String(args?.query ?? "").trim()
+  if (!q) return "ERROR: semantic_search requires a non-empty query"
+  const root = path.resolve(ctx.cwd, String(args?.path ?? "."))
+  const embed = typeof ctx.semanticEmbed === "function" ? ctx.semanticEmbed : null
+  try {
+    const res = await semanticSearch(root, q, { limit: Math.min(Math.max(1, Number(args?.limit) || 8), 30), embed })
+    return formatSemanticSearch(res, q)
+  } catch (e) {
+    return `ERROR: semantic search failed: ${String(e?.message ?? e).slice(0, 200)}`
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1916,7 +2183,56 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
 // secret redaction before it reaches the model / sessions / logs.
 // ---------------------------------------------------------------------------
 
-const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "browser", "delegate", "git_status", "grep_files", "memory"])
+const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "browser", "delegate", "git_status", "grep_files", "memory", "process", "repl", "semantic_search", "runtime"])
+
+/** v93 gap fix §7–§11 — the Runtime Intelligence tool. Backed by
+ *  runtimesession.js (discovery with evidence, the shared process manager,
+ *  health probes, claims, crash reconcile). */
+async function runRuntimeTool(ctx, args) {
+  const session = getRuntimeSession(ctx.cwd)
+  const action = String(args?.action ?? "")
+  if (action === "discover") {
+    return formatDiscovery(session.discover())
+  }
+  if (action === "launch") {
+    const r = session.launch({ command: args?.command ?? null, phase: args?.phase === "build" ? "build" : "run", name: args?.name ?? null, timeoutSec: args?.timeout_sec })
+    if (!r.ok) return r.error
+    return `launched ${r.entry.id} (pid ${r.entry.pid}) — command: ${r.command} (source: ${r.source})\n${formatProcessEntry(r.entry)}\nprobe health: {action:"health"} — claims need process + health evidence`
+  }
+  if (action === "status") {
+    const r = await session.status()
+    if (!r.ok) return r.error
+    const procs = r.processes.length ? r.processes.map((p) => `${p.id}: ${p.state}${p.pid ? ` (pid ${p.pid})` : ""} ports: ${p.ports?.length ? p.ports.join(",") : "(none detected)"}`).join("\n") : "(no live runtime processes)"
+    const led = r.ledger.length ? `\nledger:\n${r.ledger.map((e) => `${e.name} pid ${e.pid} (from ${e.source})`).join("\n")}` : ""
+    return `project: ${r.project.type} | run: ${r.project.runCommand ?? "NOT discovered"}\nprocesses:\n${procs}${led}`
+  }
+  if (action === "health") {
+    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1" })
+    if (r.error && !r.probe) return `ERROR: ${r.error}`
+    return r.ok
+      ? `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)`
+      : `NOT HEALTHY — ${r.probe?.url ?? ""}: ${r.error ?? "probe failed"} (this is evidence against any 'server started' claim)`
+  }
+  if (action === "claim") {
+    const r = await session.claimServerStarted({ port: args?.port ?? null })
+    const lines = [r.ok ? "CLAIM PROVEN: server started" : "CLAIM NOT PROVEN: server started"]
+    lines.push(`processes: ${r.processes.length} live${r.processes[0] ? ` (${r.processes[0].id}, pid ${r.processes[0].pid})` : ""}`)
+    lines.push(`health: ${r.health.ok ? `HTTP ${r.health.probe?.status} in ${r.health.probe?.ms}ms` : r.health.error ?? "failed"}`)
+    return lines.join("\n")
+  }
+  if (action === "reconcile") {
+    const r = session.reconcile({ kill: args?.kill === true })
+    if (!r.ok) return r.error
+    if (!r.entries.length) return "ledger is empty — nothing to reconcile (no forge-owned processes recorded)"
+    return r.entries.map((e) => `${e.name}: ${e.verdict} — ${e.note}${e.killed ? ` [${e.killed}]` : ""}`).join("\n")
+  }
+  if (action === "stop") {
+    const r = session.stop({ name: args?.name ?? null, signal: args?.signal ?? "SIGTERM" })
+    if (!r.ok) return r.error
+    return `${formatProcessEntry(r.entry)}\n${r.note ?? ""}`
+  }
+  return `ERROR: unknown runtime action "${action}" (discover | launch | status | health | claim | reconcile | stop)`
+}
 
 export async function execTool(ctx, name, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) args = {}
@@ -1958,6 +2274,10 @@ export async function execTool(ctx, name, args) {
     case "think": result = think(ctx, args); break
     case "memory": result = memory(ctx, args); break
     case "delegate": result = await delegate(ctx, args); break
+    case "process": result = cap(String(await runProcessTool(ctx, args) ?? ""), ctx.maxToolOutput); break
+    case "repl": result = cap(String(await runReplTool(ctx, args) ?? ""), ctx.maxToolOutput); break
+    case "semantic_search": result = cap(String(await runSemanticSearchTool(ctx, args) ?? ""), ctx.maxToolOutput); break
+    case "runtime": result = cap(String(await runRuntimeTool(ctx, args) ?? ""), ctx.maxToolOutput); break
     default: {
       // v20.2 P3-5: user tool plugins
       const pl = ctx._plugins?.get(name)

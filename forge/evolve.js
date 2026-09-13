@@ -109,7 +109,7 @@ function saveSkillLife(cwd, data) {
   writeStateFile(skillLifePath(cwd), JSON.stringify(data, null, 1), { mode: 0o600 })
 }
 
-function touchSkill(cwd, name, { lifecycle = null, family = null, version = null, predecessor = null } = {}) {
+function touchSkill(cwd, name, patch = {}) {
   if (!cwd || !name) return null
   const all = loadSkillLife(cwd)
   const skills = all.skills || (all.skills = {})
@@ -119,9 +119,16 @@ function touchSkill(cwd, name, { lifecycle = null, family = null, version = null
   rec.name = name
   rec.samples = (rec.samples ?? 0) + 1
   rec.lastSeen = Date.now()
+  // v93 gap fix: generic merge — verification evidence and staleness ride
+  // the same write path as the classic fields
+  const { lifecycle = null, family = null, version = null, predecessor = null } = patch
   if (lifecycle) rec.lifecycle = lifecycle
   else if (rec.lifecycle !== SKILL_LIFE.VERIFIED && rec.lifecycle !== SKILL_LIFE.ACTIVE) {
     rec.lifecycle = SKILL_LIFE.CANDIDATE
+  }
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === "lifecycle" || k === "family" || k === "version" || k === "predecessor") continue
+    if (v != null) rec[k] = v
   }
   if (family) rec.family = family
   if (version != null) rec.version = version
@@ -148,10 +155,64 @@ export function recordSkillCandidate(cwd, name, extra = {}) {
  * Mark a learned skill VERIFIED/DEPRECATED after real evidence.
  * Never infers verification from a model guess.
  */
-export function recordSkillOutcome({ cwd, name, status = SKILL_LIFE.VERIFIED } = {}) {
+/** v93 gap fix §21 — fingerprint of the skill's related files at
+ *  verification time; staleness is proven against it, never assumed. */
+function filesFingerprint(cwd, files = []) {
+  const list = (Array.isArray(files) ? files : [files]).filter(Boolean).map((f) => String(f).slice(0, 200)).slice(0, 12)
+  const out = []
+  for (const f of list) {
+    const abs = path.isAbsolute(f) ? f : path.join(cwd, f)
+    try { out.push({ file: f, mtime: Math.round(fs.statSync(abs).mtimeMs || 0) }) } catch { out.push({ file: f, mtime: null }) }
+  }
+  return out
+}
+
+export function recordSkillOutcome({ cwd, name, status = SKILL_LIFE.VERIFIED, gate = null, files = [], task = "" } = {}) {
   const life = SKILL_LIFE[status] || status
-  if (life === SKILL_LIFE.VERIFIED) return touchSkill(cwd, name, { lifecycle: SKILL_LIFE.VERIFIED })
+  if (life === SKILL_LIFE.VERIFIED) {
+    // §21: the VERIFIED transition records the BEHAVIORAL EVIDENCE that
+    // justified it — the fully-passed gate (a second completed run) and the
+    // fingerprint of the related files it was verified against. A VERIFIED
+    // with no evidence on record cannot auto-promote.
+    const patch = { lifecycle: SKILL_LIFE.VERIFIED }
+    if (gate && typeof gate === "object") {
+      const checks = gate && typeof gate.checks === "object" ? gate.checks : {}
+      const passed = Object.values(checks).filter(Boolean).length
+      const total = Object.keys(checks).length || 9
+      patch.verification = {
+        passed: passed === total && total > 0,
+        at: Date.now(),
+        representativeTask: String(task ?? "").slice(0, 200),
+        benchmark: { passed, total },
+        fingerprint: filesFingerprint(cwd, files),
+        passes: 2, // authoring (CANDIDATE) + this fully-passed re-run (the regression check)
+      }
+    }
+    return touchSkill(cwd, name, patch)
+  }
   return touchSkill(cwd, name, { lifecycle: life })
+}
+
+/** v93 gap fix §22 — mark learned skills STALE when the files they were
+ *  verified against have changed. Stale is reported, never silently used. */
+export function markStaleSkills(cwd, changedFiles = []) {
+  const changed = new Set((Array.isArray(changedFiles) ? changedFiles : [changedFiles]).filter(Boolean).map((f) => String(f)))
+  if (!changed.size) return { marked: 0, skills: [] }
+  const life = loadSkillLife(cwd)
+  const marked = []
+  for (const rec of Object.values(life.skills ?? {})) {
+    const fp = rec.verification?.fingerprint
+    if (!Array.isArray(fp) || !fp.length) continue
+    const touched = fp.some((e) => changed.has(e.file))
+    if (touched && !rec.stale) {
+      rec.stale = true
+      rec.staleAt = Date.now()
+      rec.staleReason = "related files changed after verification"
+      marked.push(rec.name)
+    }
+  }
+  if (marked.length) writeStateFile(skillLifePath(cwd), JSON.stringify(life, null, 1), { mode: 0o600 })
+  return { marked: marked.length, skills: marked }
 }
 
 export function skillLifecycle(name, cwd = process.cwd()) {
@@ -387,7 +448,11 @@ export function evolveRun({
   })
   if (out.skill?.ok && score.ok && score.passed === score.total && out.skill.deduped) {
     try {
-      const rec = recordSkillOutcome({ cwd, name: out.skill.name, status: SKILL_LIFE.VERIFIED })
+      const rec = recordSkillOutcome({
+        cwd, name: out.skill.name, status: SKILL_LIFE.VERIFIED,
+        gate, task,
+        files: (les?.files?.length ? les.files : files) || [],
+      })
       out.skill.lifecycle = rec?.lifecycle || SKILL_LIFE.VERIFIED
     } catch { /* promote is best-effort */ }
   }

@@ -1,4 +1,28 @@
-# ⬢ forge — standalone terminal AI agent (v91)
+# ⬢ forge — standalone terminal AI agent (v94)
+
+**v94 "gapwise"** — the confirmed v93 gaps fixed inside the existing
+architecture, zero fake completion: ONE completion contract for every
+execution path (budget exhaustion → INCOMPLETE + checkpoint + resume, never
+a fabricated COMPLETED); exhausted workers classified and retried; Runtime
+Intelligence (discovery with per-fact evidence, real health probes, claim
+gates, crash reconcile — `runtime` tool #26); a persistent incremental
+world model; a persisted core bus + engineering-event ledger with restart
+reconstruction; LSP-first structured extraction; a tool-creation pipeline
+with behavioral verification; strict learned-skill promotion; strategy 3.0
+with contextual factors and justifications. 26 tools.
+
+**v93 "sensewise"** — three new senses: a background **process manager**
+(dev servers survive the tool call; ports detected from output and the OS
+socket table, never guessed), a **persistent Node REPL** (variables and
+loaded data survive between calls; timeout = "still running", never
+fabricated), and **semantic code search** (BM25 + embedding hybrid). The
+last v91 islands (skillforge, embeddings, memgraph) are wired.
+
+**v92 "wirewise"** — nothing rewritten; every island module is now consulted
+by the living system: a prediction ledger (predict → settle → calibrate),
+language-adapter coverage in every agent prompt, world-model consultation at
+planning, integrator conflicts reported instead of discarded, and the P0
+plugin-load TDZ fix (user tool plugins work again).
 
 **v91 "corewise" (∞ CORE)** — the unified upgrade: Forge Core binds every
 subsystem into one coherent engineering intelligence. New first-class
@@ -47,8 +71,9 @@ A CLI coding agent + interactive chat that runs entirely in your terminal:
 
 - **`forge`** — interactive chat with terminal-in-chat: type Linux commands and
   they execute in your project folder; plain sentences go to the model
-- **`forge agent "task"`** — coding agent, 19 tools (bash, files, edits,
-  patches, web, images, browser, memory, sub-agents)
+- **`forge agent "task"`** — coding agent, 26 tools (bash, files, edits,
+  patches, web, images, browser, memory, sub-agents, git views, process,
+  repl, semantic search, runtime)
 - **`forge agent --auto "task"`** — full autonomous lifecycle: plan → DAG →
   parallel workers → verification ledger → repair → recovery, crash-resumable
 - **`forge ask "question"`** — one-shot answer
@@ -137,11 +162,11 @@ forge.js   CLI (40+ subcommands)      chat.js   terminal-in-chat + sessions
 agent.js   bounded tool loop           meta.js   autonomous controller:
                                           PLAN → DAG → segments → VERIFY →
                                           REPAIR → RECOVER (crash-resumable)
-tools.js   19 tools + redaction        shellguard.js  risk classifier (labels only)
+tools.js   26 tools + redaction        shellguard.js  risk classifier (labels only)
 providers.js  20 providers, failover   modelstrategy.js  measured routing
 memory/lessons/evolve   hierarchical memory + failure learning
 verifyledger/completion  evidence ledger + 9-check completion gate
-tests/     130 suites, zero network needed (FORGE_FAST=1 npm test)
+tests/     148 suites, zero network needed (FORGE_FAST=1 npm test)
 ```
 
 ## Self-test (Node only, no network)

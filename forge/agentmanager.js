@@ -106,7 +106,10 @@ export function roleCatalog() {
   return [...builtin, ...dynamic]
 }
 
-/** Worker lifecycle states. */
+/** Worker lifecycle states. v93 gap fix: EXHAUSTED — the sub-agent spent its
+ * step/tool budget (or hit a resource limit) without finishing. A worker
+ * whose runner resolved but whose AGENT outcome is INCOMPLETE is NOT work
+ * complete; it is a settled, classifiable, retryable state. */
 export const WORKER_STATUS = {
   QUEUED: "queued",
   RUNNING: "running",
@@ -115,11 +118,13 @@ export const WORKER_STATUS = {
   CANCELLED: "cancelled",
   TIMED_OUT: "timed_out",
   ORPHANED: "orphaned",
+  EXHAUSTED: "exhausted",
 }
 
 const SETTLED = new Set([
   WORKER_STATUS.COMPLETED, WORKER_STATUS.FAILED,
   WORKER_STATUS.CANCELLED, WORKER_STATUS.TIMED_OUT, WORKER_STATUS.ORPHANED,
+  WORKER_STATUS.EXHAUSTED,
 ])
 
 /** How long to wait for a cancelled worker to actually stop before calling it
@@ -309,13 +314,33 @@ export function createAgentManager({
 
     try {
       if (outcome?.ok && !(rec.cancelRequested === true || ac.signal?.aborted === true)) {
-        rec.result = String(outcome.result ?? "").slice(0, 8000)
-        rec.status = rec.orphaned ? WORKER_STATUS.ORPHANED : WORKER_STATUS.COMPLETED
-        emit({ type: "WORKER_COMPLETED", workerId: rec.id, id: rec.id, role: rec.role, ok: true, report: rec.result.slice(0, 400), dagNode: rec.dagNode, nodeId: rec.nodeId })
+        // v93 gap fix: the default runner returns the full agent result —
+        // classify it. A resolved runner is NOT evidence of work complete.
+        const res = outcome.result
+        const resObj = res && typeof res === "object" ? res : null
+        const text = String(resObj ? resObj.text : res ?? "").slice(0, 8000)
+        const agentStatus = resObj ? String(resObj.status ?? "") : ""
+        const agentBudgetHit = resObj?.budgetHit === true
+        const exhausted = agentStatus === "INCOMPLETE" || agentBudgetHit
+        rec.result = text
+        rec.agentStatus = agentStatus || null
+        rec.agentBudgetHit = agentBudgetHit
+        if (exhausted) {
+          // §3/§6: budget exhaustion is an execution control, not completion.
+          // The worker is settled EXHAUSTED — meta classifies (retry/reassign/
+          // continue/replan); it can never complete a DAG node like this.
+          rec.status = WORKER_STATUS.EXHAUSTED
+          rec.error = `sub-agent exhausted its budget without finishing (${agentStatus || "budget"})`
+          emit({ type: "WORKER_COMPLETED", workerId: rec.id, id: rec.id, role: rec.role, ok: false, status: rec.status, error: rec.error, exhausted: true, agentStatus: agentStatus || null, report: rec.result.slice(0, 400), dagNode: rec.dagNode, nodeId: rec.nodeId })
+        } else {
+          rec.status = rec.orphaned ? WORKER_STATUS.ORPHANED : WORKER_STATUS.COMPLETED
+          emit({ type: "WORKER_COMPLETED", workerId: rec.id, id: rec.id, role: rec.role, ok: true, agentStatus: agentStatus || null, report: rec.result.slice(0, 400), dagNode: rec.dagNode, nodeId: rec.nodeId })
+        }
       } else if (outcome?.ok) {
         // cancelled (or the outer signal aborted) — a result produced after a
         // cancellation request is a partial, never a success
-        rec.partialResult = String(outcome.result ?? "").slice(0, 8000)
+        const pr = outcome.result
+        rec.partialResult = String(pr && typeof pr === "object" ? pr.text : pr ?? "").slice(0, 8000)
         rec.status = WORKER_STATUS.CANCELLED
         rec.error = rec.error ?? "cancelled before completion"
         emit({ type: "WORKER_COMPLETED", workerId: rec.id, id: rec.id, role: rec.role, ok: false, status: rec.status, cancelled: true, dagNode: rec.dagNode, nodeId: rec.nodeId })
@@ -418,7 +443,11 @@ export function createAgentManager({
         setModel: (m) => { rec.model = m ? String(m).slice(0, 120) : rec.model },
       })
     }
-    // default runner lazily loads the real sub-agent (read-only by role)
+    // default runner lazily loads the real sub-agent (read-only by role).
+    // v93 gap fix: return the FULL agent result, not just r.text — the
+    // worker's settlement must see the agent's real outcome (status/
+    // budgetHit) or an exhausted sub-agent used to look like a completed
+    // worker whose "findings" were the fabricated budget text.
     const { runAgent } = await import("./agent.js")
     const fullTask = rec.context ? `${rec.context}\n\nTASK: ${rec.task}` : rec.task
     const r = await runAgent({
@@ -427,7 +456,7 @@ export function createAgentManager({
       signal: workerSignal ?? signal, sub: rec.id,
       taskId: rec.taskId, runId: rec.runId, segmentId: rec.segmentId, nodeId: rec.nodeId,
     })
-    return r.text
+    return r
   }
 
   /** Allow the controller to inject config/provider for the default runner. */

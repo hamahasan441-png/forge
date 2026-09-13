@@ -100,7 +100,10 @@ export function openRun({ runId, task, cwd = process.cwd(), kind = "agent", prov
       if (id && !rec.checkpoints.includes(id)) { rec.checkpoints.push(id); schedule() }
     },
     end(status, extra = {}) {
-      rec.status = ["completed", "failed", "cancelled"].includes(status) ? status : "failed"
+      // v93 gap fix: "incomplete" is a first-class terminal state — a run
+      // that hit a budget/resource limit without a final answer is NOT
+      // "failed" (nothing errored) and definitely not "completed".
+      rec.status = ["completed", "failed", "cancelled", "incomplete"].includes(status) ? status : "failed"
       rec.endedAt = Date.now()
       if (extra.error) rec.error = String(extra.error).slice(0, 400)
       if (extra.steps != null) rec.step = extra.steps
