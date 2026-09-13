@@ -13,7 +13,7 @@
  *  5. Crash reconcile: dead pid → reported; live owned → orphan; pid-reuse
  *     (starttime mismatch) → NOT ours, never touched; unrelated processes
  *     never appear because we only act on ledger entries.
- *  6. Tool wiring: 26 tools, verifier gating (discover/status/health/claim/
+ *  6. Tool wiring: 29 tools (v94c toolwise), verifier gating (discover/status/health/claim/
  *     reconcile allowed; launch/stop blocked), read-only gating.
  */
 import fs from "node:fs"
@@ -199,8 +199,8 @@ function procStarttime(pid) {
 // ---------------------------------------------------------------------------
 console.log("== 5. tool wiring — registry, verifier + read-only gating ==")
 {
-  eq("tool count is 26 (runtime added)", toolCount(), 26)
-  eq("TOOL_DEFS length 26", TOOL_DEFS.length, 26)
+  eq("tool count is 29 (runtime + v94c toolwise added)", toolCount(), 29)
+  eq("TOOL_DEFS length 29", TOOL_DEFS.length, 29)
   ok("runtime def registered", TOOL_DEFS.some((t) => t.function.name === "runtime"))
   eq("capabilities registry 1:1 with the wire (26)", BUILTIN_CAPABILITIES.length, TOOL_DEFS.length)
   eq("checkWriteClassification: no disagreement", checkWriteClassification(defaultRegistry({})).length, 0)

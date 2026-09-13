@@ -132,6 +132,13 @@
     "runtime.js",
     "repl.js",
     "codesearch.js",
+    "searchproviders.js",
+    "execcontroller.js",
+    "engmemory.js",
+    "plannerisk.js",
+    "knowgraph.js",
+    "critique.js",
+    "sysshell.js",
     "runtimesession.js",
     "toolcreate.js"
   ],

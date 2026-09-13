@@ -182,6 +182,20 @@ const suites = [
   ["v93st", "node", ["test-v93st.mjs"]],
   ["v94a", "node", ["test-v94a.mjs"]],
   ["v93s", "node", ["test-v93s.mjs"]],
+  // ---- v94 masterwise: Engineering Intelligence Core acceptance suites ---
+  ["search-providers", "node", ["test-search-providers.mjs"]],
+  ["exec-controller", "node", ["test-execution-controller.mjs"]],
+  ["eng-memory", "node", ["test-engmemory.mjs"]],
+  ["plannerisk", "node", ["test-plannerisk.mjs"]],
+  // ---- v94b: TokenRouter provider + understand-anything skills pack -------
+  ["v94b", "node", ["test-v94b.mjs"]],
+  ["toolwise", "node", ["test-toolwise.mjs"]],
+  // ---- v94 skillwise: obra/superpowers engineering-process pack -----------
+  ["skillwise", "node", ["test-skillwise.mjs"]],
+  // ---- v94 knowwise: auto KG floor graph + blast-radius + Termux shell ----
+  ["knowwise", "node", ["test-knowwise.mjs"]],
+  // ---- v94 deepwise: plan competition + adoption, pre-mutation critique ----
+  ["deepwise", "node", ["test-deepwise.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

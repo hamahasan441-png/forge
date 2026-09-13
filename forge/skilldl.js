@@ -562,7 +562,9 @@ async function downloadArtifact(url, { kind = "skill", fetchFn = defaultFetch, e
       timeoutMs: 20000,
       totalTimeoutMs: 45000,
       maxBytes: MAX_SKILL_BYTES,
-      allowPrivate: false,
+      // v94 knowwise: private skill mirrors are refused by default (SSRF
+      // hygiene); FORGE_SKILL_ALLOW_PRIVATE=1 is the explicit owner opt-in.
+      allowPrivate: process.env.FORGE_SKILL_ALLOW_PRIVATE === "1",
       onBytes: (p) => progress({ phase: "read", url: checked.url, ...p, done: false, pct: p?.pct == null ? null : Math.min(99, p.pct) }),
     })
   } catch (e) {

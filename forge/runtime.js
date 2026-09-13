@@ -30,6 +30,7 @@
  */
 import { spawn } from "node:child_process"
 import fs from "node:fs"
+import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 
 const MAX_LIVE = 8
 const MAX_OUTPUT_PER_STREAM = 256 * 1024
@@ -289,7 +290,7 @@ export function createProcessManager({
       }
       let child
       try {
-        child = spawn("/bin/sh", ["-c", cmd], {
+        child = spawn(resolveShell(), ["-c", cmd], {
           cwd: cwd ? String(cwd) : undefined,
           detached: true, // own group: kill(-pid) takes the whole tree
           stdio: ["ignore", "pipe", "pipe"],

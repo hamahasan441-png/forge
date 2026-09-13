@@ -102,6 +102,41 @@ function snippetOf(lines) {
   return picked
 }
 
+// v94 masterwise (§5 LOCAL SEARCH): an incremental per-file chunk cache.
+// A repository search re-chunks every file on every call; with the cache a
+// second search (or any later call in the same process) re-uses the chunks of
+// every UNCHANGED file (mtime+size fingerprint — the same discipline as the
+// v32 index) and only reads/re-chunks what actually changed. Bounded (FIFO
+// eviction); a changed file re-chunks, so staleness is impossible; the cache
+// is pure-read and never reported as hits. FORGE_INDEX=0 disables it, exactly
+// like the persistent index.
+const CHUNK_CACHE_MAX = 4000
+const chunkCache = new Map() // full path -> { mtimeMs, size, docs }
+export function chunkCacheSize() { return chunkCache.size }
+function chunksForFile(f) {
+  const useCache = process.env.FORGE_INDEX !== "0"
+  let st = null
+  try { st = fs.statSync(f.full) } catch { return [] }
+  if (useCache) {
+    const hit = chunkCache.get(f.full)
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.docs
+  }
+  let src
+  try { src = fs.readFileSync(f.full, "utf8") } catch { return [] }
+  const docs = []
+  for (const c of chunkLines(src)) {
+    docs.push({ text: `${f.rel}\n${c.lines.join("\n")}`, ref: { path: f.rel, start: c.start, end: c.end, snippet: snippetOf(c.lines) } })
+  }
+  if (useCache) {
+    if (chunkCache.size >= CHUNK_CACHE_MAX) {
+      const oldest = chunkCache.keys().next().value
+      chunkCache.delete(oldest)
+    }
+    chunkCache.set(f.full, { mtimeMs: st.mtimeMs, size: st.size, docs })
+  }
+  return docs
+}
+
 /**
  * Search a project root by meaning. opts:
  *   limit, maxFiles, maxBytesPerFile, embed (async fn), alpha, budgetMs
@@ -126,11 +161,9 @@ export async function semanticSearch(root, query, {
   let chunksTruncated = false
   for (const f of files) {
     if (docs.length >= MAX_CHUNKS) { chunksTruncated = true; break }
-    let src
-    try { src = fs.readFileSync(f.full, "utf8") } catch { continue }
-    for (const c of chunkLines(src)) {
+    for (const d of chunksForFile(f)) {
       if (docs.length >= MAX_CHUNKS) { chunksTruncated = true; break }
-      docs.push({ text: `${f.rel}\n${c.lines.join("\n")}`, ref: { path: f.rel, start: c.start, end: c.end, snippet: snippetOf(c.lines) } })
+      docs.push(d)
     }
   }
   if (!docs.length) return { ok: false, files: files.length, chunks: 0, truncated: false, mode: "none", hits: [], note: "files found but no content chunks" }

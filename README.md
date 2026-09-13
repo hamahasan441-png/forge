@@ -5,6 +5,57 @@ straight to providers.
 
 **Version 94.0.0 — "gapwise" (gap fix / integration patch).
 
+**v94 follow-ons (masterwise + tokenwise)** — no version bump, no rewrite,
+same architecture: the **Engineering Intelligence Core** (adaptive search
+providers with honest failure, an execution controller that can never mistake
+a step budget for completion, the layered engineering memory with provenance,
+the predictive risk-aware planner); the **TokenRouter** provider — one
+OpenAI-compatible `/v1` key over 300+ upstream models (`TOKENROUTER_API_KEY`);
+and the bundled **understand-anything** skills pack (codebase → knowledge
+graph: analyze, chat, dashboard, diff, domain, explain, figma, knowledge,
+onboard — the graph feeds project memory retrieval on later tasks). **toolwise**
+follow-on: three new read-only, deterministic tools — `kg_query` (project
+knowledge graph: dependents, blast radius, tests, .ua graph), `plan_whatif`
+(simulate plan changes through the predictive risk engine before committing),
+`code_context` (semantic hits + structural wiring in one call). 29 tools,
+89 bundled skills at that point, 155/155 suites green. **skillwise**
+follow-on: the **obra/superpowers** engineering-process pack bundled as
+first-party skills (MIT, github.com/obra/superpowers) — brainstorming,
+TDD, systematic-debugging, verification-before-completion, plan writing &
+execution, code review requesting/receiving, subagent-driven development,
+parallel dispatch, git worktrees, skill authoring: 13 of 14 upstream skills
+byte-identical (upstream `writing-plans` not re-bundled — forge ships its own
+adapted one; the 5 platform-seam skills carry appended forge execution notes
+over a byte-identical upstream prefix). 102 bundled skills, 34 first-party
+catalog skills, 156/156 suites green at that point. The **knowwise**
+follow-on made the project itself a living knowledge source: the first task
+in any project auto-writes a deterministic FLOOR knowledge graph
+(`.ua/knowledge-graph.json` from the world-model extractors — no LLM, no
+network; real understand-anything graphs are never touched; rebuilds only on
+fingerprint drift) that feeds memory retrieval and `kg_query` from run one;
+every successful file edit now carries a bounded blast-radius prediction
+(radius · importers · tests — one advisory line, additive record field +
+event, `FORGE_BLAST_RADIUS=0` disables); and shell resolution is
+Termux/NetHunter-ready (`FORGE_SHELL` > /bin/sh > $PREFIX/bin/sh > $SHELL),
+so every bash call, background process, and typed `!` command works on
+Android out of the box. 157/157 suites green at that point.
+
+**v94 "deepwise"** — judgment before action, all deterministic, zero model
+calls, zero network: plan **competition + adoption** (the original plan now
+competes against its reshaped variants on expected verified progress; when a
+variant wins by a real margin at equal-or-better risk and success, the
+planner ADOPTS it — the inspect/verify guard node becomes real executed DAG
+work, predictions re-stamped, live risk restarted at the adopted estimate;
+shapes that drop declared dependencies are advised but never auto-adopted);
+a **pre-mutation self-critique** (one deterministic checklist before every
+file mutation — secret paths, edit targets that do not exist, same-file edit
+thrash, and hub files read straight from the knowwise floor graph; one
+advisory line + event, never blocks, `FORGE_CRITIQUE=0` disables); and the
+reality→risk loop closed for experiments (repair outcomes move LIVE risk).
+158/158 suites green.
+
+**v94 "gapwise"**
+
 **v94 "gapwise"** — the confirmed v93 gaps fixed inside the existing
 architecture, zero fake completion: ONE completion contract for every
 execution path (budget exhaustion → INCOMPLETE + checkpoint + resume, never
@@ -51,8 +102,8 @@ logs and `/status` — the verdict is just always *run*.
 ```
 forge/                 the npm package (CLI + tests + bundled skills)
   forge.js             CLI entry
-  skills/              80 bundled skills
-  tests/               139 suites (npm test, zero network)
+  skills/              102 bundled skills
+  tests/               158 suites (npm test, zero network)
 LICENSE                MIT
 PACKAGE_INFO.txt       capability summary
 FORGE-AUDIT-REPORT*.md engineering reports (history)

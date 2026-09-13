@@ -222,7 +222,7 @@ check "chat inline final streamed" "$out" "TOOL RESULT RECEIVED"
 
 # 30. /tools lists the 18 tools
 out=$(printf '/tools\n/exit\n' | $F chat 2>&1)
-check "/tools lists tools" "$out" "forge tools (26)"
+check "/tools lists tools" "$out" "forge tools (29)"
 check "/tools shows glob" "$out" "glob_files"
 check "/tools shows apply_patch" "$out" "apply_patch"
 

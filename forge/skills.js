@@ -135,7 +135,7 @@ export function checkSkills(dir, { maxSkillKB = 64 } = {}) {
         const h1 = md.match(/^#\s+(.+)$/m)
         const firstLine = md.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#") && !l.startsWith("---"))
         if (!h1 && !firstLine) issues.push("no description (no H1 heading or intro line)")
-        if (sizeKB > maxSkillKB) issues.push(`SKILL.md is ${sizeKB} KB (> ${maxSkillKB} KB; loads are truncated at 24 KB)`)
+        if (sizeKB > maxSkillKB) issues.push(`SKILL.md is ${sizeKB} KB (> ${maxSkillKB} KB; loads are truncated at 64 KB)`)
         for (const link of brokenSkillLinks(md, path.join(dir, e.name))) issues.push(`broken link: ${link}`)
       }
     }
@@ -191,7 +191,10 @@ function realPathOf(p) {
   try { return fs.realpathSync(p) } catch { return path.resolve(p) }
 }
 
-export function loadSkill(dir, name, maxLen = 24000) {
+// v94b: default ceiling raised 24000 → 65536 to match checkSkills' maxSkillKB
+// (64 KB) so the bundled understand-anything pack (58.8 KB SKILL.md) loads
+// intact. Truncation itself stays — loads are still bounded.
+export function loadSkill(dir, name, maxLen = 65536) {
   const n = validSkillName(name)
   if (!n) return null
   const skillFile = path.join(dir, n, "SKILL.md")

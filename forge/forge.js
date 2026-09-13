@@ -48,6 +48,7 @@ const loadPlugins = () => import("./plugins.js")
 const loadExtend = () => import("./extend.js")
 import { readHealth, recordHealth } from "./health.js"
 import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
+import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell reporting
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
@@ -253,7 +254,7 @@ function resolveProvider(config) {
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
  *  — which working model to use (Enter = default, type any id to switch, ✓
  *  badges from the health cache, FREE badges from the model cache) — then
- *  drops into chat with all 26 tools + skills ON. Non-TTY never prompts. */
+ *  drops into chat with all 29 tools (v94c toolwise) + skills ON. Non-TTY never prompts. */
 async function smartStart(cfg, p) {
   if (!process.stdin.isTTY) return p
   const conf = cfg.providers?.[p.name] ?? {}
@@ -624,7 +625,7 @@ async function main() {
       console.log(`  platform:  ${process.platform} ${process.arch} • ${res.cores} cores • ${Math.round(res.totalMB / 1024 * 10) / 10}GB RAM (${res.freeMB}MB free) ${dim("tier " + res.tier)}`)
       let gitOk = false
       try { (await import("node:child_process")).execFileSync("git", ["--version"], { stdio: "ignore" }); gitOk = true } catch {}
-      console.log(`  terminal:  ${process.stdout.isTTY ? `${process.stdout.columns || "?"}x${process.stdout.rows || "?"} TTY` : "non-TTY (piped)"} • /bin/sh ${fs.existsSync("/bin/sh") ? green("ok") : yellow("missing")} • git ${gitOk ? green("ok") : yellow("missing")}`)
+      console.log(`  terminal:  ${process.stdout.isTTY ? `${process.stdout.columns || "?"}x${process.stdout.rows || "?"} TTY` : "non-TTY (piped)"} • shell ${(() => { const sh = resolveShell(); return `${sh} ${fs.existsSync(sh) ? green("ok") : yellow("missing — set FORGE_SHELL")}` })()} • git ${gitOk ? green("ok") : yellow("missing")}`)
       // config
       const src = flags.config ? String(flags.config) : USER_CONFIG_PATH
       let writable = false
@@ -1971,10 +1972,18 @@ ${bold("terminal + deep (v19/v20)")}
   ${cyan("--deep")} / ${cyan("/deep")}             DEEP THINKING — high reasoning effort (OpenRouter/o-series), bigger budgets, verify-first
   ${cyan("--profile")} / ${cyan("/profile")}       effort profile: fast | balanced | deep | auto (auto = deep for complex tasks)
 
-${bold("safety (v20)")}
-  writes stay inside the project dir • sensitive files (.env, keys, credentials) protected from the model
-  shell commands risk-classified (catastrophic always blocked; risky ones ask y/N) • SSRF-guarded URL fetches
-  tool results secret-redacted • sub-agents read-only, depth-capped, timed out
+${bold("safety (v88 full control + correctness rails)")}
+  shell commands risk-classified for honest labels, nothing refused or paused by default (v88 "noguard" — the owner's standing decision)
+  sandbox is OPT-IN only (${cyan("FORGE_SANDBOX=1")} + working bwrap) • writes are TOCTOU-safe (securefs) • tool results secret-redacted
+  sub-agents read-only, depth-capped, timed out • URL fetches DNS/socket-pinned (hijack-proof); ${cyan("fetch_url")} allows private targets
+${bold("environment (full power on any device — Termux/NetHunter ready)")}
+  ${cyan("FORGE_SHELL=<path>")}            override the shell (auto: /bin/sh → $PREFIX/bin/sh on Termux → $SHELL)
+  ${cyan("FORGE_ALLOW_PRIVATE_URLS=1")}     private-network targets allowed in web_search/browser fetches
+  ${cyan("FORGE_SKILL_ALLOW_PRIVATE=1")}    allow skill download from private mirrors
+  ${cyan("FORGE_BLAST_RADIUS=0")}           disable the per-edit blast-radius prediction note
+  ${cyan("FORGE_CRITIQUE=0")}               disable the pre-edit self-critique checklist (secret paths, missing targets, edit thrash, hub files)
+  ${cyan("FORGE_INDEX=0")}                  disable the persistent parse cache
+  ${cyan("FORGE_FAILOVER=1")}               provider failover on outages (also: ${cyan("config set failover true")})
 
 ${bold("resilience")}
   ${cyan("forge config set failover true")}  agent AND chat fall through to the next configured provider on outages ${dim("(or FORGE_FAILOVER=1)")}

@@ -38,6 +38,8 @@ import path from "node:path"
 import { createRegistry, registerPlugins, operationRisk, classifyCall, RISK, STATUS, riskRank, maxRisk } from "./capabilities.js"
 import { planExecution, cheaperAlternative, nextAction, targetsOf, repeatedFailures, route } from "./router.js"
 import { classifyFailure, recoveryPlan, formatDiagnosis, shouldEscalate, FAILURE } from "./diagnose.js"
+import { predictBlastRadius } from "./impact.js" // v94 knowwise: blast-radius prediction before/after mutations
+import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique } from "./critique.js" // v94 deepwise: pre-mutation self-critique
 import { verificationPlan, runVerification, formatVerification, verifyTargets } from "./verify.js"
 import { redact } from "./secrets.js"
 import { listCheckpoints } from "./checkpoint.js"
@@ -49,7 +51,8 @@ import { TASK_CLASS } from "./classify.js"
 export const TOOL_EVENTS = [
   "TOOL_SELECTED", "TOOL_STARTED", "TOOL_OUTPUT", "TOOL_COMPLETED", "TOOL_FAILED",
   "TOOL_RETRY", "TOOL_FALLBACK", "TOOL_BLOCKED", "TOOL_VERIFIED", "TOOL_CACHED",
-  "TOOL_ESCALATION",
+  "TOOL_ESCALATION", "TOOL_BLAST", // v94 knowwise: bounded blast-radius prediction after a successful mutation
+  "TOOL_CRITIQUE", // v94 deepwise: deterministic pre-mutation self-critique (advisory, never blocks)
 ]
 
 const CACHE_MAX_BYTES = 256 * 1024
@@ -82,6 +85,44 @@ export function argsHash(name, args) {
  *                   legacyEvents is on, the classic tool_start / tool_result
  *                   the agent loop and the terminal UI already understand.
  */
+
+// v94 knowwise: blast-radius prediction surface. Tools whose result the
+// journal classifies by substrings ("created"/"deleted") — the note NEVER
+// contains those words, and never ends in the `[exit code: N]` shape.
+const BLAST_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])
+function blastEnabled() {
+  const v = process.env.FORGE_BLAST_RADIUS
+  return !(v === "0" || v === "false" || v === "off")
+}
+
+// v94 deepwise: per-context mutation counters (WeakMap — no leaks, no global
+// state). preMutationCritique READS a count before the mutation runs; the
+// count is incremented after the mutation actually happened.
+const MUTATION_COUNTS = new WeakMap()
+function mutationCountsFor(ctx) {
+  let m = MUTATION_COUNTS.get(ctx)
+  if (!m) { m = new Map(); MUTATION_COUNTS.set(ctx, m) }
+  return m
+}
+function noteMutationTargets(ctx, cwd, targets) {
+  try {
+    const m = mutationCountsFor(ctx)
+    for (const t of targets) {
+      const rel = (() => { try { const r = path.relative(cwd, path.resolve(cwd, t)); return r && !r.startsWith("..") ? r : t } catch { return t } })()
+      m.set(rel, (m.get(rel) ?? 0) + 1)
+    }
+  } catch { /* counting is bookkeeping — never breaks a mutation */ }
+}
+function blastNote(b) {
+  if (b.unknown) return "[forge] blast: unknown — file outside the project graph; verify importers manually"
+  if (!b.radius) return "[forge] blast: radius 0 — no importers found in the project graph (leaf change)"
+  const bits = [`[forge] blast: radius ${b.radius}`, b.scope ? `scope ${b.scope}` : ""]
+  if (b.importers?.length) bits.push(`importers: ${b.importers.join(", ")}`)
+  if (b.tests?.length) bits.push(`tests: ${b.tests.join(", ")}`)
+  bits.push("check the importers still behave")
+  return bits.filter(Boolean).join(" · ")
+}
+
 export function createToolIntel({
   exec,
   ctx = {},
@@ -263,6 +304,24 @@ export function createToolIntel({
       }
     }
 
+    // ---- deepwise: pre-mutation self-critique -----------------------------
+    // A deterministic checklist BEFORE the mutation runs. Advisory only:
+    // one event, one record field, and (when there is something real to say)
+    // one line appended to the result so the model sees it on the next
+    // decision. Off with tools.intelligence:false or FORGE_CRITIQUE=0.
+    // Never throws, never blocks, never costs a model call.
+    let critiqueLine = ""
+    if (enabled && !meta.read_only && CRITIQUE_TOOLS.has(name) && critiqueEnabled()) {
+      try {
+        const c = preMutationCritique({ tool: name, args, cwd, mutationCounts: mutationCountsFor(ctx) })
+        if (c.concerns.length) {
+          record.critique = c.concerns
+          critiqueLine = c.line
+          emit({ type: "TOOL_CRITIQUE", tool: name, callId, taskId, runId, step, concerns: c.concerns })
+        }
+      } catch { /* critique is advisory — never breaks a mutation */ }
+    }
+
     // ---- execute ----------------------------------------------------------
     if (legacyEvents) emit({ type: "tool_start", name, args: JSON.stringify(args), step })
     emit({ type: "TOOL_STARTED", tool: name, callId, taskId, runId, step, args: summarizeArgs(name, args), risk: op.risk, mode })
@@ -307,6 +366,12 @@ export function createToolIntel({
     const idemNote = !d.failed ? null : idempotencyNote(name, args, result)
     if (idemNote) result += `\n[forge] ${idemNote}`
 
+    // deepwise: the pre-mutation critique reaches the model through the same
+    // additive one-line budget as the blast note (never "created"/"deleted",
+    // never an [exit code] tail). Appended AFTER classification so it can
+    // never influence failure detection or retry decisions.
+    if (critiqueLine) result += `\n${critiqueLine}`
+
     // ---- state update -----------------------------------------------------
     // what a discovery tool FOUND is context for the next routing decision
     if (!d.failed && (name === "grep_files" || name === "glob_files" || name === "list_dir")) {
@@ -314,7 +379,31 @@ export function createToolIntel({
     }
     if (!d.failed && !meta.read_only) {
       mutationHappened(name)
-      record.files_changed = verifyTargets(name, args, cwd).map((p) => rel(p, cwd))
+      const blastTargets = verifyTargets(name, args, cwd)
+      record.files_changed = blastTargets.map((p) => rel(p, cwd))
+      // deepwise: the thrash counter is fed by REAL mutations only
+      noteMutationTargets(ctx, cwd, blastTargets.length ? blastTargets : [])
+      // v94 knowwise: blast-radius prediction — computed AFTER the mutation so
+      // it can never mask or delay it; purely additive (one bounded note line,
+      // a record field, one event). Off with tools.intelligence:false (the
+      // raw pre-v20.5 result string is preserved verbatim) or
+      // FORGE_BLAST_RADIUS=0. Never throws.
+      if (enabled && BLAST_TOOLS.has(name) && blastEnabled() && blastTargets.length) {
+        try {
+          const b = predictBlastRadius({ cwd, files: blastTargets })
+          const toRel = (x) => { const s = typeof x === "string" ? x : (x?.file ?? x?.path ?? ""); return s ? rel(s, cwd) : "" }
+          record.blast = {
+            radius: b.radius ?? 0,
+            scope: Array.isArray(b.scope) && b.scope.length ? b.scope[b.scope.length - 1] : null,
+            importers: (b.importers ?? []).filter(Boolean).slice(0, 6).map(toRel).filter(Boolean),
+            tests: (b.tests ?? []).filter(Boolean).slice(0, 4).map(toRel).filter(Boolean),
+            unknown: !!b.unknown,
+          }
+          const line = blastNote(record.blast)
+          if (line) result += `\n${line}`
+          emit({ type: "TOOL_BLAST", tool: name, callId, taskId, runId, step, radius: record.blast.radius, scope: record.blast.scope, importers: record.blast.importers, tests: record.blast.tests, unknown: record.blast.unknown })
+        } catch { /* blast is advisory — never breaks a mutation */ }
+      }
       try {
         const ck = listCheckpoints(cwd, 1)[0]
         // only attribute a checkpoint that this call actually created: the
