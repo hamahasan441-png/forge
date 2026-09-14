@@ -344,5 +344,86 @@ console.log("== 13. transport is chosen by spec shape ==")
   ok("no raw global fetch anywhere in mcp.js", !/[^.\w]fetch\(/.test(src.replace(/pinnedFetch\(/g, "PF(")))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 14. resources + prompts: the other two MCP primitives ==")
+{
+  const { normalizeResources, normalizePrompts, flattenResourceContents, flattenPromptMessages, mcpContextTool } =
+    await import("../mcp.js")
+
+  eq("resources: garbage → []", normalizeResources(null), [])
+  eq("resources: entries without a uri are dropped", normalizeResources({ resources: [{ name: "x" }, { uri: "file://a" }] }).map((r) => r.uri), ["file://a"])
+  eq("prompts: garbage → []", normalizePrompts({ prompts: "nope" }), [])
+  eq("prompts: named entries survive", normalizePrompts({ prompts: [{ name: "review", description: "d" }] }), [{ name: "review", description: "d" }])
+  eq("resource text is flattened", flattenResourceContents({ contents: [{ text: "hello" }, { text: "world" }] }), "hello\nworld")
+  ok("a binary resource is labeled, never silently dropped",
+    /binary resource/.test(flattenResourceContents({ contents: [{ blob: "AAAA", mimeType: "image/png" }] })))
+  eq("prompt messages are flattened with roles",
+    flattenPromptMessages({ messages: [{ role: "user", content: { type: "text", text: "hi" } }] }), "user: hi")
+
+  eq("no capabilities → no context tool", mcpContextTool({ name: "s" }, {}), null)
+  eq("tools-only server → no context tool", mcpContextTool({ name: "s" }, { tools: {} }), null)
+
+  const calls = []
+  const client = {
+    name: "docs",
+    async listResources() { calls.push("listResources"); return [{ uri: "doc://a", name: "A", mimeType: "text/md" }] },
+    async readResource(u) { calls.push("read:" + u); return "BODY OF " + u },
+    async listPrompts() { calls.push("listPrompts"); return [{ name: "review", description: "code review" }] },
+    async getPrompt(n) { calls.push("getPrompt:" + n); return "user: do " + n },
+  }
+  const tool = mcpContextTool(client, { resources: {}, prompts: {} })
+  eq("context tool is namespaced per server", tool.name, "mcp__docs__context")
+  eq("context tool is READ-ONLY (so the crew may use it)", tool.readOnly, true)
+  eq("it declares the read-only hint too", tool.annotations, { readOnlyHint: true })
+  eq("all four actions offered when both primitives exist",
+    tool.def.function.parameters.properties.action.enum, ["list_resources", "read_resource", "list_prompts", "get_prompt"])
+  ok("listing resources renders uri + name + mime", /doc:\/\/a — A \[text\/md\]/.test(await tool.run({ action: "list_resources" })))
+  eq("reading a resource returns its body", await tool.run({ action: "read_resource", uri: "doc://a" }), "BODY OF doc://a")
+  ok("read_resource without a uri is an honest error", /needs a uri/.test(await tool.run({ action: "read_resource" })))
+  ok("listing prompts renders name + description", /review — code review/.test(await tool.run({ action: "list_prompts" })))
+  eq("getting a prompt returns its messages", await tool.run({ action: "get_prompt", name: "review" }), "user: do review")
+  ok("an unknown action is an honest error", /unknown action/.test(await tool.run({ action: "nope" })))
+  ok("a throwing client degrades to ERROR, never a throw",
+    /^ERROR: /.test(await mcpContextTool({ name: "b", async listResources() { throw new Error("boom") } }, { resources: {} }).run({ action: "list_resources" })))
+
+  // resources-only server exposes only the resource actions
+  const resOnly = mcpContextTool(client, { resources: {} })
+  eq("resources-only server offers only resource actions",
+    resOnly.def.function.parameters.properties.action.enum, ["list_resources", "read_resource"])
+}
+
+console.log("== 15. the context tool reaches the agent over a real server ==")
+{
+  const http = await import("node:http")
+  const srv = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => { body += c })
+    req.on("end", () => {
+      let m; try { m = JSON.parse(body) } catch { m = null }
+      if (!m || m.id === undefined) { res.writeHead(202).end(); return }
+      const reply = (result) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ jsonrpc: "2.0", id: m.id, result })) }
+      if (m.method === "initialize") return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {}, resources: {}, prompts: {} }, serverInfo: { name: "docs", version: "1" } })
+      if (m.method === "tools/list") return reply({ tools: [{ name: "search", description: "s", inputSchema: { type: "object", properties: {} } }] })
+      if (m.method === "resources/list") return reply({ resources: [{ uri: "doc://readme", name: "Readme", mimeType: "text/markdown" }] })
+      if (m.method === "resources/read") return reply({ contents: [{ text: "# Readme\nthe real body" }] })
+      if (m.method === "prompts/list") return reply({ prompts: [{ name: "triage", description: "triage an issue" }] })
+      reply({})
+    })
+  })
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+  const url = `http://127.0.0.1:${srv.address().port}/mcp`
+  const cfg = { mcp: { lazy: false, servers: { docs: { url, allowPrivate: true } } } }
+  const res = await loadMcpTools(cfg, { timeoutMs: 8000 })
+  eq("the server's tool AND its context tool are offered", res.tools.map((t) => t.name), ["mcp__docs__search", "mcp__docs__context"])
+  eq("one context tool per server, not one per resource", res.tools.filter((t) => /__context$/.test(t.name)).length, 1)
+  const ctx = res.tools.find((t) => /__context$/.test(t.name))
+  ok("resources list over HTTP", /doc:\/\/readme — Readme/.test(await ctx.run({ action: "list_resources" })))
+  ok("resource read over HTTP returns the real body", /the real body/.test(await ctx.run({ action: "read_resource", uri: "doc://readme" })))
+  ok("prompts list over HTTP", /triage/.test(await ctx.run({ action: "list_prompts" })))
+  eq("the context tool is read-only, so a sub-agent may keep it", ctx.readOnly, true)
+  for (const c of res.clients) { try { c.close() } catch {} }
+  srv.close()
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

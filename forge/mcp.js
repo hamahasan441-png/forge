@@ -181,6 +181,26 @@ class McpClient {
     return { text: flattenContent(res?.content), isError: res?.isError === true }
   }
 
+  async listResources() {
+    const res = await this._request("resources/list", {})
+    return normalizeResources(res)
+  }
+
+  async readResource(uri) {
+    const res = await this._request("resources/read", { uri })
+    return flattenResourceContents(res)
+  }
+
+  async listPrompts() {
+    const res = await this._request("prompts/list", {})
+    return normalizePrompts(res)
+  }
+
+  async getPrompt(name, args) {
+    const res = await this._request("prompts/get", { name, arguments: args ?? {} })
+    return flattenPromptMessages(res)
+  }
+
   close() {
     if (this._closed) return
     this._closed = true
@@ -321,10 +341,122 @@ class McpHttpClient {
     return { text: flattenContent(res?.content), isError: res?.isError === true }
   }
 
+  async listResources() { return normalizeResources(await this._rpc("resources/list", {})) }
+  async readResource(uri) { return flattenResourceContents(await this._rpc("resources/read", { uri })) }
+  async listPrompts() { return normalizePrompts(await this._rpc("prompts/list", {})) }
+  async getPrompt(name, args) { return flattenPromptMessages(await this._rpc("prompts/get", { name, arguments: args ?? {} })) }
+
   close() {
     // HTTP is stateless per request: there is no child to reap. Marking closed
     // makes later calls fail honestly instead of silently reconnecting.
     this._closed = true
+  }
+}
+
+/** `resources/list` → a bounded [{uri, name, description, mimeType}]. */
+export function normalizeResources(res) {
+  const list = Array.isArray(res?.resources) ? res.resources : []
+  return list.filter((r) => r && typeof r.uri === "string").slice(0, 200).map((r) => ({
+    uri: String(r.uri).slice(0, 500),
+    name: String(r.name ?? "").slice(0, 200),
+    description: String(r.description ?? "").slice(0, 300),
+    mimeType: String(r.mimeType ?? "").slice(0, 100),
+  }))
+}
+
+/** `prompts/list` → a bounded [{name, description}]. */
+export function normalizePrompts(res) {
+  const list = Array.isArray(res?.prompts) ? res.prompts : []
+  return list.filter((p) => p && typeof p.name === "string").slice(0, 200).map((p) => ({
+    name: String(p.name).slice(0, 200),
+    description: String(p.description ?? "").slice(0, 300),
+  }))
+}
+
+/** `resources/read` → the contents flattened to text, honestly labeled when a
+ *  part is binary (blob) rather than silently dropped. */
+export function flattenResourceContents(res) {
+  const parts = Array.isArray(res?.contents) ? res.contents : []
+  const out = []
+  for (const c of parts) {
+    if (!c || typeof c !== "object") continue
+    if (typeof c.text === "string") out.push(c.text)
+    else if (typeof c.blob === "string") out.push(`[binary resource ${c.mimeType || "data"}, ${c.blob.length} base64 chars — not inlined]`)
+  }
+  return out.join("\n")
+}
+
+/** `prompts/get` → the prompt's messages flattened to readable text. */
+export function flattenPromptMessages(res) {
+  const msgs = Array.isArray(res?.messages) ? res.messages : []
+  const out = []
+  for (const m of msgs) {
+    if (!m || typeof m !== "object") continue
+    const body = typeof m.content === "string" ? m.content : flattenContent(m.content?.type ? [m.content] : m.content)
+    out.push(`${String(m.role ?? "user")}: ${body}`)
+  }
+  return out.join("\n\n")
+}
+
+/**
+ * One synthetic READ-ONLY tool per server that advertises resources and/or
+ * prompts. MCP exposes three primitives — tools, resources, prompts — and forge
+ * consumed only the first, so a server's documents, schemas and canned prompts
+ * were invisible. Folding them into ONE tool per server (instead of one tool
+ * per resource) keeps the context cost flat no matter how many resources a
+ * server publishes, and read-only means the crew can use it too.
+ */
+export function mcpContextTool(client, caps) {
+  const hasRes = Boolean(caps?.resources)
+  const hasPrompts = Boolean(caps?.prompts)
+  if (!hasRes && !hasPrompts) return null
+  const name = mcpToolName(client.name, "context")
+  const actions = [...(hasRes ? ["list_resources", "read_resource"] : []), ...(hasPrompts ? ["list_prompts", "get_prompt"] : [])]
+  return {
+    name,
+    readOnly: true,
+    annotations: { readOnlyHint: true },
+    def: {
+      type: "function",
+      function: {
+        name,
+        description: `Read-only access to the documents and canned prompts published by MCP server "${client.name}". Actions: ${actions.join(", ")}.`,
+        parameters: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: actions },
+            uri: { type: "string", description: "resource uri (read_resource)" },
+            name: { type: "string", description: "prompt name (get_prompt)" },
+          },
+          required: ["action"],
+        },
+      },
+    },
+    source: `mcp:${client.name}`,
+    async run(args) {
+      const action = String(args?.action ?? "")
+      try {
+        if (action === "list_resources") {
+          const r = await client.listResources()
+          return r.length ? r.map((x) => `${x.uri}${x.name ? ` — ${x.name}` : ""}${x.mimeType ? ` [${x.mimeType}]` : ""}`).join("\n") : "(no resources published)"
+        }
+        if (action === "read_resource") {
+          if (!args?.uri) return "ERROR: read_resource needs a uri"
+          return (await client.readResource(String(args.uri))) || "(empty resource)"
+        }
+        if (action === "list_prompts") {
+          const p = await client.listPrompts()
+          return p.length ? p.map((x) => `${x.name}${x.description ? ` — ${x.description}` : ""}`).join("\n") : "(no prompts published)"
+        }
+        if (action === "get_prompt") {
+          if (!args?.name) return "ERROR: get_prompt needs a name"
+          return (await client.getPrompt(String(args.name), args?.arguments)) || "(empty prompt)"
+        }
+        return `ERROR: unknown action "${action}" — expected one of ${actions.join(", ")}`
+      } catch (e) {
+        return `ERROR: ${e.message}`
+      }
+    },
   }
 }
 
@@ -459,7 +591,7 @@ export async function loadMcpTools(config, { timeoutMs, cachedOnly = false } = {
         // refresh the inventory from the live server (cheap: it just started)
         try {
           const tools = await client.listTools()
-          saveInventory(cacheKey(name, spec), name, tools)
+          saveInventory(cacheKey(name, spec), name, tools, client.capabilities)
         } catch { /* inventory refresh is best-effort; the call proceeds */ }
         return client
       })
@@ -487,9 +619,10 @@ export async function loadMcpTools(config, { timeoutMs, cachedOnly = false } = {
     } catch (e) { s.error = `${s.name}: ${e.message}`; return }
     try {
       const tools = await client.listTools()
-      if (lazy) saveInventory(cacheKey(s.name, s.spec), s.name, tools)
+      if (lazy) saveInventory(cacheKey(s.name, s.spec), s.name, tools, client.capabilities)
       s.client = client
-      s.tools = mcpToolsToPlugins(client, tools)
+      const ctx = mcpContextTool(client, client.capabilities)
+      s.tools = [...mcpToolsToPlugins(client, tools), ...(ctx ? [ctx] : [])]
     } catch (e) {
       s.error = `${s.name}: tools/list failed — ${e.message}`
       client.close()
@@ -501,6 +634,19 @@ export async function loadMcpTools(config, { timeoutMs, cachedOnly = false } = {
     const sname = s.name
     if (s.inv) {
       out.tools.push(...inventoryToPlugins(sname, s.spec, s.inv.tools, { ensureConnected, timeoutMs }))
+      if (s.inv.caps?.resources || s.inv.caps?.prompts) {
+        // a lazy stand-in: the same read-only context tool, but it connects the
+        // server on first use exactly like every other lazy stub
+        const lazyClient = {
+          name: sname,
+          listResources: async () => (await ensureConnected(sname, s.spec)).listResources(),
+          readResource: async (u) => (await ensureConnected(sname, s.spec)).readResource(u),
+          listPrompts: async () => (await ensureConnected(sname, s.spec)).listPrompts(),
+          getPrompt: async (n, a) => (await ensureConnected(sname, s.spec)).getPrompt(n, a),
+        }
+        const ctx = mcpContextTool(lazyClient, s.inv.caps)
+        if (ctx) out.tools.push(ctx)
+      }
       out.clients.push({
         name: sname,
         close() {
@@ -585,11 +731,16 @@ function freshInventory(name, spec) {
   } catch { return null }
 }
 
-function saveInventory(key, name, tools) {
+function saveInventory(key, name, tools, caps = null) {
   try {
     const file = loadInventoryFile()
     file.servers[key] = {
       at: Date.now(), name,
+      // remember WHICH primitives the server offers, so the lazy path can
+      // advertise the read-only context tool without a handshake
+      caps: caps && typeof caps === "object"
+        ? { resources: Boolean(caps.resources), prompts: Boolean(caps.prompts) }
+        : undefined,
       tools: (tools ?? []).slice(0, MAX_CACHED_TOOLS).map((t) => ({
         name: String(t?.name ?? "").slice(0, 200),
         description: String(t?.description ?? "").slice(0, 500),
