@@ -107,7 +107,9 @@ export function selectCapabilities({
       externals = externals.filter((p) => {
         const parsed = parseMcpToolName(p.name)
         const bad = parsed && sick.get(parsed.server)
-        if (bad) {
+        // An explicit request is a deliberate half-open probe. Without this
+        // escape hatch a tripped server cannot record a success and recover.
+        if (bad && !namedInTask(task, p)) {
           dropped.push({ name: p.name, reason: `server "${parsed.server}" is failing (${bad.failed}/${bad.samples} calls) — circuit open` })
           return false
         }
@@ -155,6 +157,9 @@ export function selectCapabilities({
 export const HEALTH_MIN_SAMPLES = 5
 /** Failure rate at or above which a server's tools are withheld. */
 export const HEALTH_FAIL_RATE = 0.8
+/** A tripped server is retried after this quiet period instead of remaining
+ *  permanently unreachable. Explicitly requested tools may probe sooner. */
+export const HEALTH_COOLDOWN_MS = 5 * 60 * 1000
 
 /** Laplace-smoothed success rate in (0,1). No samples → 0.5 (unproven). */
 export function reliabilityOf(stat) {
@@ -190,21 +195,23 @@ export function measuredRank(relevance, stat) {
  * and an extreme failure rate, so a flaky afternoon never costs a capability.
  * Returns a Map of server → {samples, failed, rate}.
  */
-export function unhealthyServers(stats = {}) {
+export function unhealthyServers(stats = {}, { now = Date.now(), cooldownMs = HEALTH_COOLDOWN_MS } = {}) {
   const byServer = new Map()
   for (const [name, stat] of Object.entries(stats || {})) {
     const parsed = parseMcpToolName(name)
     if (!parsed) continue
-    const agg = byServer.get(parsed.server) ?? { samples: 0, failed: 0 }
+    const agg = byServer.get(parsed.server) ?? { samples: 0, failed: 0, lastUsed: 0 }
     agg.samples += Number(stat?.samples) || 0
     agg.failed += Number(stat?.failed) || 0
+    agg.lastUsed = Math.max(agg.lastUsed, Number(stat?.lastUsed) || 0)
     byServer.set(parsed.server, agg)
   }
   const out = new Map()
   for (const [server, agg] of byServer) {
     if (agg.samples < HEALTH_MIN_SAMPLES) continue
     const rate = agg.failed / agg.samples
-    if (rate >= HEALTH_FAIL_RATE) out.set(server, { ...agg, rate })
+    const cooledDown = agg.lastUsed > 0 && Number.isFinite(cooldownMs) && cooldownMs >= 0 && now - agg.lastUsed >= cooldownMs
+    if (rate >= HEALTH_FAIL_RATE && !cooledDown) out.set(server, { ...agg, rate })
   }
   return out
 }

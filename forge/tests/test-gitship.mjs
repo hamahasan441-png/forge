@@ -27,6 +27,7 @@ process.env.FORGE_HOME = HOME
 // the identity-fallback path must not depend on the machine running the test
 process.env.GIT_CONFIG_GLOBAL = "/dev/null"
 process.env.GIT_CONFIG_NOSYSTEM = "1"
+for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"]) delete process.env[key]
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-gitship-work-"))
 process.chdir(WORK)
 

@@ -1968,6 +1968,12 @@ async function delegate(ctx, args) {
 export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
   const os = await import("node:os")
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "forge-doctor-"))
+  // Hosted IDEs commonly inject Git author/committer variables. They take
+  // precedence over `git -c user.*`, which made this self-test blame the host
+  // bot instead of the fixture author. Keep the probe hermetic without
+  // changing the user's real Git configuration.
+  const gitProbeEnv = { ...process.env }
+  for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"]) delete gitProbeEnv[key]
   const ctx = {
     cwd: tmp, root: tmp, timeoutSec: 8, maxToolOutput: 4000, skillsDir: null,
     searchUrl, memoryPath: memoryPath || path.join(tmp, "memory.md"), todoPath: todoPath || path.join(tmp, "todo.json"),
@@ -2006,7 +2012,7 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
   ))
   results.push(await t("git_status", async () => {
     const { execFileSync } = await import("node:child_process")
-    try { execFileSync("git", ["init", "-q"], { cwd: tmp }) } catch {}
+    try { execFileSync("git", ["init", "-q"], { cwd: tmp, env: gitProbeEnv }) } catch {}
     const r = await execTool(ctx, "git_status", {})
     if (typeof r === "string" && r.startsWith("ERROR")) return r
     return r + "\n[git verified]"
@@ -2014,8 +2020,8 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
   results.push(await t("git_diff", async () => {
     const { execFileSync } = await import("node:child_process")
     try {
-      execFileSync("git", ["add", "-A"], { cwd: tmp })
-      execFileSync("git", ["-c", "user.email=doctor@forge.local", "-c", "user.name=forge-doctor", "commit", "-q", "-m", "doctor probe"], { cwd: tmp })
+      execFileSync("git", ["add", "-A"], { cwd: tmp, env: gitProbeEnv })
+      execFileSync("git", ["-c", "user.email=doctor@forge.local", "-c", "user.name=forge-doctor", "commit", "-q", "-m", "doctor probe"], { cwd: tmp, env: gitProbeEnv })
     } catch {}
     await execTool(ctx, "write_file", { path: "probe.txt", content: "diff probe v2" })
     const r = await execTool(ctx, "git_diff", {})

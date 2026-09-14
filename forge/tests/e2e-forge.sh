@@ -309,7 +309,7 @@ check "chat continues after compaction" "$out" "Hello from mock!"
 $F config set chat.compactAtChars 48000 >/dev/null 2>&1
 
 # 42. plan mode (non-TTY): prints plan, does NOT execute the real run
-out=$($F agent --plan "USE_TOOL plan this" 2>&1 </dev/null)
+out=$($F agent --cwd "$T/work" --plan "USE_TOOL plan this" 2>&1 </dev/null)
 check "plan mode prints plan header" "$out" "plan "
 check "plan mode blocks write tools" "$out" "write tools are disabled"
 check "plan mode non-TTY warning" "$out" "not executing"

@@ -18,6 +18,13 @@ import os from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 
+// Hosted runners may inject author variables that override even `git -c
+// user.name=...`. This suite asserts exact fixture authors, so isolate it from
+// both environment and machine Git configuration.
+for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"]) delete process.env[key]
+process.env.GIT_CONFIG_GLOBAL = "/dev/null"
+process.env.GIT_CONFIG_NOSYSTEM = "1"
+
 const { TOOL_DEFS, toolCount, BUILTIN_TOOL_NAMES, WRITE_TOOLS, VERIFICATION_TOOLS, verificationAllows, makeToolContext, execTool } = await import("../tools.js")
 const { BUILTIN_CAPABILITIES, createRegistry, classifyCall, operationRisk, RISK, CLASS } = await import("../capabilities.js")
 

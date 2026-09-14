@@ -194,6 +194,10 @@ export function atomicWriteInDir(dirfd, dirReal, name, data, { mode } = {}) {
   let fd = null
   try {
     fd = fs.openSync(at(tmp), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, useMode)
+    // open(2) always filters the creation mode through the process umask.
+    // Re-apply the requested/preserved mode on the still-private temp inode so
+    // replacing a 0664 file under umask 0077 does not silently narrow it.
+    fs.fchmodSync(fd, useMode)
     let off = 0
     while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off)
     fs.fsyncSync(fd)
@@ -321,6 +325,10 @@ export function writeStateFile(file, data, { mode = 0o600, fsyncDir = true } = {
   let fd = null
   try {
     fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL, mode)
+    // State callers may deliberately request a shareable mode (for example a
+    // generated plan at 0644). open(2) applies umask, so make the API's mode
+    // contract exact before any rename can expose the new inode.
+    fs.fchmodSync(fd, mode)
     let off = 0
     while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off)
     fs.fsyncSync(fd)

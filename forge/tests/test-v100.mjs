@@ -650,9 +650,9 @@ console.log("== 21. measured selection: proven tools outrank unproven ones ==")
   eq("no history → first equally-relevant tool in config order", noHist.kept.filter(isExternal).map((p) => p.name), ["mcp__beta__run_query"])
 }
 
-console.log("== 22. circuit breaker: a persistently failing server is withheld ==")
+console.log("== 22. circuit breaker: persistent failures trip, then recover ==")
 {
-  const { selectCapabilities, isExternal, unhealthyServers, HEALTH_MIN_SAMPLES } = await import("../capfabric.js")
+  const { selectCapabilities, isExternal, unhealthyServers, HEALTH_MIN_SAMPLES, HEALTH_COOLDOWN_MS } = await import("../capfabric.js")
   const mk = (server, tool) => ({ name: `mcp__${server}__${tool}`, source: `mcp:${server}`, def: { type: "function", function: { name: `mcp__${server}__${tool}`, description: "" } } })
 
   eq("no stats → no server is unhealthy", unhealthyServers({}).size, 0)
@@ -671,6 +671,14 @@ console.log("== 22. circuit breaker: a persistently failing server is withheld =
     selectCapabilities({ task: "x", plugins: [mk("dead", "go")], nativeNames: [], stats, breaker: false }).dropped.length, 0)
   eq("no stats → breaker cannot fire",
     selectCapabilities({ task: "x", plugins: [mk("dead", "go")], nativeNames: [] }).dropped.length, 0)
+  eq("an explicitly requested tool is a half-open recovery probe",
+    selectCapabilities({ task: "use mcp__dead__go", plugins: [mk("dead", "go")], nativeNames: [], stats }).dropped.length, 0)
+
+  const now = Date.now()
+  const recent = { "mcp__dead__go": { samples: 20, failed: 20, lastUsed: now - 1000 } }
+  const old = { "mcp__dead__go": { samples: 20, failed: 20, lastUsed: now - HEALTH_COOLDOWN_MS } }
+  ok("a recent failure keeps the circuit open", unhealthyServers(recent, { now }).has("dead"))
+  ok("the cooldown makes an automatic recovery probe possible", !unhealthyServers(old, { now }).has("dead"))
 }
 
 console.log("== 23. the agent reads its own recorded history ==")
