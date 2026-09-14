@@ -220,10 +220,13 @@ console.log("== 8. capability fabric: relevance budget ==")
 console.log("== 9. fabric is wired into the agent loop ==")
 {
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
-  ok("agent.js imports the fabric", /import \{ selectCapabilities, formatSelection \} from "\.\/capfabric\.js"/.test(src))
-  ok("MCP tools pass through selectCapabilities before reaching plugins", /selectCapabilities\(\{[\s\S]{0,400}plugins: usable/.test(src))
-  ok("the selected set derives from the loaded MCP tools", /const usable = isDelegatedSubAgent \? mcp\.tools\.filter/.test(src))
-  ok("only the SELECTED tools are added to plugins", /plugins = \[\.\.\.plugins, \.\.\.sel\.kept\]/.test(src))
+  ok("agent.js imports the fabric's reporting and the unified selector",
+    /import \{ formatSelection \} from "\.\/capfabric\.js"/.test(src) && /import \{ selectForTurn \} from "\.\/capindex\.js"/.test(src))
+  ok("MCP tools pass through the unified selection before reaching plugins",
+    /selectForTurn\(\{[\s\S]{0,400}mcpPlugins: mcpLoaded/.test(src))
+  ok("the selected set derives from the loaded MCP tools",
+    /mcpLoaded = isDelegatedSubAgent \? mcp\.tools\.filter/.test(src))
+  ok("only the SELECTED tools are added to plugins", /plugins = \[\.\.\.plugins, \.\.\.turnSelection\.mcp\.kept\]/.test(src))
   ok("withheld tools are reported, never silent", /mcp_tool_withheld/.test(src))
   ok("clients are still taken from the full load (no leak)", /mcpClients = mcp\.clients/.test(src))
 }
@@ -486,7 +489,7 @@ console.log("== 17. every command path reaches the fabric ==")
   ok("meta segments execute through agent.js runAgent", /runAgent \?\? \(await import\("\.\/agent\.js"\)\)\.runAgent/.test(meta))
   ok("DAG work nodes execute through runAgent", /await runAgent\(\{/.test(worknode))
   ok("chat loads MCP on its own path", /loadMcpTools\(config\)/.test(chat))
-  ok("the fabric is inside runAgent, so every caller inherits it", /selectCapabilities\(\{/.test(agent))
+  ok("the selection is inside runAgent, so every caller inherits it", /selectForTurn\(\{/.test(agent))
 
   // the read-only paths (verifier / delegated sub-agent) are the ones that used
   // to be excluded entirely; they now receive DECLARED read-only tools only
@@ -853,6 +856,76 @@ console.log("== 27. every stop explains itself ==")
   ok("progress is measured as a DELTA, never a level", /lastGrantMark/.test(src) && /since the last budget grant/.test(src))
   ok("the increment is the earned class budget, not the global default", /maxSeg \+ segBudgetStep/.test(src))
   ok("an absolute ceiling still applies", /AGENT_BUDGETS\.maxSegments\)/.test(src))
+}
+
+// ---------------------------------------------------------------------------
+console.log("== 28. ONE selection for the turn, across every registry ==")
+{
+  const { selectForTurn } = await import("../capindex.js")
+  const { isExternal } = await import("../capfabric.js")
+  const ext = (server, tool, desc = "") => ({
+    name: `mcp__${server}__${tool}`, source: `mcp:${server}`,
+    def: { type: "function", function: { name: `mcp__${server}__${tool}`, description: desc } },
+  })
+  const skillIdx = [
+    { name: "sql-debugging", desc: "debug sql queries", lifecycle: "VERIFIED" },
+    { name: "css-layout", desc: "fix css layout", lifecycle: "ACTIVE" },
+  ]
+  const pickFn = (task, idx) => idx.filter((s) => s.desc.split(" ").some((w) => task.includes(w)))
+
+  // both decisions come back from ONE call
+  const r = selectForTurn({
+    task: "debug sql queries",
+    mcpPlugins: [ext("pg", "run_query", "execute a SQL query"), ext("fs", "read_file", "read a file")],
+    skillIndex: skillIdx, pickSkillsFn: pickFn,
+    nativeNames: ["read_file"],
+  })
+  ok("the MCP decision is returned", Array.isArray(r.mcp?.kept))
+  ok("the skill decision is returned", Array.isArray(r.skills))
+  ok("both are decided in one call", r.mcp.kept.length > 0 && r.skills.length > 0)
+  ok("the MCP dedupe still runs (native read_file wins)",
+    !r.mcp.kept.some((p) => p.name === "mcp__fs__read_file"), JSON.stringify(r.mcp.kept.map((p) => p.name)))
+  ok("the dedupe reason is still explained", r.mcp.dropped.some((d) => /duplicates the native/.test(d.reason)))
+  ok("the skill selector still runs", r.skills.some((s) => s.name === "sql-debugging"))
+  ok("a combined index over the OFFERED capabilities comes back", r.index.length >= r.mcp.kept.length + r.skills.length)
+
+  // with the shared budget OFF, the result is exactly the two selectors' own
+  eq("no budget → nothing trimmed", r.trimmed.length, 0)
+
+  // the shared ceiling trims the lowest-ranked REGARDLESS of registry
+  const many = [ext("bulk", "a", "unrelated"), ext("bulk", "b", "unrelated"), ext("pg", "run_query", "execute a SQL query")]
+  const budgeted = selectForTurn({
+    task: "execute a SQL query",
+    mcpPlugins: many, skillIndex: skillIdx, pickSkillsFn: pickFn,
+    nativeNames: [], contextBudget: 2,
+  })
+  const offeredCount = budgeted.mcp.kept.length + budgeted.skills.length
+  eq("the combined offer respects the shared ceiling", offeredCount, 2)
+  ok("the most relevant capability survives the ceiling",
+    budgeted.mcp.kept.some((p) => p.name === "mcp__pg__run_query"), JSON.stringify(budgeted.mcp.kept.map((p) => p.name)))
+  ok("every trim is explained", budgeted.trimmed.every((t) => /context budget/.test(t.reason)))
+  ok("trims name which registry they came from", budgeted.trimmed.every((t) => t.kind === "mcp" || t.kind === "skill"))
+
+  // robustness: a throwing skill picker must not break the turn
+  const safe = selectForTurn({
+    task: "x", mcpPlugins: [ext("a", "b")], skillIndex: skillIdx,
+    pickSkillsFn: () => { throw new Error("boom") }, nativeNames: [],
+  })
+  eq("a failing skill picker degrades to no skills, never a throw", safe.skills.length, 0)
+  ok("and the MCP side still decided", safe.mcp.kept.length === 1)
+  eq("no picker at all → no skills, no throw", selectForTurn({ task: "x" }).skills.length, 0)
+}
+
+console.log("== 29. the agent uses that one selection for BOTH sides ==")
+{
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("runAgent calls selectForTurn once", (src.match(/selectForTurn\(\{/g) || []).length === 1)
+  ok("the MCP block only LOADS now", /mcpLoaded = isDelegatedSubAgent \? mcp\.tools\.filter/.test(src))
+  ok("plugins come from the unified decision", /plugins = \[\.\.\.plugins, \.\.\.turnSelection\.mcp\.kept\]/.test(src))
+  ok("the prompt is handed the same decision", /skillPicks: turnSelection\.skills/.test(src))
+  ok("and does not re-run a second skill selection", /const picks = skillPicks \?\? pickSkills\(/.test(src))
+  ok("trims are reported to the user", /capability_trimmed/.test(src))
+  ok("agent.js no longer calls selectCapabilities directly", !/[^.\w]selectCapabilities\(/.test(src))
 }
 
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)

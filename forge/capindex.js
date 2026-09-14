@@ -29,7 +29,7 @@
  * Zero dependencies.
  */
 import { scoreAgainst } from "./evaluate.js"
-import { reliabilityOf, latencyFactorOf, isExternal, bareToolName } from "./capfabric.js"
+import { reliabilityOf, latencyFactorOf, isExternal, bareToolName, selectCapabilities } from "./capfabric.js"
 
 export const CAP_SOURCE = Object.freeze({
   NATIVE: "native",
@@ -202,6 +202,77 @@ export function rankCapabilities(index = [], task = "", { limit = 0, sources = n
   }
   scored.sort((a, b) => b.rank - a.rank || a.order - b.order)
   return limit > 0 ? scored.slice(0, limit) : scored
+}
+
+/**
+ * ONE selection for the turn, across every source.
+ *
+ * Before this, two independent selectors ran at two points in the loop with no
+ * shared accounting: capfabric gated MCP tools to its own budget, evaluate.js
+ * picked skills to a separate top-k, and nothing knew the COMBINED context cost
+ * of the capabilities being offered. They already shared a scoring function and
+ * a reliability axis; this makes them share a decision.
+ *
+ * Both underlying selectors are CALLED, not reimplemented — the MCP dedupe /
+ * circuit-breaker / budget logic and the skill lifecycle / staleness logic each
+ * stay where they belong. This function owns only what neither could own alone:
+ * the combined view and the shared ceiling.
+ *
+ * `contextBudget` is opt-in (0 = off). With it off the result is exactly what
+ * the two selectors produced separately, so enabling the unification changes
+ * nothing until a ceiling is actually asked for.
+ *
+ * @returns {{mcp, skills, skillIndex, index, trimmed}}
+ */
+export function selectForTurn({
+  task = "",
+  mcpPlugins = [],
+  skillIndex = [],
+  pickSkillsFn = null,
+  skillOptions = {},
+  nativeDefs = [],
+  nativeNames = [],
+  createdTools = [],
+  stats = null,
+  mcpOptions = {},
+  contextBudget = 0,
+} = {}) {
+  const mcp = selectCapabilities({
+    task, plugins: mcpPlugins, nativeNames, stats, ...mcpOptions,
+  })
+  let skills = []
+  if (typeof pickSkillsFn === "function") {
+    try { skills = pickSkillsFn(task, skillIndex, skillOptions) ?? [] } catch { skills = [] }
+  }
+
+  const index = buildCapabilityIndex({
+    nativeDefs, mcpPlugins: mcp.kept, skills, createdTools, stats,
+  })
+
+  // Shared ceiling: when the combined offer exceeds the budget, the LOWEST
+  // ranked capabilities are trimmed regardless of which registry they came
+  // from — the whole point of one scale. Native tools are never trimmed: they
+  // are the core the loop and its tests depend on.
+  const trimmed = []
+  const limit = Number(contextBudget) > 0 ? Math.floor(contextBudget) : 0
+  if (limit > 0) {
+    const offered = [...mcp.kept.map((p) => ({ kind: "mcp", name: p.name, ref: p })),
+      ...skills.map((s) => ({ kind: "skill", name: s.name, ref: s }))]
+    if (offered.length > limit) {
+      const ranked = rankCapabilities(index, task, { keepIrrelevant: true })
+      const rankOf = new Map(ranked.map((r) => [r.name, r.rank]))
+      offered.sort((a, b) => (rankOf.get(b.name) ?? 0) - (rankOf.get(a.name) ?? 0))
+      for (const o of offered.slice(limit)) {
+        trimmed.push({ name: o.name, kind: o.kind, reason: `over the ${limit}-capability context budget for this turn` })
+      }
+      const keep = new Set(offered.slice(0, limit).map((o) => o.name))
+      mcp.kept = mcp.kept.filter((p) => keep.has(p.name))
+      mcp.dropped = [...mcp.dropped, ...trimmed.filter((t) => t.kind === "mcp").map((t) => ({ name: t.name, reason: t.reason }))]
+      skills = skills.filter((s) => keep.has(s.name))
+    }
+  }
+
+  return { mcp, skills, skillIndex, index, trimmed }
 }
 
 /** Counts per source — the one-line answer to "what does forge have?". */

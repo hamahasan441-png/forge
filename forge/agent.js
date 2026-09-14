@@ -30,7 +30,8 @@ import { loadToolPlugins } from "./plugins.js"
 import { loadActiveCreatedTools, listToolLife } from "./toolcreate.js"
 import { capabilityCoverage, capabilitiesImpliedByTask } from "./capabilities.js" // v97 §33 ladder
 import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
-import { selectCapabilities, formatSelection } from "./capfabric.js"
+import { formatSelection } from "./capfabric.js"
+import { selectForTurn } from "./capindex.js"
 import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
@@ -75,7 +76,7 @@ const ROLE_DIRECTIVES = {
   integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [] }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -138,8 +139,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     if (learnings) lines.push("", learnings)
   }
   if (skillsEnabled) {
-    const idx = skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), cwd) : []
-    const picks = pickSkills(task || "", idx, { klass, skillsDir, cwd })
+    // The decision was already made once, by selectForTurn, together with the
+    // MCP side — this consumes it rather than re-running a second, independent
+    // selection here. (Fallback keeps this function usable on its own.)
+    const idx = skillPicks ? (skillIndex ?? []) : (skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), cwd) : [])
+    const picks = skillPicks ?? pickSkills(task || "", idx, { klass, skillsDir, cwd })
     const block = formatSkillPicks(picks)
     if (block) lines.push("", block)
     // v97 §33: THE UNIFIED CAPABILITY LADDER — for every capability this task
@@ -342,6 +346,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { /* created tools are additive, never break the agent */ }
   }
   let mcpClients = []
+  let mcpLoaded = []
   if (!noTools && config.tools?.mcp !== false) {
     try {
       // A delegated sub-agent loads CACHE-ONLY: it never spawns a server itself.
@@ -363,27 +368,49 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         // the read-only contract already permits (tools.js only adds a plugin
         // to WRITE_TOOLS when !readOnly), so this widens capability without
         // widening authority.
-        const usable = isDelegatedSubAgent ? mcp.tools.filter((t) => t.readOnly === true) : mcp.tools
-        const sel = selectCapabilities({
-          task: String(task ?? ""),
-          plugins: usable,
-          nativeNames: [...BUILTIN_TOOL_NAMES],
-          maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
-          dedupe: config.mcp?.dedupe !== false,
-          // measured selection: this project's OWN recorded tool history ranks
-          // the survivors, and opens the circuit on a server that keeps failing.
-          stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch { return null } })(),
-          breaker: config.mcp?.breaker !== false,
-        })
-        plugins = [...plugins, ...sel.kept]
+        mcpLoaded = isDelegatedSubAgent ? mcp.tools.filter((t) => t.readOnly === true) : mcp.tools
         mcpClients = mcp.clients
-        for (const t of sel.kept) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
-        const summary = formatSelection(sel)
-        if (summary && !isDelegatedSubAgent) onEvent?.({ type: "info", text: summary, ...identityMeta() })
-        for (const d of sel.dropped) onEvent?.({ type: "mcp_tool_withheld", tool: d.name, reason: d.reason, ...identityMeta() })
       }
       for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}`, ...identityMeta() })
     } catch { }
+  }
+
+  // ── THE SINGLE SELECTION ──────────────────────────────────────────────────
+  // One call decides what capabilities this turn offers, across every registry.
+  // Both underlying selectors are still the ones doing their own job (MCP
+  // dedupe / circuit-breaker / budget; skill lifecycle / staleness) — what is
+  // unified is the DECISION: one place, one combined view, one optional shared
+  // ceiling. Previously these ran at two points in the loop with no shared
+  // accounting, so nothing knew the combined context cost being offered.
+  const turnKlass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
+  const turnSkillIndex = (config.skills?.enabled !== false && skillsDir)
+    ? (() => { try { return mergeLearnedSkills(indexSkills(skillsDir), process.cwd()) } catch { return [] } })()
+    : []
+  const turnSelection = selectForTurn({
+    task: String(task ?? ""),
+    mcpPlugins: mcpLoaded,
+    skillIndex: turnSkillIndex,
+    pickSkillsFn: pickSkills,
+    skillOptions: { klass: turnKlass, skillsDir, cwd: process.cwd() },
+    nativeDefs: [],
+    nativeNames: [...BUILTIN_TOOL_NAMES],
+    stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch { return null } })(),
+    mcpOptions: {
+      maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
+      dedupe: config.mcp?.dedupe !== false,
+      breaker: config.mcp?.breaker !== false,
+    },
+    contextBudget: Number(config.agent?.capabilityBudget) > 0 ? Number(config.agent.capabilityBudget) : 0,
+  })
+  if (turnSelection.mcp.kept.length) {
+    plugins = [...plugins, ...turnSelection.mcp.kept]
+    for (const t of turnSelection.mcp.kept) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
+  }
+  {
+    const summary = formatSelection(turnSelection.mcp)
+    if (summary && !isDelegatedSubAgent) onEvent?.({ type: "info", text: summary, ...identityMeta() })
+    for (const d of turnSelection.mcp.dropped) onEvent?.({ type: "mcp_tool_withheld", tool: d.name, reason: d.reason, ...identityMeta() })
+    for (const t of turnSelection.trimmed) onEvent?.({ type: "capability_trimmed", capability: t.name, kind: t.kind, reason: t.reason, ...identityMeta() })
   }
   let lspSession = null
   // v98 shipwise: the autostart table counts too — the read-only LSP tools
@@ -515,7 +542,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   }
 
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
   // v89 perf: FORGE_DEBUG_PROMPT=<path> dumps the exact first request payload —
