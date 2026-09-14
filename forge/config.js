@@ -101,6 +101,16 @@ export function defaultConfig() {
     // choke point as local plugins. Launched from THIS config only, never model
     // output.
     mcp: { servers: {} },
+    // v99 loopwise: the post-mutation code-review pass. code:true (default)
+    // runs ONE bounded read-only reviewer agent after a clean segment that
+    // mutated files (diff + LSP diagnostics + failing evidence in, structured
+    // findings out; blockers become required actions). maxPerTask bounds the
+    // cost per task; 0 disables. Non-privileged: any config layer may set it.
+    review: { code: true, maxPerTask: 4 },
+    // v99 loopwise: plan-quality critique (coverage/granularity/verification
+    // presence) with ONE bounded revision pass when majors exist. Applies to
+    // model-planned tasks only. Non-privileged.
+    planner: { critique: true },
     // v23: Language Server Protocol servers for real code understanding
     // (definition/references/hover/diagnostics). OFF by default. Each entry keys
     // a language: { command, args?, extensions:[".ts",...], languageId?, env?,

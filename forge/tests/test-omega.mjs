@@ -252,7 +252,7 @@ console.log("== Ω HUD is width-safe ==")
 
 console.log("== package version ==")
 {
-  ok("VERSION is 98.0.0", VERSION === "98.0.0")
+  ok("VERSION is 99.0.0", VERSION === "99.0.0")
 }
 
 console.log(`\n== omega suite: ${PASS} passed, ${FAIL} failed ==`)

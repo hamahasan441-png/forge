@@ -225,7 +225,7 @@ console.log("== deepwise: reality→risk closure (experiments move live risk) ==
   // v96 unifywise: all three call sites now pass liveRisk AND the episodeSink
   // (the episodic stage recorders wired in v96 — hypotheses/experiments/
   // verification/failed-approaches are fed by the repair loop).
-  ok("all three repairSegment call sites pass liveRisk", meta_src.includes("changedFiles: [...changedFiles], liveRisk, episodeSink })") && meta_src.includes("finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink })") && meta_src.includes("finalRisk: finalRiskLevel, liveRisk, episodeSink,"))
+  ok("all three repairSegment call sites pass liveRisk", meta_src.includes("changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: lastVerifierReport })") && meta_src.includes("finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: lastVerifierReport })") && meta_src.includes("finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: lastVerifierReport,"))
   ok("meta.js wires adoptDecision into the planner", meta_src.includes("adoptDecision(alts)") && meta_src.includes("planDefs = alts.winnerDefs"))
   ok("adoption re-stamps node predictions and restarts live risk", meta_src.includes("preds2") && meta_src.includes("liveRisk = createLiveRisk(planRisk.successProbability)"))
 }

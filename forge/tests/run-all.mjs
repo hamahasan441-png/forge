@@ -211,6 +211,7 @@ const suites = [
   // ---- v98 shipwise: structured extraction wired + verified git delivery ----
   ["gitship", "node", ["test-gitship.mjs"]],
   ["v98", "node", ["test-v98.mjs"]],
+  ["v99", "node", ["test-v99.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

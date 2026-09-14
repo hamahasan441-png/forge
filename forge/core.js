@@ -246,7 +246,7 @@ export function createForgeCore({
    *  the project dir). Task/plan/DAG/segment/worker/verification/checkpoint/
    *  recovery/decision/completion events only; raw tool traffic and huge
    *  payloads are never written. Restart reconstruction reads it back. */
-  const PERSISTED_EVENT_RE = /^(TASK_|PLAN_|DAG_|SEGMENT_|WORKER_|VERIFICATION_|VERIFY_|CHECKPOINT|REPAIR_|RECOVER|RESUM|DECISION_|COMPLETION_|INTEGRATION_CONFLICT|CONFLICT_|SELF_REVIEW|MODEL_SELECTED|STRATEGY_CHANGED|PREDICTION_|CONTRACT_DRIFT|WORLD_INVALIDATED|WORLD_ENRICHED|ENVIRONMENT_DRIFT|GITSHIP_)/
+  const PERSISTED_EVENT_RE = /^(TASK_|PLAN_|DAG_|SEGMENT_|WORKER_|VERIFICATION_|VERIFY_|CHECKPOINT|REPAIR_|RECOVER|RESUM|DECISION_|COMPLETION_|INTEGRATION_CONFLICT|CONFLICT_|SELF_REVIEW|MODEL_SELECTED|STRATEGY_CHANGED|PREDICTION_|CONTRACT_DRIFT|WORLD_INVALIDATED|WORLD_ENRICHED|ENVIRONMENT_DRIFT|GITSHIP_|CODE_REVIEW_)/
   function eventsPath() { return path.join(projectDir(cwd), "events.jsonl") }
   function persistEvent(ev) {
     if (!ev || !ev.type || !PERSISTED_EVENT_RE.test(ev.type)) return

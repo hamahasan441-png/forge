@@ -31,12 +31,14 @@
  */
 import fs from "node:fs"
 import path from "node:path"
+import { spawnSync } from "node:child_process"
 import { runGit, probeGit, uncommittedFiles } from "./worktree.js"
 import { gitOperationInProgress, gitState } from "./recovery.js"
 import { writeStateFile } from "./securefs.js"
 
 const MODES = Object.freeze(["off", "on", "ask"])
 const PUSH_MODES = Object.freeze(["off", "explicit"])
+const PR_MODES = Object.freeze(["off", "gh"])
 
 /** Resolve the gitship policy from config (user-level only — config.js puts
  *  `gitship` in PRIVILEGED_SECTIONS, so a checked-in project config can never
@@ -49,6 +51,9 @@ export function gitshipMode(config) {
     commit: pick(gs?.commit, MODES, "off"),
     branch: pick(gs?.branch, ["off", "auto"], "off"),
     push: pick(gs?.push, PUSH_MODES, "off"),
+    // v99 loopwise: PR creation via the user's OWN `gh` CLI (passthrough —
+    // forge never holds a GitHub token; gh's auth is gh's business)
+    pr: pick(gs?.pr, PR_MODES, "off"),
   }
 }
 
@@ -258,6 +263,58 @@ export async function maybeShip({
     writeStateFile(prPath, renderPrText({ objective, taskId, runId, files, verificationStatus, finalRisk, gate }))
   } catch { prPath = null }
 
+  // v99 loopwise: PR CREATION via the user's own `gh` CLI — passthrough, not
+  // an API client. forge never holds a GitHub token; gh's authentication is
+  // gh's business (`gh auth login`). Requirements, all checked, all honest:
+  //   gitship.pr = "gh" (explicit, user-level only) + a live approved ask
+  //   (same consent as push) + the commit actually pushed (a PR needs the
+  //   branch on the remote) + gh on PATH + gh authenticated. The PR body IS
+  //   the PR-ready artifact that was just written — one source of truth.
+  //   A failure (including "PR already exists") reports the reason; the
+  //   delivery commit's status is NEVER affected by PR outcome.
+  let pr = { created: false, url: null, reason: "gitship.pr is off (default) — the PR-ready artifact was written instead" }
+  if (mode.pr === "gh") {
+    if (!prPath) {
+      // audit A14: the PR body IS the artifact — without it there is nothing
+      // honest to open a PR with; never pass a null body-file to gh
+      pr = { created: false, url: null, reason: "the PR-ready artifact could not be written — refusing to open a PR without it" }
+    } else if (!pushed) {
+      pr = { created: false, url: null, reason: "gitship.pr=gh but the commit was not pushed — a PR needs the branch on the remote" }
+    } else {
+      let approved = false
+      if (typeof ask === "function") {
+        const d = ask({
+          type: "authorization",
+          key: `gitship-pr-gh`,
+          title: "Open a pull request via gh?",
+          question: `Run \`gh pr create\` with the delivery PR text for ${sha ?? "this commit"}? (forge shells out to your own gh CLI — no token is stored by forge)`,
+        })
+        approved = Boolean(d?.ok) && !d?.skipped
+      }
+      if (!approved) {
+        pr = { created: false, url: null, reason: "PR not approved (gitship.pr=gh requires live consent, like push)" }
+      } else {
+        const auth = spawnSync("gh", ["auth", "status"], { cwd: root, encoding: "utf8", timeout: 15000 })
+        if (auth.error) {
+          pr = { created: false, url: null, reason: "gh CLI not found on PATH — install github.com/cli/cli and `gh auth login`" }
+        } else if (auth.status !== 0) {
+          pr = { created: false, url: null, reason: `gh is not authenticated — run \`gh auth login\` (${String(auth.stderr ?? "").trim().split("\n")[0] ?? ""})`.slice(0, 200) }
+        } else {
+          const title = `[forge] ${String(objective ?? "").slice(0, 60) || "verified delivery"}${taskId ? ` (${taskId})` : ""}`
+          const create = spawnSync("gh", ["pr", "create", "--title", title, "--body-file", prPath], { cwd: root, encoding: "utf8", timeout: 60000 })
+          if (create.status === 0) {
+            const urlMatch = /(https?:\/\/\S+)/.exec(String(create.stdout ?? ""))
+            pr = { created: true, url: urlMatch ? urlMatch[1] : null, reason: "pull request created via gh" }
+          } else {
+            const tail = `${String(create.stderr ?? "")} ${String(create.stdout ?? "")}`.trim().split("\n").filter(Boolean).slice(-2).join(" ").slice(0, 220)
+            const exists = /already exists/i.test(tail)
+            pr = { created: false, url: null, reason: exists ? `a pull request already exists for this branch — ${tail}` : `gh pr create failed — ${tail || `exit ${create.status}`}` }
+          }
+        }
+      }
+    }
+  }
+
   return {
     shipped: true,
     pushed,
@@ -267,6 +324,7 @@ export async function maybeShip({
     identity: identityNote,
     foreignDirtyFiles: foreign.slice(0, 12),
     prPath,
-    reason: `committed ${files.length} verified file(s)${branch ? ` · bookmark branch ${branch}` : ""}${pushed ? " · pushed" : ""}`,
+    pr,
+    reason: `committed ${files.length} verified file(s)${branch ? ` · bookmark branch ${branch}` : ""}${pushed ? " · pushed" : ""}${pr.created ? ` · PR ${pr.url ?? "created"}` : ""}`,
   }
 }

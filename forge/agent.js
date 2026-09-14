@@ -276,8 +276,25 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     deepEffort = resolved.deep
     if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
   }
-  const maxSteps = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps, readonly ? 10 : AGENT_BUDGETS.maxStepsHardCap)
-  const maxToolCalls = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(10, config.agent?.maxToolCalls ?? AGENT_BUDGETS.maxToolCalls))
+  const maxStepsInitial = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps, readonly ? 10 : AGENT_BUDGETS.maxStepsHardCap)
+  let maxSteps = maxStepsInitial
+  const maxToolCallsInitial = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(10, config.agent?.maxToolCalls ?? AGENT_BUDGETS.maxToolCalls))
+  let maxToolCalls = maxToolCallsInitial
+  // v99 loopwise: productive step-budget auto-extension. The DIRECT one-shot
+  // path (no maxStepsOverride) historically stopped dead at agent.maxSteps —
+  // "run stopped at the step budget" — even when the run was demonstrably
+  // still building (fresh writes, distinct tool use). Meta's segments
+  // checkpoint and continue; the direct path had no such mercy, which is
+  // exactly the "agent stops after ~25 steps" experience. Now: while the run
+  // shows PRODUCTIVITY (recent successful writes or diverse tool use, no
+  // signature loop, no error streak), the step AND tool-call budgets extend
+  // in increments up to the SAME hard caps that always bounded them. A run
+  // that stalls stops exactly as before (INCOMPLETE + checkpoint + resume) —
+  // the extension never masks a stuck run, and budget exhaustion is STILL
+  // never completion (§5/v93): the gate owns that contract unchanged.
+  // Segment callers (meta) pass maxStepsOverride and are untouched: segment
+  // boundaries are the checkpoint cadence, not a wall.
+  const autoExtendEligible = !readonly && !verifier && sub == null && maxStepsOverride == null && config.agent?.autoExtendSteps !== false
   const skillsDir = resolveSkillsDir(config.skills?.dir)
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
   const runId = effectiveRunId
@@ -503,6 +520,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // agent edited src/x.js" apart from "edited, then tests passed". The former
   // is stale evidence for src/x.js and must not verify it.
   const writesSoFar = []
+  // v99 loopwise extension evidence: step-numbered writes, bounded tool
+  // signature counts (loop detection, execcontroller §10 rule), and the
+  // extension bookkeeping itself.
+  const writeSteps = []
+  const toolSigCounts = new Map()
+  let stepExtensions = 0
+  let lastExtensionEvidence = null
   const repoState = (() => {
     try {
       const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).toString().trim()
@@ -520,7 +544,47 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     if (!suppressRunEvents) onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats(), taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
   }
   try {
-    while (steps < maxSteps) {
+    // v99 loopwise: the loop gate. `steps >= maxSteps` no longer ends the run
+    // unconditionally on the DIRECT path — first ask whether the run is still
+    // PRODUCTIVE (see productiveExtension). Productive runs get more budget
+    // (bounded by the same hard caps); unproductive or ineligible runs break
+    // to the honest budget-hit handling below, exactly as v98 did.
+    const EXT_WINDOW = 10 // steps of recent behavior the judgment reads
+    const productiveExtension = () => {
+      if (!autoExtendEligible) return null
+      if (signal?.aborted) return null
+      if (maxSteps >= AGENT_BUDGETS.maxStepsHardCap) return null
+      // (a) signature loop — execcontroller §10 rule: the same tool+args
+      // signature 4+ times total is a spin; more budget cannot help it
+      for (const [, n] of toolSigCounts) if (n >= 4) return null
+      // (b) recent error streak — the last 6 tool results all failed
+      const recent = toolLog.slice(-6)
+      if (recent.length === 6 && recent.every((t) => String(t.result).startsWith("ERROR") || String(t.result).startsWith("BLOCKED"))) return null
+      // (c) productivity: a successful write or a passing verification
+      // command in the window, OR diverse tool use (>= 4 distinct
+      // signatures) — read-heavy exploration counts as progress too
+      const sinceStep = steps - EXT_WINDOW
+      const wroteRecently = writeSteps.some((s) => s > sinceStep)
+      const verifiedRecently = commandChecks.some((c) => c.passed && (c.step ?? 0) > sinceStep)
+      const recentSigs = new Set()
+      for (const t of toolLog) if ((t.step ?? 0) > sinceStep) recentSigs.add(`${t.name}:${String(t.result).slice(0, 40)}`)
+      const diverse = recentSigs.size >= 4
+      if (!(wroteRecently || verifiedRecently || diverse)) return null
+      return { wroteRecently, verifiedRecently, diverse, distinctRecent: recentSigs.size }
+    }
+    while (true) {
+      if (steps >= maxSteps) {
+        const evidence = productiveExtension()
+        if (!evidence) break
+        const prevSteps = maxSteps
+        maxSteps = Math.min(maxSteps + Math.max(maxStepsInitial, 32), AGENT_BUDGETS.maxStepsHardCap)
+        // tool-call budget grows with it (same increment, same hard cap) so a
+        // healthy long run is not nudge-choked one extension in
+        maxToolCalls = Math.min(maxToolCalls + Math.max(maxStepsInitial, 32), AGENT_BUDGETS.maxToolCallsHardCap)
+        stepExtensions++
+        lastExtensionEvidence = evidence
+        onEvent?.({ type: "step_budget_extended", from: prevSteps, to: maxSteps, extension: stepExtensions, evidence, ...identityMeta() })
+      }
       steps++
       log?.step(steps)
       onEvent?.({ type: "step", step: steps, ...identityMeta() })
@@ -624,6 +688,15 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
           const { result, ms } = results[i]
           toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
+          // v99 loopwise: bounded signature count for the extension's loop
+          // guard (same shape as execcontroller §10: tool + primary arg)
+          {
+            let argsKey = ""
+            try { const a = safeJson(tc.args); argsKey = a ? JSON.stringify(a).slice(0, 120) : "" } catch { argsKey = "" }
+            const sig = `${tc.name}:${argsKey}`
+            toolSigCounts.set(sig, (toolSigCounts.get(sig) ?? 0) + 1)
+            if (toolSigCounts.size > 256) toolSigCounts.delete(toolSigCounts.keys().next().value)
+          }
           if (tc.name === "bash" && !sub) {
             try {
               const rawArgs = safeJson(tc.args)
@@ -651,9 +724,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             const r = String(result)
             const okRes = !(r.startsWith("ERROR") || r.startsWith("BLOCKED"))
             if (okRes && WRITE_TOOLS.has(tc.name) && tc.name !== "bash") {
-              for (const [fp, action] of journalFiles(tc.name, tc.args, r)) { writesSoFar.push(fp); if (log) log.touched(fp, action) }
+              for (const [fp, action] of journalFiles(tc.name, tc.args, r)) { writesSoFar.push(fp); writeSteps.push(steps); if (log) log.touched(fp, action) }
             } else if (okRes && tc.name === "bash" && hasWriteRedirection(String(safeJson(tc.args)?.command ?? ""))) {
               writesSoFar.push("(shell write)") // unknown target: conservatively counts as a write after any earlier check
+              writeSteps.push(steps)
             }
             if (log) log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
           }
@@ -736,10 +810,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         checkpointId = boundaryCheckpoint(process.cwd(), { runId, label: "budget-incomplete", objective: task })
         if (checkpointId && log) log.checkpoint(checkpointId)
       } catch { /* checkpoint is best-effort, never breaks the run */ }
-      finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
+      finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
@@ -827,6 +901,10 @@ export function agentEventPrinter() {
       console.log(dim(`  ⚡ ${ev.tool}: ${ev.reason}`))
     } else if (ev.type === "info") {
       console.log(dim(`  · ${ev.text}`))
+    } else if (ev.type === "step_budget_extended") {
+      // v99 loopwise: visible mercy — the run is productive, so it continues
+      const why = ev.evidence ? [ev.evidence.wroteRecently ? "fresh writes" : null, ev.evidence.verifiedRecently ? "passing checks" : null, ev.evidence.diverse ? `${ev.evidence.distinctRecent} distinct tools` : null].filter(Boolean).join(", ") : "productive"
+      console.log(dim(`  ∞ step budget extended ${ev.from} → ${ev.to} (#${ev.extension}) — still productive (${why})`))
     } else if (ev.type === "compacted") {
       if (ev.after === -1) {
         console.log(yellow(`  ✂ ${ev.reason ?? "context overflow"} (~${ev.estTok} tok) — compressing and retrying`))

@@ -52,7 +52,11 @@ console.log("== 1. «25 steps»: the counter ends SEGMENTS, never the task ==")
   let actions = 0
   const fake = async (args) => {
     actions++
-    if (args.planOnly) return { text: "1. investigate x\n2. implement x\n3. verify x", toolRecords: [], commandChecks: [], toolLog: [] }
+    // v99 loopwise: the plan text ECHOES the objective's own terms — the
+    // planner-quality critique (plancritique.js) must find nothing worth a
+    // revision pass here; this suite measures SEGMENT boundary behavior,
+    // not the critique. (A revision call would shift the action accounting.)
+    if (args.planOnly) return { text: "1. investigate the three step job that needs more than 25 steps\n2. implement the three step job that needs more than 25 steps\n3. verify the three step job that needs more than 25 steps", toolRecords: [], commandChecks: [], toolLog: [] }
     // the agent burns its budget for the first 4 segments (20 steps) — the
     // counter ends each SEGMENT; only the verified-complete final segment
     // (clean end, no budget) lets the gate decide COMPLETED
@@ -150,13 +154,14 @@ console.log("== 4. repeated identical failure: honest FAILED after the repair bu
 console.log("== 5. ExecutionController units: adaptive segments + enforced fuses (§8/§29) ==")
 {
   const ctl = xc.createExecutionController({ taskId: "t-x", runId: "r-x" })
-  // deterministic adaptive segment sizing
-  eq("ARCHITECTURAL base is 40", ctl.segmentSize({ klass: "ARCHITECTURAL" }), 40)
-  eq("MICRO base is 8", ctl.segmentSize({ klass: "MICRO" }), 8)
+  // deterministic adaptive segment sizing (v99 loopwise: bases raised ~2x so a
+  // healthy run is not interrupted every ~25 steps; cap 64 → 128)
+  eq("ARCHITECTURAL base is 88", ctl.segmentSize({ klass: "ARCHITECTURAL" }), 88)
+  eq("MICRO base is 14", ctl.segmentSize({ klass: "MICRO" }), 14)
   ok("failure rate shrinks segments (earlier checkpoints)", ctl.segmentSize({ klass: "LARGE", failureRate: 0.8 }) < ctl.segmentSize({ klass: "LARGE", failureRate: 0 }))
   ok("resource pressure shrinks segments", ctl.segmentSize({ klass: "LARGE", pressureLevel: "adapting" }) < ctl.segmentSize({ klass: "LARGE" }))
   ok("slow tools shrink segments", ctl.segmentSize({ klass: "LARGE", avgToolLatencyMs: 30000 }) < ctl.segmentSize({ klass: "LARGE" }))
-  ok("clamped to [8, 64]", ctl.segmentSize({ klass: "MICRO", failureRate: 1 }) >= 8 && ctl.segmentSize({ klass: "ARCHITECTURAL" }) <= 64)
+  ok("clamped to [8, 128]", ctl.segmentSize({ klass: "MICRO", failureRate: 1 }) >= 8 && ctl.segmentSize({ klass: "ARCHITECTURAL" }) <= 128)
 
   // fuses are enforced, not displayed
   eq("wall_clock fuse → checkpoint_wait", ctl.enforceFuses([{ fuse: "wall_clock", action: "checkpoint_and_wait", why: "4h" }], { segment: 1 }).action, "checkpoint_wait")
