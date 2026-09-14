@@ -212,6 +212,8 @@ const suites = [
   ["gitship", "node", ["test-gitship.mjs"]],
   ["v98", "node", ["test-v98.mjs"]],
   ["v99", "node", ["test-v99.mjs"]],
+  // ---- v100 fabricwise: capability fabric groundwork (MCP annotations + parallel connect)
+  ["v100", "node", ["test-v100.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

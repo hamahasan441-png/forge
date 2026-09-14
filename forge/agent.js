@@ -30,6 +30,7 @@ import { loadToolPlugins } from "./plugins.js"
 import { loadActiveCreatedTools, listToolLife } from "./toolcreate.js"
 import { capabilityCoverage, capabilitiesImpliedByTask } from "./capabilities.js" // v97 §33 ladder
 import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
+import { selectCapabilities, formatSelection } from "./capfabric.js"
 import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun } from "./toolintel.js"
@@ -345,9 +346,27 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     try {
       const mcp = await loadMcpTools(config)
       if (mcp.tools.length) {
-        plugins = [...plugins, ...mcp.tools]
+        // v100 fabricwise: the capability fabric gates MCP tools BEFORE they
+        // reach the model context — it drops tools that merely duplicate a
+        // native one (the official filesystem/git servers collide exactly on
+        // read_file/write_file/edit_file/git_status/git_diff/git_log) and, only
+        // when a setup exceeds the external budget, keeps the ones relevant to
+        // THIS task. Clients are unaffected: a withheld tool's server is still
+        // connected/closed exactly as before, so nothing leaks and a later
+        // segment with a different objective can surface it again.
+        const sel = selectCapabilities({
+          task: String(task ?? ""),
+          plugins: mcp.tools,
+          nativeNames: [...BUILTIN_TOOL_NAMES],
+          maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
+          dedupe: config.mcp?.dedupe !== false,
+        })
+        plugins = [...plugins, ...sel.kept]
         mcpClients = mcp.clients
-        for (const t of mcp.tools) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
+        for (const t of sel.kept) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
+        const summary = formatSelection(sel)
+        if (summary && !isDelegatedSubAgent) onEvent?.({ type: "info", text: summary, ...identityMeta() })
+        for (const d of sel.dropped) onEvent?.({ type: "mcp_tool_withheld", tool: d.name, reason: d.reason, ...identityMeta() })
       }
       for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}`, ...identityMeta() })
     } catch { }

@@ -232,18 +232,43 @@ export function configuredServers(config) {
 /**
  * Adapt a connected client's tools into forge's plugin tool shape, so the agent
  * loop can treat them exactly like local plugins (same safety choke point).
- * Names are namespaced; MCP tools are WRITE-class (readOnly:false) by default.
+ * Names are namespaced; an MCP tool is WRITE-class unless the server's own
+ * ToolAnnotations declare `readOnlyHint: true` (absent hints stay WRITE).
  * The returned `run(args)` calls the server and returns a string; an MCP
  * `isError` result is surfaced as an "ERROR:" string, matching how the tool
  * layer marks failures (never thrown into the loop).
  */
+/**
+ * MCP `ToolAnnotations` (spec 2025-03-26), normalized and bounded.
+ * Hints are the SERVER's own declaration about its tool: they are advisory
+ * metadata, never a security boundary — an absent hint stays the safe default
+ * (assume the tool mutates). Unknown/!== true values never widen anything.
+ */
+export function normalizeAnnotations(a) {
+  if (!a || typeof a !== "object") return null
+  const out = {}
+  if (typeof a.title === "string" && a.title) out.title = a.title.slice(0, 120)
+  for (const k of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
+    if (typeof a[k] === "boolean") out[k] = a[k]
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/** A tool is read-only ONLY when the server explicitly says so. Absent or
+ *  malformed annotations keep the historical assumption (mutating), so this
+ *  can never silently promote an unannotated tool into a read-only context. */
+export function readOnlyHinted(t) {
+  return t?.annotations?.readOnlyHint === true
+}
+
 export function mcpToolsToPlugins(client, tools) {
   return tools.map((t) => {
     const name = mcpToolName(client.name, t.name)
     const params = normalizeSchema(t.inputSchema)
     return {
       name,
-      readOnly: false, // assume side effects unless a future annotation says otherwise
+      readOnly: readOnlyHinted(t),
+      annotations: normalizeAnnotations(t.annotations),
       def: {
         type: "function",
         function: {
@@ -314,38 +339,49 @@ export async function loadMcpTools(config, { timeoutMs } = {}) {
     }
     return lazyClients.get(name)
   }
-  for (const [name, spec] of configuredServers(config)) {
-    const inv = lazy ? freshInventory(name, spec) : null
-    if (inv) {
-      // fresh cached inventory → advertise stubs, connect on first call
-      out.tools.push(...inventoryToPlugins(name, spec, inv.tools, { ensureConnected, timeoutMs }))
+  const slots = [...configuredServers(config)].map(([name, spec]) => ({
+    name, spec, inv: lazy ? freshInventory(name, spec) : null,
+    tools: [], client: null, error: null,
+  }))
+  // v100: every COLD server handshakes in PARALLEL. These are independent child
+  // processes, so the old sequential `await connectServer` per server made a
+  // cold start pay the SUM of every server's startup (~300ms each → ~2.4s for
+  // eight); it now costs the slowest one. Servers with a fresh cached inventory
+  // are not spawned at all (v96 lazy connect), so they never enter this pass.
+  await Promise.all(slots.filter((s) => !s.inv).map(async (s) => {
+    let client
+    try {
+      client = await connectServer(s.name, s.spec, { timeoutMs })
+    } catch (e) { s.error = `${s.name}: ${e.message}`; return }
+    try {
+      const tools = await client.listTools()
+      if (lazy) saveInventory(cacheKey(s.name, s.spec), s.name, tools)
+      s.client = client
+      s.tools = mcpToolsToPlugins(client, tools)
+    } catch (e) {
+      s.error = `${s.name}: tools/list failed — ${e.message}`
+      client.close()
+    }
+  }))
+  // Assemble in CONFIG order: parallelism must never reorder the tool list
+  // (tool order is part of what the model sees, and tests pin it).
+  for (const s of slots) {
+    const sname = s.name
+    if (s.inv) {
+      out.tools.push(...inventoryToPlugins(sname, s.spec, s.inv.tools, { ensureConnected, timeoutMs }))
       out.clients.push({
-        name,
+        name: sname,
         close() {
-          const p = lazyClients.get(name)
+          const p = lazyClients.get(sname)
           if (!p) return
-          lazyClients.delete(name)
+          lazyClients.delete(sname)
           Promise.resolve(p).then((c) => { try { c.close() } catch { /* already gone */ } }).catch(() => {})
         },
       })
       continue
     }
-    let client
-    try {
-      client = await connectServer(name, spec, { timeoutMs })
-    } catch (e) {
-      out.errors.push(`${name}: ${e.message}`)
-      continue
-    }
-    try {
-      const tools = await client.listTools()
-      if (lazy) saveInventory(cacheKey(name, spec), name, tools)
-      out.clients.push(client)
-      out.tools.push(...mcpToolsToPlugins(client, tools))
-    } catch (e) {
-      out.errors.push(`${name}: tools/list failed — ${e.message}`)
-      client.close()
-    }
+    if (s.error) { out.errors.push(s.error); continue }
+    if (s.client) { out.clients.push(s.client); out.tools.push(...s.tools) }
   }
   return out
 }
@@ -419,6 +455,7 @@ function saveInventory(key, name, tools) {
         name: String(t?.name ?? "").slice(0, 200),
         description: String(t?.description ?? "").slice(0, 500),
         inputSchema: t?.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : undefined,
+        annotations: normalizeAnnotations(t?.annotations) ?? undefined,
       })),
     }
     const keys = Object.keys(file.servers)
@@ -446,7 +483,8 @@ function inventoryToPlugins(name, spec, tools, { ensureConnected, timeoutMs }) {
     const params = normalizeSchema(t.inputSchema)
     return {
       name: name2,
-      readOnly: false,
+      readOnly: readOnlyHinted(t),
+      annotations: normalizeAnnotations(t.annotations),
       def: {
         type: "function",
         function: {
