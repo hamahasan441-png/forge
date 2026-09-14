@@ -55,6 +55,7 @@ const suites = [
   ["repomap", "node", ["test-repomap.mjs"]],
   ["plugins", "node", ["test-plugins.mjs"]],
   ["mcp", "node", ["test-mcp.mjs"]],
+  ["mcp-catalog", "node", ["test-mcpcatalog-top100.mjs"]],
   ["lsp", "node", ["test-lsp.mjs"]],
   ["retrieval", "node", ["test-retrieval.mjs"]],
   ["semantic", "node", ["test-semantic.mjs"]],

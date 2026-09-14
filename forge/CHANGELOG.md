@@ -7,6 +7,13 @@ preserved — leftovers live in TODO.md.
 
 ## 99.0.0 — loopwise (the agency release)
 
+- Expanded the offline MCP catalog from 12 hand-written presets to a generated,
+  pinned top 100 sourced from active official MCP Registry records and GitHub
+  repository health metadata. GitHub's maintained hosted MCP server and MCP ECC
+  are explicit inclusions. Catalog search/filtering, `forge mcp info`,
+  transport-aware list/test output, and environment-referenced credentials keep
+  discovery useful without writing token values into Forge config.
+
 The user-facing verdict on v98 was blunt: the agent STOPS too soon (~25
 steps), nothing reviews the code it writes, repairs fly blind, plans are
 never questioned, and reaching the wider skill/MCP ecosystem is manual.

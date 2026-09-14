@@ -28,6 +28,7 @@
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import { pinnedFetch } from "./netguard.js"
 import pathMod from "node:path"
 import fsMod from "node:fs"
@@ -51,6 +52,39 @@ export function parseMcpToolName(name) {
   return m ? { server: m[1], tool: m[2] } : null
 }
 
+function resolvedBinding(binding, base, server, target) {
+  if (binding === undefined || binding === null) return null
+  if (typeof binding !== "object" || Array.isArray(binding)) return String(binding)
+  const envName = typeof binding.env === "string" ? binding.env.trim() : ""
+  if (!envName) return null
+  const value = base?.[envName]
+  if (value === undefined || value === "") {
+    if (binding.required === true) throw new Error(`MCP server "${server}" requires environment variable ${envName} for ${target}`)
+    return null
+  }
+  return `${String(binding.prefix ?? "")}${String(value)}${String(binding.suffix ?? "")}`
+}
+
+/** Resolve config environment references without persisting or logging values. */
+export function resolveMcpEnvironment(declared = {}, base = process.env, server = "unknown") {
+  const out = {}
+  for (const [name, binding] of Object.entries(declared || {})) {
+    const value = resolvedBinding(binding, base, server, `environment variable ${name}`)
+    if (value !== null) out[name] = value
+  }
+  return out
+}
+
+/** Resolve HTTP header environment references immediately before a request. */
+export function resolveMcpHeaders(declared = {}, base = process.env, server = "unknown") {
+  const out = {}
+  for (const [name, binding] of Object.entries(declared || {})) {
+    const value = resolvedBinding(binding, base, server, `HTTP header ${name}`)
+    if (value !== null) out[name] = value
+  }
+  return out
+}
+
 /**
  * One MCP server connection over stdio. Not exported as a class API surface to
  * keep churn low; use `connectServer()` which returns a ready client.
@@ -60,7 +94,7 @@ class McpClient {
     this.name = name
     this.command = command
     this.args = Array.isArray(args) ? args : []
-    this.env = env && typeof env === "object" ? env : {}
+    this.env = resolveMcpEnvironment(env && typeof env === "object" ? env : {}, process.env, name)
     this.cwd = cwd
     this.timeoutMs = timeoutMs
     this.child = null
@@ -261,7 +295,7 @@ class McpHttpClient {
       // both response shapes are acceptable to us
       accept: "application/json, text/event-stream",
       "user-agent": `forge-agent/${VERSION}`,
-      ...this.extraHeaders,
+      ...resolveMcpHeaders(this.extraHeaders, process.env, this.name),
       ...extra,
     }
     if (this._sessionId) h["mcp-session-id"] = this._sessionId
@@ -691,10 +725,11 @@ function inventoryPath() {
 /** Cache key = server name + command/args fingerprint: two configs that share
  *  a name but run different commands never collide (tests included). */
 function cacheKey(name, spec) {
-  const cmd = spec.url ? `url\u0000${spec.url}` : [spec.command, ...(spec.args ?? [])].join("\u0000")
-  let h = 5381
-  for (let i = 0; i < cmd.length; i++) h = ((h << 5) + h + cmd.charCodeAt(i)) | 0
-  return `${name}:${(h >>> 0).toString(36)}`
+  // Include binding SHAPES so two accounts/configurations do not share an
+  // inventory accidentally. Only the resulting hash is persisted; literal
+  // credential values, when used by legacy configs, never leave memory.
+  const shape = JSON.stringify({ url: spec.url || null, command: spec.command || null, args: spec.args || [], env: spec.env || {}, headers: spec.headers || {} })
+  return `${name}:${createHash("sha256").update(shape).digest("hex").slice(0, 16)}`
 }
 
 function loadInventoryFile() {
