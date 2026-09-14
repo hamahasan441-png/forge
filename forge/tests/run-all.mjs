@@ -196,6 +196,16 @@ const suites = [
   ["knowwise", "node", ["test-knowwise.mjs"]],
   // ---- v94 deepwise: plan competition + adoption, pre-mutation critique ----
   ["deepwise", "node", ["test-deepwise.mjs"]],
+  // ---- v94 gapclose: TODO burn-down — runtime probes/kill walk, checkpoint
+  //      drift reconcile, sandbox re-probe, persistent semantic index,
+  //      multi-step tool probes, LSP auto-start -----------------------------
+  ["health-proto", "node", ["test-runtime-health-protocol.mjs"]],
+  ["kill-walk", "node", ["test-runtime-kill-walk.mjs"]],
+  ["cp-drift", "node", ["test-checkpoint-drift.mjs"]],
+  ["sandbox-reprobe", "node", ["test-sandbox-reprobe.mjs"]],
+  ["sem-index", "node", ["test-semantic-index-persist.mjs"]],
+  ["tool-multistep", "node", ["test-toolcreate-multistep.mjs"]],
+  ["lsp-auto", "node", ["test-lsp-autostart.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

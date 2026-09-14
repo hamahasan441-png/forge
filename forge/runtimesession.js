@@ -34,6 +34,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import http from "node:http"
+import net from "node:net" // v94 gapclose: protocol-aware health probes (TCP floor)
 import { execFileSync } from "node:child_process"
 import { parseListeningPorts } from "./runtime.js"
 import { projectDir } from "./memory.js"
@@ -192,20 +193,119 @@ function pickBuildCommand({ scripts, packageManager, projectType, gomod, cargo, 
 // §11 — RUNTIME EVIDENCE: a real health probe, never a faked "up"
 // ---------------------------------------------------------------------------
 
-/** HTTP GET against a live port. Evidence: status code + latency. */
-export function healthProbe({ port, host = "127.0.0.1", timeoutMs = 2500, path: urlPath = "/" } = {}) {
+/** v94 gapclose (TODO runtime #2): raw TCP connect probe — the honest floor
+ *  of reachability evidence. It PROVES the port is listening and accepting
+ *  connections; it proves NOTHING about application-level health, and every
+ *  consumer must label it that way. */
+function tcpProbe({ port, host, timeoutMs }) {
+  const t0 = Date.now()
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (ok, error = null) => {
+      if (settled) return
+      settled = true
+      try { sock.destroy() } catch {}
+      resolve({ ok, error, ms: Date.now() - t0 })
+    }
+    const sock = net.connect({ port, host })
+    sock.on("error", () => { /* permanent guard: a probe socket talks to unknown
+      services and may be destroyed mid-flight — an error after settlement must
+      never become an unhandled 'error' event that kills the process */ })
+    sock.setTimeout(timeoutMs)
+    sock.once("connect", () => done(true))
+    sock.once("timeout", () => done(false, `tcp connect timeout after ${timeoutMs}ms`))
+    sock.once("error", (e) => done(false, String(e?.code ?? e?.message ?? e)))
+  })
+}
+
+/** HTTP errors meaning "something ANSWERED, but not in HTTP" — a TCP follow-up
+ *  probe is justified evidence for a listening non-HTTP service. ECONNREFUSED
+ *  and friends are NOT here: nothing answered, and the error already proves it. */
+const NON_HTTP_REPLY = new Set(["ECONNRESET", "EPIPE", "ECONNABORTED"])
+const NOTHING_LISTENING = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ENETDOWN"])
+
+function isNonHttpReplyCode(e) {
+  const code = String(e?.code ?? "")
+  return code.startsWith("HPE_") || NON_HTTP_REPLY.has(code) || String(e?.message ?? "") === "socket hang up"
+}
+
+/** Classify + (when justified) follow up a failed HTTP probe with a TCP
+ *  connect so the evidence distinguishes "nothing listening" from "listening,
+ *  but does not speak plain HTTP" from "listening, but hung". */
+async function httpProbeFailure(e, errorText, { portNum, host, urlPath, t0, timeoutMs, strictHttp = false }) {
+  const base = { protocol: "http", url: `http://${host}:${portNum}${urlPath}`, status: null, ms: Date.now() - t0 }
+  const code = String(e?.code ?? e?.message ?? "")
+  // protocol:"http" means STRICTLY HTTP evidence — no TCP follow-up, no
+  // upgraded verdict. The fallback belongs to "auto" only.
+  if (strictHttp) return { ok: false, error: errorText, probe: base }
+  if (code === "timeout" || NOTHING_LISTENING.has(code)) {
+    // nothing answered (or the GET hung). A hung GET with a listening port is
+    // worth distinguishing — one cheap connect tells us which world we are in.
+    if (code !== "timeout") return { ok: false, error: errorText, probe: { ...base, tcpListening: false } }
+    const t = await tcpProbe({ port: portNum, host, timeoutMs })
+    return t.ok
+      ? { ok: false, error: `${errorText} — but the port IS listening (TCP connect ok in ${t.ms}ms): the service accepted the connection and never answered the HTTP GET (hung, or a protocol that expects the client to speak first)`, probe: { ...base, tcpListening: true, tcpMs: t.ms } }
+      : { ok: false, error: `${errorText} (TCP connect also failed: ${t.error})`, probe: { ...base, tcpListening: false, tcpError: t.error } }
+  }
+  if (isNonHttpReplyCode(e)) {
+    const t = await tcpProbe({ port: portNum, host, timeoutMs })
+    if (t.ok) {
+      return {
+        ok: true,
+        probe: {
+          protocol: "tcp", url: `tcp://${host}:${portNum}`, status: null, ms: t.ms,
+          detail: `HTTP GET failed with ${code}, but a raw TCP connect succeeded in ${t.ms}ms — the service is LISTENING and answered the connect; it does not speak plain HTTP (TLS/HTTP2/raw-socket/WebSocket-upgrade service). Listening is PROVEN; application-level health is NOT provable over HTTP.`,
+        },
+      }
+    }
+    return { ok: false, error: `${errorText} (TCP connect also failed: ${t.error})`, probe: { ...base, tcpListening: false, tcpError: t.error } }
+  }
+  return { ok: false, error: errorText, probe: base }
+}
+
+/**
+ * REAL probe against a live port. protocol: "auto" (default) | "http" | "tcp".
+ *
+ *   auto → HTTP GET first. A status code is the evidence (unchanged v94
+ *          semantics: 1xx–4xx = healthy, 5xx = not). When the GET fails at the
+ *          TRANSPORT layer, a TCP connect separates the honest cases:
+ *            - non-HTTP reply + TCP connect ok → ok:true, protocol "tcp"
+ *              (a TLS/WebSocket/raw-socket service that IS listening — the
+ *              old probe called this NOT healthy, which was false evidence)
+ *            - timeout + TCP connect ok        → ok:false, "listening but hung"
+ *            - refused                         → ok:false, nothing listening
+ *   tcp  → skip HTTP entirely; connect-only evidence.
+ *
+ * Returns { ok, error?, probe } — probe carries protocol/url/status/ms (+
+ * tcpListening/tcpMs/detail on the fallback paths) so every consumer can
+ * report WHICH kind of health was actually proven.
+ */
+export function healthProbe({ port, host = "127.0.0.1", timeoutMs = 2500, path: urlPath = "/", protocol = "auto" } = {}) {
   const portNum = Number(port)
   if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
     return { ok: false, error: `invalid port ${JSON.stringify(port)}`, probe: null }
+  }
+  const proto = protocol === "tcp" ? "tcp" : protocol === "http" ? "http" : "auto"
+  if (proto === "tcp") {
+    return tcpProbe({ port: portNum, host, timeoutMs }).then((t) => (t.ok
+      ? {
+        ok: true,
+        probe: {
+          protocol: "tcp", url: `tcp://${host}:${portNum}`, status: null, ms: t.ms,
+          detail: `TCP connect ok in ${t.ms}ms — the port is LISTENING and accepting; application-level health is not provable over a bare connect`,
+        },
+      }
+      : { ok: false, error: t.error, probe: { protocol: "tcp", url: `tcp://${host}:${portNum}`, status: null, ms: t.ms } }))
   }
   const t0 = Date.now()
   return new Promise((resolve) => {
     const req = http.get({ host, port: portNum, path: urlPath, timeout: timeoutMs }, (res) => {
       res.resume() // drain — the status code is the evidence, not the body
-      resolve({ ok: res.statusCode > 0 && res.statusCode < 500, probe: { url: `http://${host}:${portNum}${urlPath}`, status: res.statusCode, ms: Date.now() - t0 } })
+      resolve({ ok: res.statusCode > 0 && res.statusCode < 500, probe: { protocol: "http", url: `http://${host}:${portNum}${urlPath}`, status: res.statusCode, ms: Date.now() - t0 } })
     })
-    req.on("timeout", () => { req.destroy(); resolve({ ok: false, error: `timeout after ${timeoutMs}ms`, probe: { url: `http://${host}:${portNum}${urlPath}`, ms: Date.now() - t0 } }) })
-    req.on("error", (e) => resolve({ ok: false, error: String(e?.code ?? e?.message ?? e), probe: { url: `http://${host}:${portNum}${urlPath}`, ms: Date.now() - t0 } }))
+    const failCtx = { portNum, host, urlPath, t0, timeoutMs, strictHttp: proto === "http" }
+    req.on("timeout", () => { req.destroy(); resolve(httpProbeFailure({ code: "timeout" }, `timeout after ${timeoutMs}ms`, failCtx)) })
+    req.on("error", (e) => resolve(httpProbeFailure(e, String(e?.code ?? e?.message ?? e), failCtx)))
   })
 }
 
@@ -308,8 +408,10 @@ export function createRuntimeSession({ cwd = process.cwd(), mgr } = {}) {
     }
   }
 
-  /** §11: a health claim needs a REAL probe. Probing records evidence. */
-  async function health({ port = null, host = "127.0.0.1", timeoutMs = 2500 } = {}) {
+  /** §11: a health claim needs a REAL probe. Probing records evidence.
+   *  v94 gapclose: protocol-aware — an HTTP status is HTTP evidence; a TCP
+   *  connect is LISTENING evidence, recorded and labeled as exactly that. */
+  async function health({ port = null, host = "127.0.0.1", timeoutMs = 2500, protocol = "auto" } = {}) {
     let portNum = Number(port)
     if (!portNum) {
       // detect from live processes' ports (OS socket table — never a guess)
@@ -318,8 +420,20 @@ export function createRuntimeSession({ cwd = process.cwd(), mgr } = {}) {
       portNum = ports[0]
       if (!portNum) return { ok: false, error: "no port detected on live runtime processes (empty = none detected — pass an explicit port only if the project documents one)", evidence: null }
     }
-    const probe = await healthProbe({ port: portNum, host, timeoutMs })
-    record("health", probe.ok ? `runtime healthy on :${portNum}` : `runtime NOT healthy on :${portNum}`, probe.ok ? `HTTP ${probe.probe.status} in ${probe.probe.ms}ms` : probe.error, probe.probe)
+    const probe = await healthProbe({ port: portNum, host, timeoutMs, protocol })
+    const isTcp = probe.probe?.protocol === "tcp"
+    record(
+      "health",
+      probe.ok
+        ? (isTcp ? `runtime LISTENING on :${portNum} (non-HTTP service)` : `runtime healthy on :${portNum}`)
+        : `runtime NOT healthy on :${portNum}`,
+      probe.ok
+        ? (isTcp
+          ? `TCP connect in ${probe.probe.ms}ms after HTTP could not parse a reply — listening is proven, application-level health is not provable over HTTP`
+          : `HTTP ${probe.probe.status} in ${probe.probe.ms}ms`)
+        : probe.error,
+      probe.probe,
+    )
     return probe
   }
 
@@ -330,8 +444,11 @@ export function createRuntimeSession({ cwd = process.cwd(), mgr } = {}) {
     const procEvidence = live.length >= 1
     const hp = live.length ? await health({ port }) : { ok: false, error: "no live runtime process" }
     const ok = procEvidence && hp.ok
+    // v94 gapclose: a TCP-connect probe is LISTENING evidence, labeled as such
+    const isTcp = hp.probe?.protocol === "tcp"
+    const hpLabel = isTcp ? "tcp-connect" : hp.probe?.status ?? "?"
     record("claim", ok ? "server started — PROVEN" : "server started — NOT proven", ok
-      ? `process ${live[0].id} (pid ${live[0].pid}) + health ${hp.probe?.status ?? "?"}`
+      ? `process ${live[0].id} (pid ${live[0].pid}) + health ${hpLabel}${isTcp ? " (non-HTTP service: listening proven, app-level health not provable over HTTP)" : ""}`
       : `process: ${procEvidence ? "live" : "none"}; health: ${hp.ok ? "ok" : hp.error}`, { processes: live.length, health: hp.ok })
     return { ok, processes: live, health: hp }
   }

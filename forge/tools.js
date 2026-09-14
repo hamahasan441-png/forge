@@ -32,7 +32,7 @@ import path from "node:path"
 import { snapshotBefore, sealCreated, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun } from "./shellguard.js"
-import { wrapBash } from "./sandbox.js"
+import { wrapBash, resetSandboxProbe } from "./sandbox.js"
 import { resolveShell } from "./sysshell.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
@@ -487,7 +487,7 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "runtime",
-      description: "Runtime Intelligence for the PROJECT (not arbitrary commands): discover the project's real runtime shape (type/entrypoint/package manager/build/run scripts/port hints — every fact carries its file evidence, commands are NEVER invented), then launch the DISCOVERED build/run command via the background process manager, probe health with a REAL HTTP request, and prove claims like 'server started' with process + health evidence. Also reconciles forge-owned processes after a crash (ledger + pid-reuse guard — never touches unrelated processes). Actions: discover | launch | status | health | claim | reconcile | stop.",
+      description: "Runtime Intelligence for the PROJECT (not arbitrary commands): discover the project's real runtime shape (type/entrypoint/package manager/build/run scripts/port hints — every fact carries its file evidence, commands are NEVER invented), then launch the DISCOVERED build/run command via the background process manager, probe health with a REAL probe (HTTP first; protocol-aware TCP-connect evidence for non-HTTP services — listening is proven and labeled, never faked as app health), and prove claims like 'server started' with process + health evidence. Also reconciles forge-owned processes after a crash (ledger + pid-reuse guard — never touches unrelated processes). Actions: discover | launch | status | health | claim | reconcile | stop.",
       parameters: { type: "object", properties: {
         action: { type: "string", enum: ["discover", "launch", "status", "health", "claim", "reconcile", "stop"], description: "what to do" },
         command: { type: "string", description: "launch: explicit command (default: the DISCOVERED run/build script — never invented)" },
@@ -967,6 +967,11 @@ async function runBash(ctx, command, timeoutSec) {
   let out = await attempt(wrapped)
   if (wrapped.sandboxed && isBwrapStartFailure(out)) {
     bwrapBroken = true
+    // v94 gapclose: the REAL start failure is evidence the boot-time kernel
+    // probe is stale — drop it so every later detection in this process
+    // (doctor, capabilities, wrapBash) re-reads the kernel instead of
+    // reporting a sandbox that demonstrably cannot start.
+    try { resetSandboxProbe() } catch { /* sandbox.js always exports this; defensive only */ }
     const why = (out.split("\n").find((l) => /^\s*bwrap:/.test(l)) || "bwrap failed to start").trim().slice(0, 160)
     out = await attempt(plainWrap(command))
     out += `\n[forge] sandbox skipped: ${why} — command re-run WITHOUT the sandbox (FORGE_SANDBOX=0 makes this permanent).`
@@ -2495,8 +2500,11 @@ async function runRuntimeTool(ctx, args) {
     return `project: ${r.project.type} | run: ${r.project.runCommand ?? "NOT discovered"}\nprocesses:\n${procs}${led}`
   }
   if (action === "health") {
-    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1" })
+    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1", protocol: args?.protocol === "tcp" || args?.protocol === "http" ? args.protocol : "auto" })
     if (r.error && !r.probe) return `ERROR: ${r.error}`
+    if (r.ok && r.probe.protocol === "tcp") {
+      return `REACHABLE (non-HTTP) — ${r.probe.url} → TCP connect ok in ${r.probe.ms}ms — the service is LISTENING and answered the connect, but it does not speak plain HTTP (TLS/WebSocket/raw-socket service); listening is PROVEN, application-level health is NOT provable with this probe (recorded as runtime evidence)`
+    }
     return r.ok
       ? `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)`
       : `NOT HEALTHY — ${r.probe?.url ?? ""}: ${r.error ?? "probe failed"} (this is evidence against any 'server started' claim)`
@@ -2505,7 +2513,11 @@ async function runRuntimeTool(ctx, args) {
     const r = await session.claimServerStarted({ port: args?.port ?? null })
     const lines = [r.ok ? "CLAIM PROVEN: server started" : "CLAIM NOT PROVEN: server started"]
     lines.push(`processes: ${r.processes.length} live${r.processes[0] ? ` (${r.processes[0].id}, pid ${r.processes[0].pid})` : ""}`)
-    lines.push(`health: ${r.health.ok ? `HTTP ${r.health.probe?.status} in ${r.health.probe?.ms}ms` : r.health.error ?? "failed"}`)
+    lines.push(`health: ${r.health.ok
+      ? (r.health.probe?.protocol === "tcp"
+        ? `TCP connect in ${r.health.probe?.ms}ms — non-HTTP service: LISTENING proven (process + its own port + accepted connect), application-level health not provable over HTTP`
+        : `HTTP ${r.health.probe?.status} in ${r.health.probe?.ms}ms`)
+      : r.health.error ?? "failed"}`)
     return lines.join("\n")
   }
   if (action === "reconcile") {

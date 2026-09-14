@@ -5,6 +5,76 @@ reads it at runtime and every user-agent is built from that single source.
 Historical entries below are kept honest and short; completed plans are not
 preserved — leftovers live in TODO.md.
 
+## 94.0.0 — gapclose (TODO burn-down: seven real gaps, closed with evidence)
+
+Every item below was an OPEN, documented gap in TODO.md — not a new feature
+layer. Each fix ships with its own regression suite (7 new suites, 138 new
+assertions; 162/162 node suites + e2e + cleanroom green). Nothing rewritten.
+
+- runtime / process cleanup (§56, §133): the kill fallback is now an
+  EVIDENCE-BASED process-table walk. When `kill(-pgid)` fails (platforms
+  without group signals), killTree no longer kills only the leader and
+  silently orphans the `sh -c` grandchildren — `groupPidsPortable()`
+  enumerates real members (/proc pgid scan on linux; `ps -axo
+  pid=,pgid=,ppid=` pgid ∪ ppid-closure on other POSIX; PowerShell CIM /
+  wmic ppid-closure on win32; leader-only honest degradation when no
+  evidence source exists) and signals each. Pinned by forcing the fallback
+  (negative-pid kill stubbed to throw) and proving zero orphan survivors.
+- runtime / health probes (§55): `healthProbe` is protocol-aware
+  (auto|http|tcp). An HTTP status remains HTTP evidence, unchanged. When the
+  GET fails at the transport layer, a TCP connect separates the honest
+  cases: non-HTTP reply + connect ok → reachable, labeled "LISTENING
+  proven, application health NOT provable over HTTP" (a TLS/WebSocket/
+  raw-socket service is no longer false-reported NOT healthy); timeout +
+  connect ok → "listening but hung"; refused → nothing listening. The
+  session evidence lines, claim gate and `runtime` tool output all name the
+  protocol that proved the verdict; strict `protocol:"http"` never falls
+  back.
+- checkpoint / recovery (§80–81): `restoreTransactional` gained phase 5b
+  RECONCILE — every manifest file the restore could NOT write (tooLarge
+  skips, created files kept because they changed since the checkpoint) is
+  hashed against its recorded fingerprint; drift is reported with recorded/
+  current evidence and `treeConsistent` says whether the working tree as a
+  whole matches the checkpoint. Silent divergence between crash and resume
+  is now impossible; a clean restore still reports RESTORED (drift never
+  fakes a failure, and a failure never hides behind drift).
+- sandbox: the bwrap kernel probe cache drops on the first REAL start
+  failure (`resetSandboxProbe()` wired into the v87 bwrapBroken fallback in
+  tools.js) — a kernel hardened after forge started is re-probed by every
+  later detection (doctor, capabilities) instead of being trusted from a
+  stale boot-time read.
+- semantic_search (§51/§121): the chunk corpus persists per project
+  (~/.forge/projects/<hash>/semantic-index.json), fingerprint-invalidated
+  per file (mtime+size, world-model discipline): a fresh process reuses
+  every unchanged file and re-chunks only what changed; an unchanged repo
+  never rewrites its index; FORGE_INDEX=0 disables it; the repository tree
+  itself stays pure read. Every result carries honest `index` stats
+  (loadedFromDisk / rebuilt / saved / skip reason).
+- tool creation (§46): designs may carry a `probeScript` — an ordered list
+  of run() calls executed in ONE child process (module state carries
+  between steps: login → act → verify). Each step is checked against the
+  declared output schema plus its own oracle (outputType / outputIncludes);
+  VERIFIED requires EVERY step to pass and the failing step is named. A
+  soft-error step (exit 0 with "ERROR: …" output) can no longer ride the
+  exit code to promotion. Single-probe verification is byte-identical.
+- LSP (§18): first-party AUTO-START table for the top languages
+  (typescript-language-server; pyright-langserver → pylsp; gopls;
+  rust-analyzer). User `lsp.servers` config always wins; a candidate is
+  used ONLY when the binary actually exists on PATH (the resolved absolute
+  path spawns — evidence, never invention); FORGE_LSP_AUTOSTART=0 /
+  lsp.autoStart:false disable it; a missing binary produces an honest
+  "PATH probed for X (not found)" error. The verification-ledger gate in
+  meta.js stays config-only ON PURPOSE (no surprise heavy server spawns
+  mid-segment); auto-start serves the on-demand structured path
+  (extractStructured layer-3 provenance `lsp:auto:<lang>`, session tools,
+  direct collectDiagnosticsForFiles callers).
+- test hygiene: the legacy LSP suites (test-lsp, test-lsp-lifecycle,
+  test-v93l, test-v94a) pin `FORGE_LSP_AUTOSTART=0` so a host toolchain
+  binary can never make them environment-dependent; test-v27's import pin
+  accepts the extra sandbox binding and additionally pins the re-probe
+  wiring. The table contract is pinned by the new test-lsp-autostart suite
+  against a real (stub) language-server binary on PATH.
+
 ## 94.0.0 — deepwise (judgment before action, continued)
 
 - Plan competition + adoption (plannerisk.alternatives + adoptDecision,

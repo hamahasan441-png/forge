@@ -94,6 +94,7 @@ export function designTool({
   capabilities = [],
   relatedFiles = [],
   author = "forge",
+  probeScript = null,           // v94 gapclose: scripted multi-step behavioral probe
 } = {}) {
   const id = String(name || "").trim()
   const blocked = []
@@ -104,6 +105,38 @@ export function designTool({
   if (inSchema.type !== "object") blocked.push("inputSchema.type must be 'object'")
   const outSchema = outputSchema && typeof outputSchema === "object" ? outputSchema : { type: "string" }
   if (!["string", "object", "array"].includes(outSchema.type)) blocked.push("outputSchema.type must be string|object|array")
+
+  // v94 gapclose (TODO tool creation): a single schema-shaped probe cannot
+  // prove multi-step tools (login → act → verify). A probeScript is an
+  // ORDERED list of run() calls executed IN ONE child process — module state
+  // carries between steps, which is exactly the semantics a multi-step tool
+  // needs. Each step may declare what its output must look like; verification
+  // only passes when EVERY step passes. Strict validation up front: a bad
+  // script must never reach the promotion gate.
+  let script = null
+  if (probeScript != null) {
+    if (!Array.isArray(probeScript) || probeScript.length < 1 || probeScript.length > 6) {
+      blocked.push("probeScript must be an array of 1..6 steps")
+    } else {
+      script = []
+      for (let i = 0; i < probeScript.length; i++) {
+        const s = probeScript[i]
+        if (!s || typeof s !== "object" || Array.isArray(s)) { blocked.push(`probeScript[${i}] must be an object { name?, args?, expect? }`); break }
+        const args = s.args && typeof s.args === "object" && !Array.isArray(s.args) ? s.args : {}
+        const expect = s.expect && typeof s.expect === "object" && !Array.isArray(s.expect) ? s.expect : {}
+        if (expect.outputType != null && !["string", "object", "array"].includes(expect.outputType)) { blocked.push(`probeScript[${i}].expect.outputType must be string|object|array`); break }
+        script.push({
+          name: String(s.name ?? `step-${i + 1}`).slice(0, 40),
+          args,
+          expect: {
+            ...(expect.outputType ? { outputType: expect.outputType } : {}),
+            ...(expect.outputIncludes != null ? { outputIncludes: String(expect.outputIncludes).slice(0, 200) } : {}),
+          },
+        })
+      }
+      if (blocked.length) script = null
+    }
+  }
 
   const life = loadToolLife(cwd)
   const existing = life.tools[id]
@@ -117,6 +150,7 @@ export function designTool({
     description: desc.slice(0, 200),
     inputSchema: inSchema,
     outputSchema: outSchema,
+    ...(script ? { probeScript: script } : {}),
     capabilities: (Array.isArray(capabilities) ? capabilities : []).map((c) => String(c).slice(0, 40)).slice(0, 6),
     provenance: {
       source: "created",
@@ -212,6 +246,14 @@ function outputMatches(output, schema) {
  * process, run it with sample args, and OBSERVE the result. Evidence: exit
  * code, stderr, elapsed ms, and whether the output matched the declared
  * output schema. Exit 0 alone is NOT enough; a mismatch stays INACTIVE.
+ *
+ * v94 gapclose (TODO tool creation): when the design carries a `probeScript`,
+ * verification becomes a SCRIPTED multi-step run — the steps execute IN ORDER
+ * IN ONE child process (module state carries between steps: login → act →
+ * verify), each step's output is checked against the declared output schema
+ * PLUS its own expectations (outputType / outputIncludes — the step oracle),
+ * and the tool is VERIFIED only when EVERY step passed. Per-step evidence is
+ * recorded; a failing step is named.
  */
 export async function verifyTool(cwd, name, { args = {}, timeoutMs = 10000 } = {}) {
   const life = loadToolLife(cwd)
@@ -219,9 +261,27 @@ export async function verifyTool(cwd, name, { args = {}, timeoutMs = 10000 } = {
   if (!rec) return { ok: false, blocked: ["not found"] }
   if (!rec.file) return { ok: false, blocked: ["not implemented (implementTool first)"] }
   const file = path.join(toolsDir(cwd), rec.file)
+  const steps = Array.isArray(rec.probeScript) && rec.probeScript.length ? rec.probeScript : null
 
   const runner = path.join(projectDir(cwd), `.verify-${name}-${Date.now()}.mjs`)
-  const runnerSrc = [
+  const perStepMs = steps ? Math.max(1000, Math.min(8000, Math.floor(timeoutMs / steps.length))) : Math.min(timeoutMs, 8000)
+  const runnerSrc = steps ? [
+    `const mod = await import(${JSON.stringify("file://" + file)});`,
+    `const p = mod.default;`,
+    `if (!p || typeof p.run !== "function") { console.error("no run() exported"); process.exit(3); }`,
+    `const STEPS = ${JSON.stringify(steps)};`,
+    `const PER_STEP_MS = ${perStepMs};`,
+    `for (let i = 0; i < STEPS.length; i++) {`,
+    `  const t0 = Date.now();`,
+    `  try {`,
+    `    const out = await Promise.race([p.run(STEPS[i].args), new Promise((_, rj) => { const tm = setTimeout(() => rj(new Error("timeout in run()")), PER_STEP_MS); tm.unref?.() })]);`,
+    `    process.stdout.write("__FORGE_STEP__" + i + "__" + JSON.stringify({ ok: true, out, ms: Date.now() - t0 }));`,
+    `  } catch (e) {`,
+    `    process.stdout.write("__FORGE_STEP__" + i + "__" + JSON.stringify({ ok: false, error: String(e?.message ?? e), ms: Date.now() - t0 }));`,
+    `    process.exit(2);`,
+    `  }`,
+    `}`,
+  ].join("\n") : [
     `const mod = await import(${JSON.stringify("file://" + file)});`,
     `const p = mod.default;`,
     `if (!p || typeof p.run !== "function") { console.error("no run() exported"); process.exit(3); }`,
@@ -248,6 +308,55 @@ export async function verifyTool(cwd, name, { args = {}, timeoutMs = 10000 } = {
     })
     const ms = Date.now() - t0
     try { fs.rmSync(runner) } catch { }
+
+    if (steps) {
+      // ---- scripted multi-step evidence ----------------------------------
+      const stepResults = []
+      for (const ch of String(result.out).split("__FORGE_STEP__").slice(1)) {
+        const sep = ch.indexOf("__")
+        if (sep < 1) continue
+        const idx = Number(ch.slice(0, sep))
+        const jsonPart = ch.slice(sep + 2)
+        let parsed = null
+        try { parsed = JSON.parse(jsonPart) } catch {
+          const a = jsonPart.indexOf("{"), b = jsonPart.lastIndexOf("}")
+          if (a !== -1 && b > a) { try { parsed = JSON.parse(jsonPart.slice(a, b + 1)) } catch { } }
+        }
+        if (Number.isInteger(idx) && idx >= 0 && idx < steps.length) stepResults[idx] = parsed
+      }
+      const stepsEvidence = steps.map((s, i) => {
+        const r = stepResults[i] ?? null
+        const ran = r?.ok === true
+        const out = ran ? r.out ?? null : null
+        const schemaOk = ran && outputMatches(out, rec.outputSchema)
+        const typeOk = !s.expect?.outputType || (ran && out != null && (s.expect.outputType === "array" ? Array.isArray(out) : typeof out === s.expect.outputType))
+        const includesOk = s.expect?.outputIncludes == null || (ran && String(typeof out === "string" ? out : JSON.stringify(out ?? "")).includes(s.expect.outputIncludes))
+        const matched = ran && schemaOk && typeOk && includesOk
+        return {
+          name: s.name, args: s.args, ran, ms: r?.ms ?? null, matched,
+          error: r?.ok === false ? String(r.error ?? "step failed") : (r ? null : "step never reported (child died or timed out mid-script)"),
+          outputPreview: ran ? (typeof out === "string" ? out.slice(0, 160) : JSON.stringify(out ?? null).slice(0, 200)) : null,
+          expectations: { schema: schemaOk, ...(s.expect?.outputType ? { outputType: typeOk } : {}), ...(s.expect?.outputIncludes != null ? { outputIncludes: includesOk } : {}) },
+        }
+      })
+      const passed = result.code === 0 && !result.timedOut && stepsEvidence.every((s) => s.matched)
+      const evidence = {
+        at: Date.now(), mode: "probe-script", steps: stepsEvidence,
+        exitCode: result.code, timedOut: result.timedOut, ms,
+        stderr: String(result.err ?? "").slice(0, 200),
+        outputMatchedSchema: passed,
+      }
+      rec.verification = { passed, evidence }
+      rec.tests = [
+        { name: "behavioral-run", passed, mode: "probe-script", steps: steps.length, exitCode: result.code, ms },
+        ...stepsEvidence.map((s) => ({ name: `probe-step:${s.name}`, passed: s.matched, ms: s.ms })),
+      ]
+      rec.lifecycle = passed ? TOOL_LIFE.VERIFIED : TOOL_LIFE.INACTIVE
+      rec.updated = Date.now()
+      saveToolLife(cwd, life)
+      const failedStep = passed ? null : (stepsEvidence.find((s) => !s.matched)?.name ?? "script-incomplete")
+      return { ok: passed, name, lifecycle: rec.lifecycle, evidence, failedStep }
+    }
 
     const rawOut = result.out.includes("__FORGE_OUT__") ? result.out.slice(result.out.indexOf("__FORGE_OUT__") + "__FORGE_OUT__".length) : ""
     let output = null

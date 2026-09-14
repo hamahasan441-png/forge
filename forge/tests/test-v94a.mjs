@@ -18,6 +18,10 @@ import http from "node:http"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v94a-"))
 process.env.FORGE_HOME = HOME
+// v94 gapclose: these suites pin the empty-config → lexical-fallback contract;
+// the LSP auto-start table (a host typescript-language-server could otherwise
+// resolve .js mid-test) is pinned by tests/test-lsp-autostart.mjs instead.
+process.env.FORGE_LSP_AUTOSTART = "0"
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v94a-work-"))
 process.chdir(WORK)
 fs.mkdirSync(path.join(WORK, "src"), { recursive: true })

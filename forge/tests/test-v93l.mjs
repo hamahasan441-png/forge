@@ -20,6 +20,10 @@ import path from "node:path"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93l-"))
 process.env.FORGE_HOME = HOME
+// v94 gapclose: these suites pin the empty-config → lexical-fallback contract;
+// the LSP auto-start table (a host typescript-language-server could otherwise
+// resolve .js mid-test) is pinned by tests/test-lsp-autostart.mjs instead.
+process.env.FORGE_LSP_AUTOSTART = "0"
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93l-work-"))
 process.chdir(WORK)
 fs.writeFileSync(path.join(WORK, "calc.js"), "export function add(a, b) { return a + b }\nexport const CALC_VERSION = 1\n")

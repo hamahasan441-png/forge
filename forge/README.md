@@ -5,6 +5,28 @@ straight to providers.
 
 **Version 94.0.0 — "gapwise" (gap fix / integration patch).
 
+**v94 "gapclose"** — the TODO burn-down: seven documented open gaps closed
+with evidence, no rewrite, no version bump. The kill fallback is now an
+**evidence-based process-table walk** (/proc · ps · PowerShell/wmic — a
+failed group signal never again means "leader only" with orphaned
+grandchildren); **health probes are protocol-aware** (a TLS/WebSocket/raw-TCP
+service is reported LISTENING with an honest "app health not provable over
+HTTP" label instead of a false NOT-healthy; a hung listener is distinguished
+from a dead port); **checkpoint restore reconciles the working tree**
+(files the restore could never write — >64MB skips, kept created files — are
+hashed against the manifest and any external drift is reported with
+fingerprints, `treeConsistent`); the **bwrap kernel probe re-probes** after a
+real start failure; **semantic search persists its chunk corpus**
+(fingerprint-invalidated per file, outside the repo, FORGE_INDEX=0 opts out —
+a fresh process re-reads only what changed); **created tools may carry a
+scripted multi-step probe** (login → act → verify in one child process,
+per-step oracles, a failing step is named — a soft error can no longer ride
+exit 0 to promotion); and an **LSP auto-start table** (typescript, python,
+go, rust) makes structured documentSymbol extraction the default when the
+binary actually exists on PATH — user config always wins,
+FORGE_LSP_AUTOSTART=0 opts out, and the segment-verification gate stays
+config-only on purpose. 7 new suites, 138 new assertions, 165/165 green.
+
 **v94 follow-ons (masterwise + tokenwise)** — no version bump, no rewrite,
 same architecture: the **Engineering Intelligence Core** (adaptive search
 providers with honest failure, an execution controller that can never mistake
