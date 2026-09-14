@@ -43,6 +43,79 @@ export function readAvailableMB() {
   return Math.round(os.freemem() / (1024 * 1024))
 }
 
+/**
+ * Termux / Android userland. Detected from the environment Termux itself sets
+ * (TERMUX_VERSION, or a PREFIX under com.termux) — never guessed from uname,
+ * which a NetHunter chroot rewrites.
+ *
+ * This matters because Android does not kill the single greedy process the way
+ * a desktop OOM killer does: lowmemorykiller takes the WHOLE session, so forge
+ * dies with SIGKILL (signal 9) and the terminal has to be reopened. The only
+ * defense is to not get there — stay conservative about concurrent children.
+ */
+export function isTermux(env = process.env) {
+  if (env?.TERMUX_VERSION) return true
+  const prefix = String(env?.PREFIX ?? "")
+  if (prefix.includes("com.termux")) return true
+  return String(env?.HOME ?? "").includes("com.termux")
+}
+
+/**
+ * Android userland, INCLUDING a NetHunter/proot chroot where none of Termux's
+ * own environment survives (a Kali chroot has its own HOME=/root or /home/kali
+ * and no TERMUX_VERSION — so isTermux() alone silently misses the exact setup
+ * that gets SIGKILLed most often).
+ *
+ * The chroot-surviving signal is the KERNEL: /proc/version is the host's, and
+ * Android kernels carry "android" in the version/build string. The /system
+ * markers are a second, cheap confirmation when it is bind-mounted. Memoized —
+ * this is asked per spawn decision and the answer cannot change mid-process.
+ */
+let _androidMemo = null
+export function isAndroid(env = process.env) {
+  if (isTermux(env)) return true
+  if (_androidMemo !== null) return _androidMemo
+  let hit = false
+  try { hit = /android/i.test(fs.readFileSync("/proc/version", "utf8")) } catch { hit = false }
+  if (!hit) {
+    for (const marker of ["/system/build.prop", "/system/bin/app_process", "/data/data/com.termux"]) {
+      try { if (fs.existsSync(marker)) { hit = true; break } } catch { /* unreadable → not a signal */ }
+    }
+  }
+  _androidMemo = hit
+  return hit
+}
+
+/** Headroom (MB) never handed out to children: the OS, the shell, forge itself
+ *  and the model client all live here. Below this the killer starts choosing. */
+export const MEM_HEADROOM_MB = 400
+
+/**
+ * How many child processes may run AT ONCE without courting the OOM killer.
+ *
+ * `requested` (an explicit user/env number) always wins — this never overrides
+ * a deliberate choice. Otherwise the answer is the smaller of what memory can
+ * pay for and what the cores can use, clamped hard on Termux and on the low
+ * tier. Returns at least 1: the work still happens, just serially.
+ */
+export function safeSpawnConcurrency({ profile = null, env = process.env, requested = null, perChildMB = 220, headroomMB = MEM_HEADROOM_MB } = {}) {
+  const explicit = Number(requested)
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit)
+  const p = profile ?? resourceProfile()
+  const byMem = Math.floor(Math.max(0, p.freeMB - headroomMB) / Math.max(1, perChildMB))
+  const byCore = Math.max(1, p.cores - 1)
+  let n = Math.min(byMem, byCore)
+  if (p.tier === "low") n = 1
+  if (isAndroid(env)) n = Math.min(n, 2) // the whole session dies, not one child
+  return Math.max(1, Math.min(n, 8))
+}
+
+/** Is there enough free memory to start ANOTHER child right now? Used between
+ *  units of work so a long run backs off instead of being killed. */
+export function memoryHeadroomOk({ perChildMB = 220, headroomMB = MEM_HEADROOM_MB } = {}) {
+  return readAvailableMB() >= headroomMB + perChildMB
+}
+
 export function resourceProfile(sample) {
   const cores = Number.isFinite(sample?.cores) ? Number(sample.cores) : (os.cpus()?.length ?? 1)
   const totalMB = Number.isFinite(sample?.totalMB) ? Number(sample.totalMB) : Math.round(os.totalmem() / (1024 * 1024))

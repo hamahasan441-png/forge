@@ -325,7 +325,7 @@ function isConnError(e) {
  * One HTTP(S) request pinned to `target.addresses`. Resolves with
  * { status, headers, body, address } — body capped at maxBytes.
  */
-function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, signal, onSocket, onLookup, hop, onBytes }) {
+function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, signal, onSocket, onLookup, hop, onBytes, body = null }) {
   return new Promise((resolve, reject) => {
     const u = target.url
     const allowed = new Set(target.addresses.map((a) => a.address.toLowerCase()))
@@ -395,7 +395,10 @@ function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, sign
         done(resolve, { status: res.statusCode ?? 0, statusText: res.statusMessage ?? "", headers: res.headers, body: Buffer.concat(chunks), address: res.socket?.remoteAddress ?? null })
       })
     })
-    req.end()
+    // A request body (POST/PUT/PATCH — e.g. JSON-RPC to an MCP endpoint) is
+    // written here. Content-Length is set by the caller so the request never
+    // falls back to chunked encoding, which some strict endpoints reject.
+    req.end(body ?? undefined)
   })
 }
 
@@ -420,8 +423,13 @@ export async function pinnedFetch(url, opts = {}) {
   const {
     method = "GET", headers = {}, timeoutMs = 15000, totalTimeoutMs = 30000, maxRedirects = 5,
     maxBytes = 2 * 1024 * 1024, allowPrivate = false, resolver, policy, tls = {}, signal,
-    onSocket, onLookup, retries = 1, onBytes,
+    onSocket, onLookup, retries = 1, onBytes, body = null,
   } = opts
+  // The body travels with the method. A redirect that downgrades the method to
+  // GET (303, or 301/302 off a non-GET) MUST drop it — resending a payload to a
+  // location the origin chose is exactly the confused-deputy shape this module
+  // exists to prevent.
+  let curBody = body == null ? null : (Buffer.isBuffer(body) ? body : Buffer.from(String(body)))
   const started = Date.now()
   const hops = []
   let current = String(url)
@@ -437,10 +445,12 @@ export async function pinnedFetch(url, opts = {}) {
     const remaining = totalTimeoutMs - (Date.now() - started)
     if (remaining <= 0) throw new PinnedFetchError(`timeout after ${totalTimeoutMs}ms`, { code: "ETIMEDOUT", url: current, hop })
     const hopHeaders = { ...headers, host: target.port === (target.protocol === "https:" ? 443 : 80) ? target.host : `${target.host}:${target.port}` }
+    if (curBody) hopHeaders["content-length"] = String(curBody.length)
+    else { delete hopHeaders["content-length"]; delete hopHeaders["Content-Length"] }
     let res
     for (let attempt = 0; ; attempt++) {
       try {
-        res = await requestPinned(target, { method: curMethod, headers: hopHeaders, timeoutMs: Math.min(timeoutMs, remaining), maxBytes, tls, signal, onSocket, onLookup, hop, onBytes })
+        res = await requestPinned(target, { method: curMethod, headers: hopHeaders, timeoutMs: Math.min(timeoutMs, remaining), maxBytes, tls, signal, onSocket, onLookup, hop, onBytes, body: curBody })
         break
       } catch (e) {
         if (attempt < retries && isConnError(e) && !signal?.aborted) continue // same pinned set
@@ -456,7 +466,7 @@ export async function pinnedFetch(url, opts = {}) {
       } catch {
         throw new PinnedFetchError(`invalid redirect location`, { code: "EREDIRECT", url: current, hop })
       }
-      if (res.status === 303 || ((res.status === 301 || res.status === 302) && curMethod !== "GET" && curMethod !== "HEAD")) curMethod = "GET"
+      if (res.status === 303 || ((res.status === 301 || res.status === 302) && curMethod !== "GET" && curMethod !== "HEAD")) { curMethod = "GET"; curBody = null }
       current = next
       continue // next hop is resolved, validated and pinned from scratch
     }

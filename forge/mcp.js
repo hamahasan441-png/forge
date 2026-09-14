@@ -28,6 +28,7 @@
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
 import { spawn } from "node:child_process"
+import { pinnedFetch } from "./netguard.js"
 import pathMod from "node:path"
 import fsMod from "node:fs"
 import { resolveDataDir } from "./config.js"
@@ -180,6 +181,26 @@ class McpClient {
     return { text: flattenContent(res?.content), isError: res?.isError === true }
   }
 
+  async listResources() {
+    const res = await this._request("resources/list", {})
+    return normalizeResources(res)
+  }
+
+  async readResource(uri) {
+    const res = await this._request("resources/read", { uri })
+    return flattenResourceContents(res)
+  }
+
+  async listPrompts() {
+    const res = await this._request("prompts/list", {})
+    return normalizePrompts(res)
+  }
+
+  async getPrompt(name, args) {
+    const res = await this._request("prompts/get", { name, arguments: args ?? {} })
+    return flattenPromptMessages(res)
+  }
+
   close() {
     if (this._closed) return
     this._closed = true
@@ -200,6 +221,245 @@ class McpClient {
   }
 }
 
+/**
+ * One MCP server reached over Streamable HTTP (spec 2025-03-26) instead of
+ * stdio. Same public surface as the stdio client — name / serverInfo /
+ * capabilities / listTools() / callTool() / close() — so everything downstream
+ * (mcpToolsToPlugins, the inventory cache, the capability fabric) is unchanged.
+ *
+ * Why this exists: forge was stdio-only, which meant every HOSTED MCP server
+ * (the bulk of the ecosystem — Linear, Notion, Sentry, remote GitHub) was
+ * simply unreachable, no matter how it was configured.
+ *
+ * Every request goes through netguard.pinnedFetch, so a remote endpoint gets
+ * the same DNS-pinning / private-address / redirect protection as any other
+ * outbound URL. A server on a private address (a local dev stack) requires the
+ * same explicit opt-in as any other private fetch — never an implicit one.
+ *
+ * The endpoint may answer a POST with either `application/json` (one response)
+ * or `text/event-stream` (SSE frames); both are handled. We are a minimal
+ * client: we issue requests and read responses, and ignore server-initiated
+ * traffic, exactly like the stdio client.
+ */
+class McpHttpClient {
+  constructor(name, { url, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, allowPrivate = false } = {}) {
+    this.name = name
+    this.url = String(url || "")
+    this.extraHeaders = headers && typeof headers === "object" ? headers : {}
+    this.timeoutMs = timeoutMs
+    this.allowPrivate = allowPrivate === true
+    this._nextId = 1
+    this._closed = false
+    this._sessionId = null
+    this.serverInfo = null
+    this.capabilities = null
+  }
+
+  _headers(extra = {}) {
+    const h = {
+      "content-type": "application/json",
+      // both response shapes are acceptable to us
+      accept: "application/json, text/event-stream",
+      "user-agent": `forge-agent/${VERSION}`,
+      ...this.extraHeaders,
+      ...extra,
+    }
+    if (this._sessionId) h["mcp-session-id"] = this._sessionId
+    return h
+  }
+
+  /** Pull the JSON-RPC payload out of an SSE stream: the first `data:` frame
+   *  carrying a JSON object with our id. Non-data lines are protocol noise. */
+  static parseSse(text) {
+    const out = []
+    for (const block of String(text ?? "").split(/\r?\n\r?\n/)) {
+      const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("")
+      if (!data) continue
+      try { out.push(JSON.parse(data)) } catch { /* a non-JSON frame is noise */ }
+    }
+    return out
+  }
+
+  async _rpc(method, params, { notify = false } = {}) {
+    if (this._closed) throw new Error(`MCP server "${this.name}" is closed`)
+    const id = notify ? undefined : this._nextId++
+    const payload = { jsonrpc: "2.0", method, params: params ?? {}, ...(notify ? {} : { id }) }
+    let res
+    try {
+      res = await pinnedFetch(this.url, {
+        method: "POST",
+        headers: this._headers(),
+        body: Buffer.from(JSON.stringify(payload)),
+        timeoutMs: this.timeoutMs,
+        totalTimeoutMs: this.timeoutMs,
+        allowPrivate: this.allowPrivate ? "first-hop" : false,
+        maxBytes: MAX_LINE_BYTES,
+      })
+    } catch (e) {
+      throw new Error(`MCP HTTP request "${method}" to "${this.name}" failed: ${e.message}`)
+    }
+    // the server may hand us a session id on initialize; echo it from then on
+    const sid = res.headers?.["mcp-session-id"]
+    if (sid && !this._sessionId) this._sessionId = String(sid)
+    if (notify) return null
+    if (!res.ok) throw new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"`)
+    const ctype = String(res.headers?.["content-type"] ?? "")
+    const text = res.body?.toString("utf8") ?? ""
+    let msg = null
+    if (/text\/event-stream/i.test(ctype)) {
+      msg = McpHttpClient.parseSse(text).find((m) => m && m.id === id) ?? null
+    } else {
+      try { msg = JSON.parse(text) } catch { msg = null }
+      if (Array.isArray(msg)) msg = msg.find((m) => m && m.id === id) ?? null
+    }
+    if (!msg) throw new Error(`MCP HTTP response from "${this.name}" for "${method}" was not a JSON-RPC result`)
+    if (msg.error) throw new Error(`MCP error ${msg.error.code}: ${msg.error.message || "unknown"}`)
+    return msg.result
+  }
+
+  async start() {
+    if (!/^https?:\/\//i.test(this.url)) throw new Error(`MCP server "${this.name}" has an invalid url`)
+    const init = await this._rpc("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "forge", version: VERSION },
+    })
+    this.serverInfo = init?.serverInfo ?? null
+    this.capabilities = init?.capabilities ?? null
+    try { await this._rpc("notifications/initialized", {}, { notify: true }) } catch { /* best-effort, matches stdio */ }
+    return this
+  }
+
+  async listTools() {
+    const res = await this._rpc("tools/list", {})
+    const tools = Array.isArray(res?.tools) ? res.tools : []
+    return tools.filter((t) => t && typeof t.name === "string")
+  }
+
+  async callTool(tool, args) {
+    const res = await this._rpc("tools/call", { name: tool, arguments: args ?? {} })
+    return { text: flattenContent(res?.content), isError: res?.isError === true }
+  }
+
+  async listResources() { return normalizeResources(await this._rpc("resources/list", {})) }
+  async readResource(uri) { return flattenResourceContents(await this._rpc("resources/read", { uri })) }
+  async listPrompts() { return normalizePrompts(await this._rpc("prompts/list", {})) }
+  async getPrompt(name, args) { return flattenPromptMessages(await this._rpc("prompts/get", { name, arguments: args ?? {} })) }
+
+  close() {
+    // HTTP is stateless per request: there is no child to reap. Marking closed
+    // makes later calls fail honestly instead of silently reconnecting.
+    this._closed = true
+  }
+}
+
+/** `resources/list` → a bounded [{uri, name, description, mimeType}]. */
+export function normalizeResources(res) {
+  const list = Array.isArray(res?.resources) ? res.resources : []
+  return list.filter((r) => r && typeof r.uri === "string").slice(0, 200).map((r) => ({
+    uri: String(r.uri).slice(0, 500),
+    name: String(r.name ?? "").slice(0, 200),
+    description: String(r.description ?? "").slice(0, 300),
+    mimeType: String(r.mimeType ?? "").slice(0, 100),
+  }))
+}
+
+/** `prompts/list` → a bounded [{name, description}]. */
+export function normalizePrompts(res) {
+  const list = Array.isArray(res?.prompts) ? res.prompts : []
+  return list.filter((p) => p && typeof p.name === "string").slice(0, 200).map((p) => ({
+    name: String(p.name).slice(0, 200),
+    description: String(p.description ?? "").slice(0, 300),
+  }))
+}
+
+/** `resources/read` → the contents flattened to text, honestly labeled when a
+ *  part is binary (blob) rather than silently dropped. */
+export function flattenResourceContents(res) {
+  const parts = Array.isArray(res?.contents) ? res.contents : []
+  const out = []
+  for (const c of parts) {
+    if (!c || typeof c !== "object") continue
+    if (typeof c.text === "string") out.push(c.text)
+    else if (typeof c.blob === "string") out.push(`[binary resource ${c.mimeType || "data"}, ${c.blob.length} base64 chars — not inlined]`)
+  }
+  return out.join("\n")
+}
+
+/** `prompts/get` → the prompt's messages flattened to readable text. */
+export function flattenPromptMessages(res) {
+  const msgs = Array.isArray(res?.messages) ? res.messages : []
+  const out = []
+  for (const m of msgs) {
+    if (!m || typeof m !== "object") continue
+    const body = typeof m.content === "string" ? m.content : flattenContent(m.content?.type ? [m.content] : m.content)
+    out.push(`${String(m.role ?? "user")}: ${body}`)
+  }
+  return out.join("\n\n")
+}
+
+/**
+ * One synthetic READ-ONLY tool per server that advertises resources and/or
+ * prompts. MCP exposes three primitives — tools, resources, prompts — and forge
+ * consumed only the first, so a server's documents, schemas and canned prompts
+ * were invisible. Folding them into ONE tool per server (instead of one tool
+ * per resource) keeps the context cost flat no matter how many resources a
+ * server publishes, and read-only means the crew can use it too.
+ */
+export function mcpContextTool(client, caps) {
+  const hasRes = Boolean(caps?.resources)
+  const hasPrompts = Boolean(caps?.prompts)
+  if (!hasRes && !hasPrompts) return null
+  const name = mcpToolName(client.name, "context")
+  const actions = [...(hasRes ? ["list_resources", "read_resource"] : []), ...(hasPrompts ? ["list_prompts", "get_prompt"] : [])]
+  return {
+    name,
+    readOnly: true,
+    annotations: { readOnlyHint: true },
+    def: {
+      type: "function",
+      function: {
+        name,
+        description: `Read-only access to the documents and canned prompts published by MCP server "${client.name}". Actions: ${actions.join(", ")}.`,
+        parameters: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: actions },
+            uri: { type: "string", description: "resource uri (read_resource)" },
+            name: { type: "string", description: "prompt name (get_prompt)" },
+          },
+          required: ["action"],
+        },
+      },
+    },
+    source: `mcp:${client.name}`,
+    async run(args) {
+      const action = String(args?.action ?? "")
+      try {
+        if (action === "list_resources") {
+          const r = await client.listResources()
+          return r.length ? r.map((x) => `${x.uri}${x.name ? ` — ${x.name}` : ""}${x.mimeType ? ` [${x.mimeType}]` : ""}`).join("\n") : "(no resources published)"
+        }
+        if (action === "read_resource") {
+          if (!args?.uri) return "ERROR: read_resource needs a uri"
+          return (await client.readResource(String(args.uri))) || "(empty resource)"
+        }
+        if (action === "list_prompts") {
+          const p = await client.listPrompts()
+          return p.length ? p.map((x) => `${x.name}${x.description ? ` — ${x.description}` : ""}`).join("\n") : "(no prompts published)"
+        }
+        if (action === "get_prompt") {
+          if (!args?.name) return "ERROR: get_prompt needs a name"
+          return (await client.getPrompt(String(args.name), args?.arguments)) || "(empty prompt)"
+        }
+        return `ERROR: unknown action "${action}" — expected one of ${actions.join(", ")}`
+      } catch (e) {
+        return `ERROR: ${e.message}`
+      }
+    },
+  }
+}
+
 /** Flatten an MCP content array (text/other parts) into a single string. */
 export function flattenContent(content) {
   if (typeof content === "string") return content
@@ -217,7 +477,11 @@ export function flattenContent(content) {
 
 /** Connect and initialize a server. Caller owns close(). */
 export async function connectServer(name, spec, { timeoutMs } = {}) {
-  const client = new McpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
+  // Transport is chosen by the SHAPE of the spec: a `url` is Streamable HTTP,
+  // a `command` is stdio. Never guessed from anything else.
+  const client = spec?.url
+    ? new McpHttpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
+    : new McpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
   await client.start()
   return client
 }
@@ -226,24 +490,49 @@ export async function connectServer(name, spec, { timeoutMs } = {}) {
 export function configuredServers(config) {
   const servers = config?.mcp?.servers
   if (!servers || typeof servers !== "object") return []
-  return Object.entries(servers).filter(([, s]) => s && typeof s === "object" && s.disabled !== true && s.command)
+  return Object.entries(servers).filter(([, s]) => s && typeof s === "object" && s.disabled !== true && (s.command || s.url))
 }
 
 /**
  * Adapt a connected client's tools into forge's plugin tool shape, so the agent
  * loop can treat them exactly like local plugins (same safety choke point).
- * Names are namespaced; MCP tools are WRITE-class (readOnly:false) by default.
+ * Names are namespaced; an MCP tool is WRITE-class unless the server's own
+ * ToolAnnotations declare `readOnlyHint: true` (absent hints stay WRITE).
  * The returned `run(args)` calls the server and returns a string; an MCP
  * `isError` result is surfaced as an "ERROR:" string, matching how the tool
  * layer marks failures (never thrown into the loop).
  */
+/**
+ * MCP `ToolAnnotations` (spec 2025-03-26), normalized and bounded.
+ * Hints are the SERVER's own declaration about its tool: they are advisory
+ * metadata, never a security boundary — an absent hint stays the safe default
+ * (assume the tool mutates). Unknown/!== true values never widen anything.
+ */
+export function normalizeAnnotations(a) {
+  if (!a || typeof a !== "object") return null
+  const out = {}
+  if (typeof a.title === "string" && a.title) out.title = a.title.slice(0, 120)
+  for (const k of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
+    if (typeof a[k] === "boolean") out[k] = a[k]
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/** A tool is read-only ONLY when the server explicitly says so. Absent or
+ *  malformed annotations keep the historical assumption (mutating), so this
+ *  can never silently promote an unannotated tool into a read-only context. */
+export function readOnlyHinted(t) {
+  return t?.annotations?.readOnlyHint === true
+}
+
 export function mcpToolsToPlugins(client, tools) {
   return tools.map((t) => {
     const name = mcpToolName(client.name, t.name)
     const params = normalizeSchema(t.inputSchema)
     return {
       name,
-      readOnly: false, // assume side effects unless a future annotation says otherwise
+      readOnly: readOnlyHinted(t),
+      annotations: normalizeAnnotations(t.annotations),
       def: {
         type: "function",
         function: {
@@ -291,7 +580,7 @@ function normalizeSchema(schema) {
  * against the cached names: a tool that vanished is an honest ERROR, and the
  * cache entry is dropped (never serve a phantom capability).
  */
-export async function loadMcpTools(config, { timeoutMs } = {}) {
+export async function loadMcpTools(config, { timeoutMs, cachedOnly = false } = {}) {
   const lazy = lazyEnabled(config)
   const out = { tools: [], clients: [], errors: [] }
   // per-call memo of lazily-connected servers: name → Promise<McpClient>
@@ -302,7 +591,7 @@ export async function loadMcpTools(config, { timeoutMs } = {}) {
         // refresh the inventory from the live server (cheap: it just started)
         try {
           const tools = await client.listTools()
-          saveInventory(cacheKey(name, spec), name, tools)
+          saveInventory(cacheKey(name, spec), name, tools, client.capabilities)
         } catch { /* inventory refresh is best-effort; the call proceeds */ }
         return client
       })
@@ -314,38 +603,70 @@ export async function loadMcpTools(config, { timeoutMs } = {}) {
     }
     return lazyClients.get(name)
   }
-  for (const [name, spec] of configuredServers(config)) {
-    const inv = lazy ? freshInventory(name, spec) : null
-    if (inv) {
-      // fresh cached inventory → advertise stubs, connect on first call
-      out.tools.push(...inventoryToPlugins(name, spec, inv.tools, { ensureConnected, timeoutMs }))
+  const slots = [...configuredServers(config)].map(([name, spec]) => ({
+    name, spec, inv: lazy ? freshInventory(name, spec) : null,
+    tools: [], client: null, error: null,
+  }))
+  // v100: every COLD server handshakes in PARALLEL. These are independent child
+  // processes, so the old sequential `await connectServer` per server made a
+  // cold start pay the SUM of every server's startup (~300ms each → ~2.4s for
+  // eight); it now costs the slowest one. Servers with a fresh cached inventory
+  // are not spawned at all (v96 lazy connect), so they never enter this pass.
+  await Promise.all(slots.filter((s) => !s.inv && !cachedOnly).map(async (s) => {
+    let client
+    try {
+      client = await connectServer(s.name, s.spec, { timeoutMs })
+    } catch (e) { s.error = `${s.name}: ${e.message}`; return }
+    try {
+      const tools = await client.listTools()
+      if (lazy) saveInventory(cacheKey(s.name, s.spec), s.name, tools, client.capabilities)
+      s.client = client
+      const ctx = mcpContextTool(client, client.capabilities)
+      s.tools = [...mcpToolsToPlugins(client, tools), ...(ctx ? [ctx] : [])]
+    } catch (e) {
+      s.error = `${s.name}: tools/list failed — ${e.message}`
+      client.close()
+    }
+  }))
+  // Assemble in CONFIG order: parallelism must never reorder the tool list
+  // (tool order is part of what the model sees, and tests pin it).
+  for (const s of slots) {
+    const sname = s.name
+    if (s.inv) {
+      out.tools.push(...inventoryToPlugins(sname, s.spec, s.inv.tools, { ensureConnected, timeoutMs }))
+      if (s.inv.caps?.resources || s.inv.caps?.prompts) {
+        // a lazy stand-in: the same read-only context tool, but it connects the
+        // server on first use exactly like every other lazy stub
+        const lazyClient = {
+          name: sname,
+          listResources: async () => (await ensureConnected(sname, s.spec)).listResources(),
+          readResource: async (u) => (await ensureConnected(sname, s.spec)).readResource(u),
+          listPrompts: async () => (await ensureConnected(sname, s.spec)).listPrompts(),
+          getPrompt: async (n, a) => (await ensureConnected(sname, s.spec)).getPrompt(n, a),
+        }
+        const ctx = mcpContextTool(lazyClient, s.inv.caps)
+        if (ctx) out.tools.push(ctx)
+      }
       out.clients.push({
-        name,
+        name: sname,
         close() {
-          const p = lazyClients.get(name)
+          const p = lazyClients.get(sname)
           if (!p) return
-          lazyClients.delete(name)
+          lazyClients.delete(sname)
           Promise.resolve(p).then((c) => { try { c.close() } catch { /* already gone */ } }).catch(() => {})
         },
       })
       continue
     }
-    let client
-    try {
-      client = await connectServer(name, spec, { timeoutMs })
-    } catch (e) {
-      out.errors.push(`${name}: ${e.message}`)
+    if (cachedOnly) {
+      // v100: cache-only callers (delegated sub-agents) never pay a server
+      // handshake. A server with no fresh inventory is skipped HONESTLY rather
+      // than spawned — the crew simply has fewer tools this run, never a stall.
+      out.errors.push(`${sname}: skipped (cache-only: no fresh tool inventory)`)
       continue
     }
-    try {
-      const tools = await client.listTools()
-      if (lazy) saveInventory(cacheKey(name, spec), name, tools)
-      out.clients.push(client)
-      out.tools.push(...mcpToolsToPlugins(client, tools))
-    } catch (e) {
-      out.errors.push(`${name}: tools/list failed — ${e.message}`)
-      client.close()
-    }
+    if (s.error) { out.errors.push(s.error); continue }
+    if (s.client) { out.clients.push(s.client); out.tools.push(...s.tools) }
   }
   return out
 }
@@ -370,7 +691,7 @@ function inventoryPath() {
 /** Cache key = server name + command/args fingerprint: two configs that share
  *  a name but run different commands never collide (tests included). */
 function cacheKey(name, spec) {
-  const cmd = [spec.command, ...(spec.args ?? [])].join("\u0000")
+  const cmd = spec.url ? `url\u0000${spec.url}` : [spec.command, ...(spec.args ?? [])].join("\u0000")
   let h = 5381
   for (let i = 0; i < cmd.length; i++) h = ((h << 5) + h + cmd.charCodeAt(i)) | 0
   return `${name}:${(h >>> 0).toString(36)}`
@@ -410,15 +731,21 @@ function freshInventory(name, spec) {
   } catch { return null }
 }
 
-function saveInventory(key, name, tools) {
+function saveInventory(key, name, tools, caps = null) {
   try {
     const file = loadInventoryFile()
     file.servers[key] = {
       at: Date.now(), name,
+      // remember WHICH primitives the server offers, so the lazy path can
+      // advertise the read-only context tool without a handshake
+      caps: caps && typeof caps === "object"
+        ? { resources: Boolean(caps.resources), prompts: Boolean(caps.prompts) }
+        : undefined,
       tools: (tools ?? []).slice(0, MAX_CACHED_TOOLS).map((t) => ({
         name: String(t?.name ?? "").slice(0, 200),
         description: String(t?.description ?? "").slice(0, 500),
         inputSchema: t?.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : undefined,
+        annotations: normalizeAnnotations(t?.annotations) ?? undefined,
       })),
     }
     const keys = Object.keys(file.servers)
@@ -446,7 +773,8 @@ function inventoryToPlugins(name, spec, tools, { ensureConnected, timeoutMs }) {
     const params = normalizeSchema(t.inputSchema)
     return {
       name: name2,
-      readOnly: false,
+      readOnly: readOnlyHinted(t),
+      annotations: normalizeAnnotations(t.annotations),
       def: {
         type: "function",
         function: {

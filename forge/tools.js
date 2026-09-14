@@ -2545,7 +2545,10 @@ async function runRuntimeTool(ctx, args) {
       timeoutSec: args?.timeout_sec,
     })
     const lines = [r.ok ? "BRING-UP COMPLETE — launched, ready, healthy" : `BRING-UP INCOMPLETE — ${r.error ?? "see stages"}`]
-    for (const s of r.stages) lines.push(`  ${s.ok ? green("✓") : red("✗")} ${s.stage}: ${s.detail}`)
+    // plain markers: a tool RESULT is text the model reads, not terminal output
+    // (the render layer owns color). `green`/`red` were never defined in this
+    // module, so every `runtime up` threw ReferenceError before reaching here.
+    for (const s of r.stages) lines.push(`  ${s.ok ? "✓" : "✗"} ${s.stage}: ${s.detail}`)
     if (r.ok) lines.push("next: interact/observe, then {action:\"stop\"} — exit handlers also clean up")
     return lines.join("\n")
   }

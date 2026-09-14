@@ -24,6 +24,7 @@
     "browser.js",
     "bus.js",
     "capabilities.js",
+    "capfabric.js",
     "caps.js",
     "causal.js",
     "chat.js",
