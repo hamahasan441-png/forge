@@ -103,6 +103,7 @@ export function createTerminal({
   let pendingDurable = "" // durable text waiting for the next frame (batches console.log bursts)
   let flushTimer = null
   let exitHook = null
+  const signalHooks = []
 
   const decoder = createKeyDecoder()
 
@@ -668,6 +669,14 @@ export function createTerminal({
       if (continuation) contPrompt = continuation
       editor = createEditor({ history })
       if (!tty) return term
+      // REPAIR FIRST. A previous run that was KILLED (SIGKILL — Android's
+      // lowmemorykiller takes the whole Termux session and no handler can run)
+      // leaves this TTY with the cursor hidden and bracketed paste enabled.
+      // Those are terminal state, not process state, so they outlive the
+      // process and make the shell look dead. Undoing the residue here means
+      // simply starting forge again repairs the terminal.
+      try { input.setRawMode(false) } catch {}
+      rawWrite(SHOW + PASTE_OFF)
       active = true
       try { input.setRawMode(true) } catch {}
       input.resume()
@@ -681,6 +690,22 @@ export function createTerminal({
       // queued output is lost
       exitHook = () => { try { term.stop() } catch {} }
       process.once("exit", exitHook)
+      // Node's "exit" event does NOT fire when a signal terminates the process,
+      // so the hook above never ran for the two signals that matter most on a
+      // phone: SIGTERM (what Android sends BEFORE it escalates to SIGKILL) and
+      // SIGHUP (the terminal/session closing). Restore, then re-raise so the
+      // default action still applies — forge must not become unkillable. Any
+      // signal forge already owns elsewhere is left alone.
+      for (const sig of ["SIGTERM", "SIGHUP"]) {
+        if (process.listenerCount(sig) > 0) continue
+        const h = () => {
+          try { term.stop() } catch {}
+          try { process.removeListener(sig, h) } catch {}
+          try { process.kill(process.pid, sig) } catch { process.exit(sig === "SIGHUP" ? 129 : 143) }
+        }
+        signalHooks.push([sig, h])
+        process.once(sig, h)
+      }
       frame()
       return term
     },
@@ -694,6 +719,8 @@ export function createTerminal({
       if (flushTimer) { clearImmediate(flushTimer); flushTimer = null }
       unhookConsole()
       if (exitHook) { process.removeListener("exit", exitHook); exitHook = null }
+      for (const [sig, h] of signalHooks) { try { process.removeListener(sig, h) } catch {} }
+      signalHooks.length = 0
       if (!tty || !active) { if (pendingDurable) { rawWrite(pendingDurable); pendingDurable = "" } return }
       active = false
       const flushed = pendingDurable + (partial ? partial + "\n" : "")

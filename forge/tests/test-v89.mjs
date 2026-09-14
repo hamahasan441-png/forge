@@ -221,7 +221,11 @@ console.log("== 7. parallel test runner knob ==")
 {
   const src = fs.readFileSync(new URL("run-all.mjs", import.meta.url), "utf8")
   ok("FORGE_TEST_CONCURRENCY is honored", /FORGE_TEST_CONCURRENCY/.test(src))
-  ok("default concurrency 4", /\|\| 4\b/.test(src))
+  // v100: the default is no longer the constant 4 — it is derived from the
+  // machine (cores + available memory, clamped hard on Android/Termux), because
+  // a flat 4 got the whole Termux session SIGKILLed by the lowmemorykiller.
+  ok("default concurrency is derived from the machine, not hardcoded", /safeSpawnConcurrency\(/.test(src))
+  ok("and the pool backs off under memory pressure", /awaitHeadroom\(/.test(src))
   ok("bash suites stay sequential (shared port 8787)", /bashSuites/.test(src) && /for \(const s of bashSuites\) byLabel\.set\(s\[0\], await run\(s\)\)/.test(src))
 }
 

@@ -495,5 +495,119 @@ console.log("== 17. every command path reaches the fabric ==")
   ok("a verifier run is read-only by construction", /readOnly: readonly \|\| verifier/.test(agent))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 18. OOM guard: concurrency follows the MACHINE, not a constant ==")
+{
+  const { resourceProfile, safeSpawnConcurrency, isTermux, isAndroid, memoryHeadroomOk, MEM_HEADROOM_MB } =
+    await import("../profile.js")
+
+  // Termux is detected from the environment Termux itself sets
+  ok("TERMUX_VERSION is Termux", isTermux({ TERMUX_VERSION: "0.118" }) === true)
+  ok("a com.termux PREFIX is Termux", isTermux({ PREFIX: "/data/data/com.termux/files/usr" }) === true)
+  ok("a plain linux env is not Termux", isTermux({ HOME: "/home/user", PREFIX: "/usr" }) === false)
+  ok("this machine is not Android (no false positive)", isAndroid({ HOME: "/home/user" }) === false)
+
+  const P = (cores, totalMB, freeMB) => resourceProfile({ cores, totalMB, freeMB })
+
+  // The case that actually killed the user's session: a capable-LOOKING phone.
+  // 8 cores and 3GB free would otherwise compute 7 children.
+  const phone = P(8, 8192, 3000)
+  eq("phone profile looks 'high' on paper", phone.tier, "high")
+  ok("but Termux clamps concurrency to 2", safeSpawnConcurrency({ profile: phone, env: { TERMUX_VERSION: "0.118" } }) === 2)
+  ok("without the clamp it would have been far higher",
+    safeSpawnConcurrency({ profile: phone, env: { HOME: "/home/user" } }) > 2)
+
+  // a genuinely small device serializes
+  eq("2-core/2GB box runs one at a time", safeSpawnConcurrency({ profile: P(2, 2000, 500), env: {} }), 1)
+  eq("low tier always serializes", P(2, 2000, 500).tier, "low")
+
+  // memory, not cores, is the binding constraint when RAM is scarce
+  const starved = P(16, 16384, 800)
+  ok("16 cores but 800MB free → at most 1", safeSpawnConcurrency({ profile: starved, env: {} }) <= 1)
+
+  // a roomy machine is not punished
+  ok("a 16GB/8-core laptop still parallelizes", safeSpawnConcurrency({ profile: P(8, 16384, 9000), env: {} }) >= 4)
+
+  // an explicit request always wins — this never overrides a deliberate choice
+  eq("explicit request wins over every heuristic",
+    safeSpawnConcurrency({ profile: P(2, 2000, 300), env: { TERMUX_VERSION: "1" }, requested: "6" }), 6)
+  eq("a garbage request falls back to the heuristic",
+    safeSpawnConcurrency({ profile: P(2, 2000, 500), env: {}, requested: "not-a-number" }), 1)
+  ok("the result is never 0 (work still happens, just serially)",
+    safeSpawnConcurrency({ profile: P(1, 512, 10), env: { TERMUX_VERSION: "1" } }) >= 1)
+
+  ok("headroom check is a real reading", typeof memoryHeadroomOk() === "boolean")
+  ok("a headroom floor is reserved for the OS and forge itself", MEM_HEADROOM_MB >= 256)
+}
+
+console.log("== 19. the test runner itself is memory-aware (the SIGKILL fix) ==")
+{
+  const runner = fs.readFileSync(new URL("./run-all.mjs", import.meta.url), "utf8")
+  ok("concurrency is derived, not a hardcoded 4", !/\|\| 4\)/.test(runner) && /safeSpawnConcurrency\(/.test(runner))
+  ok("FORGE_TEST_CONCURRENCY is still honored", /requested: process\.env\.FORGE_TEST_CONCURRENCY/.test(runner))
+  ok("the pool waits for headroom between suites", /await awaitHeadroom\(/.test(runner))
+  ok("the headroom wait is bounded (never a deadlock)", /waited < 30000/.test(runner))
+  ok("the chosen concurrency is reported to the user", /concurrency \$\{CONCURRENCY\}/.test(runner))
+}
+
+// ---------------------------------------------------------------------------
+console.log("== 20. terminal survives a SIGKILL (the 'close the terminal' bug) ==")
+{
+  const src = fs.readFileSync(new URL("../terminal.js", import.meta.url), "utf8")
+  ok("startup REPAIRS residue before configuring (cursor back, paste off)",
+    /rawWrite\(SHOW \+ PASTE_OFF\)/.test(src))
+  ok("cooked mode is forced before raw mode is re-enabled",
+    /setRawMode\(false\) \} catch \{\}\s*\n\s*rawWrite\(SHOW \+ PASTE_OFF\)/.test(src))
+  ok("SIGTERM and SIGHUP now restore the terminal", /for \(const sig of \["SIGTERM", "SIGHUP"\]\)/.test(src))
+  ok("a signal forge already owns is left alone", /if \(process\.listenerCount\(sig\) > 0\) continue/.test(src))
+  ok("the signal is re-raised — forge never becomes unkillable", /process\.kill\(process\.pid, sig\)/.test(src))
+  ok("signal hooks are removed on stop (no leak across sessions)", /for \(const \[sig, h\] of signalHooks\)/.test(src))
+
+  // Real PTY proof: leave the TTY in the killed state (cursor hidden, paste on,
+  // raw mode), then start a forge terminal in it and confirm the repair bytes
+  // are emitted. python3+pty only; skipped cleanly otherwise.
+  const { spawnSync } = await import("node:child_process")
+  const hasPty = spawnSync("python3", ["-c", "import pty,termios"], { stdio: "ignore" }).status === 0
+  if (!hasPty) {
+    console.log("  skip PTY repair proof (python3 pty unavailable)")
+  } else {
+    const drv = path.join(WORK, "kill-repair.py")
+    const child = path.join(WORK, "child.mjs")
+    fs.writeFileSync(child, `
+import { createTerminal } from ${JSON.stringify(new URL("../terminal.js", import.meta.url).href)}
+const t = createTerminal()
+t.start({ prompt: "> ", onSubmit: () => {}, onEOF: () => {}, onResize: () => {} })
+setTimeout(() => {}, 60000)
+`)
+    fs.writeFileSync(drv, `
+import os, pty, sys, time, select
+pid, fd = pty.fork()
+if pid == 0:
+    # leave the tty in the state a SIGKILLed forge leaves behind
+    sys.stdout.write("\x1b[?25l\x1b[?2004h"); sys.stdout.flush()
+    os.execvp(${JSON.stringify(process.execPath)}, [${JSON.stringify(process.execPath)}, ${JSON.stringify(child)}])
+out = b""
+end = time.time() + 6
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.2)
+    if r:
+        try:
+            d = os.read(fd, 65536)
+        except OSError:
+            break
+        if not d: break
+        out += d
+    if b"\x1b[?25h" in out and b"\x1b[?2004l" in out:
+        break
+os.kill(pid, 9)
+sys.stdout.buffer.write(out)
+`)
+    const r = spawnSync("python3", [drv], { encoding: "buffer", timeout: 20000 })
+    const bytes = r.stdout ? r.stdout.toString("latin1") : ""
+    ok("a real forge terminal emits SHOW-cursor into a killed-state tty", bytes.includes("\u001b[?25h"), JSON.stringify(bytes.slice(0, 120)))
+    ok("and turns bracketed paste back off", bytes.includes("\u001b[?2004l"), JSON.stringify(bytes.slice(0, 120)))
+  }
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

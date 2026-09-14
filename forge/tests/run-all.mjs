@@ -275,15 +275,40 @@ function run([label, cmd, args]) {
 // old one-at-a-time loop just serialized ~85s of mostly-idle waits. The two
 // bash suites share port 8787 and stay sequential at the end.
 // FORGE_TEST_CONCURRENCY=1 restores the old sequential behavior exactly.
-const CONCURRENCY = Math.max(1, Number(process.env.FORGE_TEST_CONCURRENCY || 0) || 4)
+// v100: concurrency is derived from the MACHINE, not hardcoded. A flat 4 is
+// fine on a laptop and fatal on a phone: each suite spawns its own children
+// (mock providers, MCP/LSP stubs, PTYs, http servers), and Android's
+// lowmemorykiller does not kill the greediest child — it kills the WHOLE
+// Termux session, so forge dies with SIGKILL (signal 9) and the terminal has
+// to be reopened. FORGE_TEST_CONCURRENCY still wins when set explicitly.
+const { resourceProfile, safeSpawnConcurrency, memoryHeadroomOk, isAndroid } = await import("../profile.js")
+const PROFILE = resourceProfile()
+const CONCURRENCY = safeSpawnConcurrency({
+  profile: PROFILE,
+  requested: process.env.FORGE_TEST_CONCURRENCY,
+  perChildMB: 220,
+})
+console.log(`\n\x1b[2mmachine: ${PROFILE.cores} core(s), ${PROFILE.freeMB}MB available, tier ${PROFILE.tier}${isAndroid() ? ", android/termux" : ""} → concurrency ${CONCURRENCY}\x1b[0m`)
 const nodeSuites = suites.filter((s) => s[1] === "node")
 const bashSuites = suites.filter((s) => s[1] !== "node")
 const byLabel = new Map()
+/** Wait (bounded) until there is room for another child. A long run under
+ *  memory pressure should SLOW DOWN, not be killed halfway through. */
+async function awaitHeadroom(label) {
+  let waited = 0
+  while (!memoryHeadroomOk({ perChildMB: 220 }) && waited < 30000) {
+    if (waited === 0) console.log(`\x1b[33m  ⏸ ${label}: waiting for memory headroom\x1b[0m`)
+    await new Promise((r) => setTimeout(r, 1000))
+    waited += 1000
+  }
+}
+
 async function pool(jobs, n) {
   const queue = [...jobs.entries()]
   await Promise.all(Array.from({ length: Math.min(n, queue.length) }, async () => {
     while (queue.length) {
       const [, job] = queue.shift()
+      await awaitHeadroom(job[0])
       byLabel.set(job[0], await run(job))
     }
   }))
