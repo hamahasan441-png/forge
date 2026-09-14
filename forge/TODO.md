@@ -12,28 +12,28 @@ test proves the behavior exists.
 
 ## Open items
 
-- [ ] runtime: process-group kill on platforms without `kill(-pgid)` (the
-      group-signal fallback kills only the leader on some non-Linux systems;
-      needs an evidence-based walk like groupPids, with a test)
-- [ ] runtime: health probes assume HTTP; a TCP-only or WebSocket service
-      reports NOT healthy even when it is listening — needs a protocol-aware
-      probe or an honest "no HTTP probe available" evidence line
-- [ ] sandbox: bwrap detection probes overflowuid/overflowgid once per
-      process; a kernel hardened *after* forge started is not re-probed —
-      consider a cheap re-probe on the first bwrap startup failure
-- [ ] semantic_search: BM25 corpus is rebuilt from scratch per process; a
-      persistent inverted index (fingerprint-invalidated like the world
-      model) would cut first-query latency on large repos
-- [ ] LSP: documentSymbol extraction falls back to lexical scanning when no
-      language server is running; a server auto-start table for the top
-      languages (ts/js, python, go, rust) would make the structured path the
-      default instead of the exception
-- [ ] tool creation: behavioral verification runs one schema-shaped probe;
-      multi-step tools (login → act → verify) need a scripted probe format
-      before they can be promoted safely
-- [ ] checkpoint: restore does not currently verify that the working tree
-      matches the checkpoint's recorded fingerprints when files were touched
-      by an external process between crash and resume
+- [ ] semantic_search: the persistent CHUNK CORPUS shipped in v94 gapclose
+      (fingerprint-invalidated per file, ~/.forge/projects/<hash>/
+      semantic-index.json — a fresh process re-reads only changed files).
+      The BM25 inverted structure itself is still built per query from the
+      cached chunks (milliseconds of CPU, no I/O); persisting the inverted
+      structure too is a further step, not justified at current repo sizes.
+- [ ] runtime: the kill-fallback walk enumerates win32 process trees via
+      PowerShell CIM / wmic; neither exists on this repo's test hosts, so the
+      win32 branch is only pinned for its honest leader-only degradation —
+      the full tree walk there needs a Windows host to prove behaviorally.
+- [ ] runtime: for a non-HTTP service the TCP floor proves LISTENING, not
+      application health; protocol-specific probes (TLS handshake, WebSocket
+      upgrade, Redis PING-style) as runtime-adapter capabilities would
+      strengthen the evidence beyond "it answered the connect"
+- [ ] LSP: extractStructured spawns and closes one server PER CALL (fine for
+      on-demand tool use); a bulk structured-extraction path should reuse a
+      session (createLspSession caches clients per language) instead of
+      paying a server start per file
+- [ ] checkpoint: reconcile covers the files the CHECKPOINT recorded; a
+      whole-tree reconcile at crash-resume (every world-model fingerprint vs
+      disk, so external edits to files no checkpoint ever touched are also
+      surfaced before planning continues) is the larger open step
 
 ## Skill forge — leftovers (never shipped, never promoted)
 

@@ -39,6 +39,22 @@ function bwrapKernelSupport() {
   return kernProbe
 }
 
+/** v94 gapclose (TODO sandbox): the kernel probe is cached once per process —
+ *  a kernel hardened (or relaxed) AFTER forge started is never re-probed, so
+ *  every later detection (doctor, capabilities, a fresh wrapBash path) would
+ *  keep trusting the stale boot-time answer. tools.js calls this on the first
+ *  REAL bwrap start failure: the next detection re-reads the kernel. Cheap
+ *  (two file reads), and only ever called after evidence that the cached
+ *  answer is wrong. */
+export function resetSandboxProbe() {
+  kernProbe = undefined
+}
+
+/** Probe-cache visibility for doctor/tests: undefined = not probed yet. */
+export function sandboxProbeState() {
+  return kernProbe
+}
+
 function isSetuid(p) {
   try { return !!(fs.statSync(p).mode & 0o4000) } catch { return false }
 }

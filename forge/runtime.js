@@ -28,7 +28,7 @@
  *
  * Zero dependencies: node:child_process + node:fs only.
  */
-import { spawn } from "node:child_process"
+import { spawn, execFileSync } from "node:child_process"
 import fs from "node:fs"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 
@@ -83,6 +83,98 @@ function groupPids(pgid) {
     }
   } catch { /* unreadable /proc — leader only */ }
   return pids
+}
+
+/** v94 gapclose (TODO runtime #1) — PORTABLE group/tree enumeration.
+ *
+ *  `kill(-pgid)` is a Linux/POSIX-group convenience; on platforms where the
+ *  group signal is unavailable (or it fails for any other reason) the old
+ *  fallback killed ONLY the leader and silently orphaned the tree it was
+ *  supposed to own (`sh -c` forking the real server as a grandchild is the
+ *  common case). This walker never assumes: it enumerates the REAL process
+ *  table and returns evidence-based members, always including the leader:
+ *
+ *    linux            → /proc scan by pgid (groupPids)
+ *    darwin/*bsd/…    → `ps -axo pid=,pgid=,ppid=` (pgid match ∪ ppid closure)
+ *    win32            → PowerShell CIM (ppid closure), `wmic` fallback
+ *
+ *  Bounded (WALK_CAP), best-effort, never throws. `opts.platform` exists so
+ *  tests can exercise the non-/proc paths on any machine (procps `ps` speaks
+ *  the same `-axo` dialect on Linux). */
+const WALK_CAP = 512
+export function groupPidsPortable(leader, { platform = process.platform } = {}) {
+  const root = Number(leader)
+  const out = new Set(Number.isInteger(root) && root > 0 ? [root] : [])
+  if (!out.size) return []
+  try {
+    if (platform === "linux" && fs.existsSync("/proc")) {
+      for (const p of groupPids(root)) out.add(p)
+      return [...out].slice(0, WALK_CAP)
+    }
+    if (platform === "win32") {
+      const pairs = (() => {
+        // one snapshot of (pid, ppid) pairs; never a per-pid spawn storm
+        const psCmd = "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"
+        const sources = [
+          ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCmd]],
+          ["wmic", ["process", "get", "ProcessId,ParentProcessId"]],
+        ]
+        for (const [bin, args] of sources) {
+          try {
+            const text = execFileSync(bin, args, { encoding: "utf8", timeout: 4000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })
+            const parsed = []
+            for (const line of String(text).split(/\r?\n/)) {
+              const m = /^\s*(\d+)[,\s]+(\d+)\s*$/.exec(line)
+              if (m) parsed.push([Number(m[1]), Number(m[2])])
+            }
+            if (parsed.length) return parsed
+          } catch { /* try the next source */ }
+        }
+        return null
+      })()
+      if (pairs) for (const p of descendantClosure(root, pairs)) out.add(p)
+      return [...out].slice(0, WALK_CAP)
+    }
+    // POSIX without a usable /proc (darwin, *bsd, solaris, …)
+    try {
+      const text = execFileSync("ps", ["-axo", "pid=,pgid=,ppid="], { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] })
+      const pairs = []
+      const byPgid = []
+      for (const line of String(text).split(/\r?\n/)) {
+        const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line)
+        if (!m) continue
+        const pid = Number(m[1]), pgid = Number(m[2]), ppid = Number(m[3])
+        pairs.push([pid, ppid])
+        if (pgid === root) byPgid.push(pid)
+      }
+      for (const p of byPgid) out.add(p)
+      // pgid can differ when a grandchild called setsid; the ppid closure is
+      // the second, independent evidence source — union, never guess
+      for (const p of descendantClosure(root, pairs)) out.add(p)
+    } catch { /* no ps — leader only (the pre-gapclose behavior) */ }
+  } catch { /* best-effort: whatever evidence we have */ }
+  return [...out].slice(0, WALK_CAP)
+}
+
+/** Transitive child closure from (pid, ppid) pairs. Bounded, cycle-safe. */
+function descendantClosure(root, pairs) {
+  const kids = new Map()
+  for (const [pid, ppid] of pairs) {
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue
+    if (!kids.has(ppid)) kids.set(ppid, [])
+    kids.get(ppid).push(pid)
+  }
+  const seen = new Set()
+  const queue = [root]
+  while (queue.length && seen.size < WALK_CAP) {
+    const p = queue.shift()
+    for (const c of kids.get(p) ?? []) {
+      if (seen.has(c) || c === root) continue
+      seen.add(c)
+      queue.push(c)
+    }
+  }
+  return seen
 }
 
 /** Listening TCP ports actually held by a pid, read from the Linux /proc
@@ -188,8 +280,20 @@ export function createProcessManager({
   const killTree = (e, signal) => {
     if (e.state !== "running" || !e.child) return false
     let sent = false
-    try { process.kill(-e.child.pid, signal); sent = true } catch { /* group gone */ }
-    if (!sent) { try { e.child.kill(signal); sent = true } catch { /* already dead */ } }
+    try { process.kill(-e.child.pid, signal); sent = true } catch { /* group signal unavailable or group gone */ }
+    if (!sent) {
+      // v94 gapclose (TODO runtime #1): a FAILED group signal is not evidence
+      // the tree is gone — on platforms without kill(-pgid) it never existed,
+      // and leader-only child.kill() orphans the grandchildren (the `sh -c`
+      // fork case). Walk the real process table and signal every member;
+      // only when the walk delivered nothing fall back to child.kill.
+      let delivered = 0
+      for (const pid of groupPidsPortable(e.child.pid)) {
+        try { process.kill(pid, signal); delivered++ } catch { /* raced away — already gone */ }
+      }
+      if (delivered > 0) sent = true
+      else { try { e.child.kill(signal); sent = true } catch { /* already dead */ } }
+    }
     return sent
   }
 

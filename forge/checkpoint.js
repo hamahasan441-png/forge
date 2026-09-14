@@ -214,6 +214,10 @@ export function sealCreated(checkpointId, cwd) {
  *   3. RESTORE SET  — compute exactly what will be written/deleted, up front
  *   4. RESTORE      — apply it
  *   5. VERIFY       — hash every restored file and compare with the manifest
+ *   5b. RECONCILE   — hash every manifest file the restore could NOT write
+ *                     (tooLarge skips, kept created files) and report drift:
+ *                     `treeConsistent` says whether the working tree matches
+ *                     the checkpoint's recorded fingerprints as a whole
  *   6. PERSIST      — write the result, including any partial failure
  *
  * A restore that did not fully succeed is NEVER reported as successful: the
@@ -328,12 +332,45 @@ export function restoreTransactional(checkpointId, { cwd = null } = {}) {
     }
     result.phases.verify = verify
 
+    // ---- 5b. RECONCILE — does the WORKING TREE match the checkpoint's fingerprints?
+    // v94 gapclose (TODO checkpoint): VERIFY proves the files THIS restore
+    // wrote. It cannot see files the restore could never write — tooLarge
+    // skips (recorded sha, no backup) and created files it had to KEEP because
+    // they changed since the checkpoint. An external process may have touched
+    // them between crash and resume; silent divergence is not an option, so
+    // hash them against the manifest and report drift as evidence.
+    const reconcile = { checked: 0, matched: 0, drift: [] }
+    for (const f of m.files ?? []) {
+      if (!f.sha) continue
+      if (!f.tooLarge && !f.created) continue // written + verified in phase 5
+      reconcile.checked++
+      const cur = fullFileHash(f.path)
+      if (f.created) {
+        // consistent iff the file is gone (it did not exist at checkpoint time)
+        if (!cur) reconcile.matched++
+        else reconcile.drift.push({ path: f.path, reason: "created-after-checkpoint file KEPT on disk — it changed since the checkpoint, so removing it would destroy work outside this checkpoint", recorded: String(f.sha).slice(0, 8), current: cur.sha.slice(0, 8) })
+      } else if (!cur) {
+        reconcile.drift.push({ path: f.path, reason: "recorded at checkpoint but MISSING on disk — never restorable (too large to snapshot) and touched outside this restore", recorded: String(f.sha).slice(0, 8), current: null })
+      } else if (cur.sha === f.sha) {
+        reconcile.matched++
+      } else {
+        reconcile.drift.push({ path: f.path, reason: "changed on disk since the checkpoint — never restorable (too large to snapshot), touched outside this restore", recorded: String(f.sha).slice(0, 8), current: cur.sha.slice(0, 8) })
+      }
+    }
+    result.phases.reconcile = reconcile
+    result.treeConsistent = result.failed.length === 0 && verify.mismatched.length === 0 && reconcile.drift.length === 0
+
     // ---- 6. PERSIST -------------------------------------------------------
     const total = restoreSet.write.length + restoreSet.remove.length
     const done = result.restored.length
     if (result.failed.length === 0 && verify.mismatched.length === 0) {
       result.status = "RESTORED"
       result.ok = true
+      if (reconcile.drift.length) {
+        // honest completion: the restore applied everything it COULD, but the
+        // tree as a whole does not match the checkpoint's recorded state.
+        result.notes.push(`working-tree drift: ${reconcile.drift.length} file(s) recorded by this checkpoint differ on disk (touched outside forge between snapshot and restore — see phases.reconcile.drift); treeConsistent=false`)
+      }
       // only now is it safe to retire the checkpoint
       try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
     } else if (done > 0) {
