@@ -316,7 +316,7 @@ function normalizeSchema(schema) {
  * against the cached names: a tool that vanished is an honest ERROR, and the
  * cache entry is dropped (never serve a phantom capability).
  */
-export async function loadMcpTools(config, { timeoutMs } = {}) {
+export async function loadMcpTools(config, { timeoutMs, cachedOnly = false } = {}) {
   const lazy = lazyEnabled(config)
   const out = { tools: [], clients: [], errors: [] }
   // per-call memo of lazily-connected servers: name → Promise<McpClient>
@@ -348,7 +348,7 @@ export async function loadMcpTools(config, { timeoutMs } = {}) {
   // cold start pay the SUM of every server's startup (~300ms each → ~2.4s for
   // eight); it now costs the slowest one. Servers with a fresh cached inventory
   // are not spawned at all (v96 lazy connect), so they never enter this pass.
-  await Promise.all(slots.filter((s) => !s.inv).map(async (s) => {
+  await Promise.all(slots.filter((s) => !s.inv && !cachedOnly).map(async (s) => {
     let client
     try {
       client = await connectServer(s.name, s.spec, { timeoutMs })
@@ -378,6 +378,13 @@ export async function loadMcpTools(config, { timeoutMs } = {}) {
           Promise.resolve(p).then((c) => { try { c.close() } catch { /* already gone */ } }).catch(() => {})
         },
       })
+      continue
+    }
+    if (cachedOnly) {
+      // v100: cache-only callers (delegated sub-agents) never pay a server
+      // handshake. A server with no fresh inventory is skipped HONESTLY rather
+      // than spawned — the crew simply has fewer tools this run, never a stall.
+      out.errors.push(`${sname}: skipped (cache-only: no fresh tool inventory)`)
       continue
     }
     if (s.error) { out.errors.push(s.error); continue }

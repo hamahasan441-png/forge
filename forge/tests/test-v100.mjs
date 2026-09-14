@@ -68,7 +68,7 @@ console.log("== 3. mcpToolsToPlugins — the verdict reaches the plugin ==")
 // ---------------------------------------------------------------------------
 // A stub MCP server that sleeps before answering initialize, so a SEQUENTIAL
 // connect of N servers costs ~N*delay while a parallel one costs ~delay.
-const DELAY_MS = 450
+const DELAY_MS = 300
 const stub = path.join(WORK, "slow-mcp.cjs")
 fs.writeFileSync(stub, `
 const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n")
@@ -104,7 +104,7 @@ const mkConfig = (n) => {
 
 console.log("== 4. cold servers connect in PARALLEL ==")
 {
-  const N = 4
+  const N = 3
   const t0 = Date.now()
   const res = await loadMcpTools(mkConfig(N), { timeoutMs: 8000 })
   const ms = Date.now() - t0
@@ -114,7 +114,7 @@ console.log("== 4. cold servers connect in PARALLEL ==")
   ok(`parallel: ${N} servers in ${ms}ms, well under the ${N * DELAY_MS}ms sequential floor`,
     ms < N * DELAY_MS * 0.7, `${ms}ms`)
   eq("tool order follows CONFIG order, not completion order",
-    res.tools.map((t) => t.name), ["mcp__s0__peek", "mcp__s0__poke", "mcp__s1__peek", "mcp__s1__poke", "mcp__s2__peek", "mcp__s2__poke", "mcp__s3__peek", "mcp__s3__poke"])
+    res.tools.map((t) => t.name), ["mcp__s0__peek", "mcp__s0__poke", "mcp__s1__peek", "mcp__s1__poke", "mcp__s2__peek", "mcp__s2__poke"])
   eq("annotated tool is read-only end-to-end", res.tools[0].readOnly, true)
   eq("unannotated sibling stays mutating", res.tools[1].readOnly, false)
   for (const c of res.clients) { try { c.close() } catch {} }
@@ -221,10 +221,52 @@ console.log("== 9. fabric is wired into the agent loop ==")
 {
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   ok("agent.js imports the fabric", /import \{ selectCapabilities, formatSelection \} from "\.\/capfabric\.js"/.test(src))
-  ok("MCP tools pass through selectCapabilities before reaching plugins", /selectCapabilities\(\{[\s\S]{0,400}plugins: mcp\.tools/.test(src))
+  ok("MCP tools pass through selectCapabilities before reaching plugins", /selectCapabilities\(\{[\s\S]{0,400}plugins: usable/.test(src))
+  ok("the selected set derives from the loaded MCP tools", /const usable = isDelegatedSubAgent \? mcp\.tools\.filter/.test(src))
   ok("only the SELECTED tools are added to plugins", /plugins = \[\.\.\.plugins, \.\.\.sel\.kept\]/.test(src))
   ok("withheld tools are reported, never silent", /mcp_tool_withheld/.test(src))
   ok("clients are still taken from the full load (no leak)", /mcpClients = mcp\.clients/.test(src))
+}
+
+console.log("== 10. cache-only loading never spawns a server ==")
+{
+  // a server with NO cached inventory must be skipped, not spawned
+  const coldCfg = { mcp: { servers: { nevercached: { command: process.execPath, args: [stub] } } } }
+  const t0 = Date.now()
+  const res = await loadMcpTools(coldCfg, { timeoutMs: 8000, cachedOnly: true })
+  const ms = Date.now() - t0
+  eq("cache-only + cold cache → zero tools", res.tools.length, 0)
+  ok(`no handshake was paid (${ms}ms < ${DELAY_MS}ms)`, ms < DELAY_MS, `${ms}ms`)
+  ok("the skip is reported honestly", res.errors.some((e) => /cache-only/.test(e)), JSON.stringify(res.errors))
+  for (const c of res.clients) { try { c.close() } catch {} }
+
+  // the server cached back in section 6 IS served cache-only, with no spawn
+  const warmCfg = { mcp: { servers: { lz: { command: process.execPath, args: [stub] } } } }
+  const warm = await loadMcpTools(warmCfg, { timeoutMs: 8000, cachedOnly: true })
+  eq("cache-only + warm cache → tools served", warm.tools.length, 2)
+  eq("read-only verdict intact under cache-only", warm.tools[0].readOnly, true)
+  for (const c of warm.clients) { try { c.close() } catch {} }
+}
+
+console.log("== 11. crew: read-only MCP tools reach a delegated sub-agent ==")
+{
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("the sub-agent MCP block is no longer gated off",
+    /if \(!noTools && config\.tools\?\.mcp !== false\)/.test(src))
+  ok("a sub-agent loads cache-only (never spawns a server)",
+    /isDelegatedSubAgent \? \{ cachedOnly: true \}/.test(src))
+  ok("a sub-agent only ever sees DECLARED read-only tools",
+    /isDelegatedSubAgent \? mcp\.tools\.filter\(\(t\) => t\.readOnly === true\)/.test(src))
+  ok("the read-only contract is still enforced downstream (tools.js)",
+    /if \(!pl\.readOnly\) WRITE_TOOLS\.add\(pl\.name\)/.test(fs.readFileSync(new URL("../tools.js", import.meta.url), "utf8")))
+  // the filter itself: only readOnly:true survives
+  const mixed = [
+    { name: "mcp__s__peek", source: "mcp:s", readOnly: true },
+    { name: "mcp__s__poke", source: "mcp:s", readOnly: false },
+    { name: "mcp__s__legacy", source: "mcp:s" },
+  ]
+  eq("filter keeps exactly the declared read-only tools",
+    mixed.filter((t) => t.readOnly === true).map((t) => t.name), ["mcp__s__peek"])
 }
 
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)

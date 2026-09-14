@@ -342,9 +342,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { /* created tools are additive, never break the agent */ }
   }
   let mcpClients = []
-  if (!isDelegatedSubAgent && !noTools && config.tools?.mcp !== false) {
+  if (!noTools && config.tools?.mcp !== false) {
     try {
-      const mcp = await loadMcpTools(config)
+      // A delegated sub-agent loads CACHE-ONLY: it never spawns a server itself.
+      const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true } : {})
       if (mcp.tools.length) {
         // v100 fabricwise: the capability fabric gates MCP tools BEFORE they
         // reach the model context — it drops tools that merely duplicate a
@@ -354,9 +355,18 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         // THIS task. Clients are unaffected: a withheld tool's server is still
         // connected/closed exactly as before, so nothing leaks and a later
         // segment with a different objective can surface it again.
+        // v100: a delegated sub-agent is READ-ONLY by construction
+        // (isDelegatedSubAgent = readonly && !planOnly). Before ToolAnnotations
+        // existed, every MCP tool was hardcoded mutating, so the only safe
+        // choice was to give the crew none at all. Now a server that DECLARES
+        // readOnlyHint:true can be offered: those tools are exactly the ones
+        // the read-only contract already permits (tools.js only adds a plugin
+        // to WRITE_TOOLS when !readOnly), so this widens capability without
+        // widening authority.
+        const usable = isDelegatedSubAgent ? mcp.tools.filter((t) => t.readOnly === true) : mcp.tools
         const sel = selectCapabilities({
           task: String(task ?? ""),
-          plugins: mcp.tools,
+          plugins: usable,
           nativeNames: [...BUILTIN_TOOL_NAMES],
           maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
           dedupe: config.mcp?.dedupe !== false,
