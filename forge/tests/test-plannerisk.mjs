@@ -123,8 +123,10 @@ console.log("== 4. alternative plans for high-risk plans (§23) ==")
   ok("a recommended variant exists and beats or matches the others", alts.recommended?.expectedVerifiedProgress >= alts.all[alts.all.length - 1].expectedVerifiedProgress)
   ok("inspect-first variant includes a read-only guard node", alts.all.some((v) => v.name === "inspect-first"))
   // low-risk plans get NO alternatives (no wasted work)
+  // v96 unifywise: one return shape — low-risk plans get the same object with
+  // needed:false (no reshaping warranted), never a bare [] anymore.
   const none = pr.alternatives({ riskLadder: "low", uncertainty: 0.2 }, defs)
-  eq("low-risk plans are not re-planned", none, null ?? (Array.isArray(none) ? [] : none)) // returns falsy/empty for low risk
+  ok("low-risk plans are not re-planned", none && none.needed === false && none.recommended === null && none.all.length === 0, JSON.stringify(none))
 }
 
 console.log("== 5. information-gain planning (§24) ==")

@@ -20,6 +20,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { projectDir } from "./memory.js"
+import { writeStateFile } from "./securefs.js"
 import { rankDocs } from "./retrieval.js"
 
 export const EPISODE_STAGE = {
@@ -61,10 +62,12 @@ export function loadEpisodes(cwd) {
 }
 
 export function saveEpisodes(cwd, episodes) {
+  // v96 unifywise: the episodic store is ENGINEERING HISTORY — a torn write
+  // here loses a whole episode. Every sibling store (lessons, engmemory,
+  // predictions, claims) writes through securefs.writeStateFile; episodes now
+  // do too (atomic tmp+fsync+rename, mode 0600).
   try {
-    fs.mkdirSync(path.dirname(episodesPath(cwd)), { recursive: true })
-    fs.writeFileSync(episodesPath(cwd), JSON.stringify({ episodes }, null, 1), "utf8")
-    return true
+    return Boolean(writeStateFile(episodesPath(cwd), JSON.stringify({ episodes }, null, 1)))
   } catch { return false }
 }
 
@@ -230,7 +233,13 @@ export function createEpisodeStore({ cwd = process.cwd(), max = MAX_EPISODES } =
 
   return {
     start, get, latest, addHypothesis, addExperiment, addEvidence, addFix,
-    addVerification, addFailedApproach, setReview, setLesson,
+    addVerification, addFailedApproach, setReview,
+    // v96 unifywise: setLesson is usually the LAST mutation of an episode
+    // (core.run closes with setReview → setLesson → addFix-only-if-files).
+    // The bare module function mutates in memory only, so a run whose gate
+    // blocked with no file changes never durably persisted its distilled
+    // lesson. The store method now persists — the run's outcome reaches disk.
+    setLesson: (ep, lesson, opts) => { const r = setLesson(ep, lesson, opts); if (r) persist(); return r },
     similar, contextBlock, stats, list, persist,
     get episodes() { return [...episodes] },
   }

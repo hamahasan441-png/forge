@@ -12,11 +12,25 @@
  *     conversation was about), usage totals, updatedAt.
  *   - `forge resume <n|id>` + `forge chat --resume <n|id>`.
  *   - listing is ordered by timestamp (not by filename).
+ *
+ * v97 unifiedwise (§5-§8): ChatGPT-like continuity —
+ *   - RAW CONVERSATION MEMORY: <id>.transcript.jsonl keeps EVERY user/assistant
+ *     turn as its own record { ts, role, content, sessionId, projectId, taskId,
+ *     classes } — compaction folds the working context but NEVER destroys the
+ *     raw history anymore (the session .json keeps the compacted view).
+ *   - per-directory lookup: sessionsForCwd(cwd) → the sessions that belong to
+ *     this project, so startup can rehydrate automatically (§6) instead of
+ *     requiring --continue.
+ *   - projectId (path hash) recorded per session for cross-store joins.
  */
 import fs from "node:fs"
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
-import { SESSIONS_DIR } from "./config.js"
+import { SESSIONS_DIR as _SESSIONS_DIR_IMPORT, DEFAULT_DIR } from "./config.js"
+import { projectHash } from "./memory.js"
+
+const SESSIONS_DIR = _SESSIONS_DIR_IMPORT // rebindable via withSessionsDir (test seam)
+const TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024 // per-conversation raw history cap (trim-oldest, never silent)
 
 function sessionId() {
   return new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
@@ -30,9 +44,9 @@ function sessionId() {
  */
 export function saveSession({ provider, model, messages, id, usage, cwd, title, summary }) {
   try {
-    fs.mkdirSync(SESSIONS_DIR, { recursive: true })
+    fs.mkdirSync(sessionStore(), { recursive: true })
     const sid = id || sessionId()
-    const file = path.join(SESSIONS_DIR, sid + ".json")
+    const file = path.join(sessionStore(), sid + ".json")
     // preserve createdAt/title when overwriting (persist() passes the same id)
     let prev = null
     try { prev = JSON.parse(fs.readFileSync(file, "utf8")) } catch {}
@@ -47,11 +61,12 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
       model,
       usage: usage ?? prev?.usage ?? null,
       cwd: cwd ?? prev?.cwd ?? null,
+      projectId: cwd ? projectHash(cwd) : (prev?.projectId ?? null), // v97 §3: cross-store join key
       title: derivedTitle,
       summary: summary ?? prev?.summary ?? null,
       messages,
     }, null, 1))
-    writeStateFile(path.join(SESSIONS_DIR, "last.json"), JSON.stringify({ id: sid, file }))
+    writeStateFile(path.join(sessionStore(), "last.json"), JSON.stringify({ id: sid, file }))
     // v20.2 (P1-6): cap the store when a NEW conversation is created (not on
     // every auto-save of an existing one, which reuses its id)
     if (!id) pruneSessions()
@@ -64,14 +79,20 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
 // v20.2 (P1-6): the session store grew without bound. Keep the newest N.
 export const MAX_SESSIONS = 300
 
-/** Delete all but the newest `max` sessions. Returns count removed. Best-effort. */
+/** Delete all but the newest `max` sessions. Returns count removed. Best-effort.
+ *  v97 audit A22: a session's RAW TRANSCRIPT (.transcript.jsonl) is removed
+ *  together with its session file — pruning must never orphan transcripts. */
 export function pruneSessions(max = MAX_SESSIONS) {
   try {
     const files = sessionFiles() // newest-first
     if (files.length <= max) return 0
     let removed = 0
     for (const f of files.slice(max)) {
-      try { fs.rmSync(f, { force: true }); removed++ } catch {}
+      try {
+        fs.rmSync(f, { force: true })
+        try { fs.rmSync(transcriptPath(path.basename(f, ".json")), { force: true }) } catch { }
+        removed++
+      } catch {}
     }
     return removed
   } catch {
@@ -114,14 +135,107 @@ export function searchSessions(query, { max = 20, scan = 600 } = {}) {
   return out
 }
 
+// ---------------------------------------------------------------------------
+// v97 unifiedwise (§5-§7): RAW CONVERSATION MEMORY + per-directory lookup
+// ---------------------------------------------------------------------------
+
+export function transcriptPath(id) {
+  return path.join(sessionStore(), String(id).replace(/[^A-Za-z0-9._-]/g, "_") + ".transcript.jsonl")
+}
+
+/** Append ONE raw turn to the non-destructive transcript (§7). Every record
+ *  carries ts/role/content/sessionId/projectId (+ taskId/classes when known)
+ *  so compaction can never make history un-reconstructable. Best-effort,
+ *  never throws; bounded per conversation (trim-oldest-half on overflow). */
+export function appendTranscript({ sessionId: sid, projectId = null, taskId = null, role, content, classes = null }) {
+  if (!sid || !role) return false
+  const r = String(role)
+  if (r !== "user" && r !== "assistant") return true // tool/system rounds stay in the working file
+  const text = typeof content === "string" ? content : ""
+  if (!text.trim()) return true
+  const rec = {
+    ts: Date.now(), role: r,
+    content: text.slice(0, 24000),
+    sessionId: sid, projectId, taskId,
+    ...(classes?.length ? { classes } : {}),
+  }
+  try {
+    fs.mkdirSync(sessionStore(), { recursive: true })
+    const p = transcriptPath(sid)
+    fs.appendFileSync(p, JSON.stringify(rec) + "\n")
+    try {
+      const st = fs.statSync(p)
+      if (st.size > TRANSCRIPT_MAX_BYTES) {
+        const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean)
+        fs.writeFileSync(p, lines.slice(Math.floor(lines.length / 2)).join("\n") + "\n")
+      }
+    } catch { }
+    return true
+  } catch { return false }
+}
+
+/** Read the raw transcript (newest-last). Bounded scan. */
+export function readTranscript(id, { limit = 400 } = {}) {
+  try {
+    const lines = fs.readFileSync(transcriptPath(id), "utf8").split("\n").filter(Boolean)
+    const out = []
+    for (const l of lines.slice(-limit)) {
+      try { out.push(JSON.parse(l)) } catch { }
+    }
+    return out
+  } catch { return [] }
+}
+
+/** Sessions whose recorded cwd matches this directory (§6 auto-rehydration).
+ *  Newest-first, bounded scan of the store. */
+export function sessionsForCwd(cwd, { max = 5, scan = 300 } = {}) {
+  const target = path.resolve(cwd)
+  const out = []
+  for (const file of sessionFiles().slice(0, scan)) {
+    if (out.length >= max) break
+    try {
+      const j = JSON.parse(fs.readFileSync(file, "utf8"))
+      if (j?.cwd && path.resolve(j.cwd) === target) out.push(j)
+    } catch { }
+  }
+  return out
+}
+
+/** The most recent session for a directory, or null. */
+export function latestSessionForCwd(cwd) {
+  return sessionsForCwd(cwd, { max: 1 })[0] ?? null
+}
+
+/** Session-id → session-file path (safely namespaced). */
+export function projectSessionFile(id) {
+  return path.join(sessionStore(), String(id).replace(/[^A-Za-z0-9._-]/g, "_") + ".json")
+}
+
 export function lastSessionFile() {
   try {
-    const p = path.join(SESSIONS_DIR, "last.json")
+    const p = path.join(sessionStore(), "last.json")
     const j = JSON.parse(fs.readFileSync(p, "utf8"))
     return j.file
   } catch {
     return null
   }
+}
+
+/** Test/bench seam: point the session store at a scratch directory
+ *  (FORGE-BENCH case 19 exercises the save→lookup→transcript round-trip
+ *  WITHOUT touching the real store). Pair with clearSessionStoreOverride()
+ *  in a finally block. */
+export function setSessionStoreOverride(dir) {
+  SESSIONS_DIR_OVERRIDE = dir
+}
+
+export function clearSessionStoreOverride() {
+  SESSIONS_DIR_OVERRIDE = null
+}
+
+let SESSIONS_DIR_OVERRIDE = null
+function sessionStore() {
+  return SESSIONS_DIR_OVERRIDE ?? SESSIONS_DIR
 }
 
 export function loadSession(file) {
@@ -138,10 +252,10 @@ export function loadSession(file) {
 function sessionFiles() {
   try {
     return fs
-      .readdirSync(SESSIONS_DIR)
+      .readdirSync(sessionStore())
       .filter((f) => f.endsWith(".json") && f !== "last.json")
       .map((f) => {
-        const full = path.join(SESSIONS_DIR, f)
+        const full = path.join(sessionStore(), f)
         try { return { full, mt: fs.statSync(full).mtimeMs } } catch { return null }
       })
       .filter(Boolean)
@@ -168,7 +282,7 @@ export function findSession(ref, { listMax = 30 } = {}) {
     return hit ? hit.file : null
   }
   // session id (with or without .json) or a direct path
-  const direct = path.resolve(SESSIONS_DIR, r.endsWith(".json") ? r : r + ".json")
+  const direct = path.resolve(sessionStore(), r.endsWith(".json") ? r : r + ".json")
   if (fs.existsSync(direct)) return direct
   if (fs.existsSync(r)) return path.resolve(r)
   // fall back to unique id prefix match

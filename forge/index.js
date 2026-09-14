@@ -7,6 +7,15 @@
  * persist+reuse (always parse), the sandbox.js lesson: never fake a hit.
  *
  * The walk and skip-dirs stay in repomap.js. This module is load/save/hit.
+ *
+ * v98 shipwise — the extraction PROVENANCE tier: every record now carries
+ * `extraction: { layer, source }` so no consumer can mistake regex output
+ * for parser output. JSON files get a genuine LAYER-1 native parse
+ * (JSON.parse, top-level keys as symbols — a real parser, not a pattern);
+ * everything else starts at the honest lexical layer 8 and is upgraded to
+ * layer 3 (LSP documentSymbol) by langstruct.js enrichment. INDEX_VERSION
+ * bumps 1 → 2 ONCE so every project re-extracts one time and cached
+ * lexical-era records never masquerade as structured ones.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -15,7 +24,7 @@ import { writeStateFile } from "./securefs.js"
 import { extractRecord } from "./lang.js"
 import { extractContracts } from "./xlang.js"
 
-export const INDEX_VERSION = 1
+export const INDEX_VERSION = 2
 
 export function indexEnabled() {
   const v = process.env.FORGE_INDEX
@@ -70,10 +79,39 @@ export function cacheHit(cached, st) {
   return cached.size === fp.size && cached.mtime === fp.mtime && Array.isArray(cached.symbols)
 }
 
+/** v98 layer-1 native JSON parse: top-level keys as symbols. A real parser
+ *  (JSON.parse) — on failure the record is honestly empty with the failure
+ *  recorded, never a faked partial extraction. `.jsonc` comments are NOT
+ *  stripped — a parse failure is reported as what it is. */
+function jsonNativeRecord(file, src) {
+  try {
+    const j = JSON.parse(String(src ?? ""))
+    const keys = (j && typeof j === "object" && !Array.isArray(j)) ? Object.keys(j) : (Array.isArray(j) ? [] : [])
+    return {
+      ok: true,
+      rec: { lang: "json", symbols: keys.slice(0, 200), imports: [], exports: keys.slice(0, 40), calls: [], types: [] },
+      extraction: { layer: 1, source: "native JSON.parse (top-level keys)" },
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      rec: { lang: "json", symbols: [], imports: [], exports: [], calls: [], types: [] },
+      extraction: { layer: 1, source: "native JSON.parse", failed: true, error: String(e?.message ?? e).slice(0, 120) },
+    }
+  }
+}
+
 export function recordFromSource(file, src, fullPath, st) {
   const fp = fingerprint(st)
+  const name = String(file ?? "")
+  if (/\.jsonc?$/i.test(name)) {
+    // layer 1 — native parse owns JSON; contracts still come from the shared
+    // extractor so cross-language edges stay one implementation
+    const nat = jsonNativeRecord(name, src)
+    return { ...fp, ...nat.rec, test: false, config: true, contracts: extractContracts(name, src), extraction: nat.extraction }
+  }
   const rec = extractRecord(file, src, fullPath)
-  return { ...fp, ...rec, contracts: extractContracts(file, src) }
+  return { ...fp, ...rec, contracts: extractContracts(file, src), extraction: { layer: 8, source: "lexical (lang.js)" } }
 }
 
 export function invalidate(root, rels = []) {

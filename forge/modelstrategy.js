@@ -109,11 +109,32 @@ const PRIOR_RATES = {
   unknown: { successRate: 0.6, repairRate: 0.5, verificationPassRate: 0.5, reliability: 0.6 },
 }
 
+// v94 fastwise: loadPerformance() used to hit the disk on EVERY call — and
+// effectiveStats calls it twice per candidate, so one selectModel pass over
+// ~12 candidates could read model-performance.json ~24 times. The mtime+size
+// memo below (the house freshness signature) re-reads only when the file
+// actually changed. Behavior-preserving: recordOutcome writes through, and a
+// changed file (new write, deletion, corruption) is always picked up by the
+// next stat — a stale value can never be served.
+let perfMemo = { sig: "absent", data: {} }
+
 export function loadPerformance() {
+  let sig = "absent"
+  try {
+    const st = fs.statSync(PERF_FILE)
+    sig = `${st.mtimeMs}:${st.size}`
+  } catch { /* absent */ }
+  if (sig === perfMemo.sig) return perfMemo.data
   try {
     const j = JSON.parse(fs.readFileSync(PERF_FILE, "utf8"))
-    return j && typeof j === "object" && !Array.isArray(j) ? j : {}
-  } catch { return {} }
+    const data = j && typeof j === "object" && !Array.isArray(j) ? j : {}
+    perfMemo = { sig, data }
+    return data
+  } catch {
+    // unreadable: retry honestly on the next call, serve nothing stale
+    perfMemo = { sig: "unreadable", data: {} }
+    return {}
+  }
 }
 
 function savePerformance(data) {
@@ -184,6 +205,7 @@ function percentile(sorted, p) {
 }
 
 export function clearPerformance() {
+  perfMemo = { sig: "absent", data: {} } // fastwise: the memo must forget the cleared file
   try { fs.rmSync(PERF_FILE, { force: true }); return true } catch { return false }
 }
 
@@ -365,6 +387,49 @@ export function selectModel(config, opts = {}) {
       performance: c.performance ?? null,
     })),
   }
+}
+
+// ---------------------------------------------------------------------------
+// v94 fastwise — execution LANES: pre-computed strategy hints, one decision
+// engine. resolveLane composes the signals forge already has — task
+// complexity (classifyTaskComplexity, already wired above), the device
+// resource tier (injected by the caller from the resource manager — meta owns
+// that object, so no import cycle), and an optional role class (injected from
+// crewroute). It feeds the EXISTING selectModel opts (latencyBudgetMs /
+// costBias / preferredClass) — no new selection path, no model calls, no
+// network, fully deterministic.
+// ---------------------------------------------------------------------------
+
+/** Below scoreModel's 15s tight-budget threshold, so fast-lane candidates
+ *  earn the "meets tight latency budget" bonus honestly. */
+const FAST_LANE_BUDGET_MS = 12_000
+
+export function resolveLane({ task = "", deep = null, risk = "medium", preferredClass = null, resources = null } = {}) {
+  const complexity = classifyTaskComplexity(task)
+  const isDeep = deep != null ? Boolean(deep) : complexity === "complex" || complexity === "critical"
+  const tier = resources?.tier ?? null
+  const burst = resources?.burst === true
+  const notes = []
+  let lane = "balanced"
+  let latencyBudgetMs = null
+  let costBias = "normal"
+  let cls = preferredClass ?? null
+  if (isDeep) {
+    lane = "deep"
+    notes.push(`${complexity} task → full depth, no artificial budget`)
+  } else if (complexity === "trivial" || complexity === "simple" || risk === "low") {
+    lane = "fast"
+    latencyBudgetMs = FAST_LANE_BUDGET_MS
+    costBias = "low"
+    if (!cls) cls = CAPABILITY_CLASS.FAST_REASONING
+    notes.push("light task → tight budget, cheap models preferred")
+  } else {
+    if (tier === "low") { costBias = "low"; notes.push("low-resource device → cost bias") }
+    notes.push("standard depth")
+  }
+  if (tier) notes.push(`tier=${tier}`)
+  if (burst) notes.push("burst headroom")
+  return { lane, latencyBudgetMs, costBias, preferredClass: cls, why: notes.join(" · ") }
 }
 
 export function reconsiderModel(config, opts = {}) {

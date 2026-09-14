@@ -75,8 +75,11 @@ export function loadPredictions(cwd = process.cwd()) {
   } catch { return [] }
 }
 
-/** §9 — build the deterministic prediction for a segment about to run. */
-export function predictForNode({ node = null, objective = "", riskLevel = null, segment = 0, segmentId = null, taskId = null } = {}) {
+/** §9 — build the deterministic prediction for a segment about to run.
+ *  v97 §29: the prediction now also covers TESTS and STEPS (effort) — the two
+ *  realities a planner can be systematically wrong about. Both stay null
+ *  (honest UNKNOWN) when the caller has no deterministic basis. */
+export function predictForNode({ node = null, objective = "", riskLevel = null, segment = 0, segmentId = null, taskId = null, expectedTests = null, expectedSteps = null } = {}) {
   const targets = node?.targetFiles ?? node?.target_files ?? []
   const symbols = node?.targetSymbols ?? node?.target_symbols ?? []
   const expectedFiles = (Array.isArray(targets) ? targets : []).map(rel).filter(Boolean).slice(0, MAX_PREDICTION_FILES)
@@ -93,6 +96,8 @@ export function predictForNode({ node = null, objective = "", riskLevel = null, 
     expectedFiles,
     expectedSymbols: (Array.isArray(symbols) ? symbols : []).slice(0, 12),
     expectedRisk,
+    expectedTests: Number.isFinite(expectedTests) ? Math.max(0, Math.round(expectedTests)) : null,
+    expectedSteps: Number.isFinite(expectedSteps) ? Math.max(0, Math.round(expectedSteps)) : null,
     expectedOutcome: "advance",
     derived: expectedFiles.length ? "targets" : "objective-only",
     // reality — unset until settlement
@@ -108,7 +113,7 @@ export function predictForNode({ node = null, objective = "", riskLevel = null, 
  * `finalRisk` is the risk recalculated from the actual change; `status` is
  * the segment outcome ("ok" | "error" | null = unknown).
  */
-export function settlePrediction(pred, { actualFiles = [], finalRisk = null, status = null } = {}) {
+export function settlePrediction(pred, { actualFiles = [], finalRisk = null, status = null, actualTests = null, actualSteps = null } = {}) {
   if (!pred || typeof pred !== "object") return pred
   const expected = (pred.expectedFiles ?? []).map(String)
   const actual = (Array.isArray(actualFiles) ? actualFiles : []).map(rel).filter(Boolean).slice(0, MAX_PREDICTION_FILES)
@@ -121,6 +126,9 @@ export function settlePrediction(pred, { actualFiles = [], finalRisk = null, sta
   const fo = RISK_ORDER[finalRisk] ?? null
   const riskDelta = eo != null && fo != null ? fo - eo : null
   const outcomeCorrect = status == null ? null : (status === "ok") === (pred.expectedOutcome === "advance")
+  // v97 §29: tests + steps deltas (null-vs-null stays null — UNKNOWN ≠ 0)
+  const testsDelta = Number.isFinite(pred.expectedTests) && Number.isFinite(actualTests) ? actualTests - pred.expectedTests : null
+  const stepsDelta = Number.isFinite(pred.expectedSteps) && Number.isFinite(actualSteps) ? actualSteps - pred.expectedSteps : null
   // drift: how far reality sat outside the prediction, 0 = fully predicted
   const denom = Math.max(1, expected.length, actual.length)
   const driftScore = clamp01((filesExtra.length + filesMissed.length) / denom)
@@ -136,6 +144,10 @@ export function settlePrediction(pred, { actualFiles = [], finalRisk = null, sta
     riskDelta,
     outcomeCorrect,
     driftScore,
+    actualTests: Number.isFinite(actualTests) ? actualTests : null,
+    actualSteps: Number.isFinite(actualSteps) ? actualSteps : null,
+    testsDelta,
+    stepsDelta,
   }
 }
 
@@ -180,6 +192,12 @@ export function predictionCalibration(cwd = process.cwd()) {
   const outcomeAccuracy = outcomeSamples.length
     ? clamp01(outcomeSamples.filter((p) => p.outcomeCorrect).length / outcomeSamples.length)
     : null
+  // v97 §29: test/effort calibration — is the planner systematically running
+  // more tests / more steps than it predicted? (Honest: null without samples.)
+  const testSamples = settled.filter((p) => Number.isFinite(p.testsDelta))
+  const stepSamples = settled.filter((p) => Number.isFinite(p.stepsDelta))
+  const testBias = testSamples.length ? Number((testSamples.reduce((a, p) => a + p.testsDelta, 0) / testSamples.length).toFixed(1)) : null
+  const stepBias = stepSamples.length ? Number((stepSamples.reduce((a, p) => a + p.stepsDelta, 0) / stepSamples.length).toFixed(1)) : null
   return {
     samples: settled.length,
     riskSamples: riskSamples.length,
@@ -192,6 +210,8 @@ export function predictionCalibration(cwd = process.cwd()) {
     riskBias,
     riskEscalations,
     outcomeAccuracy,
+    testBias,
+    stepBias,
   }
 }
 
@@ -204,6 +224,8 @@ export function predictionsForPrompt(cwd = process.cwd(), { limit = 4, maxChars 
   if (cal.filePrecision != null) lines.push(`file prediction precision ${(cal.filePrecision * 100).toFixed(0)}%${cal.fileRecall != null ? `, recall ${(cal.fileRecall * 100).toFixed(0)}%` : ""}`)
   if (cal.riskBias != null && cal.riskBias > 0) lines.push(`risk was UNDER-predicted ${cal.riskEscalations}/${cal.riskSamples ?? 0} time(s) — predict risk honestly, not optimistically`)  
   if (cal.scopeDriftRate > 0.25) lines.push(`scope drift ${(cal.scopeDriftRate * 100).toFixed(0)}% — keep changes inside the declared target files`)
+  if (cal.testBias != null && cal.testBias > 0.5) lines.push(`tests ran ~+${cal.testBias} MORE than predicted — declare the real test scope up front`)
+  if (cal.stepBias != null && cal.stepBias > 0.5) lines.push(`segments needed ~+${cal.stepBias} more steps than predicted — budget effort honestly`)
   const worst = settled
     .filter((p) => (p.driftScore ?? 0) >= 0.5 && (p.filesExtra?.length || p.filesMissed?.length || (p.riskDelta ?? 0) > 0))
     .slice(-2)
@@ -234,6 +256,8 @@ export function formatSettlement(s) {
   if (s.filesExtra?.length) parts.push(`${s.filesExtra.length} UNPREDICTED`)
   if (s.filesMissed?.length) parts.push(`${s.filesMissed.length} predicted-but-untouched`)
   if (s.riskDelta != null) parts.push(`risk ${s.expectedRisk}→${s.finalRisk} (${s.riskDelta >= 0 ? "+" : ""}${s.riskDelta})`)
+  if (s.testsDelta != null) parts.push(`tests ${s.expectedTests}→${s.actualTests}`)
+  if (s.stepsDelta != null) parts.push(`steps ${s.expectedSteps}→${s.actualSteps}`)
   if (s.outcomeCorrect != null) parts.push(s.outcomeCorrect ? "outcome as predicted" : "outcome MIS-PREDICTED")
   return `${s.id}: ${parts.join(", ")}`
 }

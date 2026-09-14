@@ -94,7 +94,7 @@ export function designTool({
   capabilities = [],
   relatedFiles = [],
   author = "forge",
-  probeScript = null,           // v94 gapclose: scripted multi-step behavioral probe
+  probeSteps = null,            // v94 todowise: optional multi-step behavioral probe script
 } = {}) {
   const id = String(name || "").trim()
   const blocked = []
@@ -105,38 +105,18 @@ export function designTool({
   if (inSchema.type !== "object") blocked.push("inputSchema.type must be 'object'")
   const outSchema = outputSchema && typeof outputSchema === "object" ? outputSchema : { type: "string" }
   if (!["string", "object", "array"].includes(outSchema.type)) blocked.push("outputSchema.type must be string|object|array")
-
-  // v94 gapclose (TODO tool creation): a single schema-shaped probe cannot
-  // prove multi-step tools (login → act → verify). A probeScript is an
-  // ORDERED list of run() calls executed IN ONE child process — module state
-  // carries between steps, which is exactly the semantics a multi-step tool
-  // needs. Each step may declare what its output must look like; verification
-  // only passes when EVERY step passes. Strict validation up front: a bad
-  // script must never reach the promotion gate.
-  let script = null
-  if (probeScript != null) {
-    if (!Array.isArray(probeScript) || probeScript.length < 1 || probeScript.length > 6) {
-      blocked.push("probeScript must be an array of 1..6 steps")
-    } else {
-      script = []
-      for (let i = 0; i < probeScript.length; i++) {
-        const s = probeScript[i]
-        if (!s || typeof s !== "object" || Array.isArray(s)) { blocked.push(`probeScript[${i}] must be an object { name?, args?, expect? }`); break }
-        const args = s.args && typeof s.args === "object" && !Array.isArray(s.args) ? s.args : {}
-        const expect = s.expect && typeof s.expect === "object" && !Array.isArray(s.expect) ? s.expect : {}
-        if (expect.outputType != null && !["string", "object", "array"].includes(expect.outputType)) { blocked.push(`probeScript[${i}].expect.outputType must be string|object|array`); break }
-        script.push({
-          name: String(s.name ?? `step-${i + 1}`).slice(0, 40),
-          args,
-          expect: {
-            ...(expect.outputType ? { outputType: expect.outputType } : {}),
-            ...(expect.outputIncludes != null ? { outputIncludes: String(expect.outputIncludes).slice(0, 200) } : {}),
-          },
-        })
-      }
-      if (blocked.length) script = null
-    }
-  }
+  // v94 todowise: multi-step probes (login → act → verify style tools) — a
+  // step is { args, expectOk?, expectContains?, label? }. Shape-validated here
+  // so behavioral verification never runs an unvalidated script.
+  const steps = Array.isArray(probeSteps) && probeSteps.length
+    ? probeSteps.slice(0, 12).map((s) => ({
+        args: (s && typeof s === "object" && !Array.isArray(s) && s.args && typeof s.args === "object") ? s.args : {},
+        expectOk: s?.expectOk === true,
+        ...(s?.expectContains != null ? { expectContains: String(s.expectContains).slice(0, 200) } : {}),
+        ...(s?.label != null ? { label: String(s.label).slice(0, 60) } : {}),
+      }))
+    : null
+  if (steps && !steps.length) blocked.push("probeSteps must be a non-empty array of {args, expectOk?, expectContains?, label?}")
 
   const life = loadToolLife(cwd)
   const existing = life.tools[id]
@@ -150,8 +130,8 @@ export function designTool({
     description: desc.slice(0, 200),
     inputSchema: inSchema,
     outputSchema: outSchema,
-    ...(script ? { probeScript: script } : {}),
     capabilities: (Array.isArray(capabilities) ? capabilities : []).map((c) => String(c).slice(0, 40)).slice(0, 6),
+    ...(steps ? { probeSteps: steps } : {}),
     provenance: {
       source: "created",
       author: String(author).slice(0, 60),
@@ -247,53 +227,72 @@ function outputMatches(output, schema) {
  * code, stderr, elapsed ms, and whether the output matched the declared
  * output schema. Exit 0 alone is NOT enough; a mismatch stays INACTIVE.
  *
- * v94 gapclose (TODO tool creation): when the design carries a `probeScript`,
- * verification becomes a SCRIPTED multi-step run — the steps execute IN ORDER
- * IN ONE child process (module state carries between steps: login → act →
- * verify), each step's output is checked against the declared output schema
- * PLUS its own expectations (outputType / outputIncludes — the step oracle),
- * and the tool is VERIFIED only when EVERY step passed. Per-step evidence is
- * recorded; a failing step is named.
+ * v94 todowise — MULTI-STEP SCRIPTED PROBES (the TODO.md contract): tools with
+ * real sequences (login → act → verify) could not be promotion-tested by one
+ * schema-shaped probe. When a probe script is present (`opts.steps` or the
+ * record's design-time `probeSteps`), the child imports the plugin ONCE and
+ * runs every step's args IN ORDER in the SAME process — module state survives
+ * across steps, exactly like real usage. Every step is judged on its own
+ * observed output: schema match, `expectOk` (output.ok === true), and
+ * `expectContains` (substring in the serialized output). A step that throws
+ * aborts the sequence (later steps may depend on it). `passed` requires exit
+ * 0, no timeout, and ALL steps green. No script → the original single-probe
+ * behavior, byte-for-byte.
  */
-export async function verifyTool(cwd, name, { args = {}, timeoutMs = 10000 } = {}) {
+export async function verifyTool(cwd, name, { args = {}, steps = null, timeoutMs = 10000 } = {}) {
   const life = loadToolLife(cwd)
   const rec = life.tools[name]
   if (!rec) return { ok: false, blocked: ["not found"] }
   if (!rec.file) return { ok: false, blocked: ["not implemented (implementTool first)"] }
   const file = path.join(toolsDir(cwd), rec.file)
-  const steps = Array.isArray(rec.probeScript) && rec.probeScript.length ? rec.probeScript : null
+
+  // the probe script: explicit override, else the design-time declaration
+  const script = Array.isArray(steps) && steps.length
+    ? steps.slice(0, 12).map((s) => ({
+      args: (s && typeof s === "object" && !Array.isArray(s) && s.args && typeof s.args === "object") ? s.args : {},
+      expectOk: s?.expectOk === true,
+      ...(s?.expectContains != null ? { expectContains: String(s.expectContains).slice(0, 200) } : {}),
+      ...(s?.label != null ? { label: String(s.label).slice(0, 60) } : {}),
+    }))
+    : (Array.isArray(rec.probeSteps) && rec.probeSteps.length ? rec.probeSteps : null)
 
   const runner = path.join(projectDir(cwd), `.verify-${name}-${Date.now()}.mjs`)
-  const perStepMs = steps ? Math.max(1000, Math.min(8000, Math.floor(timeoutMs / steps.length))) : Math.min(timeoutMs, 8000)
-  const runnerSrc = steps ? [
-    `const mod = await import(${JSON.stringify("file://" + file)});`,
-    `const p = mod.default;`,
-    `if (!p || typeof p.run !== "function") { console.error("no run() exported"); process.exit(3); }`,
-    `const STEPS = ${JSON.stringify(steps)};`,
-    `const PER_STEP_MS = ${perStepMs};`,
-    `for (let i = 0; i < STEPS.length; i++) {`,
-    `  const t0 = Date.now();`,
-    `  try {`,
-    `    const out = await Promise.race([p.run(STEPS[i].args), new Promise((_, rj) => { const tm = setTimeout(() => rj(new Error("timeout in run()")), PER_STEP_MS); tm.unref?.() })]);`,
-    `    process.stdout.write("__FORGE_STEP__" + i + "__" + JSON.stringify({ ok: true, out, ms: Date.now() - t0 }));`,
-    `  } catch (e) {`,
-    `    process.stdout.write("__FORGE_STEP__" + i + "__" + JSON.stringify({ ok: false, error: String(e?.message ?? e), ms: Date.now() - t0 }));`,
-    `    process.exit(2);`,
-    `  }`,
-    `}`,
-  ].join("\n") : [
-    `const mod = await import(${JSON.stringify("file://" + file)});`,
-    `const p = mod.default;`,
-    `if (!p || typeof p.run !== "function") { console.error("no run() exported"); process.exit(3); }`,
-    `const t0 = Date.now();`,
-    `try {`,
-    `  let timer = null;`,
-    `  const out = await Promise.race([p.run(${JSON.stringify(args)}), new Promise((_, rj) => { timer = setTimeout(() => rj(new Error("timeout in run()")), ${Math.min(timeoutMs, 8000)}) })]);`,
-    `  clearTimeout(timer);`,
-    `  process.stdout.write("__FORGE_OUT__" + JSON.stringify(out));`,
-    `  if (Date.now() - t0 > ${Math.min(timeoutMs, 8000)}) process.exit(4);`,
-    `} catch (e) { console.error(String(e?.message ?? e)); process.exit(2); }`,
-  ].join("\n")
+  const perStepMs = Math.min(timeoutMs, 8000)
+  const runnerSrc = script
+    ? [
+      `const mod = await import(${JSON.stringify("file://" + file)});`,
+      `const p = mod.default;`,
+      `if (!p || typeof p.run !== "function") { console.error("no run() exported"); process.exit(3); }`,
+      `const steps = ${JSON.stringify(script.map((s) => s.args))};`,
+      `const results = [];`,
+      `for (const [i, sArgs] of steps.entries()) {`,
+      `  const t0 = Date.now();`,
+      `  try {`,
+      `    let timer = null;`,
+      `    const out = await Promise.race([p.run(sArgs), new Promise((_, rj) => { timer = setTimeout(() => rj(new Error("timeout in run() step " + i)), ${perStepMs}) })]);`,
+      `    clearTimeout(timer);`,
+      `    results.push({ ok: true, ms: Date.now() - t0, out });`,
+      `  } catch (e) {`,
+      `    results.push({ ok: false, error: String(e?.message ?? e) });`,
+      `    break; // a failed step aborts the sequence — later steps may depend on it`,
+      `  }`,
+      `}`,
+      `process.stdout.write("__FORGE_STEPS__" + JSON.stringify(results));`,
+      `if (results.some((r) => !r.ok)) process.exit(2);`,
+    ].join("\n")
+    : [
+      `const mod = await import(${JSON.stringify("file://" + file)});`,
+      `const p = mod.default;`,
+      `if (!p || typeof p.run !== "function") { console.error("no run() exported"); process.exit(3); }`,
+      `const t0 = Date.now();`,
+      `try {`,
+      `  let timer = null;`,
+      `  const out = await Promise.race([p.run(${JSON.stringify(args)}), new Promise((_, rj) => { timer = setTimeout(() => rj(new Error("timeout in run()")), ${perStepMs}) })]);`,
+      `  clearTimeout(timer);`,
+      `  process.stdout.write("__FORGE_OUT__" + JSON.stringify(out));`,
+      `  if (Date.now() - t0 > ${perStepMs}) process.exit(4);`,
+      `} catch (e) { console.error(String(e?.message ?? e)); process.exit(2); }`,
+    ].join("\n")
   try {
     fs.writeFileSync(runner, runnerSrc, { mode: 0o600 })
     const t0 = Date.now()
@@ -309,53 +308,42 @@ export async function verifyTool(cwd, name, { args = {}, timeoutMs = 10000 } = {
     const ms = Date.now() - t0
     try { fs.rmSync(runner) } catch { }
 
-    if (steps) {
-      // ---- scripted multi-step evidence ----------------------------------
-      const stepResults = []
-      for (const ch of String(result.out).split("__FORGE_STEP__").slice(1)) {
-        const sep = ch.indexOf("__")
-        if (sep < 1) continue
-        const idx = Number(ch.slice(0, sep))
-        const jsonPart = ch.slice(sep + 2)
-        let parsed = null
-        try { parsed = JSON.parse(jsonPart) } catch {
-          const a = jsonPart.indexOf("{"), b = jsonPart.lastIndexOf("}")
-          if (a !== -1 && b > a) { try { parsed = JSON.parse(jsonPart.slice(a, b + 1)) } catch { } }
-        }
-        if (Number.isInteger(idx) && idx >= 0 && idx < steps.length) stepResults[idx] = parsed
-      }
-      const stepsEvidence = steps.map((s, i) => {
-        const r = stepResults[i] ?? null
-        const ran = r?.ok === true
-        const out = ran ? r.out ?? null : null
-        const schemaOk = ran && outputMatches(out, rec.outputSchema)
-        const typeOk = !s.expect?.outputType || (ran && out != null && (s.expect.outputType === "array" ? Array.isArray(out) : typeof out === s.expect.outputType))
-        const includesOk = s.expect?.outputIncludes == null || (ran && String(typeof out === "string" ? out : JSON.stringify(out ?? "")).includes(s.expect.outputIncludes))
-        const matched = ran && schemaOk && typeOk && includesOk
+    if (script) {
+      // ---- multi-step evidence: judge every step's OBSERVED output ---------
+      const raw = result.out.includes("__FORGE_STEPS__") ? result.out.slice(result.out.indexOf("__FORGE_STEPS__") + "__FORGE_STEPS__".length) : ""
+      let observed = []
+      try { observed = raw ? JSON.parse(raw) : [] } catch { observed = [] }
+      const stepEvidence = script.map((s, i) => {
+        const o = observed[i] ?? null
+        const output = o?.ok ? o.out : null
+        const serialized = output == null ? "" : (typeof output === "string" ? output : JSON.stringify(output))
         return {
-          name: s.name, args: s.args, ran, ms: r?.ms ?? null, matched,
-          error: r?.ok === false ? String(r.error ?? "step failed") : (r ? null : "step never reported (child died or timed out mid-script)"),
-          outputPreview: ran ? (typeof out === "string" ? out.slice(0, 160) : JSON.stringify(out ?? null).slice(0, 200)) : null,
-          expectations: { schema: schemaOk, ...(s.expect?.outputType ? { outputType: typeOk } : {}), ...(s.expect?.outputIncludes != null ? { outputIncludes: includesOk } : {}) },
+          step: i + 1,
+          label: s.label ?? `step ${i + 1}`,
+          ran: Boolean(o),
+          threw: o ? !o.ok : null,
+          error: o && !o.ok ? String(o.error ?? "").slice(0, 160) : null,
+          ms: o?.ms ?? null,
+          matchedSchema: outputMatches(output, rec.outputSchema),
+          expectOk: s.expectOk === true ? output?.ok === true : null,
+          expectContains: s.expectContains != null ? serialized.includes(s.expectContains) : null,
+          outputPreview: serialized.slice(0, 160) || null,
         }
       })
-      const passed = result.code === 0 && !result.timedOut && stepsEvidence.every((s) => s.matched)
+      const allRan = stepEvidence.length === script.length && stepEvidence.every((e) => e.ran && !e.threw)
+      const allMatched = stepEvidence.every((e) => e.matchedSchema && (e.expectOk === null || e.expectOk === true) && (e.expectContains === null || e.expectContains === true))
+      const passed = result.code === 0 && !result.timedOut && allRan && allMatched
       const evidence = {
-        at: Date.now(), mode: "probe-script", steps: stepsEvidence,
-        exitCode: result.code, timedOut: result.timedOut, ms,
+        at: Date.now(), mode: "multi-step", steps: script.length, exitCode: result.code, timedOut: result.timedOut, ms,
         stderr: String(result.err ?? "").slice(0, 200),
-        outputMatchedSchema: passed,
+        stepEvidence,
       }
       rec.verification = { passed, evidence }
-      rec.tests = [
-        { name: "behavioral-run", passed, mode: "probe-script", steps: steps.length, exitCode: result.code, ms },
-        ...stepsEvidence.map((s) => ({ name: `probe-step:${s.name}`, passed: s.matched, ms: s.ms })),
-      ]
+      rec.tests = stepEvidence.map((e) => ({ name: `behavioral-step:${e.label}`, passed: e.ran && !e.threw && e.matchedSchema && (e.expectOk === null || e.expectOk === true) && (e.expectContains === null || e.expectContains === true), exitCode: result.code, matched: e.matchedSchema, ms: e.ms }))
       rec.lifecycle = passed ? TOOL_LIFE.VERIFIED : TOOL_LIFE.INACTIVE
       rec.updated = Date.now()
       saveToolLife(cwd, life)
-      const failedStep = passed ? null : (stepsEvidence.find((s) => !s.matched)?.name ?? "script-incomplete")
-      return { ok: passed, name, lifecycle: rec.lifecycle, evidence, failedStep }
+      return { ok: passed, name, lifecycle: rec.lifecycle, evidence }
     }
 
     const rawOut = result.out.includes("__FORGE_OUT__") ? result.out.slice(result.out.indexOf("__FORGE_OUT__") + "__FORGE_OUT__".length) : ""

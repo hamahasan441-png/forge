@@ -57,20 +57,24 @@ function gitignoreDirs(root) {
 
 /** v93 gap fix §12/§13 — a STAT-ONLY walk (no extraction): the fingerprint
  *  scanner the world model uses to detect drift without re-parsing. Same
- *  skip semantics as walkIndexed — one walk truth, two consumers. */
+ *  skip semantics as walkIndexed — one walk truth, two consumers.
+ *  v97 §15: maxFiles <= 0 means NO CAP — the walk completes so the caller can
+ *  prioritize and page itself (the world model does exactly that). */
 export function listSourceFiles(root, { maxFiles = 2000, maxBytesPerFile = 512 * 1024 } = {}) {
   const base = (() => { try { return path.resolve(root || process.cwd()) } catch { return null } })()
   if (!base) return { files: [], truncated: false, skippedBySize: 0 }
+  const uncapped = !(maxFiles > 0)
+  const cap = uncapped ? Infinity : maxFiles
   const skip = new Set([...SKIP, ...gitignoreDirs(base)])
   const out = []
   let truncated = false
   let skippedBySize = 0
   const walk = (dir, depth) => {
-    if (out.length >= maxFiles || depth > 8) return
+    if (out.length >= cap || depth > 8) return
     let entries = []
     try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
     for (const e of entries) {
-      if (out.length >= maxFiles) { truncated = true; break }
+      if (out.length >= cap) { truncated = true; break }
       if (e.name.startsWith(".") && e.name !== ".") { if (skip.has(e.name)) continue }
       if (skip.has(e.name)) continue
       const full = path.join(dir, e.name)
@@ -83,6 +87,59 @@ export function listSourceFiles(root, { maxFiles = 2000, maxBytesPerFile = 512 *
     }
   }
   walk(base, 0)
+  return { files: out, truncated, skippedBySize }
+}
+
+/**
+ * v98 shipwise — the CHUNKED async twin of listSourceFiles. Identical skip
+ * semantics, identical output shape, identical ordering; the only difference
+ * is that the walk YIELDS to the event loop every `yieldEvery` entries (and
+ * on a time deadline) so a six-figure-repo stat walk never freezes the TTY,
+ * the bus, or in-flight provider requests. The synchronous listSourceFiles
+ * stays untouched for sync callers (the world model's sync surface is pinned
+ * by tests); async builders (worldmodel.buildAsync) use this one. Never
+ * throws; a signal aborts between chunks with the partial result honestly
+ * marked truncated.
+ */
+export async function listSourceFilesAsync(root, { maxFiles = 2000, maxBytesPerFile = 512 * 1024, yieldEvery = 200, yieldMs = 16, signal = null } = {}) {
+  const base = (() => { try { return path.resolve(root || process.cwd()) } catch { return null } })()
+  if (!base) return { files: [], truncated: false, skippedBySize: 0 }
+  const uncapped = !(maxFiles > 0)
+  const cap = uncapped ? Infinity : maxFiles
+  const skip = new Set([...SKIP, ...gitignoreDirs(base)])
+  const out = []
+  let truncated = false
+  let skippedBySize = 0
+  let sinceYield = 0
+  let lastYield = Date.now()
+  const maybeYield = async () => {
+    sinceYield++
+    if (sinceYield < yieldEvery && Date.now() - lastYield < yieldMs) return
+    sinceYield = 0
+    lastYield = Date.now()
+    await new Promise((r) => setImmediate(r))
+  }
+  const walk = async (dir, depth) => {
+    if (out.length >= cap || depth > 8) return
+    if (signal?.aborted) { truncated = true; return }
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      if (out.length >= cap) { truncated = true; break }
+      if (signal?.aborted) { truncated = true; break }
+      if (e.name.startsWith(".") && e.name !== ".") { if (skip.has(e.name)) continue }
+      if (skip.has(e.name)) continue
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) { await walk(full, depth + 1); continue }
+      if (!isSourceFile(e.name) && !isConfigFile(e.name)) continue
+      let st
+      try { st = fs.statSync(full) } catch { continue }
+      if (st.size > maxBytesPerFile) { skippedBySize++; continue }
+      out.push({ rel: path.relative(base, full).replace(/\\/g, "/"), full, size: st.size, mtime: Math.round(st.mtimeMs || 0) })
+      await maybeYield()
+    }
+  }
+  await walk(base, 0)
   return { files: out, truncated, skippedBySize }
 }
 
@@ -103,6 +160,11 @@ export function recordToGraphParts(rec) {
     lang: rec.lang,
     contracts: rec.contracts || [],
     dependencies: [],
+    // v98 shipwise: structured-extraction passthrough — tier-3 details and
+    // provenance ride the SAME node the world model serves, so enriched
+    // records are visible to every consumer without a second join
+    symbolDetails: Array.isArray(rec.symbolDetails) ? rec.symbolDetails : null,
+    extraction: rec.extraction || null,
   }
   const edges = []
   for (const imp of node.imports) {
@@ -195,7 +257,7 @@ function collectRepoFiles(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024 }
   return found
 }
 
-function walkIndexed(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024 } = {}) {
+function walkIndexed(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024, rels = null } = {}) {
   let base
   try { base = path.resolve(root || process.cwd()) } catch {
     return { records: [], stats: { reused: 0, parsed: 0, files: 0, persisted: false } }
@@ -205,39 +267,54 @@ function walkIndexed(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024 } = {}
   const nextFiles = {}
   const records = []
   let scanned = 0, reused = 0, parsed = 0
-  const walk = (dir, depth) => {
-    if (scanned >= maxFiles || depth > 8) return
-    let entries = []
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
-    for (const e of entries) {
-      if (scanned >= maxFiles) return
-      if (e.name.startsWith(".") && e.name !== ".") { if (skip.has(e.name)) continue }
-      if (skip.has(e.name)) continue
-      const full = path.join(dir, e.name)
-      if (e.isDirectory()) { walk(full, depth + 1); continue }
-      if (!isSourceFile(e.name) && !isConfigFile(e.name)) continue
-      scanned++
-      let st
-      try { st = fs.statSync(full) } catch { continue }
-      if (st.size > maxBytesPerFile) continue
-      const rel = path.relative(base, full)
-      const cached = cache.files?.[rel]
-      let rec
-      if (cacheHit(cached, st) && Array.isArray(cached.contracts)) {
-        rec = { ...cached, rel }
-        reused++
-      } else {
-        let src = ""
-        try { src = fs.readFileSync(full, "utf8") } catch { continue }
-        rec = { rel, ...recordFromSource(e.name, src, full, st) }
-        if (!Array.isArray(rec.contracts)) rec.contracts = []
-        parsed++
-      }
-      nextFiles[rel] = rec
-      records.push(rec)
+  // v97 §15: an EXPLICIT rel list (already prioritized by the caller) replaces
+  // the directory walk — same cache/index semantics, one implementation.
+  const visit = (full) => {
+    const name = path.basename(full)
+    if (!isSourceFile(name) && !isConfigFile(name)) return
+    scanned++
+    let st
+    try { st = fs.statSync(full) } catch { return }
+    if (st.size > maxBytesPerFile) return
+    const rel = path.relative(base, full)
+    const cached = cache.files?.[rel]
+    let rec
+    if (cacheHit(cached, st) && Array.isArray(cached.contracts)) {
+      rec = { ...cached, rel }
+      reused++
+    } else {
+      let src = ""
+      try { src = fs.readFileSync(full, "utf8") } catch { return }
+      rec = { rel, ...recordFromSource(name, src, full, st) }
+      if (!Array.isArray(rec.contracts)) rec.contracts = []
+      parsed++
     }
+    nextFiles[rel] = rec
+    records.push(rec)
   }
-  walk(base, 0)
+  if (Array.isArray(rels) && rels.length) {
+    for (const rel of rels) {
+      if (scanned >= maxFiles) break
+      const full = path.join(base, String(rel).replace(/\\/g, "/"))
+      visit(full)
+    }
+  } else {
+    const walk = (dir, depth) => {
+      if (scanned >= maxFiles || depth > 8) return
+      let entries = []
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (scanned >= maxFiles) return
+        if (e.name.startsWith(".") && e.name !== ".") { if (skip.has(e.name)) continue }
+        if (skip.has(e.name)) continue
+        const full = path.join(dir, e.name)
+        if (e.isDirectory()) { walk(full, depth + 1); continue }
+        if (!isSourceFile(e.name) && !isConfigFile(e.name)) continue
+        visit(full)
+      }
+    }
+    walk(base, 0)
+  }
   const persisted = saveIndex(base, { files: nextFiles })
   const stats = { reused, parsed, files: records.length, persisted: persisted && indexEnabled() }
   lastIndexStats = stats
@@ -282,7 +359,7 @@ function formatRepoMap(found, { maxListed = 60, maxSymbols = 12, maxChars = 4000
 export function buildSemanticGraph(root, opts = {}) {
   const maxFiles = opts.maxFiles ?? 500
   const maxBytesPerFile = opts.maxBytesPerFile ?? 512 * 1024
-  const walked = walkIndexed(root, { maxFiles, maxBytesPerFile })
+  const walked = walkIndexed(root, { maxFiles, maxBytesPerFile, rels: opts.rels ?? null })
   const files = []
   const edges = []
   for (const rec of walked.records) {

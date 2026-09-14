@@ -6,34 +6,42 @@ deleted at release time and their leftovers move here. Do not keep a PLAN
 file for work that already shipped — if it shipped, the plan is history; if
 it did not ship, it belongs on this list.
 
-Status: **not completed** — every item below is open. Nothing on this list
-is claimed, promised or half-shipped; an item moves out of here only when a
-test proves the behavior exists.
+Status: **not completed** — the deferred items below remain open. The seven
+runtime/sandbox/search/checkpoint/LSP/tool-creation gaps that lived here
+through v94 "fastwise" are CLOSED (v94 "todowise": `tests/test-todowise.mjs`,
+81 assertions, suite registered in run-all — an item only moves out of this
+file when a test proves the behavior exists, and each one now has exactly
+that). The kernel item — isolated worktree execution for DAG nodes — is
+CLOSED by v95 "worktreewise" (`tests/test-worktreewise.mjs`, 75 assertions,
+9 sections: lifecycle, isolation invariant, conflict honesty, eligibility,
+gates, orphan sweep, child-process runner, meta integration, surface-dedup
+audit). v96 "unifywise" additionally closed the WIRING ledger — the
+computed-then-ignored surfaces, dropped resume state, dead event vocabulary,
+unfed ledgers and duplicated implementations found by the five-module deep
+audit — each pinned by `tests/test-unifywise.mjs` (72 assertions) and
+`tests/test-envfingerprint.mjs` (27 assertions). v98 "shipwise" closed the
+v97 leftovers — LSP structured extraction wired into the index path
+(langstruct.js, pinned by `tests/test-v98.mjs`), browser visual regression
+(visual_diff baselines), artifact verification (observed build outputs as
+VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
+(buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
+
+## v98 "shipwise" — leftovers (completed plan removed, house style)
+
+- [ ] tree-sitter consumption: the layer-2 probe reports the binary but
+      extraction still never uses it (the CLI's grammar/output schema is a
+      per-language surface; LSP tier-3 is the default structured path now)
+- [ ] docker-image verification goes no deeper than bringUp health + artifact
+      existence (image digest/layer checks are not implemented)
+- [ ] gitship PR CREATION (not just PR text) — needs a consented remote API
+      path (token sourcing is unsolved by policy, providers.js:104)
+
 
 ## Open items
 
-- [ ] semantic_search: the persistent CHUNK CORPUS shipped in v94 gapclose
-      (fingerprint-invalidated per file, ~/.forge/projects/<hash>/
-      semantic-index.json — a fresh process re-reads only changed files).
-      The BM25 inverted structure itself is still built per query from the
-      cached chunks (milliseconds of CPU, no I/O); persisting the inverted
-      structure too is a further step, not justified at current repo sizes.
-- [ ] runtime: the kill-fallback walk enumerates win32 process trees via
-      PowerShell CIM / wmic; neither exists on this repo's test hosts, so the
-      win32 branch is only pinned for its honest leader-only degradation —
-      the full tree walk there needs a Windows host to prove behaviorally.
-- [ ] runtime: for a non-HTTP service the TCP floor proves LISTENING, not
-      application health; protocol-specific probes (TLS handshake, WebSocket
-      upgrade, Redis PING-style) as runtime-adapter capabilities would
-      strengthen the evidence beyond "it answered the connect"
-- [ ] LSP: extractStructured spawns and closes one server PER CALL (fine for
-      on-demand tool use); a bulk structured-extraction path should reuse a
-      session (createLspSession caches clients per language) instead of
-      paying a server start per file
-- [ ] checkpoint: reconcile covers the files the CHECKPOINT recorded; a
-      whole-tree reconcile at crash-resume (every world-model fingerprint vs
-      disk, so external edits to files no checkpoint ever touched are also
-      surfaced before planning continues) is the larger open step
+(none — the seven former items shipped and closed in v94 "todowise"; the
+kernel worktree item shipped and closed in v95 "worktreewise"; the remaining
+deferred work is policy-gated, not implementable-by-decision)
 
 ## Skill forge — leftovers (never shipped, never promoted)
 
@@ -41,12 +49,6 @@ test proves the behavior exists.
       never met the promotion bar (no recorded behavioral evidence, no fresh
       fingerprint). It stays here until it passes the same gates as a
       learned download.
-
-## Kernel — leftovers
-
-- [ ] isolated worktree execution for DAG nodes: nodes would run in a
-      per-node git worktree so parallel segments never see each other's
-      partial writes; design exists, no implementation, no test.
 
 ## Learned skills — policy reminders
 
@@ -63,7 +65,12 @@ test proves the behavior exists.
   pinnedFetch policy (Research crawler stays on this list until its fetch
   surface is proven pinned).
 - Never make a learned skill Auto-ACTIVE without behavioral evidence.
-- Never keep a shipped PLAN file — leftovers live here, history lives in
-  the CHANGELOG.
-- Never run DAG nodes in a shared tree when they mutate the same files
-  (the isolated worktree item above is the fix, not a license).
+- Never keep a shipped PLAN file — leftovers live here, history lives in the
+  CHANGELOG.
+- Never run DAG nodes in a shared tree when they mutate the same files —
+  v95 "worktreewise" IS the fix: mutating nodes with pairwise-disjoint
+  declared targets execute in per-node git worktrees, the merge back into
+  the shared tree is checked-then-applied behind the single-writer barrier,
+  and anything ineligible (undeclared targets, overlap, dependencies,
+  uncommitted target drift, non-git repo, opt-out) stays serialized exactly
+  as before. The rule stands; the fix enforces it.

@@ -180,7 +180,7 @@ console.log('== stale lessons / evidence index ==')
   const pdir = projectDir(WORK)
   fs.mkdirSync(pdir, { recursive: true })
   fs.writeFileSync(path.join(pdir, 'index.json'), JSON.stringify({
-    version: 1,
+    version: 2,
     files: { 'api.ts': { mtime: Date.now() + 60_000, size: 12, symbols: ['x'] } },
   }))
   const les = { files: ['api.ts'], lastUsed: Date.now() - 120_000, successful_repair: 'add the route', failure: 'x' }
@@ -199,9 +199,9 @@ console.log('== frozen kernel + package ==')
   ok('project cannot flip assumeYes', dropped.includes('tools.assumeYes'))
   eq('classifyTaskComplexity frozen', classifyTaskComplexity('fix a typo'), 'trivial')
   eq('typo still MICRO', classifyTask('fix a typo in README').class, TASK_CLASS.MICRO)
-  eq('VERSION is 94.0.0', VERSION, '94.0.0')
+  eq('VERSION is 98.0.0', VERSION, '98.0.0')
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  eq('package.json is 94.0.0', pkg.version, '94.0.0')
+  eq('package.json is 98.0.0', pkg.version, '98.0.0')
   ok('files includes evaluate.js', pkg.files.includes('evaluate.js'))
   ok('files includes integrate.js', pkg.files.includes('integrate.js'))
   eq('zero runtime deps', Object.keys(pkg.dependencies ?? {}).length, 0)

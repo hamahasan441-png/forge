@@ -33,8 +33,12 @@ import path from "node:path"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { rankDocs } from "./retrieval.js"
 import { DEFAULT_DIR } from "./config.js"
+import { VERSION } from "./version.js"
 
-const VERSION = "94.0.0"
+// v95 fix: this module used to carry a LOCAL `const VERSION = "94.0.0"` that
+// shadowed the single source of truth — the search provider's user-agent
+// advertised a stale version on every request after the bump. version.js is
+// the ONE source (v20.2 rule); a bump must touch exactly one file.
 const UA = `forge-agent/${VERSION}`
 /** Forge-owned cache root (same discipline as the embeddings cache). */
 const CACHE_ROOT = path.join(DEFAULT_DIR, "cache")

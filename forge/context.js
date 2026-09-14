@@ -265,13 +265,18 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     const ranked = sections.map((s) => ({ ...s, tokens: estimateTokens(s.text) }))
     const kept = []
     let used = 0
+    let budgetOverflow = false
     for (const s of ranked) {
       if (used + s.tokens > budget && kept.length) { s.dropped = true; continue }
+      // v96 unifywise honesty flag: the FIRST section is always kept (an
+      // empty context helps nobody), but when it alone blows the budget the
+      // caller must be able to see that — a silent 3x overflow is not "fit".
+      if (used + s.tokens > budget && !kept.length && s.tokens > budget) budgetOverflow = true
       kept.push(s)
       used += s.tokens
     }
     const text = kept.filter((s) => !s.dropped).map((s) => s.text).join("\n\n")
-    return { text, tokens: used, sections: kept, sources, repoFiles: repoSizeFiles() }
+    return { text, tokens: used, sections: kept, sources, repoFiles: repoSizeFiles(), ...(budgetOverflow ? { budgetOverflow: true, budget } : {}) }
   }
 
   /** BM25 over a set of candidate docs the caller already has (e.g. file

@@ -93,7 +93,7 @@ console.log("== 2. health probes are REAL (never faked) ==")
   ok("live server → healthy with status evidence", good.ok === true && good.probe.status === 200 && good.probe.ms >= 0)
   const bad = await rs.healthProbe({ port: 1 }) // port 1: nothing there
   ok("dead port → NOT healthy (evidence against claims)", bad.ok === false && Boolean(bad.error))
-  const invalid = rs.healthProbe({ port: "not-a-port" })
+  const invalid = await rs.healthProbe({ port: "not-a-port" }) // v94 todowise: async (protocol-aware probe awaits the TCP fallback)
   ok("invalid port → honest error, no probe", invalid.ok === false && invalid.probe === null)
   srv.close()
 }

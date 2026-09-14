@@ -29,10 +29,11 @@ import fs from "node:fs"
 import { VERSION } from "./version.js"
 import os from "node:os"
 import path from "node:path"
-import { snapshotBefore, sealCreated, restoreTransactional } from "./checkpoint.js"
+import { snapshotBefore, sealCreated, sealEdited, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun } from "./shellguard.js"
-import { wrapBash, resetSandboxProbe } from "./sandbox.js"
+import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
+import { signalGroup } from "./runtime.js"
 import { resolveShell } from "./sysshell.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
@@ -375,11 +376,11 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "browser",
-      description: "Drive a real browser to open, snapshot, click, fill, and screenshot pages. Opt-in binary (chromium or agent-browser). Missing binary returns UNAVAILABLE — the turn continues. http(s) URLs are SSRF-guarded; file:// stays inside the project; javascript:/data: refused. Screenshot pixels attach as vision parts when the provider can see.",
+      description: "Drive a real browser to open, snapshot, click, fill, and screenshot pages. Opt-in binary (chromium or agent-browser). Missing binary returns UNAVAILABLE — the turn continues. http(s) URLs are SSRF-guarded; file:// stays inside the project; javascript:/data: refused. Screenshot pixels attach as vision parts when the provider can see. `errors` lists captured console/page-log/network-load errors — UI verification evidence (a rendering page with errors is NOT verified). `visual_diff {name}` captures a snapshot+ screenshot baseline on first run, then COMPARES later runs (text diff + pixel hash) — visual regression evidence; `update:true` re-baselines.",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["open", "snapshot", "click", "fill", "type", "press", "screenshot", "scroll", "back", "reload", "close", "status"], description: "open | snapshot | click | fill | type | press | screenshot | scroll | back | reload | close | status" },
+          action: { type: "string", enum: ["open", "snapshot", "click", "fill", "type", "press", "screenshot", "scroll", "back", "reload", "close", "status", "errors", "visual_diff"], description: "open | snapshot | click | fill | type | press | screenshot | scroll | back | reload | close | status | errors | visual_diff (regression baseline compare)" },
           url: { type: "string", description: "absolute http(s) URL, file:// inside the project, or about:blank (open)" },
           ref: { type: "string", description: "interactive ref from snapshot, e.g. @e1" },
           selector: { type: "string", description: "CSS selector when no ref" },
@@ -387,6 +388,8 @@ export const TOOL_DEFS = [
           key: { type: "string", description: "key to press (Enter, Tab, Escape, …)" },
           path: { type: "string", description: "optional project path to save a screenshot" },
           amount: { type: "number", description: "scroll pixels (default 500)" },
+          name: { type: "string", description: "visual_diff baseline name (1-64 chars)" },
+          update: { type: "boolean", description: "visual_diff: re-baseline explicitly (update:true)" },
         },
         required: ["action"],
       },
@@ -487,14 +490,16 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "runtime",
-      description: "Runtime Intelligence for the PROJECT (not arbitrary commands): discover the project's real runtime shape (type/entrypoint/package manager/build/run scripts/port hints — every fact carries its file evidence, commands are NEVER invented), then launch the DISCOVERED build/run command via the background process manager, probe health with a REAL probe (HTTP first; protocol-aware TCP-connect evidence for non-HTTP services — listening is proven and labeled, never faked as app health), and prove claims like 'server started' with process + health evidence. Also reconciles forge-owned processes after a crash (ledger + pid-reuse guard — never touches unrelated processes). Actions: discover | launch | status | health | claim | reconcile | stop.",
+      description: "Runtime Intelligence for the PROJECT (not arbitrary commands): discover the project's real runtime shape (type/entrypoint/package manager/build/run scripts/port hints — every fact carries its file evidence, commands are NEVER invented), then launch the DISCOVERED build/run command via the background process manager, probe health with a REAL HTTP request, and prove claims like 'server started' with process + health evidence. `up` is the full lifecycle in one action: (optional build) → launch → WAIT-READY (bounded health polling) → verdict. Also reconciles forge-owned processes after a crash (ledger + pid-reuse guard — never touches unrelated processes). Actions: discover | up | launch | status | health | claim | reconcile | stop.",
       parameters: { type: "object", properties: {
-        action: { type: "string", enum: ["discover", "launch", "status", "health", "claim", "reconcile", "stop"], description: "what to do" },
-        command: { type: "string", description: "launch: explicit command (default: the DISCOVERED run/build script — never invented)" },
+        action: { type: "string", enum: ["discover", "up", "launch", "status", "health", "claim", "reconcile", "stop"], description: "what to do" },
+        command: { type: "string", description: "launch/up: explicit run command (default: the DISCOVERED run script — never invented)" },
+        build: { type: "boolean", description: "up: run the discovered BUILD command first (bounded wait)" },
+        ready_timeout_ms: { type: "number", description: "up: readiness budget (default 30000)" },
         phase: { type: "string", enum: ["run", "build"], description: "launch: which discovered script (default run)" },
         name: { type: "string", description: "launch/stop: process name (default app for run, build for build)" },
-        port: { type: "number", description: "health/claim: explicit port (default: detected from live processes)" },
-        host: { type: "string", description: "health/claim host (default 127.0.0.1)" },
+        port: { type: "number", description: "health/claim/up: explicit port (default: detected from live processes)" },
+        host: { type: "string", description: "health/claim/up host (default 127.0.0.1)" },
         timeout_sec: { type: "number", description: "launch auto-kill fuse (default 3600)" },
         kill: { type: "boolean", description: "reconcile: kill forge-owned orphans (default false — report only)" },
         signal: { type: "string", description: "stop signal (default SIGTERM)" },
@@ -867,11 +872,15 @@ function capWithMarker(body, marker, limit) {
  * Terminate a child AND everything it spawned. The command runs via
  * /bin/sh -c inside its own process group (detached:true), so a single
  * negative-PID signal reaches `sleep 300 &`-style grandchildren that used to
- * survive the parent's SIGKILL and leak after a timeout.
+ * survive the parent's SIGKILL and leak after a timeout. v94 todowise: when
+ * the platform refuses the group signal, the same EVIDENCE-BASED member walk
+ * as runtime.js signals each group member (the old fallback reached only the
+ * leader and leaked grandchildren).
  */
 function killTree(child, signal = "SIGKILL") {
   if (!child || child.pid == null) return
   try { process.kill(-child.pid, signal); return } catch {}
+  try { signalGroup(child.pid, signal) } catch {}
   try { child.kill(signal) } catch {}
 }
 
@@ -963,18 +972,20 @@ async function runBash(ctx, command, timeoutSec) {
   // v87: wrap only while the sandbox has not proven broken; if the sandboxed
   // spawn dies with a bwrap setup error, re-run the same command unsandboxed
   // and remember — later commands skip the dead wrapper entirely.
+  // v94 todowise: the failure also RESETS the sandbox module's one-per-process
+  // kernel probe (overflowuid/overflowgid) — a kernel hardened after forge
+  // started is re-probed once, cheaply, exactly at the moment the evidence
+  // (bwrap start failure) says the cached verdict went stale.
   let wrapped = bwrapBroken ? plainWrap(command) : wrapBash(command, { cwd: ctx.cwd, root: ctx.root })
   let out = await attempt(wrapped)
   if (wrapped.sandboxed && isBwrapStartFailure(out)) {
     bwrapBroken = true
-    // v94 gapclose: the REAL start failure is evidence the boot-time kernel
-    // probe is stale — drop it so every later detection in this process
-    // (doctor, capabilities, wrapBash) re-reads the kernel instead of
-    // reporting a sandbox that demonstrably cannot start.
-    try { resetSandboxProbe() } catch { /* sandbox.js always exports this; defensive only */ }
+    // v94 todowise: re-probe the kernel NOW (not lazily) — the failure is the
+    // evidence that the cached overflowuid/overflowgid verdict went stale.
+    try { reprobeKernelSupport() } catch { /* never let a re-probe break the run */ }
     const why = (out.split("\n").find((l) => /^\s*bwrap:/.test(l)) || "bwrap failed to start").trim().slice(0, 160)
     out = await attempt(plainWrap(command))
-    out += `\n[forge] sandbox skipped: ${why} — command re-run WITHOUT the sandbox (FORGE_SANDBOX=0 makes this permanent).`
+    out += `\n[forge] sandbox skipped: ${why} — kernel support re-probed; command re-run WITHOUT the sandbox (FORGE_SANDBOX=0 makes this permanent).`
   }
   return out
 }
@@ -1224,7 +1235,7 @@ function write_file(ctx, args) {
   } catch (e) {
     return writeErrorText(e, p)
   }
-  if (id) sealCreated(id, ctx.cwd)
+  if (id) { sealCreated(id, ctx.cwd); sealEdited(id, ctx.cwd) } // v94 todowise: post-write seal enables drift attribution at restore
   const cpNote = !id && existed ? " — ⚠ checkpoint failed: this change cannot be undone" : ""
   return `OK wrote ${p} (${(args.content ?? "").length} bytes${existed ? "" : ", created"})${cpNote}`
 }
@@ -1248,6 +1259,7 @@ function edit_file(ctx, args) {
   } catch (e) {
     return writeErrorText(e, p)
   }
+  if (cpId) sealEdited(cpId, ctx.cwd) // v94 todowise: post-write seal enables drift attribution at restore
   return `OK edited ${p}${cpId ? "" : " — ⚠ checkpoint failed: this change cannot be undone"}`
 }
 
@@ -1604,6 +1616,7 @@ function multi_edit(ctx, args) {
   } catch (e) {
     return writeErrorText(e, p)
   }
+  if (cpId) sealEdited(cpId, ctx.cwd) // v94 todowise: post-write seal enables drift attribution at restore
   return `OK multi_edit ${p}: ${applied} replacement(s), ${edits.length} edit(s), atomic${cpId ? "" : " — ⚠ checkpoint failed: this change cannot be undone"}`
 }
 
@@ -1685,7 +1698,7 @@ function apply_patch(ctx, args) {
     const p = safePath(ctx, t, { write: true }).abs
     try { projectUnlink(ctx, p) } catch (e) { unlinkFailed.push(`${t} (${e?.code ?? e?.message})`) }
   }
-  if (checkpointId) sealCreated(checkpointId, ctx.cwd)
+  if (checkpointId) { sealCreated(checkpointId, ctx.cwd); sealEdited(checkpointId, ctx.cwd) } // v94 todowise: post-write seal enables drift attribution at restore
   if (unlinkFailed.length) return `ERROR: patch applied but could not delete ${unlinkFailed.join(", ")} — files were written; run forge undo to revert`
   const parts = []
   if (applied.created.length) parts.push(`created ${applied.created.join(", ")}`)
@@ -2248,6 +2261,9 @@ async function runKgQueryTool(ctx, args) {
   let method = "none"
   try {
     const world = createWorldModel({ cwd: root })
+    // v98 shipwise: chunked walk — the kg_query tool must never freeze the
+    // loop on a six-figure repo; the fresh window covers the follow-up queries
+    await world.buildAsync()
     const res = world.answer(q)
     method = res?.method ?? "none"
     const a = res?.answer
@@ -2455,6 +2471,8 @@ async function runCodeContextTool(ctx, args) {
   }
   try {
     const world = createWorldModel({ cwd: root })
+    // v98 shipwise: chunked walk (same law as kg_query)
+    await world.buildAsync()
     lines.push("", "wiring (world model — who imports it, what tests cover it):")
     for (const rel of topFiles) {
       try {
@@ -2500,24 +2518,35 @@ async function runRuntimeTool(ctx, args) {
     return `project: ${r.project.type} | run: ${r.project.runCommand ?? "NOT discovered"}\nprocesses:\n${procs}${led}`
   }
   if (action === "health") {
-    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1", protocol: args?.protocol === "tcp" || args?.protocol === "http" ? args.protocol : "auto" })
+    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1" })
     if (r.error && !r.probe) return `ERROR: ${r.error}`
-    if (r.ok && r.probe.protocol === "tcp") {
-      return `REACHABLE (non-HTTP) — ${r.probe.url} → TCP connect ok in ${r.probe.ms}ms — the service is LISTENING and answered the connect, but it does not speak plain HTTP (TLS/WebSocket/raw-socket service); listening is PROVEN, application-level health is NOT provable with this probe (recorded as runtime evidence)`
-    }
-    return r.ok
-      ? `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)`
-      : `NOT HEALTHY — ${r.probe?.url ?? ""}: ${r.error ?? "probe failed"} (this is evidence against any 'server started' claim)`
+    if (r.ok && r.level === "http") return `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)`
+    if (r.ok && r.level === "tcp") return `REACHABLE — TCP listener on ${r.probe.host}:${r.probe.port} in ${r.probe.ms}ms (${r.note ?? "no HTTP response — protocol-aware probe"}) (recorded as runtime evidence)`
+    return `NOT HEALTHY — ${r.probe?.url ?? `${r.probe?.host ?? "127.0.0.1"}:${r.probe?.port ?? "?"}`}: ${r.error ?? "probe failed"} (this is evidence against any 'server started' claim)`
   }
   if (action === "claim") {
     const r = await session.claimServerStarted({ port: args?.port ?? null })
     const lines = [r.ok ? "CLAIM PROVEN: server started" : "CLAIM NOT PROVEN: server started"]
     lines.push(`processes: ${r.processes.length} live${r.processes[0] ? ` (${r.processes[0].id}, pid ${r.processes[0].pid})` : ""}`)
-    lines.push(`health: ${r.health.ok
-      ? (r.health.probe?.protocol === "tcp"
-        ? `TCP connect in ${r.health.probe?.ms}ms — non-HTTP service: LISTENING proven (process + its own port + accepted connect), application-level health not provable over HTTP`
-        : `HTTP ${r.health.probe?.status} in ${r.health.probe?.ms}ms`)
-      : r.health.error ?? "failed"}`)
+    lines.push(`health: ${r.health.ok ? (r.health.level === "tcp" ? `TCP listener :${r.health.probe?.port} in ${r.health.probe?.ms}ms (no HTTP response — protocol-aware)` : `HTTP ${r.health.probe?.status} in ${r.health.probe?.ms}ms`) : r.health.error ?? "failed"}`)
+    return lines.join("\n")
+  }
+  if (action === "up") {
+    // v97 §41: the composite lifecycle — launch → WAIT READY → health verdict,
+    // one honest action with per-stage evidence. `build:true` runs the
+    // discovered build command first (bounded wait). Nothing is assumed: a
+    // non-ready result says exactly how far it got.
+    const r = await session.bringUp({
+      command: args?.command ?? null,
+      build: args?.build === true,
+      port: args?.port ?? null,
+      host: args?.host ?? "127.0.0.1",
+      readyTimeoutMs: Number(args?.ready_timeout_ms) > 0 ? Number(args?.ready_timeout_ms) : 30000,
+      timeoutSec: args?.timeout_sec,
+    })
+    const lines = [r.ok ? "BRING-UP COMPLETE — launched, ready, healthy" : `BRING-UP INCOMPLETE — ${r.error ?? "see stages"}`]
+    for (const s of r.stages) lines.push(`  ${s.ok ? green("✓") : red("✗")} ${s.stage}: ${s.detail}`)
+    if (r.ok) lines.push("next: interact/observe, then {action:\"stop\"} — exit handlers also clean up")
     return lines.join("\n")
   }
   if (action === "reconcile") {
@@ -2531,7 +2560,7 @@ async function runRuntimeTool(ctx, args) {
     if (!r.ok) return r.error
     return `${formatProcessEntry(r.entry)}\n${r.note ?? ""}`
   }
-  return `ERROR: unknown runtime action "${action}" (discover | launch | status | health | claim | reconcile | stop)`
+  return `ERROR: unknown runtime action "${action}" (discover | up | launch | status | health | claim | reconcile | stop)`
 }
 
 export async function execTool(ctx, name, args) {

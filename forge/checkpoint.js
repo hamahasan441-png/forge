@@ -202,6 +202,41 @@ export function sealCreated(checkpointId, cwd) {
 }
 
 /**
+ * v94 todowise: post-write seal for EDITED files. snapshotBefore records the
+ * PRE-mutation fingerprint (what restore returns to); this records what forge
+ * actually wrote AFTER the mutation (`postSha`). At restore time the pair
+ * (sha, postSha) lets the drift phase attribute the current file state:
+ *   cur === sha      → already at the snapshot state (clean)
+ *   cur === postSha  → forge's own edit — undoing it is exactly the checkpoint's job
+ *   cur === neither  → the file was touched by something forge cannot attribute
+ *                      (external process between crash and resume) — PROTECTED,
+ *                      never silently clobbered
+ * Without a postSha the change is honestly "unattributed": restoring still
+ * reverts it (that is the checkpoint's purpose) but the drift is REPORTED.
+ */
+export function sealEdited(checkpointId, cwd) {
+  try {
+    if (!checkpointId) return
+    const dir = path.join(CHECKPOINTS_DIR, checkpointId)
+    const mFile = path.join(dir, "manifest.json")
+    const m = JSON.parse(fs.readFileSync(mFile, "utf8"))
+    let changed = false
+    for (const f of m.files ?? []) {
+      if (f.created || f.tooLarge || f.postSha) continue
+      const info = fullFileHash(f.path)
+      if (info && f.sha && info.sha !== f.sha) {
+        f.postSha = info.sha
+        f.postSize = info.size
+        f.postMtime = info.mtime
+        changed = true
+      }
+    }
+    if (changed) writeStateAtomic(mFile, JSON.stringify(m, null, 1))
+  } catch {}
+  void cwd
+}
+
+/**
  * P1 — TRANSACTIONAL RESTORE.
  *
  * The old restore walked the manifest and best-effort copied whatever it found,
@@ -214,10 +249,6 @@ export function sealCreated(checkpointId, cwd) {
  *   3. RESTORE SET  — compute exactly what will be written/deleted, up front
  *   4. RESTORE      — apply it
  *   5. VERIFY       — hash every restored file and compare with the manifest
- *   5b. RECONCILE   — hash every manifest file the restore could NOT write
- *                     (tooLarge skips, kept created files) and report drift:
- *                     `treeConsistent` says whether the working tree matches
- *                     the checkpoint's recorded fingerprints as a whole
  *   6. PERSIST      — write the result, including any partial failure
  *
  * A restore that did not fully succeed is NEVER reported as successful: the
@@ -275,9 +306,49 @@ export function restoreTransactional(checkpointId, { cwd = null } = {}) {
     }
     result.phases.restoreSet = { write: restoreSet.write.length, remove: restoreSet.remove.length, skip: restoreSet.skip.length }
 
+    // ---- 3b. DRIFT — working-tree fingerprints vs the manifest --------------
+    // v94 todowise: between the snapshot and this restore, an EXTERNAL process
+    // may have touched the tree (the crash/resume window). The manifest's
+    // (sha, postSha) pair attributes what the current file state IS:
+    //   clean          — already at the snapshot state
+    //   forge          — forge's own sealed post-write state (undo target)
+    //   external       — neither fingerprint matches: work forge cannot
+    //                    attribute → the file is KEPT, never clobbered
+    //   unattributed   — changed, but no postSha was sealed (legacy manifest /
+    //                    crash before the seal): reverting still happens (it is
+    //                    the checkpoint's purpose) and the drift is REPORTED
+    //   missing        — file gone; restoring recreates it (nothing to lose)
+    const drift = { checked: 0, clean: 0, forge: 0, external: 0, unattributed: 0, missing: 0, externallyModified: [], unattributedPaths: [] }
+    const protectedFiles = new Set()
+    for (const f of restoreSet.write) {
+      drift.checked++
+      let cur = null
+      try { cur = fullFileHash(f.path) } catch { cur = null }
+      if (!cur) { drift.missing++; continue }
+      if (cur.sha === f.sha) { drift.clean++; continue }
+      if (f.postSha && cur.sha === f.postSha) { drift.forge++; continue }
+      if (f.postSha) {
+        drift.external++
+        drift.externallyModified.push(f.path)
+        protectedFiles.add(f.path)
+        result.notes.push(`DRIFT: ${path.basename(f.path)} was modified by something forge cannot attribute (SHA ≠ snapshot and ≠ forge's post-write seal) — KEPT, not overwritten; restore it deliberately if that external work is disposable`)
+      } else {
+        drift.unattributed++
+        drift.unattributedPaths.push(f.path)
+        result.notes.push(`DRIFT (unattributed): ${path.basename(f.path)} changed since the snapshot and no forge post-write seal exists — reverting per the checkpoint's purpose, but the change is reported, never silent`)
+      }
+    }
+    result.phases.drift = drift
+    for (const f of restoreSet.write) {
+      if (protectedFiles.has(f.path)) {
+        result.skipped.push({ path: f.path, reason: "externally modified since the checkpoint (unattributable SHA) — external work preserved" })
+      }
+    }
+    const writable = restoreSet.write.filter((f) => !protectedFiles.has(f.path))
+
     // ---- 4. RESTORE -------------------------------------------------------
     const restore = { attempted: 0, ok: 0, failed: [] }
-    for (const f of restoreSet.write) {
+    for (const f of writable) {
       restore.attempted++
       const src = path.join(dir, f.backup)
       try {
@@ -316,7 +387,7 @@ export function restoreTransactional(checkpointId, { cwd = null } = {}) {
 
     // ---- 5. VERIFY --------------------------------------------------------
     const verify = { checked: 0, matched: 0, mismatched: [] }
-    for (const f of restoreSet.write) {
+    for (const f of writable) {
       if (!result.restored.includes(f.path)) continue
       verify.checked++
       if (!f.sha) continue
@@ -332,47 +403,23 @@ export function restoreTransactional(checkpointId, { cwd = null } = {}) {
     }
     result.phases.verify = verify
 
-    // ---- 5b. RECONCILE — does the WORKING TREE match the checkpoint's fingerprints?
-    // v94 gapclose (TODO checkpoint): VERIFY proves the files THIS restore
-    // wrote. It cannot see files the restore could never write — tooLarge
-    // skips (recorded sha, no backup) and created files it had to KEEP because
-    // they changed since the checkpoint. An external process may have touched
-    // them between crash and resume; silent divergence is not an option, so
-    // hash them against the manifest and report drift as evidence.
-    const reconcile = { checked: 0, matched: 0, drift: [] }
-    for (const f of m.files ?? []) {
-      if (!f.sha) continue
-      if (!f.tooLarge && !f.created) continue // written + verified in phase 5
-      reconcile.checked++
-      const cur = fullFileHash(f.path)
-      if (f.created) {
-        // consistent iff the file is gone (it did not exist at checkpoint time)
-        if (!cur) reconcile.matched++
-        else reconcile.drift.push({ path: f.path, reason: "created-after-checkpoint file KEPT on disk — it changed since the checkpoint, so removing it would destroy work outside this checkpoint", recorded: String(f.sha).slice(0, 8), current: cur.sha.slice(0, 8) })
-      } else if (!cur) {
-        reconcile.drift.push({ path: f.path, reason: "recorded at checkpoint but MISSING on disk — never restorable (too large to snapshot) and touched outside this restore", recorded: String(f.sha).slice(0, 8), current: null })
-      } else if (cur.sha === f.sha) {
-        reconcile.matched++
-      } else {
-        reconcile.drift.push({ path: f.path, reason: "changed on disk since the checkpoint — never restorable (too large to snapshot), touched outside this restore", recorded: String(f.sha).slice(0, 8), current: cur.sha.slice(0, 8) })
-      }
-    }
-    result.phases.reconcile = reconcile
-    result.treeConsistent = result.failed.length === 0 && verify.mismatched.length === 0 && reconcile.drift.length === 0
-
     // ---- 6. PERSIST -------------------------------------------------------
     const total = restoreSet.write.length + restoreSet.remove.length
     const done = result.restored.length
     if (result.failed.length === 0 && verify.mismatched.length === 0) {
-      result.status = "RESTORED"
-      result.ok = true
-      if (reconcile.drift.length) {
-        // honest completion: the restore applied everything it COULD, but the
-        // tree as a whole does not match the checkpoint's recorded state.
-        result.notes.push(`working-tree drift: ${reconcile.drift.length} file(s) recorded by this checkpoint differ on disk (touched outside forge between snapshot and restore — see phases.reconcile.drift); treeConsistent=false`)
+      if (drift.external > 0) {
+        // nothing FAILED, but the tree did NOT return to the checkpoint state:
+        // externally-modified files were deliberately kept — honest status.
+        result.status = "DRIFT"
+        result.ok = false
+        result.notes.push(`restore completed for ${done}/${total} file(s); ${drift.external} externally-modified file(s) preserved — the working tree is NOT at the checkpoint state`)
+        // the checkpoint stays restorable (it was not fully consumed)
+      } else {
+        result.status = "RESTORED"
+        result.ok = true
+        // only now is it safe to retire the checkpoint
+        try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
       }
-      // only now is it safe to retire the checkpoint
-      try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
     } else if (done > 0) {
       result.status = "PARTIAL"
       result.ok = false
@@ -437,6 +484,16 @@ function restoreOne(c) {
       if (f.tooLarge) {
         notes.push(`NOT restored ${path.basename(f.path)} — it is larger than ${Math.round(MAX_SNAPSHOT_BYTES / 1024 / 1024)}MB and was never snapshotted (size=${f.size ?? "?"}, sha=${(f.sha ?? "").slice(0, 8)})`)
         continue
+      }
+      // v94 todowise drift check (same attribution rules as the transactional
+      // restore): a file whose current SHA matches NEITHER the snapshot NOR
+      // forge's post-write seal was touched by an external process — keep it.
+      if (fs.existsSync(f.path) && f.sha && f.postSha) {
+        const cur = fullFileHash(f.path)
+        if (cur && cur.sha !== f.sha && cur.sha !== f.postSha) {
+          notes.push(`kept ${path.basename(f.path)} — modified by an external process since the checkpoint (SHA matches neither the snapshot nor forge's post-write seal); restoring would destroy unattributable work`)
+          continue
+        }
       }
       const src = path.join(CHECKPOINTS_DIR, c.id, f.backup)
       if (fs.existsSync(src)) {

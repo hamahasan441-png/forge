@@ -49,8 +49,14 @@ export function classifySpawn(r, {
   const err = clip(stderrRaw, maxBytes)
   const bufErr = r?.error?.code === "ENOBUFS"
   const truncated = out.truncated || err.truncated || bufErr
-  const timedOut = r?.error?.code === "ETIMEDOUT" || r?.signal === "SIGTERM"
-  const killed = r?.signal === "SIGKILL" || /SIGKILL/.test(String(r?.error?.message || ""))
+  // v96 unifywise: a runCommand timeout sets error.code ETIMEDOUT (spawnSync
+  // kills with the configured SIGTERM and reports the timeout error). A bare
+  // SIGTERM WITHOUT ETIMEDOUT is an EXTERNAL termination — that is KILLED
+  // (someone or something ended the process), never "timeout". Conflating the
+  // two made an externally-killed verify look like a slow one.
+  const timedOut = r?.error?.code === "ETIMEDOUT"
+  const externalTerm = r?.signal === "SIGTERM" && !timedOut
+  const killed = r?.signal === "SIGKILL" || externalTerm || /SIGKILL/.test(String(r?.error?.message || ""))
   const exitCode = Number.isInteger(r?.status) ? r.status : null
   const signal = r?.signal || null
   let status

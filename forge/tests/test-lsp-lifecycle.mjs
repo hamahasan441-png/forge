@@ -15,10 +15,6 @@ import { execFileSync } from "node:child_process"
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lsplc-"))
 process.env.FORGE_HOME = DIR
-// v94 gapclose: this suite pins lifecycle + "empty config is inert" semantics;
-// the LSP auto-start table (host toolchain binaries like gopls/tsserver could
-// otherwise make an empty config resolve) is pinned by test-lsp-autostart.mjs.
-process.env.FORGE_LSP_AUTOSTART = "0"
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lsplc-work-"))
 process.chdir(WORK)
 

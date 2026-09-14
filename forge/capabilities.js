@@ -630,6 +630,102 @@ export function costScore(meta) {
   return (c.latency ?? 0) / 100 + (c.tokens ?? 0) / 100 + cpu + (c.network ? 5 : 0)
 }
 
+// ---------------------------------------------------------------------------
+// v97 unifiedwise §33 — THE UNIFIED CAPABILITY LADDER
+//
+// One resolver across the four capability sources, in priority order:
+//   native deterministic tool → existing skill → MCP capability → created tool
+// → (nothing) → capability GAP (design/implement/verify/activate via toolcreate).
+//
+// The ladder never executes anything — it ANSWERS "what is the best way to
+// accomplish this capability right now", so the agent, compose, and `forge caps`
+// all see the same truth. Skills/MCP/created-tools are passed in by the caller
+// (they own their catalogs); the registry owns native tools.
+// ---------------------------------------------------------------------------
+
+/** Resolve one capability across all sources. Pure; never throws. */
+export function capabilityLadder({ registry, capability, skills = [], mcpTools = [], createdTools = [] } = {}) {
+  const cap = String(capability ?? "").trim()
+  if (!cap) return { capability: "", tiers: [], resolved: "invalid", best: null, gap: true }
+  const native = (() => {
+    try { return registry?.providersOf(cap) ?? [] } catch { return [] }
+  })()
+  const capLower = cap.toLowerCase()
+  const words = capLower.split(/[_\s]+/).filter(Boolean)
+  const matches = (text) => {
+    const t = String(text ?? "").toLowerCase()
+    return t.includes(capLower) || words.some((w) => w.length >= 4 && t.includes(w))
+  }
+  const skillHits = (Array.isArray(skills) ? skills : [])
+    .filter((s) => s && matches(`${s.name ?? ""} ${s.desc ?? s.description ?? ""}`))
+    .slice(0, 4)
+    .map((s) => ({ name: s.name, desc: String(s.desc ?? s.description ?? "").slice(0, 100) }))
+  const mcpHits = (Array.isArray(mcpTools) ? mcpTools : [])
+    .filter((t) => t && matches(`${t.tool ?? t.name ?? ""} ${t.description ?? ""}`))
+    .slice(0, 4)
+    .map((t) => ({ name: t.tool ?? t.name, server: t.server ?? null, desc: String(t.description ?? "").slice(0, 100) }))
+  const createdHits = (Array.isArray(createdTools) ? createdTools : [])
+    .filter((t) => t && matches(`${t.name ?? ""} ${t.description ?? ""}`) && t.lifecycle === "ACTIVE")
+    .slice(0, 4)
+    .map((t) => ({ name: t.name, lifecycle: t.lifecycle, verified: t.verified === true }))
+  const tiers = [
+    { source: "native", items: native.map((m) => ({ name: m.name, risk: m.risk, status: m.status, read_only: m.read_only })) },
+    { source: "skill", items: skillHits },
+    { source: "mcp", items: mcpHits },
+    { source: "created", items: createdHits },
+  ]
+  const firstNonEmpty = tiers.find((t) => t.items.length)
+  return {
+    capability: cap,
+    tiers,
+    resolved: firstNonEmpty ? firstNonEmpty.source : "gap",
+    best: firstNonEmpty ? firstNonEmpty.items[0] : null,
+    gap: !firstNonEmpty,
+    // §33: a gap is not a dead end — it is the toolcreate pipeline's input
+    recommendation: firstNonEmpty
+      ? `use ${firstNonEmpty.source} tool "${firstNonEmpty.items[0].name}" for ${cap}`
+      : `no native/skill/MCP/created capability provides "${cap}" — create it (forge tool create), then verify + activate before trusting it`,
+  }
+}
+
+/** Resolve several capabilities at once; returns only what the caller needs:
+ *  per-capability best source + the honest gap list. Bounded. */
+export function capabilityCoverage({ registry, capabilities = [], skills = [], mcpTools = [], createdTools = [] } = {}) {
+  const caps = (Array.isArray(capabilities) ? capabilities : []).filter(Boolean).slice(0, 12)
+  const out = []
+  for (const cap of caps) {
+    out.push(capabilityLadder({ registry, capability: cap, skills, mcpTools, createdTools }))
+  }
+  return {
+    coverage: out.map((l) => ({ capability: l.capability, resolved: l.resolved, best: l.best?.name ?? null })),
+    gaps: out.filter((l) => l.gap).map((l) => l.capability),
+  }
+}
+
+/** v97 §33: which CAPABILITY vocabulary strings does this task text imply?
+ *  Deterministic keyword mapping (the same evidence the router/verifier use);
+ *  a task with no signals needs no special capability — that is honest. */
+export function capabilitiesImpliedByTask(task) {
+  const t = String(task ?? "").toLowerCase()
+  const caps = new Set()
+  if (/\b(read|inspect|open|show|view|look at)\b/.test(t)) caps.add(CAPABILITY.FILE_READ)
+  if (/\b(edit|modify|change|update|rename|refactor|fix)\b/.test(t)) caps.add(CAPABILITY.FILE_EDITING)
+  if (/\b(create|add|new file|scaffold|write)\b/.test(t)) caps.add(CAPABILITY.FILE_CREATE)
+  if (/\b(search|grep|find|where is|locate)\b/.test(t)) caps.add(CAPABILITY.CONTENT_SEARCH)
+  if (/\b(test|spec|pytest|jest|vitest|mocha)\b/.test(t)) caps.add(CAPABILITY.TEST_EXECUTION)
+  if (/\b(build|compile|make|webpack|cargo|gradle)\b/.test(t)) caps.add(CAPABILITY.BUILD_EXECUTION)
+  if (/\b(run|execute|bash|shell|command|npm|script)\b/.test(t)) caps.add(CAPABILITY.COMMAND_EXECUTION)
+  if (/\b(git|commit|branch|diff|blame|log)\b/.test(t)) caps.add(CAPABILITY.VCS_INSPECTION)
+  if (/\b(browser|screenshot|click|page|chrome|playwright)\b/.test(t)) caps.add(CAPABILITY.BROWSER)
+  if (/\b(web search|search the web|look up|docs? for|documentation)\b/.test(t)) caps.add(CAPABILITY.WEB_SEARCH)
+  if (/\b(fetch|download|http|url|api call)\b/.test(t)) caps.add(CAPABILITY.NETWORK_FETCH)
+  if (/\b(image|screenshot|diagram|png|jpg)\b/.test(t)) caps.add(CAPABILITY.IMAGE_READ)
+  if (/\b(symbol|definition|reference|type of|imported by)\b/.test(t)) caps.add(CAPABILITY.SYMBOL_LOOKUP)
+  if (/\b(remember|note that|memory|convention)\b/.test(t)) caps.add(CAPABILITY.MEMORY_WRITE)
+  if (/\b(deploy|docker|service|server|runtime|start the app)\b/.test(t)) caps.add(CAPABILITY.COMMAND_EXECUTION)
+  return [...caps].slice(0, 12)
+}
+
 /**
  * Register user tool plugins (§18) — a new tool joins the SAME capability
  * system with no core change. A plugin may declare any registry field; what it

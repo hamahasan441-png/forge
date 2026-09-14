@@ -26,12 +26,16 @@ import os from "node:os"
 import path from "node:path"
 import { assertFetchableUrl } from "./netguard.js"
 import { queuePendingVision, providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, MIME } from "./vision.js"
+import { unifiedDiff } from "./textdiff.js"
+import { shortHash } from "./contentfence.js"
+import { projectDir } from "./memory.js"
+import { writeStateFile } from "./securefs.js"
 
 export const ACTIONS = Object.freeze([
   "open", "snapshot", "click", "fill", "type", "press",
-  "screenshot", "scroll", "back", "reload", "close", "status",
+  "screenshot", "scroll", "back", "reload", "close", "status", "errors", "visual_diff",
 ])
-export const VERIFY_ACTIONS = Object.freeze(["open", "snapshot", "screenshot", "status", "close", "reload", "back"])
+export const VERIFY_ACTIONS = Object.freeze(["open", "snapshot", "screenshot", "status", "close", "reload", "back", "errors", "visual_diff"])
 export const PAGE_MUTATING = Object.freeze(["click", "fill", "type", "press", "scroll"])
 
 const CHROME_NAMES = [
@@ -531,6 +535,32 @@ async function createCdpDriver(binary) {
   const send = (method, params = {}) => ws.send(method, params, sessionId)
   await send("Page.enable")
   await send("Runtime.enable")
+  // v97 §42 — CONSOLE + NETWORK ERROR CAPTURE. A page that renders but throws
+  // is NOT a verified page: Runtime.consoleAPICalled (error/assert),
+  // Log.entryAdded (page-level errors) and Network.loadingFailed are recorded
+  // as first-class verification evidence, bounded, with timestamps.
+  const pageErrors = []
+  const noteError = (entry) => {
+    pageErrors.push(entry)
+    if (pageErrors.length > 100) pageErrors.shift()
+  }
+  try {
+    await send("Log.enable")
+    await send("Network.enable")
+    ws.on("Runtime.consoleAPICalled", (p) => {
+      if (p?.type !== "error" && p?.type !== "assert") return
+      const text = (p.args ?? []).map((a) => a?.value ?? a?.description ?? "").join(" ").slice(0, 300)
+      noteError({ kind: "console", level: String(p.type), text: text || "(empty error)", url: p.stackTrace?.[0]?.url ?? null, ts: Date.now() })
+    })
+    ws.on("Log.entryAdded", (p) => {
+      const e = p?.entry ?? {}
+      if (e.level !== "error") return
+      noteError({ kind: "log", level: "error", text: String(e.text ?? "").slice(0, 300), url: e.url ?? e.source ?? null, ts: Date.now() })
+    })
+    ws.on("Network.loadingFailed", (p) => {
+      noteError({ kind: "network", level: "error", text: `${p?.errorText ?? "loading failed"}${p?.blockedReason ? ` (blocked: ${p.blockedReason})` : ""}`, url: null, ts: Date.now() })
+    })
+  } catch { /* event capture is evidence, never a dependency */ }
 
   async function evaluate(expression) {
     const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })
@@ -588,8 +618,12 @@ async function createCdpDriver(binary) {
     },
     async back() { await evaluate("history.back()"); return { note: "back" } },
     async reload() { await send("Page.reload", {}); return { note: "reloaded" } },
-    async screenshot() {
-      const r = await send("Page.captureScreenshot", { format: "png" })
+    async screenshot(opts = {}) {
+      // v98 shipwise: captureBeyondViewport gives FULL-PAGE screenshots when
+      // asked (visual baselines want the whole page, not just the fold)
+      const params = { format: "png" }
+      if (opts && opts.fullPage) params.captureBeyondViewport = true
+      const r = await send("Page.captureScreenshot", params)
       const b64 = r?.data
       if (!b64) return { error: "no screenshot data" }
       const buf = Buffer.from(b64, "base64")
@@ -601,7 +635,10 @@ async function createCdpDriver(binary) {
     async status() {
       const href = await evaluate("location.href").catch(() => null)
       const title = await evaluate("document.title").catch(() => null)
-      return { url: href, title, open: true, kind: "cdp" }
+      return { url: href, title, open: true, kind: "cdp", errors: pageErrors.length }
+    },
+    async errors() {
+      return { available: true, errors: [...pageErrors] }
     },
     async close() {
       try { ws.close() } catch {}
@@ -776,7 +813,90 @@ export async function runBrowser(ctx, args = {}) {
     if (action === "status") {
       const r = await driver.status()
       if (r?.error) return `ERROR: status failed: ${r.error}`
-      return formatResult("status", r)
+      const errNote = r?.errors ? `\nconsole/network errors captured: ${r.errors} (action "errors" lists them — a rendering page with errors is NOT verified)` : ""
+      return formatResult("status", r) + errNote
+    }
+
+    if (action === "errors") {
+      // v97 §42: UI verification evidence — console errors, page-log errors,
+      // failed network loads. Read-only observation.
+      const r = driver.errors ? await driver.errors() : { available: false, reason: `this backend (${driver.kind ?? "unknown"}) does not capture page errors — CDP (chromium) does` }
+      if (r?.error) return `ERROR: ${r.error}`
+      if (r?.available === false) return `page errors: UNAVAILABLE — ${r.reason}`
+      const list = r.errors ?? []
+      if (!list.length) return "page errors: NONE — no console errors, page-log errors, or failed network loads captured this session (positive evidence)"
+      const lines = [`page errors: ${list.length} captured (this is evidence AGAINST 'the page works')`]
+      for (const e of list.slice(-20)) lines.push(`  [${e.kind}] ${String(e.text ?? "").slice(0, 160)}${e.url ? ` (${String(e.url).slice(0, 80)})` : ""}`)
+      return lines.join("\n")
+    }
+
+    if (action === "visual_diff") {
+      // v98 shipwise — VISUAL REGRESSION (the TODO.md leftover): snapshot
+      // text-diff + screenshot hash against a stored baseline. The baseline
+      // lives in the forge state dir (~/.forge/projects/<hash>/browser-
+      // baselines/), keyed by name. First run CREATES the baseline (honest);
+      // later runs compare: canonical node text (formatNodes — stable refs)
+      // via unifiedDiff + screenshot sha256 (exact-match verdict, no decoder
+      // needed — a byte difference IS a pixel difference). update:true
+      // re-baselines explicitly. Evidence phrasing follows §42: positive /
+      // against, never a bare boolean.
+      const name = String(args.name ?? args.baseline ?? "").trim()
+      if (!name || /[\\/\n\r]/.test(name) || name.length > 64) return "ERROR: visual_diff requires a baseline name (1-64 chars, no path separators)"
+      const update = args.update === true || args.rebase === true
+      const snap = await driver.snapshot()
+      if (snap?.error) return `ERROR: snapshot failed: ${snap.error}`
+      const shot = await driver.screenshot({ fullPage: args.full_page !== false }).catch(() => null)
+      const currentText = formatNodes(snap.nodes ?? [])
+      const currentHash = shot?.buf ? shortHash(shot.buf) : null
+      const baseDir = path.join(projectDir(ctx?.cwd ?? process.cwd()), "browser-baselines")
+      const baseName = `${name.replace(/[^a-zA-Z0-9._-]/g, "-")}.json`
+      const baseFile = path.join(baseDir, baseName)
+      let baseline = null
+      try { baseline = JSON.parse(fs.readFileSync(baseFile, "utf8")) } catch { baseline = null }
+      if (update || !baseline) {
+        try {
+          fs.mkdirSync(baseDir, { recursive: true })
+          writeStateFile(baseFile, JSON.stringify({
+            name, url: snap.url ?? null, createdAt: Date.now(),
+            snapshotText: currentText.slice(0, 20000),
+            snapshotHash: shortHash(currentText),
+            screenshotHash: currentHash,
+          }))
+        } catch (e) {
+          return `ERROR: could not persist baseline: ${String(e?.message ?? e).slice(0, 120)}`
+        }
+        return `visual_diff ${name}: baseline ${update ? "UPDATED" : "CREATED"} (${(snap.nodes ?? []).length} nodes captured${currentHash ? ` · screenshot hash ${currentHash}` : ""}) — the NEXT run compares against it`
+      }
+      // COMPARE — snapshot text first (the semantic signal), then pixels
+      const lines = [`visual_diff ${name}: comparing against baseline (${new Date(baseline.createdAt).toISOString()})`]
+      // A5: a baseline recorded on a DIFFERENT url is probably the wrong
+      // baseline — say so instead of silently diffing apples against pears
+      if (baseline.url && snap.url && baseline.url !== snap.url) {
+        lines.push(`  ⚠ url changed since the baseline: ${baseline.url} → ${snap.url} — a DIFF here may just be a different page; re-baseline with update:true if this is intended`)
+      }
+      let ok = true
+      if (baseline.snapshotHash === shortHash(currentText)) {
+        lines.push(`  snapshot text: IDENTICAL (${(snap.nodes ?? []).length} nodes) — positive evidence the page structure is unchanged`)
+      } else {
+        ok = false
+        const d = unifiedDiff(String(baseline.snapshotText ?? ""), currentText, { path: `snapshot:${name}`, context: 2 })
+        lines.push(`  snapshot text: DIFFERS — this is evidence AGAINST 'the page is unchanged'`)
+        lines.push(d.split("\n").slice(0, 24).join("\n"))
+      }
+      if (currentHash && baseline.screenshotHash) {
+        if (currentHash === baseline.screenshotHash) {
+          lines.push(`  screenshot: IDENTICAL (sha256 ${currentHash}) — pixel-exact match`)
+        } else {
+          ok = false
+          lines.push(`  screenshot: DIFFERS (baseline ${baseline.screenshotHash} → current ${currentHash}) — pixels changed; check whether the change is intended, then visual_diff {name:"${name}", update:true} to re-baseline`)
+        }
+      } else if (!currentHash) {
+        lines.push("  screenshot: not captured this run (no pixels) — text comparison only")
+      }
+      lines.push(ok
+        ? `verdict: MATCH — positive evidence the page renders the same as the baseline`
+        : `verdict: DIFF — the page does NOT match the baseline; treat as failing visual regression until re-baselined`)
+      return lines.join("\n").slice(0, 20000)
     }
 
     return `ERROR: unhandled action "${action}"`

@@ -146,8 +146,3 @@ export function formatStrategyJustified(j = null) {
   return lines.slice(0, 4).join("\n")
 }
 
-export function formatStrategy(rows) {
-  const list = Array.isArray(rows) ? rows : []
-  if (!list.length) return ""
-  return `STRAT: ${list.map((s) => `${s.name} (${Math.round((s.rate || 0) * 100)}%)`).join(", ")}`
-}

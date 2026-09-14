@@ -79,7 +79,11 @@ const INVALIDATABLE = new Set([
 ])
 
 const STATUSES = new Set(Object.values(NODE_STATUS))
-export const RISK_LEVELS = ["low", "medium", "high", "critical"]
+// v96 unifywise: "trivial" joins the node-risk vocabulary. plannerisk and
+// verifyledger already rank trivial<low (RISK_ORDER); a node planned as
+// trivial was silently coerced to "low" here, inflating its verification
+// ladder (syntax-only vs syntax+focused_test). One vocabulary, one order.
+export const RISK_LEVELS = ["trivial", "low", "medium", "high", "critical"]
 
 function normalizeNode(n) {
   if (!n || typeof n !== "object") throw new Error("dag node must be an object")
@@ -788,6 +792,7 @@ export function defaultVerificationFor(node) {
   if (risk === "critical") return ["syntax", "focused_test", "regression_test", "build", "security"]
   if (risk === "high") return ["syntax", "focused_test", "regression_test", "build"]
   if (risk === "medium") return ["syntax", "focused_test"]
+  // low AND trivial: syntax-only (matches verifyledger's RISK_PROFILE)
   return ["syntax"]
 }
 

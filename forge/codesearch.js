@@ -13,23 +13,18 @@
  *   - a truncated scan (chunk cap hit) is REPORTED, never silent
  *   - zero hits says so and points at grep_files
  *   - scores are the real BM25/hybrid scores, not decorated
- *   - the repository itself is pure read: this module NEVER writes inside the
- *     project. v94 gapclose (TODO semantic_search): the chunk cache persists
- *     OUTSIDE the repo, in the project's forge state dir
- *     (~/.forge/projects/<hash>/semantic-index.json), fingerprint-invalidated
- *     per file (mtime+size) exactly like the world model — a fresh process
- *     reuses the chunks of every unchanged file instead of re-reading and
- *     re-chunking the whole repository. FORGE_INDEX=0 disables the persistent
- *     index together with the in-memory cache. Every result carries its real
- *     `index` stats (loadedFromDisk / rebuilt / saved), never decorated.
+ *   - reads only from the searched tree; the ONLY writes are forge's own
+ *     cache files under ~/.forge/projects/<hash>/ (v94 todowise persistent
+ *     index) — the searched project is never touched (FORGE_INDEX=0 disables)
  *
- * Zero dependencies: node:fs + retrieval.js + forge state helpers only.
+ * Zero dependencies: node:fs + retrieval.js only.
  */
 import fs from "node:fs"
 import path from "node:path"
 import { isSourceFile, isConfigFile } from "./lang.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import { projectDir } from "./memory.js"
+import { resolveWorldMaxFiles } from "./worldmodel.js" // v97 §15: one budget truth
 import { writeStateFile } from "./securefs.js"
 
 const SKIP = new Set([
@@ -123,9 +118,6 @@ function snippetOf(lines) {
 const CHUNK_CACHE_MAX = 4000
 const chunkCache = new Map() // full path -> { mtimeMs, size, docs }
 export function chunkCacheSize() { return chunkCache.size }
-/** Counts REAL cache-miss rebuilds (file read + re-chunk) — the dirty signal
- *  for the persistent index; surfaced honestly per result as `index.rebuilt`. */
-let chunkRebuilds = 0
 function chunksForFile(f) {
   const useCache = process.env.FORGE_INDEX !== "0"
   let st = null
@@ -140,7 +132,6 @@ function chunksForFile(f) {
   for (const c of chunkLines(src)) {
     docs.push({ text: `${f.rel}\n${c.lines.join("\n")}`, ref: { path: f.rel, start: c.start, end: c.end, snippet: snippetOf(c.lines) } })
   }
-  chunkRebuilds++
   if (useCache) {
     if (chunkCache.size >= CHUNK_CACHE_MAX) {
       const oldest = chunkCache.keys().next().value
@@ -152,87 +143,85 @@ function chunksForFile(f) {
 }
 
 // ---------------------------------------------------------------------------
-// v94 gapclose (TODO semantic_search) — PERSISTENT chunk index.
+// v94 todowise — PERSISTENT semantic index (the TODO.md contract)
 //
-// The BM25 corpus (per-file line-window chunks) was rebuilt from scratch in
-// every process: on a large repo the first semantic_search of every run paid
-// the full read+chunk cost again. The index file stores the SAME per-file
-// chunk docs the in-memory cache holds, keyed by the project's forge state
-// dir (one file per project root — docs carry root-RELATIVE refs, so entries
-// must never migrate between roots; the stored `root` field is checked on
-// load). Invalidation is per-file fingerprint (mtime+size), exactly like the
-// world model: a changed file re-chunks from source, an unchanged file is
-// reused. Bounded on both ends (CHUNK_CACHE_MAX entries, INDEX_MAX_BYTES on
-// disk — an oversize index is skipped, never truncated into a lie).
+// The chunk cache above is per-PROCESS: a fresh forge (new task, crash
+// recovery, another terminal) re-read and re-chunks every file before the
+// first query can even start. This layer persists the chunk docs under the
+// project dir (~/.forge/projects/<hash>/semantic-index.json),
+// fingerprint-validated with the house `${mtimeMs}:${size}` signature — the
+// SAME discipline as the world-model snapshot:
+//   - load: only entries whose current stat matches the recorded fingerprint
+//     are adopted (drift always beats the index — a stale doc can never be
+//     served); entries for files that no longer exist are dropped
+//   - save: best-effort, atomic (writeStateFile), only when the corpus is big
+//     enough for the write to pay for itself (>= MIN_PERSIST_DOCS) and the
+//     index actually changed; bounded to the first MAX_PERSIST_CHUNKS docs
+//   - corruption → rebuild (it is a cache, never evidence)
+//   - FORGE_INDEX=0 disables load AND save — never reads, never writes
+// The search engine itself is unchanged: adopted docs feed the SAME rankDocs /
+// rankDocsHybrid pipeline — no duplicate ranker.
 // ---------------------------------------------------------------------------
-const INDEX_FILE = "semantic-index.json"
-const INDEX_VERSION = 1
-const INDEX_MAX_BYTES = 24 * 1024 * 1024
-const loadedRoots = new Map() // resolved root -> { loaded, at }
+const SEMANTIC_INDEX_VERSION = 1
+const MIN_PERSIST_DOCS = 64      // small corpora rebuild in <100 ms — persisting would be waste
+const MAX_PERSIST_CHUNKS = 5000  // hard bound on the persisted doc count (same cap as a search)
+const persistentIndexStats = { loaded: 0, adopted: 0, rechunked: 0, saved: 0, dropped: 0 }
 
-function indexPathFor(root) {
-  return path.join(projectDir(root), INDEX_FILE)
+function semanticIndexPath(root) {
+  return path.join(projectDir(root), "semantic-index.json")
 }
 
-/** Seed the in-memory cache from disk. Once per process per root; per-file
- *  fingerprints decide reuse — a stale entry is simply not loaded. */
-function loadPersistentChunks(root, files) {
-  if (process.env.FORGE_INDEX === "0") return { persistent: false, loaded: 0 }
-  const prev = loadedRoots.get(root)
-  if (prev) return { persistent: true, loaded: prev.loaded }
-  let loaded = 0
-  try {
-    const file = indexPathFor(root)
-    const st = fs.statSync(file)
-    if (st.size <= INDEX_MAX_BYTES) {
-      const j = JSON.parse(fs.readFileSync(file, "utf8"))
-      if (j?.v === INDEX_VERSION && j.root === root && j.entries && typeof j.entries === "object") {
-        for (const f of files) {
-          if (chunkCache.size >= CHUNK_CACHE_MAX) break
-          if (chunkCache.has(f.full)) continue // already fresh in memory
-          const ent = j.entries[f.full]
-          if (!ent || !Array.isArray(ent.docs)) continue
-          let fst = null
-          try { fst = fs.statSync(f.full) } catch { continue }
-          if (fst.mtimeMs !== ent.mtimeMs || fst.size !== ent.size) continue // fingerprint drift — rebuild from source
-          chunkCache.set(f.full, { mtimeMs: ent.mtimeMs, size: ent.size, docs: ent.docs })
-          loaded++
-        }
-      }
-    }
-  } catch { /* no index yet / unreadable / corrupt — rebuild from source, honestly */ }
-  loadedRoots.set(root, { loaded, at: Date.now() })
-  return { persistent: true, loaded }
+/** Test/telemetry probe — the honest counters behind the persistence layer. */
+export function semanticIndexStats() { return { ...persistentIndexStats } }
+
+function fingerprintOf(st) { return `${st.mtimeMs}:${st.size}` }
+
+function loadPersistentIndex(root, files) {
+  if (process.env.FORGE_INDEX === "0") return null
+  let j = null
+  try { j = JSON.parse(fs.readFileSync(semanticIndexPath(root), "utf8")) } catch { return null }
+  if (!j || j.v !== SEMANTIC_INDEX_VERSION || j.root !== path.resolve(root) || !j.files || typeof j.files !== "object") return null
+  persistentIndexStats.loaded++
+  const byRel = new Map(files.map((f) => [f.rel, f]))
+  const adopted = new Map() // full path -> docs
+  let dropped = 0
+  for (const [rel, entry] of Object.entries(j.files)) {
+    const f = byRel.get(rel)
+    if (!f || !Array.isArray(entry?.docs)) { dropped++; continue } // file gone/renamed — never serve stale
+    let st = null
+    try { st = fs.statSync(f.full) } catch { dropped++; continue }
+    if (!st || fingerprintOf(st) !== entry.fp) { continue } // drifted — re-chunk below beats the index
+    adopted.set(f.full, entry.docs)
+    persistentIndexStats.adopted += entry.docs.length
+  }
+  persistentIndexStats.dropped += dropped
+  return adopted
 }
 
-/** Persist the current chunks for this root's collected files. Atomic write;
- *  honest skip reasons (disabled / empty / oversize / IO error). */
-function savePersistentChunks(root, files) {
-  if (process.env.FORGE_INDEX === "0") return { saved: false, skipped: "disabled (FORGE_INDEX=0)" }
-  const entries = {}
-  let n = 0
+function savePersistentIndex(root, files) {
+  if (process.env.FORGE_INDEX === "0") return false
+  let totalDocs = 0
+  for (const f of files) totalDocs += chunkCache.get(f.full)?.docs?.length ?? 0
+  if (totalDocs < MIN_PERSIST_DOCS) return false
+  const out = { v: SEMANTIC_INDEX_VERSION, root: path.resolve(root), savedAt: Date.now(), files: {} }
+  let docsKept = 0
   for (const f of files) {
     const hit = chunkCache.get(f.full)
-    if (!hit) continue
-    entries[f.full] = { mtimeMs: hit.mtimeMs, size: hit.size, docs: hit.docs }
-    n++
+    if (!hit || !hit.docs?.length) continue
+    if (docsKept + hit.docs.length > MAX_PERSIST_CHUNKS) break
+    // re-stat: only persist fingerprints that match what the cache actually holds
+    let st = null
+    try { st = fs.statSync(f.full) } catch { continue }
+    if (fingerprintOf(st) !== fingerprintOf({ mtimeMs: hit.mtimeMs, size: hit.size })) continue
+    out.files[f.rel] = { fp: fingerprintOf(st), docs: hit.docs }
+    docsKept += hit.docs.length
   }
-  if (!n) return { saved: false, skipped: "no cached chunks to persist" }
+  if (!docsKept) return false
   try {
-    const text = JSON.stringify({ v: INDEX_VERSION, root, updatedAt: Date.now(), entries })
-    if (text.length > INDEX_MAX_BYTES) return { saved: false, skipped: `index would exceed ${Math.round(INDEX_MAX_BYTES / 1024 / 1024)}MB — not persisted (in-memory cache still active)` }
-    const file = indexPathFor(root)
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    writeStateFile(file, text)
-    return { saved: true, entries: n }
-  } catch (e) {
-    return { saved: false, skipped: `write failed: ${String(e?.message ?? e).slice(0, 100)}` }
-  }
-}
-
-/** Where the persistent index lives (doctor/tests). */
-export function persistentIndexPath(root) {
-  return indexPathFor(path.resolve(String(root || process.cwd())))
+    writeStateFile(semanticIndexPath(root), JSON.stringify(out))
+    persistentIndexStats.saved++
+    return true
+  } catch { return false } // best-effort, never breaks a query
 }
 
 /**
@@ -243,7 +232,7 @@ export function persistentIndexPath(root) {
  */
 export async function semanticSearch(root, query, {
   limit = DEFAULT_LIMIT,
-  maxFiles = MAX_FILES,
+  maxFiles = null, // v97 §15: null → follow the CONFIGURED world budget (FORGE_WORLD_MAX_FILES / world.maxFiles / 2000) — semantic search sees what the world model sees
   maxBytesPerFile = MAX_BYTES_PER_FILE,
   embed = null,
   alpha,
@@ -251,31 +240,50 @@ export async function semanticSearch(root, query, {
 } = {}) {
   const q = String(query ?? "").trim()
   const base = path.resolve(String(root || process.cwd()))
-  const { files, truncated: filesTruncated } = collectFiles(base, { maxFiles, maxBytesPerFile })
+  const effectiveMax = maxFiles != null ? maxFiles : resolveWorldMaxFiles()
+  const { files, truncated: filesTruncated } = collectFiles(base, { maxFiles: effectiveMax, maxBytesPerFile })
   if (!files.length) return { ok: false, files: 0, chunks: 0, truncated: false, mode: "none", hits: [], note: `no source/config files under ${path.basename(base)} — nothing to search` }
   if (!q) return { ok: false, files: files.length, chunks: 0, truncated: false, mode: "none", hits: [], note: "empty query" }
 
-  // v94 gapclose: seed the chunk cache from the persistent index (per-file
-  // fingerprint decides reuse) and count what genuinely had to be rebuilt.
-  const loaded = loadPersistentChunks(base, files)
-  const rebuildsBefore = chunkRebuilds
+  // v94 todowise: adopt persisted chunks whose fingerprint still matches (a
+  // fresh process then pays only the stat walk for unchanged files); drifted
+  // files fall through to the normal read+chunk path below.
+  const persisted = loadPersistentIndex(base, files)
 
   const docs = []
   let chunksTruncated = false
   for (const f of files) {
     if (docs.length >= MAX_CHUNKS) { chunksTruncated = true; break }
+    const pre = persisted?.get(f.full)
+    if (pre?.length && process.env.FORGE_INDEX !== "0") {
+      // seed the in-memory cache so a later call in THIS process also skips
+      // the re-chunk, then count the adoption honestly
+      let st = null
+      try { st = fs.statSync(f.full) } catch { st = null }
+      if (st) {
+        if (chunkCache.size >= CHUNK_CACHE_MAX) {
+          const oldest = chunkCache.keys().next().value
+          chunkCache.delete(oldest)
+        }
+        chunkCache.set(f.full, { mtimeMs: st.mtimeMs, size: st.size, docs: pre })
+      }
+      for (const d of pre) {
+        if (docs.length >= MAX_CHUNKS) { chunksTruncated = true; break }
+        docs.push(d)
+      }
+      continue
+    }
+    persistentIndexStats.rechunked++
     for (const d of chunksForFile(f)) {
       if (docs.length >= MAX_CHUNKS) { chunksTruncated = true; break }
       docs.push(d)
     }
   }
-  const rebuilt = chunkRebuilds - rebuildsBefore
-  // persist only when something changed (or no index exists yet) — an
-  // unchanged repo never re-writes its index
-  let save = { saved: false, skipped: "up to date" }
-  if (loaded.persistent && (rebuilt > 0 || !fs.existsSync(indexPathFor(base)))) save = savePersistentChunks(base, files)
-  const indexStats = { persistent: loaded.persistent, loadedFromDisk: loaded.loaded, rebuilt, saved: save.saved === true, entries: save.entries ?? 0, ...(save.skipped ? { saveSkipped: save.skipped } : {}) }
-  if (!docs.length) return { ok: false, files: files.length, chunks: 0, truncated: false, mode: "none", hits: [], note: "files found but no content chunks", index: indexStats }
+  if (!docs.length) return { ok: false, files: files.length, chunks: 0, truncated: false, mode: "none", hits: [], note: "files found but no content chunks" }
+
+  // v94 todowise: persist the (now warm) corpus for the NEXT process —
+  // best-effort, bounded, only when big enough to pay for the write.
+  savePersistentIndex(base, files)
 
   // BM25 orders EVERYTHING (offline, cheap). Embeddings only RERANK the
   // shortlist — they never widen it (the repomap contract), so the embed call
@@ -312,7 +320,6 @@ export async function semanticSearch(root, query, {
     truncated: filesTruncated || chunksTruncated,
     mode,
     hits,
-    index: indexStats,
     note: hits.length ? "" : `no chunk scored above zero for "${q}" — try more specific terms, or grep_files for exact text`,
   }
 }

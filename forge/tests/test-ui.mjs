@@ -766,7 +766,13 @@ sys.stdout.buffer.write(out)
     ["send", "\x12hello"], ["wait", 0.5], ["send", "\r"], ["waitfor", "session: 10 in", 15], ["wait", 0.8],
     ["send", "/exit\r"], ["wait", 1.2],
   ])
-  ok("pty: banner + answer streamed", r1.text.includes("forge v94") && r1.text.includes("Hello from mock!"))
+  // v96 unifywise: this pin was STALE since v95 — the PTY lane is skipped under
+  // FORGE_FAST=1, so "forge v94" survived two version bumps unnoticed. The
+  // banner prints the real VERSION (ui.printBanner); the pin now derives from
+  // version.js instead of a hardcoded string, so a future bump cannot make
+  // this silently stale again.
+  const { VERSION: PTY_VERSION } = await import("../version.js")
+  ok("pty: banner + answer streamed", r1.text.includes(`forge v${PTY_VERSION}`) && r1.text.includes("Hello from mock!"))
   ok("pty: typing during streaming did not corrupt output", !r1.text.includes("typed while streamingHello") && r1.text.includes("thinking about it...Hello from mock!"))
   ok("pty: huge paste never executed line by line", !r1.text.includes("forge ❯ pasted line") && (r1.text.match(/Hello from mock!/g) || []).length === 2)
   ok("pty: Ctrl+R history recall re-sent the first message", r1.text.split("forge ❯ hello there").length === 3)

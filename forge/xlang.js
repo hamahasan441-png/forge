@@ -419,6 +419,50 @@ export function consumersOf(files, graph, { cwd = "" } = {}) {
 }
 
 /**
+ * v97 §21 — CONTRACT DRIFT between two file-record sets (before vs after a
+ * mutation). Reports:
+ *   - removed: contracts PRODUCED before that no longer exist (renamed route,
+ *     dropped table, changed proto) — with their producer files
+ *   - orphaned: contract USAGES whose producer no longer exists anywhere
+ *     (a consumer calling a route/typing a table nobody serves)
+ * Both are advisory evidence for the verification gate, never auto-fixes.
+ * Files: [{ path, contracts: [{kind, name, role}] }].
+ */
+export function contractDrift(beforeFiles = [], afterFiles = []) {
+  const key = (c) => `${c.kind}:${normName(c.name)}`
+  const producersOf = (files) => {
+    const m = new Map()
+    for (const f of files ?? []) {
+      for (const c of f.contracts ?? []) {
+        if (c.role !== "produce") continue
+        const k = key(c)
+        if (!m.has(k)) m.set(k, [])
+        if (m.get(k).length < 4) m.get(k).push(f.path)
+      }
+    }
+    return m
+  }
+  const before = producersOf(beforeFiles)
+  const after = producersOf(afterFiles)
+  const removed = []
+  for (const [k, paths] of before) {
+    if (!after.has(k)) removed.push({ contract: k, producers: paths })
+  }
+  const orphaned = []
+  for (const f of afterFiles ?? []) {
+    for (const c of f.contracts ?? []) {
+      if (c.role !== "consume") continue
+      if (!after.has(key(c))) orphaned.push({ contract: key(c), consumer: f.path })
+    }
+  }
+  return {
+    ok: !removed.length && !orphaned.length,
+    removed: removed.slice(0, 20),
+    orphaned: orphaned.slice(0, 20),
+  }
+}
+
+/**
  * Implementation files a test imports (TEST / IMPORT / CONSUMES outgoing).
  * Empty graph or non-test starts → []. Never invents a path.
  */

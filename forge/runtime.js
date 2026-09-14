@@ -85,96 +85,65 @@ function groupPids(pgid) {
   return pids
 }
 
-/** v94 gapclose (TODO runtime #1) — PORTABLE group/tree enumeration.
- *
- *  `kill(-pgid)` is a Linux/POSIX-group convenience; on platforms where the
- *  group signal is unavailable (or it fails for any other reason) the old
- *  fallback killed ONLY the leader and silently orphaned the tree it was
- *  supposed to own (`sh -c` forking the real server as a grandchild is the
- *  common case). This walker never assumes: it enumerates the REAL process
- *  table and returns evidence-based members, always including the leader:
- *
- *    linux            → /proc scan by pgid (groupPids)
- *    darwin/*bsd/…    → `ps -axo pid=,pgid=,ppid=` (pgid match ∪ ppid closure)
- *    win32            → PowerShell CIM (ppid closure), `wmic` fallback
- *
- *  Bounded (WALK_CAP), best-effort, never throws. `opts.platform` exists so
- *  tests can exercise the non-/proc paths on any machine (procps `ps` speaks
- *  the same `-axo` dialect on Linux). */
-const WALK_CAP = 512
-export function groupPidsPortable(leader, { platform = process.platform } = {}) {
-  const root = Number(leader)
-  const out = new Set(Number.isInteger(root) && root > 0 ? [root] : [])
-  if (!out.size) return []
-  try {
-    if (platform === "linux" && fs.existsSync("/proc")) {
-      for (const p of groupPids(root)) out.add(p)
-      return [...out].slice(0, WALK_CAP)
-    }
-    if (platform === "win32") {
-      const pairs = (() => {
-        // one snapshot of (pid, ppid) pairs; never a per-pid spawn storm
-        const psCmd = "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"
-        const sources = [
-          ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCmd]],
-          ["wmic", ["process", "get", "ProcessId,ParentProcessId"]],
-        ]
-        for (const [bin, args] of sources) {
-          try {
-            const text = execFileSync(bin, args, { encoding: "utf8", timeout: 4000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })
-            const parsed = []
-            for (const line of String(text).split(/\r?\n/)) {
-              const m = /^\s*(\d+)[,\s]+(\d+)\s*$/.exec(line)
-              if (m) parsed.push([Number(m[1]), Number(m[2])])
-            }
-            if (parsed.length) return parsed
-          } catch { /* try the next source */ }
-        }
-        return null
-      })()
-      if (pairs) for (const p of descendantClosure(root, pairs)) out.add(p)
-      return [...out].slice(0, WALK_CAP)
-    }
-    // POSIX without a usable /proc (darwin, *bsd, solaris, …)
-    try {
-      const text = execFileSync("ps", ["-axo", "pid=,pgid=,ppid="], { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] })
-      const pairs = []
-      const byPgid = []
-      for (const line of String(text).split(/\r?\n/)) {
-        const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line)
-        if (!m) continue
-        const pid = Number(m[1]), pgid = Number(m[2]), ppid = Number(m[3])
-        pairs.push([pid, ppid])
-        if (pgid === root) byPgid.push(pid)
-      }
-      for (const p of byPgid) out.add(p)
-      // pgid can differ when a grandchild called setsid; the ppid closure is
-      // the second, independent evidence source — union, never guess
-      for (const p of descendantClosure(root, pairs)) out.add(p)
-    } catch { /* no ps — leader only (the pre-gapclose behavior) */ }
-  } catch { /* best-effort: whatever evidence we have */ }
-  return [...out].slice(0, WALK_CAP)
+/** v94 todowise: EVIDENCE-BASED group member walk for the kill path.
+ *  `kill(-pgid)` group signaling is not reliable everywhere (some hardened /
+ *  non-Linux kernels refuse it); the old fallback signaled only the LEADER and
+ *  orphaned grandchildren. This walk enumerates the group's members with real
+ *  evidence — /proc stat first (cheap, Linux), then a bounded `ps` parse
+ *  (portable) when /proc is not available. Never guesses: if neither source
+ *  yields members, the result is honestly leader-only.
+ *  `opts.runPs` injects the ps runner (tests); default: bounded execFileSync. */
+export function parsePsMembers(text, leader) {
+  const members = [Number(leader)]
+  for (const line of String(text ?? "").split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+    if (!m) continue
+    const pid = Number(m[1]), grp = Number(m[2])
+    if (grp === Number(leader) && pid !== Number(leader) && !members.includes(pid)) members.push(pid)
+  }
+  return members
 }
 
-/** Transitive child closure from (pid, ppid) pairs. Bounded, cycle-safe. */
-function descendantClosure(root, pairs) {
-  const kids = new Map()
-  for (const [pid, ppid] of pairs) {
-    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue
-    if (!kids.has(ppid)) kids.set(ppid, [])
-    kids.get(ppid).push(pid)
+export function groupMembersEvidence(pgid, { runPs } = {}) {
+  const leader = Number(pgid)
+  if (!Number.isInteger(leader) || leader <= 0) return { members: [], source: "invalid-pgid" }
+  const procMembers = groupPids(leader)
+  if (procMembers.length > 1) return { members: procMembers, source: "/proc" }
+  if (process.platform === "linux" && fs.existsSync("/proc")) {
+    // /proc WAS available and still found only the leader: the group truly has
+    // no other members — no ps needed (never burn a subprocess on evidence we
+    // already have).
+    return { members: procMembers, source: "/proc" }
   }
-  const seen = new Set()
-  const queue = [root]
-  while (queue.length && seen.size < WALK_CAP) {
-    const p = queue.shift()
-    for (const c of kids.get(p) ?? []) {
-      if (seen.has(c) || c === root) continue
-      seen.add(c)
-      queue.push(c)
-    }
+  const ps = runPs ?? (() => {
+    try { return execFileSync("ps", ["-A", "-o", "pid=,pgid="], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }) } catch { return null }
+  })
+  let out = null
+  try { out = ps() } catch { out = null }
+  if (!out) return { members: procMembers, source: "leader-only (ps unavailable)" }
+  const members = parsePsMembers(out, leader)
+  return { members, source: members.length > 1 ? "ps" : "leader-only (ps found no members)" }
+}
+
+/** Signal every member of a process group, with evidence of what was actually
+ *  delivered. Strategy: group signal first (one syscall); when the platform
+ *  refuses it, walk the members (groupMembersEvidence) and signal each pid
+ *  individually — a member that already died reports ESRCH and is counted as
+ *  gone, not as failure. Returns { sent, method, delivered, gone }. */
+export function signalGroup(pgid, signal, { signalFn = (pid, sig) => process.kill(pid, sig), runPs } = {}) {
+  const leader = Number(pgid)
+  if (!Number.isInteger(leader) || leader <= 0) return { sent: false, method: "invalid-pgid", delivered: 0, gone: 0 }
+  try {
+    signalFn(-leader, signal)
+    return { sent: true, method: "group-signal", delivered: 0, gone: 0 }
+  } catch { /* group signal refused/unavailable — evidence walk below */ }
+  const ev = groupMembersEvidence(leader, { runPs })
+  let delivered = 0
+  let gone = 0
+  for (const member of ev.members) {
+    try { signalFn(member, signal); delivered++ } catch { gone++ }
   }
-  return seen
+  return { sent: delivered > 0, method: `pid-walk(${ev.source}) — ${ev.members.length} member(s)`, delivered, gone }
 }
 
 /** Listening TCP ports actually held by a pid, read from the Linux /proc
@@ -269,6 +238,7 @@ export function createProcessManager({
   maxHistory = MAX_HISTORY,
   maxLifetimeSec = MAX_LIFETIME_SEC,
   installSignalHandlers = true,
+  signalFn = (pid, sig) => process.kill(pid, sig), // tests simulate platforms without kill(-pgid)
 } = {}) {
   /** id → entry: { id, command, child, state, exitCode, signal, timedOut,
    *  startedAt, endedAt, out, err, outCursor, errCursor, portsSeen,
@@ -278,23 +248,10 @@ export function createProcessManager({
   let disposed = false
 
   const killTree = (e, signal) => {
-    if (e.state !== "running" || !e.child) return false
-    let sent = false
-    try { process.kill(-e.child.pid, signal); sent = true } catch { /* group signal unavailable or group gone */ }
-    if (!sent) {
-      // v94 gapclose (TODO runtime #1): a FAILED group signal is not evidence
-      // the tree is gone — on platforms without kill(-pgid) it never existed,
-      // and leader-only child.kill() orphans the grandchildren (the `sh -c`
-      // fork case). Walk the real process table and signal every member;
-      // only when the walk delivered nothing fall back to child.kill.
-      let delivered = 0
-      for (const pid of groupPidsPortable(e.child.pid)) {
-        try { process.kill(pid, signal); delivered++ } catch { /* raced away — already gone */ }
-      }
-      if (delivered > 0) sent = true
-      else { try { e.child.kill(signal); sent = true } catch { /* already dead */ } }
-    }
-    return sent
+    if (e.state !== "running" || !e.child) return { sent: false, method: "not-running", delivered: 0, gone: 0 }
+    const r = signalGroup(e.child.pid, signal, { signalFn })
+    e.killEvidence = { signal, method: r.method, delivered: r.delivered, gone: r.gone, at: Date.now() }
+    return r
   }
 
   const reap = () => {
@@ -354,9 +311,7 @@ export function createProcessManager({
   const onExitHandler = () => {
     // hard exit path — no time for graceful SIGTERM: SIGKILL the groups
     for (const e of entries.values()) {
-      if (e.state === "running" && e.child) {
-        try { process.kill(-e.child.pid, "SIGKILL") } catch { try { e.child.kill("SIGKILL") } catch {} }
-      }
+      if (e.state === "running" && e.child) killTree(e, "SIGKILL")
     }
   }
 
@@ -475,10 +430,12 @@ export function createProcessManager({
       if (!e) return { ok: false, error: `ERROR: no process "${id}"` }
       const sig = SIGNALS.includes(signal) ? signal : "SIGTERM"
       if (e.state !== "running") return { ok: true, entry: entryView(e), note: `already ${e.state} (exit ${e.exitCode ?? "?"})` }
-      const sent = killTree(e, sig)
+      const r = killTree(e, sig)
       return {
         ok: true, entry: entryView(e),
-        note: sent ? `${sig} sent to the process group — poll for the actual exit (evidence, not assumption)` : "process group already gone",
+        note: r.sent
+          ? `${sig} sent to the process group${r.method && r.method !== "group-signal" ? ` via ${r.method}` : ""} — poll for the actual exit (evidence, not assumption)`
+          : "process group already gone",
       }
     },
 

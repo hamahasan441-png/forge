@@ -14,10 +14,8 @@
  * bytes, not characters), so the read path accumulates Buffers, never strings.
  *
  * Trust model: a language server is launched from a command in the USER's
- * config (`lsp.servers`) or from the first-party AUTO-START table below (a
- * well-known binary that actually exists on the user's PATH — same trust
- * class as npm/cargo discovery), never from model output — the same trust
- * model as plugins and MCP. Every tool built on this is READ-ONLY: a
+ * config (`lsp.servers`), never from model output — the same trust model as
+ * plugins and MCP. Off by default. Every tool built on this is READ-ONLY: a
  * language server observes code, it never mutates it.
  */
 import { spawn } from "node:child_process"
@@ -300,7 +298,97 @@ export function normalizeSymbols(res) {
   return out.slice(0, 500) // bounded — a file with 500+ symbols is machine-generated
 }
 
-/** Resolve the configured server for a file, by extension. */
+// ---------------------------------------------------------------------------
+// v94 todowise — FIRST-PARTY AUTO-START TABLE (the TODO.md contract)
+//
+// documentSymbol extraction used to be the EXCEPTION: it only ran when the
+// user had hand-written config.lsp.servers for that extension — everywhere
+// else the world model silently took the lexical ladder. This table makes
+// the structured path the DEFAULT for the top languages (ts/js, python, go,
+// rust): when no user server matches the extension, forge falls back to a
+// first-party spec — used ONLY when the server binary is actually on PATH
+// (presence probed, never assumed; the probe is memoized per process).
+//
+// Trust model unchanged: these commands ship in forge source, they are never
+// model output. User config always WINS over the table, and
+// config.lsp.autostart === false turns the table off entirely. A binary that
+// is absent, or a server that fails to start, degrades to the lexical ladder
+// exactly as before — honestly labeled, never fabricated.
+// ---------------------------------------------------------------------------
+
+const AUTOSTART_TABLE = [
+  {
+    name: "typescript", extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+    candidates: [{ command: "typescript-language-server", args: ["--stdio"] }],
+  },
+  {
+    name: "python", extensions: [".py", ".pyi"],
+    candidates: [{ command: "pyright-langserver", args: ["--stdio"] }, { command: "pylsp", args: [] }],
+  },
+  {
+    name: "go", extensions: [".go"],
+    candidates: [{ command: "gopls", args: [] }],
+  },
+  {
+    name: "rust", extensions: [".rs"],
+    candidates: [{ command: "rust-analyzer", args: [] }],
+  },
+]
+
+const _commandOnPathMemo = new Map()
+function commandOnPath(cmd) {
+  const name = String(cmd || "").split(/\s+/)[0]
+  if (!name) return false
+  if (_commandOnPathMemo.has(name)) return _commandOnPathMemo.get(name)
+  let found = false
+  if (name.includes("/") || name.includes("\\")) {
+    try { found = fsMod.existsSync(name) } catch { found = false }
+  } else {
+    for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+      if (!dir) continue
+      try { if (fsMod.existsSync(path.join(dir, name))) { found = true; break } } catch {}
+    }
+  }
+  _commandOnPathMemo.set(name, found)
+  return found
+}
+
+/** First-party autostart spec for a file, or null. Never guesses: a row whose
+ *  candidate binaries are all absent returns null (lexical ladder stays the
+ *  honest default). `config.lsp.autostart === false` disables the table. */
+export function autostartForFile(file, { config } = {}) {
+  if (config?.lsp?.autostart === false) return null
+  const ext = path.extname(String(file || "")).toLowerCase()
+  if (!ext) return null
+  for (const row of AUTOSTART_TABLE) {
+    if (!row.extensions.includes(ext)) continue
+    for (const c of row.candidates) {
+      if (commandOnPath(c.command)) {
+        return { name: `autostart:${row.name}`, spec: { command: c.command, args: c.args, extensions: row.extensions, autostart: true } }
+      }
+    }
+    return null
+  }
+  return null
+}
+
+/** The table's availability rows (for /doctor + layer-3 reporting): only
+ *  candidates that are actually on PATH are listed. */
+export function autostartAvailability({ config } = {}) {
+  if (config?.lsp?.autostart === false) return []
+  const out = []
+  for (const row of AUTOSTART_TABLE) {
+    const present = row.candidates.find((c) => commandOnPath(c.command))
+    if (!present) continue
+    out.push({ name: `autostart:${row.name}`, command: present.command, available: true, autostart: true, extensions: row.extensions })
+  }
+  return out
+}
+
+/** Resolve the configured server for a file, by extension. User config wins;
+ *  when nothing matches, the first-party autostart table supplies a spec for
+ *  the top languages IF the server binary is on PATH (v94 todowise — the
+ *  structured path becomes the default, not the exception). */
 export function serverForFile(config, file) {
   const servers = config?.lsp?.servers
   const ext = path.extname(String(file || "")).toLowerCase()
@@ -311,94 +399,7 @@ export function serverForFile(config, file) {
       if (exts.includes(ext)) return { name, spec }
     }
   }
-  // v94 gapclose (TODO LSP): user config found nothing — consult the
-  // first-party auto-start table (a real binary on PATH, or nothing).
-  const auto = autoStartForFile(config, file)
-  if (auto?.found) return { name: auto.found.name, spec: auto.found.spec, autoStarted: true }
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// v94 gapclose — AUTO-START TABLE for the top languages.
-//
-// Before this, documentSymbol extraction fell back to lexical scanning unless
-// the user had hand-written lsp.servers config — the structured path was the
-// exception, not the default. The table below makes it the default for the
-// most common languages WITHOUT inventing anything:
-//
-//   - a candidate is used only when its binary ACTUALLY EXISTS on PATH
-//     (evidence, never a guess; the resolved absolute path is what spawns)
-//   - user `lsp.servers` config ALWAYS wins over the table
-//   - `lsp.autoStart: false` or FORGE_LSP_AUTOSTART=0 turns the table off
-//   - the command list is first-party static config — the trust model is
-//     unchanged: a language server is never launched from model output
-//
-// Same trust class as build-system discovery (npm/cargo on PATH): a well-known
-// toolchain binary the user already installed.
-// ---------------------------------------------------------------------------
-export const AUTO_START_TABLE = [
-  { name: "typescript", extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"], candidates: [{ command: "typescript-language-server", args: ["--stdio"] }] },
-  { name: "python", extensions: [".py", ".pyi"], candidates: [{ command: "pyright-langserver", args: ["--stdio"] }, { command: "pylsp", args: [] }] },
-  { name: "go", extensions: [".go"], candidates: [{ command: "gopls", args: [] }] },
-  { name: "rust", extensions: [".rs"], candidates: [{ command: "rust-analyzer", args: [] }] },
-]
-
-const autoStartCache = new Map() // command -> resolved absolute path | null (PATH does not change mid-process; tests call resetAutoStartCache)
-
-/** Drop the PATH-resolution cache (tests; a PATH change in a long session). */
-export function resetAutoStartCache() { autoStartCache.clear() }
-
-/** Absolute path of a command on PATH, or null. Existence + regular file is
- *  the evidence; a directory or a dangling name is never "found". */
-function whichOnPath(command) {
-  const cached = autoStartCache.get(command)
-  if (cached !== undefined) return cached
-  let resolved = null
-  try {
-    for (const dir of String(process.env.PATH || "").split(path.delimiter)) {
-      if (!dir) continue
-      const cand = path.join(dir, command)
-      try {
-        const st = fsMod.statSync(cand)
-        if (st.isFile()) { resolved = cand; break }
-      } catch { /* not in this dir */ }
-    }
-  } catch { /* unreadable PATH entry — skip */ }
-  autoStartCache.set(command, resolved)
-  return resolved
-}
-
-export function autoStartEnabled(config) {
-  if (process.env.FORGE_LSP_AUTOSTART === "0") return false
-  if (config?.lsp?.autoStart === false) return false
-  return true
-}
-
-/** Table entry for a file's extension (or null) — used for honest errors. */
-function autoStartEntryFor(file) {
-  const ext = path.extname(String(file || "")).toLowerCase()
-  return AUTO_START_TABLE.find((e) => e.extensions.includes(ext)) ?? null
-}
-
-/** Which candidate commands WOULD be probed for this file — for the honest
- *  "probed PATH for X, Y (not found)" error line. [] when disabled/no entry. */
-export function autoStartProbedFor(config, file) {
-  if (!autoStartEnabled(config)) return []
-  const entry = autoStartEntryFor(file)
-  return entry ? entry.candidates.map((c) => c.command) : []
-}
-
-/** Resolve an auto-start server for a file: { found: {name, spec} | null }.
- *  Only a binary that exists on PATH is ever returned — never a hope. */
-export function autoStartForFile(config, file) {
-  if (!autoStartEnabled(config)) return null
-  const entry = autoStartEntryFor(file)
-  if (!entry) return null
-  for (const cand of entry.candidates) {
-    const bin = whichOnPath(cand.command)
-    if (bin) return { found: { name: `auto:${entry.name}`, spec: { command: bin, args: cand.args, extensions: entry.extensions, languageId: undefined } } }
-  }
-  return { found: null }
+  return autostartForFile(file, { config })
 }
 
 export function languageIdForFile(file, spec) {
@@ -458,16 +459,7 @@ export function createLspSession(config, { cwd = process.cwd() } = {}) {
     const abs = path.resolve(cwd, String(file || ""))
     if (!fs2.existsSync(abs)) return { error: `no such file: ${rel(cwd, abs)}` }
     const found = serverForFile(config, abs)
-    if (!found) {
-      // v94 gapclose: honest error — when the auto-start table covers this
-      // extension, say exactly which binaries were probed on PATH and missed
-      const probed = autoStartProbedFor(config, abs)
-      return {
-        error: probed.length
-          ? `no language server available for ${path.extname(abs) || "this file type"} — PATH probed for ${probed.join(", ")} (not found); install one, configure lsp.servers, or use grep_files / read_file`
-          : `no language server configured for ${path.extname(abs) || "this file type"} (configure lsp.servers, or use grep_files / read_file)`,
-      }
-    }
+    if (!found) return { error: `no language server configured for ${path.extname(abs) || "this file type"} (configure lsp.servers, or use grep_files / read_file)` }
     if (!clients.has(found.name)) {
       clients.set(found.name, connectServer(found.name, found.spec, { rootUri }).catch((e) => { clients.delete(found.name); throw e }))
     }
@@ -541,23 +533,32 @@ export function createLspSession(config, { cwd = process.cwd() } = {}) {
  * verification ledger. Error-severity diagnostics fail (`passed: false`);
  * warnings/info/clean pass. A missing/unconfigured/failed server is skipped
  * (not a gate failure — LSP is optional evidence). Off when `lsp.servers`
- * is empty AND the auto-start table finds no real binary on PATH. Caller
- * does not own the session.
+ * is empty. Caller does not own the session.
  */
-export async function collectDiagnosticsForFiles(config, files, { cwd = process.cwd() } = {}) {
+export async function collectDiagnosticsForFiles(config, files, { cwd = process.cwd(), allowAutostart = false } = {}) {
   const out = []
-  // v94 gapclose: diagnostics run when EITHER the user configured servers OR
-  // the auto-start table can resolve a real binary on PATH (serverForFile
-  // below is auto-start aware). No config and no binary → still off.
-  const hasConfigured = config?.lsp?.servers && typeof config.lsp.servers === "object" && Object.keys(config.lsp.servers).length > 0
-  if (!hasConfigured && !autoStartEnabled(config)) return out
+  // v96 unifywise: `allowAutostart` (the meta verification path passes it)
+  // lets the FIRST-PARTY AUTOSTART TABLE serve files even with no user
+  // servers configured — a machine with only pyright on PATH now gets
+  // diagnostics evidence out of the box instead of silently none. The
+  // default contract stays pinned: no user servers + no allowAutostart → no
+  // evidence (an unconfigured environment is skipped, never a gate failure).
+  const userServers = config?.lsp?.servers && typeof config.lsp.servers === "object"
+    ? Object.entries(config.lsp.servers).filter(([, s]) => s && s.disabled !== true && s.command)
+    : []
+  if (!userServers.length && !allowAutostart) return out
   const wanted = []
   const seen = new Set()
   for (const f of files || []) {
     const abs = path.resolve(cwd, String(f))
     if (seen.has(abs)) continue
     seen.add(abs)
-    if (!serverForFile(config, abs)) continue
+    // user-configured server wins (serverForFile checks it first); a server
+    // resolved from the autostart table counts only when allowAutostart.
+    const serving = serverForFile(config, abs)
+    if (!serving) continue
+    const fromAutostart = serving.spec?.autostart === true || String(serving.name ?? "").startsWith("autostart:")
+    if (fromAutostart && !allowAutostart) continue
     try { if (!fsMod.existsSync(abs)) continue } catch { continue }
     wanted.push(abs)
   }
@@ -569,7 +570,7 @@ export async function collectDiagnosticsForFiles(config, files, { cwd = process.
     for (const abs of wanted) {
       let text
       try { text = String(await tool.run({ path: abs })) } catch (e) { text = `ERROR: ${e?.message ?? e}` }
-      if (/^no such file|^no language server (configured|available)|^language server ".*" failed to start|^ERROR:/.test(text)) continue
+      if (/^no such file|^no language server configured|^language server ".*" failed to start|^ERROR:/.test(text)) continue
       const errorCount = (text.match(/^error /gm) || []).length
       out.push({ file: abs, text, passed: errorCount === 0, errorCount })
     }
