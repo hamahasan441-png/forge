@@ -53,6 +53,55 @@ export const GATE_STATUS = {
 /** Recovery recommendations that mean "do not proceed". */
 const BLOCKING_RECOVERY = new Set(["ask_user", "abort", "inspect", "compensate", "resume_from_checkpoint"])
 
+/**
+ * v96 unifywise (§9 requirement traceability): the REQUIREMENT → WORK →
+ * EVIDENCE chain, checked deterministically at the gate.
+ *
+ * engmemory ingests numbered/MUST/SHALL/NEVER lines of a long objective as
+ * REQUIREMENT-layer records (R1..Rn) that "survive compaction" — but nothing
+ * ever asked whether the work actually ADDRESSED each one. This function
+ * closes that loop WITHOUT a second state store: it derives coverage from
+ * what the run already has — completed DAG node objectives, changed files,
+ * and verification evidence — and reports per-requirement status:
+ *
+ *   UNADDRESSED  nothing references it (gate blocker via required actions)
+ *   IMPLEMENTED  a completed node's objective covers it
+ *   TESTED       verification evidence mentions it (stronger than IMPLEMENTED)
+ *
+ * Pure, bounded (≤40 requirements × ≤12 tokens), never throws.
+ */
+export function requirementCoverage(requirements = [], { nodeObjectives = [], changedFiles = [], verificationEvidence = [] } = {}) {
+  const sig = (t) => String(t ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter((w) => w.length > 2 && !["the", "and", "for", "with", "that", "must", "shall", "should", "have", "are", "not", "any", "all"].includes(w))
+    .slice(0, 12)
+  const objectives = (Array.isArray(nodeObjectives) ? nodeObjectives : []).map(sig).filter((a) => a.length)
+  const evidence = (Array.isArray(verificationEvidence) ? verificationEvidence : []).map((e) => sig(e)).filter((a) => a.length)
+  const changed = new Set((Array.isArray(changedFiles) ? changedFiles : []).map((f) => String(f)))
+  const out = []
+  for (const r of (Array.isArray(requirements) ? requirements : []).slice(0, 40)) {
+    const tokens = sig(r.text)
+    if (!tokens.length) continue
+    const files = Array.isArray(r.files) ? r.files : []
+    const fileHit = files.some((f) => changed.has(String(f)))
+    const tokenHit = (hay) => tokens.some((t) => hay.includes(t))
+    let status = "UNADDRESSED"
+    if (objectives.some(tokenHit) || fileHit) status = "IMPLEMENTED"
+    if (evidence.some(tokenHit)) status = "TESTED" // evidence mention is the stronger signal either way
+    out.push({ id: r.id ?? null, text: String(r.text ?? "").slice(0, 200), status, files })
+  }
+  const uncovered = out.filter((r) => r.status === "UNADDRESSED")
+  return {
+    total: out.length,
+    covered: out.length - uncovered.length,
+    uncovered,
+    requirements: out,
+    ok: uncovered.length === 0,
+  }
+}
+
 function str(x) {
   return x == null ? "" : String(x)
 }

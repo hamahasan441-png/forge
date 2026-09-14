@@ -121,6 +121,19 @@ export function defaultConfig() {
     },
 
     retry: { attempts: 3, backoffMs: 1500, connectMs: 8000, firstByteMs: 120000, requestTimeoutMs: 180000 },
+
+    // v98 shipwise — verified git delivery policy. Kernel execution policy
+    // (like worktree), NOT a tool surface: fires only after the completion
+    // gate is satisfied. ALL OFF by default — delivery is opt-in.
+    //   commit: "off" | "on" | "ask"  — commit the run's VERIFIED files on the
+    //     current branch (explicit pathspec, forge trailers, never -A)
+    //   branch: "off" | "auto"        — bookmark branch forge/<task-id> at the
+    //     delivery commit (git branch — the checkout is NEVER switched)
+    //   push:   "off" | "explicit"    — push additionally requires a live
+    //     AUTHORIZATION ask; force is never constructed
+    // PRIVILEGED: only ~/.forge/config.json may set this section — a checked-in
+    // project config can never turn delivery on for everyone who clones.
+    gitship: { commit: "off", branch: "off", push: "off" },
   }
 }
 
@@ -158,9 +171,9 @@ function deepMerge(base, over) {
 // ---------------------------------------------------------------------------
 
 /** tools.* switches that only the user-level config (or env) may set. */
-const PRIVILEGED_TOOL_KEYS = ["unrestricted", "autoApprove", "allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "allowInterpreterEval", "allowNewPlugins", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify"]
+const PRIVILEGED_TOOL_KEYS = ["unrestricted", "autoApprove", "allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "allowInterpreterEval", "allowNewPlugins", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify", "contentFence"]
 /** top-level sections a project file may not touch at all. */
-const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval"]
+const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval", "gitship"]
 
 /**
  * Strip everything a project-local config is not allowed to set.

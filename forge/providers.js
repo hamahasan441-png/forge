@@ -1,6 +1,7 @@
 import { VERSION } from "./version.js"
 import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 import { toAnthropicContent } from "./vision.js"
+import crypto from "node:crypto"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -779,7 +780,33 @@ export function toAnthropicMessages(messages) {
 // Non-streaming chat with tool support (agent mode)
 // Returns { content, reasoning, toolCalls:[{id,name,args}], usage, finishReason }
 // ---------------------------------------------------------------------------
+// v97 §49 (zero-waste): IN-FLIGHT REQUEST COALESCING. Two IDENTICAL requests
+// (same provider/model/prompt/tools) issued CONCURRENTLY — e.g. parallel
+// workers summarizing the same context, or a fan-out hitting the same
+// sub-question — share ONE network call. Strictly in-flight: nothing is
+// cached after completion (a model call is not a pure function of its
+// prompt), and the entry is dropped the moment the call settles.
+const inflightRequests = new Map()
+const INFLIGHT_MAX = 64
+
 export async function chatOnce(opts) {
+  let key = null
+  // audit A13: a request carrying its OWN abort signal never coalesces — one
+  // caller's cancellation must never reject another caller's shared promise.
+  if (opts?.signal) return chatOnceInner(opts)
+  try {
+    const kb = [String(opts?.baseUrl ?? ""), String(opts?.model ?? ""), opts?.system ?? "", JSON.stringify(opts?.messages ?? []), JSON.stringify(opts?.tools ?? []), opts?.maxTokens ?? null, opts?.temperature ?? null, opts?.deep ?? null]
+    key = crypto.createHash("sha1").update(JSON.stringify(kb)).digest("hex")
+  } catch { key = null }
+  if (!key || inflightRequests.size >= INFLIGHT_MAX) return chatOnceInner(opts)
+  const existing = inflightRequests.get(key)
+  if (existing) return existing
+  const p = chatOnceInner(opts)
+  inflightRequests.set(key, p)
+  try { return await p } finally { inflightRequests.delete(key) }
+}
+
+async function chatOnceInner(opts) {
   const { protocol = "openai", baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, system, connectMs = 30000, requestTimeoutMs = 180000 } = opts
   const _deep = opts.deep
   const base = (baseUrl || "").replace(/\/$/, "")

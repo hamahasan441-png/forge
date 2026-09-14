@@ -1,4 +1,4 @@
-forge v94.0.0 — CLI-only build "gapwise" + "masterwise/tokenwise" follow-ons (gap fix / integration patch + Engineering Intelligence Core) on top of "sensewise" + "wirewise" + "corewise" + "gitwise" + "fast" + "noguard + worker clamp")
+forge v98.0.0 — CLI-only build "shipwise" (the delivery release: tier-3 structured extraction WIRED into the index path [langstruct.js — one session-cached LSP pass per server, symbolDetails + extraction provenance, honest fallbacks]; native JSON layer-1 parse; verified git delivery [gitship.js — kernel policy, never a tool: 9-check-gated commits with forge trailers, explicit pathspec, foreign drift never staged, branch bookmark forge/<task>, push explicit+consent only, PR-ready text, all OFF by default, PRIVILEGED config section]; prompt-injection defense [contentfence.js — attribution fence + advisory marker scan on every tool result, data-not-instructions rule in both system prompts, user-only kill switch]; world model at scale [0=unlimited resolver fix, batched index writes, walk reuse, chunked buildAsync with in-flight sharing, persistedRecords last-recorded-truth read fixing the CONTRACT_DRIFT before-capture bug]; artifact evidence [observed build outputs as VTYPE.ARTIFACT ledger records, adapter-gated; runtimeValidation enforced at critical risk]; browser visual regression [visual_diff baselines — snapshot text diff + screenshot hash, full-page capture]; agent LSP tools light up on the autostart table; FORGE-BENCH 22/22) on top of "unifiedwise" (one-brain release), "unifywise" (the wiring release) and "worktreewise" (isolated worktree execution for DAG nodes)
 - zero-dependency Node CLI (>=20, ESM), runs directly against providers
   (no localhost server, no build, no native modules; ARM64/Termux friendly)
 - 22 providers (21 OpenAI-protocol + Anthropic), auto-failover,
@@ -78,6 +78,91 @@ forge v94.0.0 — CLI-only build "gapwise" + "masterwise/tokenwise" follow-ons (
     FORGE_SHELL > /bin/sh > $PREFIX/bin/sh (Termux) > $SHELL > PATH;
     forge doctor reports the resolved shell; FORGE_SKILL_ALLOW_PRIVATE=1
     opts in to private skill mirrors
+- v95 WORKTREEWISE (the last open KERNEL item, closed with proof —
+  tests/test-worktreewise.mjs, 75 assertions, 9 sections: lifecycle,
+  isolation invariant, conflict honesty, eligibility, gates, orphan sweep,
+  child-process runner, meta integration, surface-dedup audit): worktree.js
+  (NEW) — the worktree lifecycle over git plumbing (execFile, argument
+  arrays only): createWorktree (detached checkout of HEAD under
+  .forge/worktrees/<run>-<node>), captureChanges (ONE binary-safe patch via
+  `git add -A -N` + `git diff --binary`; .forge state excluded by pathspec
+  so forge's bookkeeping can never be merged into a project), mergeBack
+  (checked-then-applied: plain --check → 3-way --check → apply; a
+  conflicting patch NEVER half-applies, the files are NAMED, the tree stays
+  untouched), removeWorktree (force + prune + terminal registry status),
+  sweepOrphans (crash-resume: a worktree whose run AND pid are gone is
+  swept at the next task start), planIsolation (mutating, NO dependencies —
+  a HEAD checkout cannot see merged-but-uncommitted dependency output —
+  DECLARED conflict keys, pairwise disjoint, disjoint from the current
+  node's keys, bounded by worktree.maxNodes default 2), uncommittedFiles
+  (the shared-tree in-flight guard); worknode.mjs (NEW) — the
+  child-process worker entry whose cwd IS the worktree (agent.js binds
+  everything to process.cwd(); one child per node = race-free parallel
+  agents, writes can only land in the node's own tree; spec + result JSON
+  outside the worktree, spec mode 600; non-zero exit = no result = honest
+  worker failure); meta.js dispatch lane — eligible mutating nodes run
+  CONCURRENTLY with the main agent in per-node worktrees (role coder, the
+  one mutating role), merge-back serialized behind a post-agent barrier
+  (single writer on the shared tree at every instant — lost updates
+  impossible), merged files recorded like main-loop writes (changedFiles,
+  taskstate, ledger acceptance record, completion WITH evidence), events
+  WORKTREE_MODE/CREATED/MERGED/CONFLICT/FAILED/REMOVED/UNAVAILABLE/
+  ORPHAN_SWEPT + bus mirrors; honest failure paths everywhere (worker
+  failure → worktree discarded + node FAILED; conflict → files named,
+  worktree KEPT for inspection; clean worktree with a report → acceptance
+  evidence; nothing at all → unverifiable); gates: default ON in a git
+  repo, FORGE_WORKTREE=0|false|off or worktree.enabled:false opts out,
+  non-git and no-HEAD refuse honestly, ineligible nodes stay serialized
+  exactly as before (the never-list rule enforced, not licensed);
+  searchproviders.js stale local VERSION constant fixed (v94 latent bug
+  the bump caught: the search user-agent advertised 94.0.0 after every
+  bump — now imports version.js, the single source)
+- v94 TODOWISE (the TODO ledger, closed with proof — strengthening patches
+  on the owning modules, each proven by tests/test-todowise.mjs, 81
+  assertions, suite #160): protocol-aware health probe (runtimesession —
+  HTTP primary, real TCP connect fallback separates not-listening from
+  listener-confirmed-no-HTTP; ok:true at tcp level with an honest evidence
+  line; claim gate + tool rendering level-aware); evidence-based
+  process-group kill (runtime — signalGroup/groupMembersEvidence/
+  parsePsMembers: kill(-pgid) refused → /proc walk then bounded ps parse,
+  every member signaled individually, killEvidence per entry; tools.js
+  bash killTree gets the same walk); bwrap kernel re-probe (sandbox —
+  reprobeKernelSupport on the first bwrap startup failure, counted via
+  kernelProbeCount); checkpoint working-tree drift verification
+  (sealEdited post-write hashes in write_file/edit_file/multi_edit/
+  apply_patch + a DRIFT phase classifying clean/forge-owned/external/
+  unattributed/missing — external work is KEPT with status DRIFT and
+  never clobbered, legacy forge undo path equally protected); persistent
+  semantic index (codesearch — chunk docs under ~/.forge/projects/<hash>/
+  semantic-index.json, house fingerprint per file, drift beats the index,
+  deleted files dropped, corruption rebuilds, <64 docs skip persistence,
+  FORGE_INDEX=0 opts out; fresh processes adopt unchanged chunks); LSP
+  first-party auto-start table (ts/js, python, go, rust — only when the
+  binary is on PATH, user config wins, lsp.autostart:false opts out;
+  serverForFile falls back to it, extractStructured structured-by-default
+  on machines with a server); multi-step scripted tool probes
+  (toolcreate — probeSteps at design or verify time, one child process
+  for the whole sequence so state survives across steps, per-step
+  evidence, a throwing step aborts, single-probe contract unchanged)
+- v94 FASTWISE (same intelligence, less wasted work — deterministic,
+  offline, no new subsystems): fastwise.js freshness layer — ONE shared
+  TTL + file-fingerprint memo (createFreshMemo: injectable now,
+  oldest-at eviction, house `${mtimeMs}:${size}` signature, drift beats
+  the TTL, failures never cached); likely-next prefetch — idle,
+  deferred, unref'd warm pass beside the knowwise KG bootstrap that
+  persists the world-model snapshot (later plans/answers pay only a
+  stat-only drift walk) and warms the semantic chunk cache with ONE
+  bounded offline BM25 pass (FORGE_INDEX=0 skips it entirely), guided
+  by likelyNext prediction (plan-frontier paths + knowwise KG hubs via
+  engmemory's ONE KG parser); resolveLane execution lanes in
+  modelstrategy (fast/balanced/deep from task complexity + device tier,
+  feeding the EXISTING selectModel opts — tight latency budget + cost
+  bias for light tasks, none for deep work, cost bias on low-resource
+  devices); modelstrategy perf-file mtime+size memo (was ~24 sync reads
+  per selection, now reads only on real change, never serves stale);
+  FORGE_FASTWISE=0 disables the warm layer; dedup-audit suite pins
+  tools/capabilities/catalog-aliases/skills unique (zero duplicates,
+  guarded permanently)
 - v94 DEEPWISE (judgment before action — deterministic, no model calls,
   no network, no new subsystems): plan competition + adoption — the
   original plan competes against its reshaped variants on expected
@@ -220,7 +305,7 @@ forge v94.0.0 — CLI-only build "gapwise" + "masterwise/tokenwise" follow-ons (
   playbooks — never spawned, never auto-ACTIVE)
 - state: sessions with resume (messages + cwd + usage), checkpoints with
   gzip backups + sha256 undo, task records with fsync durability
-- self-test: `npm test` from forge/ — 158 suites incl. e2e (mock provider)
+- self-test: `npm test` from forge/ — 160 suites incl. e2e (mock provider)
   and clean-room npm install; zero network needed; CI: Node 20 + 22
 Config file: ~/.forge/config.json (chmod 600, keys stay on your device).
 Requirements: Node.js >= 20 only (18 is EOL, untested).

@@ -27,12 +27,13 @@
  */
 import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, finalizeStatus } from "./taskstate.js"
 import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
-import { canCompleteTask, CHECK as GATE_CHECK } from "./completion.js"
+import { canCompleteTask, requirementCoverage, CHECK as GATE_CHECK } from "./completion.js"
 import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./resources.js"
 import { createExecutionController } from "./execcontroller.js"
 import { createEngMemory } from "./engmemory.js"
 import { assessPlan, predictNodes, alternatives, adoptDecision, informationGainExperiments, classifyRealityDelta, createLiveRisk, verificationPlanForRisk, gatherPlannerEvidence } from "./plannerisk.js"
-import { selectModel, reconsiderModel, recordOutcome } from "./modelstrategy.js"
+import { selectModel, reconsiderModel, recordOutcome, resolveLane } from "./modelstrategy.js"
+import { warmCaches } from "./fastwise.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
@@ -49,6 +50,9 @@ import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lesson
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
+import { maybeShip } from "./gitship.js" // v98 shipwise: verified delivery (kernel policy, never a tool)
+import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured enrichment of changed files
+import { artifactRuntimeEvidence } from "./runtimesession.js" // v98 shipwise: runtime/artifact evidence for the ledger
 import { redact } from "./secrets.js"
 import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
 import { AGENT_BUDGETS } from "./config.js"
@@ -59,16 +63,25 @@ import { createBus, MESSAGE_TYPE } from "./bus.js"
 import { createDecisionEngine, DECISION_TYPE } from "./decisionengine.js"
 import { createCrewRouter, preferredClassFor } from "./crewroute.js"
 import { reviewWorkerResult } from "./selfreview.js"
-import { createHandoffLedger, handoffContextBlock, createHandoff as createHandoffLocal } from "./handoff.js"
+// v96 unifywise: handoffContextBlock is no longer imported here — it is now
+// consumed where it belongs (agentmanager.reassign renders the structured
+// handoff into the successor's context) instead of being dead import surface.
+import { createHandoffLedger, createHandoff as createHandoffLocal } from "./handoff.js"
 // v92 "wirewise" wiring: prediction ledger (§9), language adapters (§7/§8),
-// conflict reporting (§31), semantic world-model consultation (§5/§10).
+// semantic world-model consultation (§5/§10). Conflict reporting (§31) flows
+// through INTEGRATION_CONFLICT events to core.js (the v92 wiring), so the old
+// direct reportConflict import here was dead and is gone (v96 unifywise).
 // Nothing below replaces an existing engine — each island module is now
 // consulted by the living loop that needed it.
 import { predictForNode, settlePrediction, recordPrediction, predictionsForPrompt, predictionCalibration, formatPrediction, formatSettlement } from "./prediction.js"
 import { adapterBrief } from "./langadapter.js"
-import { reportConflict } from "./crewconflict.js"
 import { createWorldModel } from "./worldmodel.js"
 import { ensureKnowledgeGraph } from "./knowgraph.js" // v94 knowwise: auto KG bootstrap
+// v95 worktreewise: isolated worktree execution for DAG nodes (the kernel TODO
+// closed). Mutating nodes with pairwise-disjoint declared targets run in
+// per-node git worktrees; the merge back is serialized single-writer.
+import { planIsolation, createWorktree, captureChanges, mergeBack, removeWorktree, sweepOrphans, isolationAvailable } from "./worktree.js"
+import { contractDrift } from "./xlang.js" // v97 §21: API/schema drift evidence
 import * as dagLib from "./dag.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -91,7 +104,7 @@ function explicitFinalization(desired) {
   return FINAL.FAILED
 }
 
-export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null } = {}) {
+export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null } = {}) {
   const emit = (ev) => { try { onEvent?.(ev) } catch { } }
 
   let taskId = resumeTaskId
@@ -111,6 +124,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const state = ts.record
   const taskRunId = state.run_id || "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
   state.run_id = taskRunId
+
+  // v96 unifywise (§50): environment fingerprint + drift. One bounded capture
+  // (process facts free, toolchain presence stat-only, versions TTL-memoized)
+  // diffed against the per-project persisted fingerprint. Drift is ADVISORY —
+  // an ENVIRONMENT_DRIFT warning with per-signal impact notes, never a gate
+  // decision. The check itself never breaks the run ("absent" is honest).
+  try {
+    const { checkEnvironment, formatDrift } = await import("./envfingerprint.js")
+    const envCheck = checkEnvironment({ cwd: process.cwd() })
+    if (envCheck.ok && envCheck.drift?.drifted) {
+      emit({ type: "ENVIRONMENT_DRIFT", taskId, runId: taskRunId, signals: envCheck.drift.signals.slice(0, 6), note: formatDrift(envCheck.drift), advisory: true })
+    }
+  } catch { /* environment fingerprinting is advisory, never load-bearing */ }
   const ledger = createLedger()
   if (Array.isArray(state.verification_results)) ledger.load(state.verification_results)
   const resources = createResourceManager({ config, cwd: process.cwd() })
@@ -145,6 +171,24 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     onEvent: (ev) => emit({ taskId, runId: taskRunId, ...ev }),
     signal,
   })
+  // --- v95 worktreewise state ----------------------------------------------
+  // nodeId → { id, dir, base } for nodes currently executing in an isolated
+  // git worktree. Declared BEFORE manager.configure() so the runner closure
+  // (which needs it) can see the SAME map for the whole task.
+  const worktreeByNode = new Map()
+  // resolved once per task on first fan-out (null = not yet resolved)
+  let wtAvailability = null
+  // v97 §52 (adaptive parallelism): the writer ceiling is configurable —
+  // config.worktree.maxNodes or FORGE_WORKTREE_WRITERS, default 2, hard cap 8
+  // (measured parallelism, not a fan-out bomb; the single-writer merge lane
+  // and pairwise-disjoint conflict keys stay exactly as they were).
+  const wtMaxNodes = Math.max(1, Math.min(8, Number(config?.worktree?.maxNodes) || Number(process.env.FORGE_WORKTREE_WRITERS) || 2))
+  // crash-resume house pattern: worktrees whose owning run is gone are swept
+  // BEFORE this task starts writing (a stale checkout must never look live).
+  try {
+    const swept = await sweepOrphans({ root: process.cwd(), liveRunIds: [taskRunId, resumeRec?.run_id].filter(Boolean) })
+    for (const s of swept) emit({ type: "WORKTREE_ORPHAN_SWEPT", taskId, runId: taskRunId, worktreeId: s.id, dir: s.dir, note: s.reason })
+  } catch { /* a broken registry must never break a task */ }
   // --- v91 ∞ CORE subsystems (shared, bounded, never a second truth) ------
   const bus91 = createBus({ taskId, persist: true })
   const handoffs91 = createHandoffLedger()
@@ -203,6 +247,26 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           }
         } catch { roleProv = provRef.prov }
       }
+      // v95 worktreewise: a node registered in worktreeByNode executes in a
+      // CHILD PROCESS whose cwd IS its own git worktree. agent.js binds
+      // everything to process.cwd(), so a child per node is the only
+      // race-free parallelism — and the writes can only land in the worktree.
+      // The spec (with the provider key) is written mode 600 OUTSIDE the
+      // worktree; the result JSON comes back the same way.
+      const wt = dagNode ? worktreeByNode.get(String(dagNode)) : null
+      if (wt) {
+        const { runIsolatedNode } = await import("./worktree.js")
+        return runIsolatedNode({
+          dir: wt.dir,
+          spec: {
+            nodeId: String(dagNode), role: "coder", task: subTask,
+            context: context ? `--- relevant project context (demand-loaded) ---\n${context}` : "",
+            config, provider: roleProv, maxSteps: 10,
+            taskId, runId: taskRunId, segmentId: `worktree-${dagNode}`,
+          },
+          timeoutMs: 1000 * 60 * 3, signal: sig ?? signal,
+        })
+      }
       return agent({
         config, provider: roleProv, task: subTask,
         taskId, runId: taskRunId, segmentId: `worker-${dagNode ?? role}`, nodeId: dagNode ?? null,
@@ -247,7 +311,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // how many times this task has already been resumed after a safety fuse
   let continuationCount = Number(resumeRec?.continuation_count ?? 0) || 0
 
-  const sel = selectModel(config, { task: state.objective, provider })
+  // v94 fastwise: resolve the execution lane from signals forge already has
+  // (task complexity + device tier from the resource manager) and feed the
+  // EXISTING selection opts — one strategy engine, deterministic, offline.
+  const lane = resolveLane({ task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true } })
+  const sel = selectModel(config, { task: state.objective, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
   const requiredCaps = sel?.capabilities ?? null
   let prov = provider
   if (sel?.decision && config?.agent?.modelStrategy !== false) {
@@ -270,6 +338,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     emit({ type: "RECOVERY_STARTED", taskId, runId: taskRunId, objective: state.objective })
     resumeRecon = reconcileTask(resumeRec, { cwd: process.cwd() })
     emit({ type: "RECOVERY_COMPLETED", taskId, runId: taskRunId, recommended: resumeRecon.recommended, drift: resumeRecon.effects ? [resumeRecon.effects.missing.length, resumeRecon.effects.unknown.length] : [0, 0] })
+    // v96 unifywise: the RESUME transition is now a real event (the Core's
+    // lifecycle map records the RESUME phase from it; the bus binds task
+    // history on it). Recovery finishing IS the resume — one truth, two views.
+    emit({ type: "TASK_RESUMED", taskId, runId: taskRunId, fromCheckpoint: state.checkpoint_id ?? null, continuation: state.continuation_count ?? 0, recommended: resumeRecon.recommended })
     ts.decide("recovery", resumeRecon.recommended)
   }
 
@@ -388,13 +460,33 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         if (typeof kgTimer.unref === "function") kgTimer.unref()
       } catch { /* KG bootstrap is best-effort */ }
     }
+    // v94 fastwise: idle warmup — persist the world-model snapshot and warm
+    // the semantic chunk cache ONCE per freshness window, guided by the
+    // likely-next prediction (objective + knowwise hubs). Deferred + unref'd
+    // exactly like the KG bootstrap; FORGE_FASTWISE=0 turns it off; every
+    // failure swallowed (best-effort, off-path, planning never delayed). The
+    // KG floor graph itself is NOT re-warmed here — knowwise owns it.
+    try {
+      const fwTimer = setTimeout(() => {
+        warmCaches({ cwd: process.cwd(), objectives: [String(state.objective ?? "")] })
+          .then((fw) => {
+            if (fw?.ok && !fw.cached && fw.warmed.length) emit({ type: "FASTWISE_WARMED", taskId, runId: taskRunId, warmed: fw.warmed, predicted: fw.predicted })
+          })
+          .catch(() => { /* fastwise warm is best-effort */ })
+      }, 0)
+      if (typeof fwTimer.unref === "function") fwTimer.unref()
+    } catch { /* fastwise warm is best-effort */ }
     // v92 §5/§10 (wirewise): consult the semantic world model BEFORE planning.
     // Project shape + blast radius of files the objective names — bounded,
     // honest (degraded world says so), never fabricated.
-    const worldPrefix = (() => {
+    const worldPrefix = await (async () => {
       if (restoredDAG || fastPath || recoveryPath) return ""
       try {
         const world = createWorldModel({ cwd: process.cwd() })
+        // v98 shipwise: the plan-time consult walks CHUNKED (never freezes the
+        // TTY/bus on a six-figure repo) and opens the async-fresh window so
+        // the summarize/impact/testsFor queries below don't re-walk per call
+        await world.buildAsync()
         const lines = []
         const summary = world.summarize({ maxLines: 5 })
         if (summary) lines.push(String(summary))
@@ -576,6 +668,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         filesChanged: [],
         verification: { ok: false, missing: [], reason: "plan invalid" },
         planValidation,
+        state: state.status,
         task: state,
       }
     }
@@ -595,6 +688,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       toolCalls: 0,
       filesChanged: [],
       verification: { ok: false, missing: [], reason: "planning failed" },
+      state: state.status,
       task: state,
     }
   }
@@ -609,6 +703,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // lowers the reported confidence instead of faking precision.
   let planRisk = null
   let liveRisk = null
+  // v96 unifywise: §24 information-gain experiments captured at planning time
+  // and injected into the FIRST segment's context (consumed once, then null).
+  let planInfogain = null
   if (planDefs.length && !restoredDAG) {
     try {
       const evidence = gatherPlannerEvidence(process.cwd(), state.objective)
@@ -682,16 +779,45 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         }
       }
       // §24 information gain — when uncertainty is high, run the CHEAPEST
-      // uncertainty-reducing experiment first (recommendation; the planner
-      // prompt carries it and inspect-first nodes are natural)
+      // uncertainty-reducing experiment first. v96 unifywise: this used to be
+      // computed-then-ignored — the comment said "the planner prompt carries
+      // it" but the planner prompt was already built before assessment ran.
+      // The experiments are now CAPTURED and injected into the FIRST segment's
+      // context, so the uncertainty reduction actually happens before the
+      // first mutation (planner prompt ordering fixed the honest way).
       const ig = informationGainExperiments({ assessment: planRisk, planDefs, knowledgeGaps: composedSnap?.gaps?.gaps ?? [] })
       if (ig.needed) {
-        emit({ type: "PLAN_INFOGAIN", taskId, runId: taskRunId, why: ig.why, experiments: ig.experiments })
+        planInfogain = ig
+        emit({ type: "PLAN_INFOGAIN", taskId, runId: taskRunId, why: ig.why, experiments: ig.experiments, carriedInto: "segment-1" })
       }
     } catch (e) {
       emit({ type: "PLAN_RISK_ASSESSMENT_FAILED", taskId, runId: taskRunId, error: String(e?.message ?? e).slice(0, 160) })
     }
   }
+
+  // v96 unifywise (§9/taskmodel): FEED THE ORIGIN-TAG LEDGER. Only
+  // seedFromObjective ever ran, so review's NO_ASSUMPTION_AS_REQUIREMENT
+  // check always saw an empty list — a ledger that exists but is never fed is
+  // a dead check. Plan nodes that SPEAK in assumptions now become ASSUMPTION
+  // entries (the promotion lattice keeps them from ever being treated as
+  // REQUIREMENTs), and mutating nodes declare IMPLEMENTATION intent. Bounded
+  // (≤8 assumptions, ≤12 implementations), deterministic, advisory-only.
+  try {
+    const ASSUMPTION_SPEAK = /\b(assum\w*|presumab\w*|should work|expects? to|likely|probably|might be|guess(?:ing)?|if (?:it|they) (?:is|are))\b/i
+    let fedA = 0, fedI = 0
+    for (const n of planDefs.slice(0, 24)) {
+      const text = String(n.objective ?? n.title ?? "").trim()
+      if (!text) continue
+      if (fedA < 8 && ASSUMPTION_SPEAK.test(text)) {
+        omega.tasks.add({ tag: "ASSUMPTION", text: `plan node ${n.id}: ${text.slice(0, 180)}`, source: "plan", files: n.targetFiles ?? [] })
+        fedA++
+      } else if (fedI < 12 && n.read_only !== true) {
+        omega.tasks.add({ tag: "IMPLEMENTATION", text: `implement via node ${n.id}: ${text.slice(0, 180)}`, source: "plan", files: n.targetFiles ?? [] })
+        fedI++
+      }
+    }
+    if (fedA) emit({ type: "TASKMODEL_FED", taskId, runId: taskRunId, assumptions: fedA, implementations: fedI, note: "plan-derived assumptions tagged — they can never be promoted to requirements" })
+  } catch { /* the origin-tag ledger is advisory for the review check */ }
 
   try {
     if (planDefs.length) {
@@ -714,6 +840,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       persistCritical()
       return {
         taskId,
+        runId: taskRunId,
         status: FINAL.WAITING,
         text: `DAG build failed: ${e?.message}`,
         segments: 0,
@@ -721,6 +848,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         toolCalls: 0,
         filesChanged: [],
         verification: { ok: false, missing: [], reason: "DAG invalid" },
+        state: TASK_STATUS.WAITING,
         task: state,
       }
     } else {
@@ -876,6 +1004,65 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       })
       for (const b of rev.blockers || []) addRequiredAction(`review: ${b.id}${b.detail ? ` (${b.detail})` : ""}`)
     }
+    // v96 unifywise (§9 requirement traceability → §45 "requirements
+    // satisfied"): every ingested REQUIREMENT must be ADDRESSED by real work —
+    // a completed node's objective, a changed file, or verification evidence.
+    // An uncovered requirement becomes a REQUIRED ACTION, which blocks the
+    // gate through the existing noPendingRequiredActions check (the same path
+    // review blockers take — no second gate, no new state store). Tasks that
+    // never ingested requirements (short objectives) see zero requirements and
+    // the check is a no-op — fast paths are untouched.
+    let reqCoverage = null
+    try {
+      const reqs = engMem.requirementRecords?.() ?? []
+      if (reqs.length) {
+        const nodeObjectives = dag
+          ? [...dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED).map((n) => String(n.objective ?? ""))
+          : []
+        const evidenceTexts = (ledger.all?.() ?? []).map((r) => String(r.evidence ?? r.command ?? ""))
+        reqCoverage = requirementCoverage(reqs, {
+          nodeObjectives,
+          changedFiles: changedRel,
+          verificationEvidence: evidenceTexts,
+        })
+        for (const u of reqCoverage.uncovered.slice(0, 4)) {
+          addRequiredAction(`requirement ${u.id ?? "?"} not addressed by any completed work: ${u.text.slice(0, 90)}`)
+        }
+      }
+    } catch { /* coverage is a gate input; its failure must not bypass the gate */ }
+    // v98 shipwise — RUNTIME/ARTIFACT EVIDENCE (the declared-then-ignored
+    // fix): plannerisk.verificationPlanForRisk promises runtimeValidation at
+    // CRITICAL risk, but nothing ever enforced it. Now: when the plan tier
+    // demands runtime validation AND the run mutated files AND the project
+    // has a PROVEN build command (adapter-gated, never invented), observed
+    // artifacts become ledger evidence — and their ABSENCE becomes a required
+    // action the gate refuses to complete over. A plain repo with no adapter
+    // or no build command is never asked for an artifact.
+    try {
+      if (vPlan.runtimeValidation && changedRel.length) {
+        // A4: the run window starts at task start — only artifacts THIS run
+        // produced/updated count as runtime evidence (a dist/ left over from
+        // a previous build is not evidence this run built anything)
+        const ae = artifactRuntimeEvidence(process.cwd(), { since: pluginStartedAtMs ?? null })
+        if (ae?.applicable) {
+          if (ae.passed) {
+            const rec = ledger.recordCommand(`artifact-observe ${ae.buildCommand}`, ae.evidence, {
+              type: VTYPE.ARTIFACT,
+              exitCode: 0,
+              affectedFiles: changedRel.slice(0, 40),
+              taskId,
+              nodeId,
+              segmentId,
+              verificationEpoch: state.verification_epoch ?? 0,
+            })
+            ts.noteVerification(rec)
+            emit({ type: "VERIFICATION_PASSED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: 0, evidence: rec.evidence, verificationId: rec.verification_id })
+          } else {
+            addRequiredAction(`critical-risk runtime validation: no build artifact observed for the proven build command "${ae.buildCommand}" — run the build (or provide runtime evidence) before completion`)
+          }
+        }
+      }
+    } catch { /* artifact evidence is best-effort; its failure must not bypass the gate */ }
     const gate = canCompleteTask({
       planValid: planValidation ? planValidation.ok !== false : true,
       planErrors: planValidation?.errors ?? [],
@@ -898,6 +1085,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       type: "COMPLETION_GATE", taskId, runId: taskRunId, segmentId, nodeId,
       ok: gate.ok, status: gate.status, checks: gate.checks, blockers: gate.blockers,
       finalRisk: fr.risk, initialRisk: fr.initialRisk,
+      ...(reqCoverage ? { requirements: { total: reqCoverage.total, covered: reqCoverage.covered, uncovered: reqCoverage.uncovered.slice(0, 4).map((u) => u.id ?? u.text.slice(0, 60)) } } : {}),
       verificationPlan: { level: vPlan.level, targeted: vPlan.targeted, regression: vPlan.regression, integration: vPlan.integration, adversarialReview: vPlan.adversarialReview, runtimeValidation: vPlan.runtimeValidation },
       planRisk: planRisk ? { riskLadder: planRisk.riskLadder, successProbability: planRisk.successProbability, confidence: planRisk.confidence } : null,
       liveSuccessProbability: liveRisk ? liveRisk.get() : null,
@@ -910,6 +1098,33 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     ts.setNextAction(null)
     ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
     emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, text: String(finalText).slice(0, 400), verification: vv.status, finalRisk: fr.risk, gate: gate.checks })
+    // v98 shipwise — VERIFIED GIT DELIVERY. The ONLY commit path in the
+    // kernel, structurally after the 9-check gate said ok. Best-effort by
+    // law: a skipped/failed delivery NEVER flips the task status — the
+    // pre-v98 behavior (verified files in the working tree, undo-able via
+    // checkpoints) is exactly the fallback. Default policy is OFF.
+    try {
+      const ship = await maybeShip({
+        root: process.cwd(),
+        config,
+        taskId,
+        runId: taskRunId,
+        objective: state.objective,
+        changedFiles: changedRel,
+        verificationStatus: vv.status,
+        finalRisk: fr.risk,
+        gate,
+        ask: (spec) => decisions91.ask(spec),
+      })
+      if (ship?.shipped) {
+        emit({ type: "GITSHIP_COMMITTED", taskId, runId: taskRunId, segmentId, nodeId, sha: ship.sha ?? null, files: (ship.files ?? []).slice(0, 20), branch: ship.branch ?? null, pushed: Boolean(ship.pushed), idempotent: Boolean(ship.idempotent), foreignDirtyFiles: ship.foreignDirtyFiles ?? [], prPath: ship.prPath ?? null, text: String(ship.reason ?? "").slice(0, 300) })
+        lastGate = { ...gate, gitship: { shipped: true, sha: ship.sha ?? null } }
+      } else {
+        emit({ type: "GITSHIP_SKIPPED", taskId, runId: taskRunId, segmentId, nodeId, reason: String(ship?.reason ?? "unknown").slice(0, 200) })
+      }
+    } catch (e) {
+      try { emit({ type: "GITSHIP_SKIPPED", taskId, runId: taskRunId, segmentId, nodeId, reason: `delivery error (task stays COMPLETED): ${String(e?.message ?? e).slice(0, 160)}` }) } catch { }
+    }
     // v94 masterwise (§16/§17): consolidation — raw events → observations →
     // verified facts → reusable knowledge; provenance and evidence preserved.
     try {
@@ -969,7 +1184,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         agent, config, provider: prov, signal, emit, state,
         error: gate.reasons.join("; ") || v?.reason || "completion gate refused",
         segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
-        finalRisk: finalRiskLevel, liveRisk,
+        finalRisk: finalRiskLevel, liveRisk, episodeSink,
       })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
@@ -1230,6 +1445,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (knownBad.length) emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `avoiding ${knownBad.length} previously-ineffective approach(es)`, avoided: knownBad.slice(0, 2).map((l) => l.failed_strategy || l.failed_action) })
 
     let dagFindings = ""
+    // v95 worktreewise: isolated worker jobs dispatched THIS segment. They run
+    // CONCURRENTLY with the main agent (each child in its own worktree), and
+    // their merge-back is awaited after the main agent settles — concurrent
+    // work, SERIALIZED merge into the shared tree. A lost update is never
+    // possible: the main tree has exactly one writer at every instant.
+    const isoJobs = []
     if (dag && workersEnabled && (workers != null || classified.strategy.workers > 0) && !signal?.aborted) {
       try {
         const classWorkers = scaleWorkers(classified.strategy.workers, resources.state)
@@ -1395,6 +1616,181 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           clearTimeout(fanoutTimer)
           ts.transition(TASK_STATUS.EXECUTING, { reason: "worker fan-out settled" })
         }
+
+        // ------------------------------------------------------------------
+        // v95 worktreewise — ISOLATED MUTATING DISPATCH (the kernel TODO,
+        // closed). READY MUTATING nodes with pairwise-disjoint DECLARED
+        // targets run in parallel, each inside its own detached git worktree:
+        // parallel segments can never see each other's partial writes. The
+        // merge back into the shared tree happens in settleIsolatedNode —
+        // SERIALIZED, checked-then-applied, honest on conflict. Nodes that
+        // cannot be isolated (no declared targets, overlap, not a git repo,
+        // FORGE_WORKTREE=0, creation failure) stay serialized EXACTLY as
+        // before: worktrees are the fix for the never-list ("never run DAG
+        // nodes in a shared tree when they mutate the same files"), not a
+        // license to share.
+        // ------------------------------------------------------------------
+        if (wtAvailability === null) {
+          wtAvailability = isolationAvailable({ root: process.cwd(), config })
+          emit({ type: "WORKTREE_MODE", taskId, runId: taskRunId, segmentId, enabled: wtAvailability.ok, reason: wtAvailability.ok ? "git worktree isolation active" : wtAvailability.reason, maxNodes: wtMaxNodes })
+        }
+        if (wtAvailability.ok && !signal?.aborted) {
+          const currentKeys = (() => { try { return currentNodeId ? dagLib.canonicalConflictKeys(dag.nodes.get(currentNodeId) ?? {}) : [] } catch { return [] } })()
+          const readyNow = dagLib.readyNodes(dag)
+          const isoPlan = planIsolation({
+            nodes: readyNow, excludeIds: [currentNodeId], excludeKeys: currentKeys,
+            conflictKeys: dagLib.canonicalConflictKeys, maxNodes: wtMaxNodes,
+          })
+          // in-flight shared-tree work must never be double-booked: a node whose
+          // declared targets have UNCOMMITTED changes (an earlier merge, the
+          // user's own edits, a prior segment) stays serialized. null (not a
+          // repo / git failure) blocks the whole dispatch honestly.
+          const { uncommittedFiles } = await import("./worktree.js")
+          const dirty = await uncommittedFiles(process.cwd())
+          const isoFiltered = dirty === null ? [] : isoPlan.filter(({ node: n }) => {
+            const targets = [...(n.targetFiles ?? []), ...(n.targetDirs ?? [])].map(String)
+            const clash = targets.some((t) => dirty.has(t) || [...dirty].some((d) => d.startsWith(t + "/")))
+            if (clash) emit({ type: "WORKTREE_UNAVAILABLE", taskId, runId: taskRunId, segmentId, nodeId: n.id, reason: "declared target has uncommitted changes in the shared tree — serialized" })
+            return !clash
+          })
+          if (isoFiltered.length) {
+            /** Settle ONE isolated node: merge its worktree back through the
+             *  serialized single-writer lane, then complete or fail it with
+             *  evidence. Merge conflicts KEEP the worktree for inspection. */
+            const settleIsolatedNode = async (n, job, r) => {
+              const wt = worktreeByNode.get(String(n.id)) ?? null
+              worktreeByNode.delete(String(n.id))
+              const finishWt = async (keep) => {
+                if (keep) return
+                const rm = await removeWorktree({ root: process.cwd(), dir: wt?.dir })
+                emit({ type: "WORKTREE_REMOVED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt?.id ?? null, ok: rm.ok, reason: rm.ok ? "removed" : rm.reason })
+              }
+              try {
+                if (!wt) { try { dagLib.markFailed(dag, n.id, "isolated node settled without a worktree record"); persistDAG() } catch {} return }
+                if (r?.status !== "completed") {
+                  // worker failed / timed out / exhausted / crashed — discard the
+                  // worktree, fail the node with the worker's own reason.
+                  await finishWt(false)
+                  const why = `isolated worker ${r?.status ?? "failed"}${r?.error ? ": " + String(r.error).slice(0, 160) : ""}`
+                  dagLib.markFailed(dag, n.id, why)
+                  bus91.send({ sender: `worktree:${wt.id}`, receiver: "core", type: MESSAGE_TYPE.BLOCKED, content: `node ${n.id}: ${why}`, node_id: n.id, priority: 2 })
+                  emit({ type: "WORKTREE_FAILED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, reason: why })
+                  persistDAG()
+                  return
+                }
+                const cap = await captureChanges({ root: process.cwd(), dir: wt.dir, nodeId: n.id })
+                if (!cap.ok) {
+                  await finishWt(false)
+                  dagLib.markFailed(dag, n.id, `worktree capture failed: ${cap.reason}`)
+                  emit({ type: "WORKTREE_FAILED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, reason: cap.reason })
+                  persistDAG()
+                  return
+                }
+                if (cap.clean !== true && cap.patchPath) {
+                  const merged = await mergeBack({ root: process.cwd(), patchPath: cap.patchPath })
+                  if (!merged.ok) {
+                    // honest conflict: report the files, keep the worktree as
+                    // evidence, fail the node — a serialized retry may re-run it.
+                    emit({ type: "WORKTREE_CONFLICT", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, files: (merged.conflicts ?? []).slice(0, 8), reason: merged.reason })
+                    bus91.send({ sender: `worktree:${wt.id}`, receiver: "core", type: MESSAGE_TYPE.WARNING, content: `node ${n.id} merge conflict: ${(merged.conflicts ?? []).slice(0, 3).join(", ") || "unknown files"}`, node_id: n.id, priority: 2 })
+                    dagLib.markFailed(dag, n.id, `worktree merge conflict — ${merged.reason}${(merged.conflicts ?? []).length ? ` (files: ${(merged.conflicts ?? []).slice(0, 4).join(", ")})` : ""}; worktree ${wt.id} kept for inspection`)
+                    await finishWt(true)
+                    persistDAG()
+                    return
+                  }
+                  // merged: the files now exist in the SHARED tree — record them
+                  // exactly like the main loop records its own writes so risk
+                  // recalculation, freshness and final verification all see them.
+                  const absFiles = (merged.files ?? []).map((f) => path.resolve(process.cwd(), String(f))).filter((f) => !f.includes(`${path.sep}.forge${path.sep}`))
+                  for (const abs of absFiles) {
+                    changedFiles.add(abs)
+                    try { ts.noteFiles([abs], []) } catch { }
+                  }
+                  if (absFiles.length) { try { ctxEngine.invalidateFor([...absFiles]) } catch { } }
+                  const rec = ledger.add({
+                    verification_id: `ver-worktree-${n.id}-${job.id}`,
+                    taskId, nodeId: n.id, segmentId,
+                    verificationEpoch: state.verification_epoch ?? 0,
+                    affectedFiles: absFiles.slice(0, 32), scope: "node", type: "acceptance",
+                    passed: true, exitCode: 0, exitCodeKnown: true,
+                    evidence: `worktree ${wt.id} merged ${absFiles.length} file(s) — ${String(r.result ?? "").slice(0, 200)}`,
+                    timestamp: Date.now(), command: `worktree-merge:${wt.id}`, output: String(r.result ?? "").slice(0, 500),
+                  })
+                  ts.noteVerification(rec)
+                  dagLib.markCompleted(dag, n.id, String(r.result ?? `worktree ${wt.id} merged ${absFiles.length} file(s)`).slice(0, 2000), { verification: rec })
+                  workerCompletionsTotal++
+                  emit({ type: "WORKTREE_MERGED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, files: absFiles.slice(0, 12) })
+                  bus91.send({ sender: `worktree:${wt.id}`, receiver: "core", type: MESSAGE_TYPE.COMPLETED, content: `node ${n.id} merged ${absFiles.length} file(s) from worktree ${wt.id}`, node_id: n.id, priority: 1 })
+                  await finishWt(false)
+                  persistDAG()
+                  return
+                }
+                // worker completed but changed NOTHING in its worktree: its
+                // report is the outcome. Complete on a real report (mirrors the
+                // read-only rule: no findings → unverifiable → failed).
+                if (String(r.result ?? "").trim()) {
+                  const rec = ledger.add({
+                    verification_id: `ver-worktree-${n.id}-${job.id}`,
+                    taskId, nodeId: n.id, segmentId,
+                    verificationEpoch: state.verification_epoch ?? 0,
+                    affectedFiles: [], scope: "node", type: "acceptance",
+                    passed: true, exitCode: 0, exitCodeKnown: true,
+                    evidence: String(r.result).slice(0, 300),
+                    timestamp: Date.now(), command: `worktree:${wt.id}`, output: String(r.result ?? "").slice(0, 500),
+                  })
+                  ts.noteVerification(rec)
+                  dagLib.markCompleted(dag, n.id, String(r.result).slice(0, 2000), { verification: rec })
+                  workerCompletionsTotal++
+                  emit({ type: "WORKTREE_MERGED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, files: [] , note: "clean worktree — no changes to merge" })
+                  await finishWt(false)
+                  persistDAG()
+                } else {
+                  await finishWt(false)
+                  dagLib.markFailed(dag, n.id, "isolated worker completed with no report and no changes — outcome unverifiable")
+                  persistDAG()
+                }
+              } catch (e) {
+                await finishWt(false)
+                try { dagLib.markFailed(dag, n.id, `isolated settle threw: ${String(e?.message ?? e).slice(0, 200)}`); persistDAG() } catch { }
+              }
+            }
+            for (const { node: n } of isoFiltered) {
+              if (signal?.aborted) break
+              const wt = await createWorktree({ root: process.cwd(), nodeId: n.id, runId: taskRunId, taskId })
+              if (!wt.ok) {
+                // honest fallback: the node stays READY and will be executed
+                // serialized by the main loop — never dispatched shared-tree.
+                emit({ type: "WORKTREE_UNAVAILABLE", taskId, runId: taskRunId, segmentId, nodeId: n.id, reason: wt.reason })
+                continue
+              }
+              worktreeByNode.set(String(n.id), wt)
+              dagLib.markRunning(dag, n.id)
+              emit({ type: "WORKTREE_CREATED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, dir: wt.dir, base: wt.base, objective: n.objective })
+              bus91.send({ sender: "core", receiver: "crew", type: MESSAGE_TYPE.REQUEST, content: `isolated node ${n.id} dispatched to worktree ${wt.id} (coder role, private checkout)`, priority: 1, node_id: n.id })
+              const job = manager.spawn({
+                role: "coder",
+                taskId, runId: taskRunId, segmentId, nodeId: n.id,
+                task: `${n.objective}\n\nYou are executing DAG node ${n.id} inside an ISOLATED git worktree — a private checkout of the project. Work ONLY inside the current directory. Do NOT run git commit, git branch, git worktree or git push — the orchestrator merges your changes back. ${(n.targetFiles ?? []).length ? `Declared target files: ${(n.targetFiles ?? []).join(", ")}.` : ""} When finished, report exactly what you changed and why.`,
+                context: contextBlock.slice(0, 3500),
+                dagNode: n.id,
+                timeoutMs: 1000 * 60 * 3,
+                targetFiles: n.targetFiles ?? null,
+                targetSymbols: n.targetSymbols ?? null,
+                targetDirs: n.targetDirs ?? null,
+                resourceLocks: n.resourceLocks ?? null,
+              })
+              resources.record({ workers: 1 })
+              isoJobs.push(job.promise.then((r) => settleIsolatedNode(n, job, r)).catch((e) => { try { dagLib.markFailed(dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} }))
+            }
+            // NOTE: isoJobs are NOT awaited here. They run concurrently with
+            // the main agent below (each child inside its own worktree — the
+            // trees are disjoint, so true parallelism is safe), and the
+            // merge-back into the shared tree is awaited AFTER the main agent
+            // settles (post-agent barrier): the main tree keeps exactly one
+            // writer at every instant. The worker timeout (3 min) bounds each
+            // child; the manager's settle gate bounds the task.
+          }
+        }
       } catch (e) { ts.noteError("DAG_FANOUT_FAILED", e?.message ?? String(e)) }
     }
 
@@ -1441,15 +1837,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // the DAG node's declared targets and the planning risk. Never a model's
     // self-reported confidence (that is not evidence). The prediction is
     // settled against observed reality after the segment completes.
+    // v97 §29: the prediction also declares TESTS and STEPS up front — derived
+    // deterministically from the node's targets (world-model test mapping) and
+    // the adaptive segment budget. Settled below against what really ran.
+    const segExpectedTests = (() => {
+      try {
+        const targets = currentNode?.targetFiles ?? []
+        if (!targets.length) return null
+        return createWorldModel({ cwd: process.cwd() }).testsFor(targets).length || 0
+      } catch { return null }
+    })()
     const segPrediction = predictForNode({
       node: currentNode, objective: state.objective, riskLevel: riskNow,
       segment, segmentId, taskId,
+      expectedTests: segExpectedTests, expectedSteps: segSteps,
     })
     emit({
       type: "PREDICTION_MADE", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
       prediction: {
         id: segPrediction.id, expectedFiles: segPrediction.expectedFiles, expectedRisk: segPrediction.expectedRisk,
         expectedOutcome: segPrediction.expectedOutcome, derived: segPrediction.derived,
+        expectedTests: segPrediction.expectedTests, expectedSteps: segPrediction.expectedSteps,
       },
       nodePrediction: currentNode?.prediction ?? null,
       text: formatPrediction(segPrediction),
@@ -1466,6 +1874,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     let res
     try {
+      // v96 unifywise: the §24 information-gain experiments ride the FIRST
+      // segment's context — the cheapest uncertainty-reducing steps run before
+      // the first mutation, exactly as the (previously false) comment promised.
+      const infogainBlock = planInfogain && planInfogain.needed
+        ? `--- pre-execution information-gain experiments (run these read-only checks BEFORE mutating anything) ---\n${planInfogain.experiments.map((e) => `- [${e.kind}] ${e.experiment}: ${e.how} (cost ${e.cost}, reduces: ${e.reduces})`).join("\n")}\nWhy: ${planInfogain.why}`
+        : ""
+      planInfogain = null // consumed once — segment 2+ executes, it does not re-inspect
       res = await agent({
         config, provider: prov, signal,
         task: segTask,
@@ -1473,7 +1888,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         runId: taskRunId,
         segmentId,
         nodeId: currentNodeId,
-        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : "", (() => { try { return engMem.retrievalBlock(segTask, { limit: 6, maxChars: 1200 }) } catch { return "" } })()].filter(Boolean).join("\n\n") || undefined,
+        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, infogainBlock, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : "", (() => { try { return engMem.retrievalBlock(segTask, { limit: 6, maxChars: 1200 }) } catch { return "" } })()].filter(Boolean).join("\n\n") || undefined,
         maxStepsOverride: segSteps, deep, onEvent: segmentEvents(emit, segment, { taskId, runId: taskRunId, segmentId, nodeId: currentNodeId }),
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
@@ -1486,6 +1901,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     totalToolCalls += segToolCalls
 
     if (res.aborted || signal?.aborted) { finalStatus = explicitFinalization(FINAL.CANCELLED); finalText = "cancelled by user"; break }
+
+    // v95 worktreewise — the post-agent MERGE BARRIER. The isolated nodes ran
+    // concurrently with the main agent (disjoint worktrees); their merge-back
+    // into the shared tree is the single-writer lane and it is serialized
+    // HERE, after the main agent's writes settled and before this segment's
+    // accounting/verification runs. A lost update is never possible; a
+    // conflict is an honest WORKTREE_CONFLICT (node FAILED, evidence kept).
+    if (isoJobs.length) {
+      try { await Promise.allSettled(isoJobs) } catch { /* allSettled never rejects; belt for exotic thenable shapes */ }
+    }
 
     const recs = res.toolRecords ?? []
     const segChanged = new Set()
@@ -1530,10 +1955,20 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // change + the segment outcome are the reality; the delta is evidence.
     {
       const segRealityRisk = (() => { try { return recomputeFinalRisk().risk } catch { return null } })()
+      // v97 §29: reality for tests + steps — verification records that actually
+      // ran this segment, and the agent's real step count.
+      const segActualTests = (() => {
+        try {
+          const ran = Array.isArray(res?.commandChecks) ? res.commandChecks : []
+          return ran.length || null
+        } catch { return null }
+      })()
       const settled = settlePrediction(segPrediction, {
         actualFiles: [...segChanged],
         finalRisk: segRealityRisk,
         status: res.error ? "error" : "ok",
+        actualTests: segActualTests,
+        actualSteps: Number.isFinite(res?.steps) ? res.steps : null,
       })
       emit({
         type: "PREDICTION_SETTLED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
@@ -1541,6 +1976,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           id: settled.id, driftScore: settled.driftScore, riskDelta: settled.riskDelta,
           filesHit: settled.filesHit?.length ?? 0, filesExtra: settled.filesExtra?.length ?? 0,
           filesMissed: settled.filesMissed?.length ?? 0, outcomeCorrect: settled.outcomeCorrect,
+          testsDelta: settled.testsDelta, stepsDelta: settled.stepsDelta,
         },
         text: formatSettlement(settled),
       })
@@ -1631,11 +2067,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     // v21.2: LSP diagnostics on files this segment mutated feed the SYNTAX
     // gate. Error-severity diagnostics fail HIGH/CRITICAL the same way a
-    // failed `node --check` does. Off when lsp.servers is empty; a missing
-    // server is skipped, not a gate failure.
-    if (segChanged.size && config?.tools?.lsp !== false && Object.keys(config?.lsp?.servers || {}).length) {
+    // failed `node --check` does. v96 unifywise: the AUTOSTART table now
+    // participates (allowAutostart) — typescript-language-server/pyright/
+    // gopls/rust-analyzer on PATH produce diagnostics evidence with zero
+    // user config, closing the gap where the DEFAULT language path had
+    // structured extraction but no verification evidence. A missing/failed
+    // server is still skipped, never a gate failure.
+    if (segChanged.size && config?.tools?.lsp !== false) {
       try {
-        const diags = await collectDiagnosticsForFiles(config, [...segChanged], { cwd: process.cwd() })
+        const diags = await collectDiagnosticsForFiles(config, [...segChanged], { cwd: process.cwd(), allowAutostart: true })
         for (const d of diags) {
           const relFile = path.relative(process.cwd(), d.file)
           const rec = ledger.recordCommand(`lsp_diagnostics ${relFile}`, d.text, {
@@ -1660,12 +2100,59 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (segChanged.size) {
       try {
         const changedRel = [...segChanged].map((f) => path.relative(process.cwd(), f))
+        const changedSet = new Set(changedRel)
+        // v97 §21 — API/SCHEMA DRIFT: capture the pre-mutation contracts of the
+        // changed files (from the persisted world — the last recorded truth),
+        // then compare with the re-extracted records after invalidation. A
+        // removed route/table/proto or an orphaned consumer is ADVISORY
+        // evidence: detected and reported, never silently ignored.
+        // v98 shipwise FIX: the "before" capture went through the world
+        // getter, which REBUILDS and re-extracts from disk — so "pre-mutation"
+        // was actually POST-mutation and drift could never fire. The last
+        // recorded truth is read from the PERSISTED SNAPSHOT (persistedRecords
+        // — no walk, no re-extraction), which is exactly what the comment
+        // always claimed.
+        let beforeFiles = []
+        try {
+          beforeFiles = createWorldModel({ cwd: process.cwd() }).persistedRecords(changedRel)
+            .map((f) => ({ path: f.path, contracts: f.contracts ?? [] }))
+        } catch { beforeFiles = [] }
         createWorldModel({ cwd: process.cwd() }).invalidate(changedRel)
         emit({ type: "WORLD_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, files: changedRel.slice(0, 12) })
+        if (beforeFiles.length) {
+          try {
+            const wmAfter = createWorldModel({ cwd: process.cwd() })
+            const afterWorld = wmAfter.build()
+            const afterFiles = (afterWorld.files ?? []).filter((f) => changedSet.has(f.path)).map((f) => ({ path: f.path, contracts: f.contracts ?? [] }))
+            const drift = contractDrift(beforeFiles, afterFiles)
+            if (!drift.ok) {
+              emit({
+                type: "CONTRACT_DRIFT", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+                removed: drift.removed.slice(0, 6), orphaned: drift.orphaned.slice(0, 6),
+                text: `contract drift: ${drift.removed.length} removed producer(s), ${drift.orphaned.length} orphaned consumer(s) — verify API/schema consumers still match`,
+              })
+            }
+          } catch { /* drift is advisory evidence, never a gate crash */ }
+        }
         // §22: knowledge verified against files that just changed is stale —
         // mark it so promotion is blocked and consumers see the staleness
         const stale = markStaleSkills(process.cwd(), changedRel)
         if (stale.marked) emit({ type: "SKILLS_STALE", taskId, runId: taskRunId, segmentId, skills: stale.skills.slice(0, 8) })
+        // v98 shipwise — TIER-3 STRUCTURED ENRICHMENT of exactly the files
+        // this segment changed. One LSP session per server, bounded budget,
+        // honest per-file fallback: records upgrade to
+        // {symbolDetails, extraction:{layer:3}} in the SHARED index, and the
+        // next world build serves them (extractOne reuses fresh records by
+        // fingerprint — the enrichment survives the rebuild). No server on
+        // PATH → zero candidates → zero cost. Best-effort by law.
+        if (config?.tools?.lsp !== false) {
+          try {
+            const enr = await enrichIndex(process.cwd(), { config, files: changedRel, budgetMs: 8000, maxFiles: 60 })
+            if (enr && (enr.enriched || enr.failed || enr.noSymbols)) {
+              emit({ type: "WORLD_ENRICHED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, enriched: enr.enriched ?? 0, failed: enr.failed ?? 0, noSymbols: enr.noSymbols ?? 0, skipped: enr.skipped ?? 0, servers: enr.servers ?? {} })
+            }
+          } catch { /* enrichment is best-effort — the lexical floor always answers */ }
+        }
       } catch { /* invalidation is best-effort; fingerprints still catch drift */ }
     }
 
@@ -1685,6 +2172,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         latencyMs: segMs,
       })
     } catch { /* strategy memory is best-effort */ }
+    // v96 unifywise: skill-variant outcomes were CLI-only (`forge variant
+    // score`) — the autonomous loop never scored the variants compose
+    // surfaced, so variant rates stayed at 0 and selection ran on name hits
+    // alone. The TOP surfaced variant now records the segment outcome, same
+    // as strategy recording above (bounded: one variant, one row per segment).
+    try {
+      const topVariant = composedSnap?.variants?.[0]
+      if (topVariant?.name) {
+        const { recordVariantOutcome } = await import("./variant.js")
+        recordVariantOutcome({ cwd: process.cwd(), name: topVariant.name, ok: !res.error && !res.budgetHit, durationMs: segMs })
+      }
+    } catch { /* variant memory is best-effort */ }
     const segStatus = res.error ? "failed" : res.budgetHit ? "continued" : "completed"
     ts.addSegment({ segment_id: segmentId, node_id: currentNodeId, objective: state.objective, status: segStatus, steps: res.steps ?? 0, tool_calls: segToolCalls, continued: !!res.budgetHit })
     ts.noteUsage({ tokens_in: tokIn, tokens_out: tokOut, tool_calls: segToolCalls, ms: segMs, workers: manager.stats().active })
@@ -1768,7 +2267,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
       ts.noteError("SEGMENT_FAILED", res.error)
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk, episodeSink })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       if (consecutiveFailures >= 3 || !recovered) {
@@ -1853,6 +2352,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     const v = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
     emit({ type: "VERIFICATION_STATUS", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: v.ok, missing: v.missing, reason: v.reason, risk: finalRiskLevel, initialRisk: riskLevel, status: v.status })
+    // v96 unifywise: the episode's VERIFICATION stage — the segment-level
+    // verdict (what the gate actually judged), one bounded record per segment.
+    if (episodeSink) episodeSink.addVerification({ command: `segment-${segment} verification (${finalRiskLevel}): ${String(v.reason ?? v.status ?? "").slice(0, 160)}`, ok: v.ok === true })
 
     // VERIFICATION FAILED → REPAIRING (hard gate). The node goes back to
     // REPAIRING too: execution succeeded, the OUTCOME did not.
@@ -1860,7 +2362,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (dag && currentNodeId) { try { dagLib.markRepairing(dag, currentNodeId, v.reason); persistDAG() } catch { } }
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: repairCount + 1, error: v.reason })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0
@@ -2066,6 +2568,21 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       tokensOut: state.resource_usage?.tokens_out ?? 0,
       toolCalls: totalToolCalls,
     })
+    // v96 unifywise: the empirics ledger (model-outcomes.json — what compose's
+    // MODELS line reads) had NO production writer: it stayed empty in every
+    // real run and pickModelEmpiric surfaced nothing. The run's outcome now
+    // reaches BOTH stores — modelstrategy's performance ledger (capability
+    // scoring, Bayesian-shrunk) and empirics (the compose/CLI display view).
+    try {
+      const { recordModelOutcome } = await import("./empirics.js")
+      recordModelOutcome({
+        provider: prov?.name ?? null,
+        model: prov?.model ?? null,
+        ok: finalStatus === FINAL.COMPLETED,
+        ms: state.resource_usage?.ms ?? null,
+        klass: classified?.class ?? null,
+      })
+    } catch { /* the empirics view is best-effort */ }
   } catch { }
 
   emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, state: finalState, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
@@ -2105,7 +2622,7 @@ function segmentEvents(emit, segment, ids = {}) {
   }
 }
 
-async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null }) {
+async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
   const ctxBlock = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1600 })
   const failText = String(error ?? verification?.reason ?? "")
@@ -2115,6 +2632,12 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
   if (omega) {
     observed = omega.observeCommand(failText, { tool: "segment", files: changedFiles })
     next = omega.nextRepair()
+    // v96 unifywise: the episode's HYPOTHESES stage is now fed from the Ω
+    // kernel's live ledger (the durable "full story" the episodic memory was
+    // designed for and never received).
+    if (episodeSink && observed?.hypothesis) {
+      episodeSink.addHypothesis(String(observed.hypothesis.description ?? "").slice(0, 400), { status: "supported", confidence: observed.hypothesis.confidence ?? 0.55 })
+    }
     if (observed.diagnosis?.failed) {
       hypoHint += `\n\nFailure class: ${observed.diagnosis.code}. Evidence: ${String(observed.diagnosis.evidence ?? "").slice(0, 240)}.`
     }
@@ -2151,6 +2674,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
     const rejected = omega.hypotheses.snapshot().filter((h) => h.status === "REJECTED")
     if (rejected.length) {
       hypoHint += `\nRejected causes (do not retry): ${rejected.map((h) => h.description).slice(0, 4).join("; ")}`
+      if (episodeSink) for (const h of rejected.slice(0, 4)) episodeSink.addFailedApproach(`rejected cause: ${String(h.description ?? "").slice(0, 200)}`)
     }
   }
   let steerHint = ""
@@ -2192,6 +2716,16 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
   try {
     const r = await agent({ config, provider, signal, task: diag, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
     const fixed = !r.error && !r.budgetHit
+    // v96 unifywise: the EXPERIMENT + FIX stages of the episode — what was
+    // tried and what actually worked, recorded durably for "never repeat what
+    // failed" retrieval in future similar problems.
+    if (episodeSink) {
+      if (next?.experiment) {
+        episodeSink.addExperiment({ command: `${next.experiment.id}: ${String(next.experiment.instruction ?? "").slice(0, 200)}`, result: fixed ? "pass" : "fail", ok: fixed })
+      }
+      if (fixed) episodeSink.addFix(String(r.text ?? "").slice(0, 300))
+      if (!fixed) episodeSink.addFailedApproach(`repair did not fix: ${String(error ?? verification?.reason ?? "").slice(0, 160)}`)
+    }
     if (omega && observed?.hypothesis) {
       omega.hypotheses.recordTest(observed.hypothesis.id, { name: "repair-pass", result: fixed ? "pass" : "fail" })
       if (omega.noteExperiment && next?.experiment?.id) omega.noteExperiment(next.experiment.id, fixed ? "pass" : "fail")
@@ -2227,11 +2761,15 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
       })
+      if (episodeSink) episodeSink.addVerification({ command: String(chk.command ?? "").slice(0, 200), ok: chk.passed === true }) // v96: the episode's VERIFICATION stage
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
       emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
     }
+    // v96 unifywise: REPAIR_COMPLETED is a real event (the Core records the
+    // REPAIR lifecycle phase from it; the previously dead vocabulary is gone).
+    emit({ type: "REPAIR_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, ok: fixed, attemptHint: fixed ? "fixed" : "not fixed" })
     emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segment, segmentId, nodeId, reason: "repair pass completed", ok: fixed })
     return fixed
   } catch (e) {

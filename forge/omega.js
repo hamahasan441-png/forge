@@ -78,14 +78,32 @@ export function createKernel({ cwd = process.cwd() } = {}) {
       causalObs = causal.observe(result, { ...meta, diagnosis: d })
       telemetry.inc(METRIC.CAUSAL)
       if (causalObs.proposed) causal.support(causalObs.proposed.id, { text: d.evidence, source: "classifyFailure" })
-      hypothesis = hypo.add({ description: `${d.code}: ${d.evidence}`.slice(0, 240), confidence: 0.55 })
-      hypo.support(hypothesis.id, { text: d.evidence, source: "classifyFailure" })
+      // v97 §26 — COMPETING HYPOTHESIS SET, not a single guess. A hard failure
+      // gets a belief distribution: the classified diagnosis as primary, the
+      // causal engine's structural candidate second, and — when origin is
+      // unknown — an explicit "environment/tooling" alternative so the loop
+      // cannot marry its first explanation (§24 self-questioning, made real).
+      // Confidences sum to 1: they are shares of belief over ONE failure.
+      const setCandidates = [{ description: `${d.code}: ${d.evidence}`.slice(0, 240), confidence: 0.5 }]
+      if (causalObs.proposed && causalObs.proposed.id != null) {
+        setCandidates.push({ description: `structural: ${String(causalObs.proposed.description ?? causalObs.proposed.id).slice(0, 220)}`, confidence: 0.3 })
+      }
+      if (origin.origin === ORIGIN.UNKNOWN) {
+        setCandidates.push({ description: "environment/tooling mismatch (runtime, deps, or config — verify before blaming the code)", confidence: 0.2 })
+      }
+      const set = hypo.addSet(setCandidates)
+      hypothesis = set[0] ?? hypo.add({ description: `${d.code}: ${d.evidence}`.slice(0, 240), confidence: 0.55 })
+      // the set's primary already carries the diagnosis evidence in its
+      // description and its 0.5 share — an extra support bump would distort
+      // the distribution (0.5+0.3+0.2 must stay a probability mass of 1).
+      // Only the single-hypothesis FALLBACK keeps the classic bump.
+      if (hypothesis && !set.length) hypo.support(hypothesis.id, { text: d.evidence, source: "classifyFailure" })
       return {
-        diagnosis: d, hypothesis, origin, causal: causalObs,
+        diagnosis: d, hypothesis, hypothesisSet: set.map((h) => ({ id: h.id, description: h.description, confidence: h.confidence })), origin, causal: causalObs,
         summary: summarizeCommand(result), originHint: formatOrigin(origin),
       }
     }
-    return { diagnosis: d, hypothesis: null, origin, causal: null, summary: summarizeCommand(result), originHint: "" }
+    return { diagnosis: d, hypothesis: null, hypothesisSet: [], origin, causal: null, summary: summarizeCommand(result), originHint: "" }
   }
 
   function impact(files) {
@@ -125,6 +143,11 @@ export function createKernel({ cwd = process.cwd() } = {}) {
     })
     telemetry.inc(METRIC.INFOGAIN)
     return { ...base, experiment }
+  }
+
+  /** v97 §26 — the live ranked belief distribution (H1/H2/H3…). */
+  function hypothesisDistribution() {
+    return hypo.distribution()
   }
 
   function nextRepair() {
@@ -199,7 +222,7 @@ export function createKernel({ cwd = process.cwd() } = {}) {
   return {
     classify, workflow, planFor, observeCommand, impact, noteWrite,
     nextRepair, confirmRootCause, rejectCause, snapshot, review,
-    counterfactualOf, needsReview, noteExperiment,
+    counterfactualOf, needsReview, noteExperiment, hypothesisDistribution,
     hypotheses: hypo, evidence, causal, tasks, telemetry, infogain: gain,
     testingScope, createCommandResult,
   }

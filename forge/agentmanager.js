@@ -39,6 +39,8 @@
  *   counted as active — it blocks completion, it is never lied about.
  */
 
+import { handoffContextBlock } from "./handoff.js"
+
 export const ROLES = {
   RESEARCHER: "researcher",
   PLANNER: "planner",
@@ -172,6 +174,8 @@ export function createAgentManager({
     taskId = null, runId = null, segmentId = null, nodeId = null,
     // canonical conflict keys (file:/symbol:/dir:/resource:)
     targetFiles = null, targetSymbols = null, targetDirs = null, resourceLocks = null,
+    // v96: optional per-batch concurrency gate (runMany) — internal, never serialized
+    batchGate = null,
   } = {}) {
     const wid = id || `w${++seq}`
     if (!task) throw new Error("worker requires a task")
@@ -211,6 +215,7 @@ export function createAgentManager({
       performanceHistory: [],    // bounded {ok, ms, verified} trail
       duplicateOf: dupe?.workerId ?? null,
       reassignmentCount: 0,
+      batchGate, // per-batch gate (runMany maxParallel); harmless null otherwise
     }
     if (dupe) emit({ type: "WORKER_DUPLICATE", workerId: wid, duplicateOf: dupe.workerId, nodeId: rec.nodeId, reason: "same node/files already claimed by an active worker" })
     workers.set(wid, rec)
@@ -221,7 +226,7 @@ export function createAgentManager({
 
   async function runWhenReady(rec, timeoutMs) {
     // wait for a slot (and for resume if paused)
-    while ((paused || active >= maxWorkers || (totalBudgetMs && usedBudgetMs >= totalBudgetMs)) && !isAborted()) {
+    while ((paused || active >= maxWorkers || rec.batchGate?.check() || (totalBudgetMs && usedBudgetMs >= totalBudgetMs)) && !isAborted()) {
       if (isAborted()) { rec.status = WORKER_STATUS.CANCELLED; rec.finishedAt = now(); return rec }
       await sleep(120)
     }
@@ -245,6 +250,7 @@ export function createAgentManager({
     rec.startedAt = now()
     rec.attempts++
     active++
+    rec.batchGate?.enter() // v96: a runMany batch counts its own in-flight workers
     live.add(rec.id)
     emit({
       type: "WORKER_STARTED", workerId: rec.id, id: rec.id, role: rec.role, task: rec.task,
@@ -268,6 +274,7 @@ export function createAgentManager({
       live.delete(rec.id)
       rec.finishedAt = rec.finishedAt ?? now()
       active = Math.max(0, active - 1)
+      rec.batchGate?.exit()
     }
     runnerPromise.then(stopRunning, stopRunning)
 
@@ -396,7 +403,14 @@ export function createAgentManager({
     const successor = spawn({
       role: newRole && roleExists(newRole) ? newRole : old.role,
       task: old.task,
-      context,
+      // v96 unifywise: the §30 structured handoff (remaining work, proven-
+      // failed approaches, recommended next action, verification status) used
+      // to be ledgered onto successor.handoff and then READ BY NOBODY — the
+      // successor only saw the flattened findings text. The formatted
+      // handoff block now travels INTO the successor's context ("build on it,
+      // never repeat it"), so a reassigned worker actually inherits the
+      // failed-approaches list instead of rediscovering it.
+      context: handoff ? [context, handoffContextBlock(handoff)].filter(Boolean).join("\n\n") : context,
       priority: old.priority,
       dagNode: old.dagNode,
       taskId: old.taskId,
@@ -539,9 +553,15 @@ export function createAgentManager({
    * resolves once all settle (never throws — failures live on the records).
    */
   async function runMany(specs = [], { maxParallel = maxWorkers } = {}) {
-    const recs = specs.map((s) => spawn(s))
-    // simple gate: spawn already queues on maxWorkers; here we just await all
-    void maxParallel
+    // v96 unifywise: maxParallel is now a REAL per-batch ceiling (it used to
+    // be accepted and ignored — `void maxParallel`). The manager-level
+    // maxWorkers ceiling still applies; a batch may additionally cap itself
+    // lower. The gate counts only THIS batch's in-flight workers, so
+    // concurrent spawns from other call sites are unaffected.
+    const cap = Math.max(1, Math.min((Number(maxParallel) | 0) || maxWorkers, maxWorkers))
+    let batchActive = 0
+    const gate = { check: () => batchActive >= cap, enter: () => { batchActive++ }, exit: () => { batchActive = Math.max(0, batchActive - 1) } }
+    const recs = specs.map((s) => spawn({ ...s, batchGate: gate }))
     const settled = await Promise.allSettled(recs.map((r) => r.promise))
     return recs.map((r, i) => (settled[i].status === "fulfilled" ? r : { ...r, status: WORKER_STATUS.FAILED, error: String(settled[i].reason) }))
   }
@@ -599,7 +619,7 @@ export function createAgentManager({
     }
     return s
   }
-  function list() { return [...workers.values()].map((w) => ({ ...w, promise: undefined, _runner: undefined, cancellationToken: undefined })) }
+  function list() { return [...workers.values()].map((w) => ({ ...w, promise: undefined, _runner: undefined, cancellationToken: undefined, batchGate: undefined })) }
 
   function isAborted() { return signal?.aborted }
 

@@ -124,6 +124,26 @@ export function shrinkToolOutput(text, limit = 1200) {
   return `${joined}\n[tool output shrunk from ${s.length} chars]`
 }
 
+/**
+ * v96 unifywise: ONE overflow-recovery shrink (was duplicated near-verbatim
+ * in chat.js and agent.js — the same semantics must never live twice).
+ * Stubs ALL old tool outputs (head/tail/error-aware via shrinkToolOutput) and
+ * dedupes identical ones, always keeping the most recent 6 messages intact.
+ */
+export function hardShrink(msgs) {
+  const seen = new Map()
+  return msgs.map((m, i) => {
+    if (m?.role !== "tool" || typeof m.content !== "string") return m
+    if (i >= msgs.length - 6) return m
+    const key = m.content.slice(0, 120)
+    if (seen.has(key)) return { ...m, content: "[duplicate tool output removed]" }
+    seen.set(key, true)
+    if (m.content.length > 600) return { ...m, content: shrinkToolOutput(m.content, 600) } // keep head/tail/errors, not a bare stub
+    return m
+  })
+}
+
+
 // ---------------------------------------------------------------------------
 // deterministic fact ledger
 // ---------------------------------------------------------------------------

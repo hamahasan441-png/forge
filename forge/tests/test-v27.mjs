@@ -194,11 +194,7 @@ console.log("== runBash still classifies before wrapping (source) ==")
   const src = fs.readFileSync(new URL("../tools.js", import.meta.url), "utf8")
   const may = src.indexOf("modelMayRun(")
   const wrap = src.indexOf("wrapBash(")
-  // v94 gapclose: the import may carry additional named bindings (e.g.
-  // resetSandboxProbe — the stale-kernel-probe drop wired to the bwrapBroken
-  // fallback); the pin's INTENT is that bash routes through sandbox.js.
-  ok("tools.js imports wrapBash", /import\s*\{[^}]*\bwrapBash\b[^}]*\}\s*from\s*"\.\/sandbox\.js"/.test(src))
-  ok("tools.js can drop the stale kernel probe when bwrap really fails", /import\s*\{[^}]*\bresetSandboxProbe\b[^}]*\}\s*from\s*"\.\/sandbox\.js"/.test(src) && /resetSandboxProbe\(\)/.test(src))
+  ok("tools.js imports wrapBash", /import\s*\{\s*wrapBash(?:\s*,\s*[A-Za-z_$][\w$]*)*\s*\}\s*from\s*"\.\/sandbox\.js"/.test(src))
   ok("modelMayRun appears before wrapBash in tools.js", may >= 0 && wrap > may)
   const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
   ok("meta uses fanoutWaitMs", /fanoutWaitMs\(/.test(meta))
@@ -211,8 +207,8 @@ console.log("== runBash still classifies before wrapping (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 94.0.0", VERSION, "94.0.0")
-  eq("package.json is 94.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "94.0.0")
+  eq("VERSION is 98.0.0", VERSION, "98.0.0")
+  eq("package.json is 98.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "98.0.0")
 }
 
 console.log(`\n== v27 suite: ${PASS} passed, ${FAIL} failed ==`)

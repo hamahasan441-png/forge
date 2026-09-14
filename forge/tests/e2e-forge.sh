@@ -59,7 +59,7 @@ KEY="test-key-1234567890"
 echo "== forge E2E (v19) =="
 
 # 0. version
-out=$($F version 2>&1); check "forge version" "$out" "forge v94.0.0"
+out=$($F version 2>&1); check "forge version" "$out" "forge v98.0.0"
 
 # 1. config
 out=$($F config set activeProvider mock 2>&1); check "config set provider" "$out" "saved"
@@ -141,7 +141,7 @@ out=$(printf 'hello\n/retry\n/exit\n' | $F chat 2>&1)
 n=$(echo "$out" | grep -c "Hello from mock!")
 if [ "${n:-0}" -ge 2 ]; then PASS=$((PASS+1)); echo "  ok  chat /retry regenerates"
 else FAIL=$((FAIL+1)); echo "  FAIL chat /retry regenerates (got $n answers)"; fi
-check "banner v30" "$out" "forge v94"
+check "banner v30" "$out" "forge v98"
 
 # 18. chat /export writes markdown transcript
 mkdir -p "$T/work"
@@ -277,7 +277,14 @@ git init -q "$T/work" 2>/dev/null
 out=$($F agent --cwd "$T/work" "USE_GIT check the repo" 2>&1 </dev/null)
 check "agent git_status tool" "$out" "git_status"
 check "git_status branch line" "$out" "git ##"
-check "git_status untracked seen" "$out" "patch-base.txt"
+# v98 shipwise: the tool result now rides the content fence (a ~68-char
+# attribution header before the payload). The mock's canned reply echoes only
+# the FIRST 200 chars of the result, so the fence pushes the deeper untracked
+# entries out of the echo window — the MODEL still receives the full result;
+# this assertion keeps the "untracked visible" intent via an entry that fits,
+# and separately pins the fence end-to-end.
+check "git_status untracked seen" "$out" "multi.txt"
+check "git_status result rides the v98 content fence" "$out" "forge tool result: git_status"
 
 # 38. parallel read tools in one round (both results arrive, in order)
 out=$($F agent --cwd "$T/work" "USE_TWO_READS read both files" 2>&1 </dev/null)
@@ -383,7 +390,7 @@ check "config menu probe ok" "$out" "connection OK"
 
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
-check "autopick banner" "$out" "forge v94"
+check "autopick banner" "$out" "forge v98"
 check "autopick provider" "$out" "provider: custom"
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"

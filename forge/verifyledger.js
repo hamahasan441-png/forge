@@ -28,6 +28,14 @@ export const VTYPE = {
   INTEGRATION: "integration",
   SECURITY: "security",
   ACCEPTANCE: "acceptance",
+  // v98 shipwise — build artifacts as first-class evidence: a build that
+  // exits 0 is a claim, the artifact on disk (dist output, APK, docker image
+  // file, migration result) is the evidence. Records are produced from
+  // observed artifacts (runtimesession.artifactRuntimeEvidence) and satisfy
+  // the runtime-validation requirement; they never enter RISK_PROFILE's
+  // blanket lists — applicability is adapter-gated at the enforcement site
+  // (never-invent: a plain JS repo is never asked for an APK).
+  ARTIFACT: "artifact",
 }
 
 export const RISK_PROFILE = {

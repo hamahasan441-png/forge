@@ -27,9 +27,11 @@ import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection }
 import { injectPendingVision } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
-import { loadActiveCreatedTools } from "./toolcreate.js"
-import { loadMcpTools } from "./mcp.js"
-import { createLspSession } from "./lsp.js"
+import { loadActiveCreatedTools, listToolLife } from "./toolcreate.js"
+import { capabilityCoverage, capabilitiesImpliedByTask } from "./capabilities.js" // v97 §33 ladder
+import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
+import { createLspSession, autostartAvailability } from "./lsp.js"
+import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
@@ -55,9 +57,8 @@ import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
 import { canCompleteFastPath } from "./completion.js"
-import { compactHistory, shrinkToolOutput } from "./compaction.js"
+import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import path from "node:path"
-import fs from "node:fs"
 import { execFileSync } from "node:child_process"
 
 export { classifyTaskComplexity, resolveEffort }
@@ -87,6 +88,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "5. If a task is impossible, say exactly why and what you tried.",
     "6. Write operations must stay inside the working directory; sensitive files (.env, keys, credentials) are protected. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
     "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. Catastrophic commands, writes outside the project, sudo, and publishes are blocked — refine the command instead of asking the user to disable safety.",
+    `8. ${UNTRUSTED_CONTENT_RULE}`,
     "",
     "TOOLS — all available, use them automatically as needed:",
     "- Multi-step work: keep a `todo` list (set at start, update statuses as you go).",
@@ -139,6 +141,25 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     const picks = pickSkills(task || "", idx, { klass, skillsDir, cwd })
     const block = formatSkillPicks(picks)
     if (block) lines.push("", block)
+    // v97 §33: THE UNIFIED CAPABILITY LADDER — for every capability this task
+    // implies, resolve native tool → skill → MCP → created tool, and say
+    // honestly when NOTHING provides it (a gap is design input, not a failure
+    // to mention). One resolver, shared with `forge caps`.
+    if (task && registry) {
+      try {
+        const caps = capabilitiesImpliedByTask(task)
+        if (caps.length) {
+          const cov = capabilityCoverage({
+            registry, capabilities: caps, skills: idx,
+            mcpTools: cachedInventoryTools(),
+            createdTools: listToolLife(cwd),
+          })
+          if (cov.gaps.length) {
+            lines.push("", `Capability gaps (native → skill → MCP → created all checked): ${cov.gaps.join(", ")}. No provider exists — proceed without it, or build it via the tool-creation pipeline and verify before trusting it.`)
+          }
+        }
+      } catch { /* ladder is advisory, never fatal */ }
+    }
   }
   if (task) {
     const taskLangs = languagesIn(task, { cwd, klass })
@@ -315,7 +336,14 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { }
   }
   let lspSession = null
-  if (!isDelegatedSubAgent && !noTools && config.tools?.lsp !== false && Object.keys(config.lsp?.servers || {}).length) {
+  // v98 shipwise: the autostart table counts too — the read-only LSP tools
+  // (definition/references/hover/diagnostics) light up on any machine with a
+  // first-party server binary on PATH, matching what layer 3 already reports
+  // in the ladder (v96 wired autostart diagnostics; the TOOL surface was the
+  // last surface still gated on user config alone).
+  const lspConfigured = Object.keys(config.lsp?.servers || {}).length > 0
+  const lspAutostart = (() => { try { return autostartAvailability(config).length > 0 } catch { return false } })()
+  if (!isDelegatedSubAgent && !noTools && config.tools?.lsp !== false && (lspConfigured || lspAutostart)) {
     try {
       lspSession = createLspSession(config, { cwd: process.cwd() })
       plugins = [...plugins, ...lspSession.tools]
@@ -629,7 +657,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             }
             if (log) log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
           }
-          messages.push({ role: "tool", tool_call_id: tc.id, content: String(result) })
+          // v98 shipwise: the ONE fence choke point for agent tool results —
+          // after cap/shrink/redaction (budget math unchanged), before the
+          // provider sees it. Advisory marker scan rides the header.
+          messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, String(result), { enabled: fenceEnabled(config) }) })
         }
         injectPendingVision(messages, tools.ctx)
         messages = await compactAgentHistory(messages, p, { onEvent })
@@ -752,19 +783,6 @@ function journalFiles(name, argStr, result) {
   return out
 }
 
-function hardShrink(messages) {
-  const seen = new Map()
-  return messages.map((m, i) => {
-    if (m?.role !== "tool" || typeof m.content !== "string") return m
-    if (i >= messages.length - 6) return m
-    const key = m.content.slice(0, 120)
-    if (seen.has(key)) return { ...m, content: "[duplicate tool output removed]" }
-    seen.set(key, true)
-    if (m.content.length > 600) return { ...m, content: shrinkToolOutput(m.content, 600) } // v21.1: keep head/tail/errors, not a bare stub
-    return m
-  })
-}
-
 function safeJson(s) {
   try {
     return JSON.parse(s)
@@ -818,5 +836,3 @@ export function agentEventPrinter() {
     }
   }
 }
-
-void fs

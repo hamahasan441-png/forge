@@ -147,7 +147,7 @@ console.log("== playbook files drive verify; command is not auto-run ==")
     "auth.test.js": "import { ok } from './auth.js'\n",
   })
   saveIndex(dir, {
-    version: 1,
+    version: 2,
     files: {
       "auth.js": { mtime: Date.now(), size: 40, symbols: ["ok"], lang: "javascript", imports: [], test: false, contracts: [] },
       "auth.test.js": { mtime: Date.now(), size: 40, symbols: [], lang: "javascript", imports: ["./auth.js"], test: true, contracts: [] },
@@ -187,9 +187,9 @@ console.log("== frozen kernel + package ==")
   ok("project cannot flip allowNewPlugins", dropped.includes("tools.allowNewPlugins"))
   eq("classifyTaskComplexity frozen", classifyTaskComplexity("fix a typo"), "trivial")
   eq("typo still MICRO", classifyTask("fix a typo in README").class, TASK_CLASS.MICRO)
-  eq("VERSION is 94.0.0", VERSION, "94.0.0")
+  eq("VERSION is 98.0.0", VERSION, "98.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  eq("package.json is 94.0.0", pkg.version, "94.0.0")
+  eq("package.json is 98.0.0", pkg.version, "98.0.0")
   ok("files includes extend.js", pkg.files.includes("extend.js"))
   ok("files includes compose.js", pkg.files.includes("compose.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

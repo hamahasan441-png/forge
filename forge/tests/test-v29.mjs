@@ -114,11 +114,11 @@ console.log("== Ω kernel: nextRepair.action frozen; experiment is additive ==")
   eq("looping experiment is different_cause", k3.nextRepair().experiment.id, XID.DIFFERENT_CAUSE)
 }
 
-console.log("== FORGE-BENCH 16/16, no live model ==")
+console.log("== FORGE-BENCH 20/20, no live model ==")
 {
-  eq("16 cases", BENCH_CASES.length, 16)
+  eq("22 cases", BENCH_CASES.length, 22) // v98 shipwise: +artifact-evidence, +injection-fence
   const summary = runBench()
-  eq("bench total 16", summary.total, 16)
+  eq("bench total 22", summary.total, 22)
   eq("bench failed 0", summary.failed, 0)
   ok("score is 100", summary.score === 100)
   ok("every case ok", summary.results.every((r) => r.ok))
@@ -154,10 +154,10 @@ console.log("== CLI: forge bench --list / --json ==")
   const env = { ...process.env, FORGE_HOME: HOME, NO_COLOR: "1" }
   const list = execFileSync("node", [forge, "bench", "--list", "--json"], { env, encoding: "utf8" })
   const parsed = JSON.parse(list)
-  eq("list json has 16 cases", parsed.cases.length, 16)
+  eq("list json has 22 cases", parsed.cases.length, 22)
   const run = execFileSync("node", [forge, "bench", "--json"], { env, encoding: "utf8" })
   const ran = JSON.parse(run)
-  eq("run json passed 16", ran.passed, 16)
+  eq("run json passed 22", ran.passed, 22)
   eq("run json failed 0", ran.failed, 0)
 }
 
@@ -178,8 +178,8 @@ console.log("== safety + wiring (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 94.0.0", VERSION, "94.0.0")
-  eq("package.json is 94.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "94.0.0")
+  eq("VERSION is 98.0.0", VERSION, "98.0.0")
+  eq("package.json is 98.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "98.0.0")
 }
 
 console.log(`\n== v29 suite: ${PASS} passed, ${FAIL} failed ==`)

@@ -9,9 +9,8 @@
  * via --experimental-repl-await), let/const persistence, multiline input.
  *
  * Wire protocol (verified against Node 20–24, piped stdin):
- *   - the REPL prints "> " when ready for input, and a continuation prompt
- *     while accumulating an incomplete multiline input — "... " on stock
- *     Node (piped stdin), "| " on some builds; both are recognized
+ *   - the REPL prints "> " when ready for input, "| " while accumulating an
+ *     incomplete multiline input
  *   - evaluation output (completion value, console.log, thrown errors) is
  *     written to stdout, followed by the next "> "
  *   - ".break" aborts an incomplete multiline state and returns to "> "
@@ -33,7 +32,7 @@ const DEFAULT_TIMEOUT_MS = 15000
 const MAX_TIMEOUT_MS = 60000
 const STARTUP_TIMEOUT_MS = 10000
 const TICK_MS = 20
-const QUIET_MS = 250 // how long a continuation prompt ("... "/"| ") must be stable to declare "incomplete"
+const QUIET_MS = 250 // how long "| " must be stable to declare "incomplete"
 const MAX_OUTPUT_BYTES = 65536
 const MAX_SESSIONS = 2
 
@@ -51,8 +50,7 @@ function nodeMajorOf(nodeBin) {
 }
 
 const PROMPT_LINE = /^> $/
-const PROMPT_PREFIX = /^(?:> |\| |\.\.\. )+/
-const CONT_PROMPTS = ["| ", "... "] // continuation prompts seen across Node builds
+const PROMPT_PREFIX = /^(?:> |\| )+/
 const BANNER = [/^Welcome to Node\.js/, /^Type "\.help"/]
 
 /** Strip REPL prompt noise from raw stdout: leading "> "/"/| " runs per line,
@@ -64,7 +62,7 @@ export function stripReplPrompts(text) {
     if (PROMPT_LINE.test(raw)) continue
     if (BANNER.some((re) => re.test(raw))) continue
     raw = raw.replace(PROMPT_PREFIX, "")
-    if (/^(?:\| |\.\.\. )+$/.test(raw)) continue
+    if (/^(?:\| )+$/.test(raw)) continue
     out.push(raw)
   }
   // the trailing ready prompt never belongs to the result
@@ -211,15 +209,14 @@ export function createReplManager({
       }
 
       const budget = Math.min(Math.max(1000, Number(tmo) || timeoutMs), MAX_TIMEOUT_MS)
-      // done = ready prompt ("> "), or an incomplete state ("... "/"| ") whose
-      // buffer has been quiet for QUIET_MS, or the budget/death runs out
-      const tailIsContinuation = (x) => CONT_PROMPTS.some((p) => x.buf.endsWith(p))
+      // done = ready prompt ("> "), or an incomplete state ("| ") whose buffer
+      // has been quiet for QUIET_MS, or the budget/death runs out
       await waitFor(
         s,
-        (x) => tailIs(x, "> ") || (tailIsContinuation(x) && Date.now() - (x.lastLenAt ?? Date.now()) >= QUIET_MS),
+        (x) => tailIs(x, "> ") || (tailIs(x, "| ") && Date.now() - (x.lastLenAt ?? Date.now()) >= QUIET_MS),
         budget,
       )
-      // distinguish: ready ("> "), incomplete ("... "/"| "), dead, timeout
+      // distinguish: ready ("> "), incomplete ("| "), dead, timeout
       if (tailIs(s, "> ")) {
         s.busy = false
         s.state = "ready"
@@ -233,7 +230,7 @@ export function createReplManager({
         return { ok: true, output: capped.text, truncated: capped.truncated, session: sessionView(s), ...(restarted ? { note: "session started fresh for this call" } : {}) }
       }
 
-      if (tailIsContinuation(s)) {
+      if (tailIs(s, "| ")) {
         // incomplete multiline input — reset the REPL with its own .break command
         try { s.child.stdin.write(".break\n") } catch {}
         await waitFor(s, (x) => tailIs(x, "> "), 2000)

@@ -28,6 +28,10 @@
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
 import { spawn } from "node:child_process"
+import pathMod from "node:path"
+import fsMod from "node:fs"
+import { resolveDataDir } from "./config.js"
+import { writeStateFile } from "./securefs.js"
 import { childEnv } from "./childenv.js"
 import { VERSION } from "./version.js"
 
@@ -273,10 +277,59 @@ function normalizeSchema(schema) {
  * Connect every configured server, collect their tools as plugin objects, and
  * return { tools, clients, errors }. Best-effort: a server that fails to start
  * is recorded in `errors`, never thrown. The caller closes `clients` when done.
+ *
+ * v96 unifywise — LAZY CONNECT (§28 "lazy load; do not load every MCP tool
+ * into every model context"): by default (`config.mcp.lazy !== false`,
+ * `FORGE_MCP_LAZY=0` opts out) a server with a FRESH cached tool inventory
+ * (~/.forge/cache/mcp-tools.json, TTL 24h, keyed by name+command so configs
+ * never collide) is NOT spawned at agent start — its tool defs are advertised
+ * from the cache and the server connects on the FIRST tool call. A cold or
+ * stale cache connects immediately (exactly the old eager behavior), lists,
+ * and refreshes the cache — so a first run is byte-identical with before, and
+ * every later run pays the server startup only if its tools are actually
+ * used. On the first call the freshly connected server's listTools is checked
+ * against the cached names: a tool that vanished is an honest ERROR, and the
+ * cache entry is dropped (never serve a phantom capability).
  */
 export async function loadMcpTools(config, { timeoutMs } = {}) {
+  const lazy = lazyEnabled(config)
   const out = { tools: [], clients: [], errors: [] }
+  // per-call memo of lazily-connected servers: name → Promise<McpClient>
+  const lazyClients = new Map()
+  const ensureConnected = async (name, spec) => {
+    if (!lazyClients.has(name)) {
+      const p = connectServer(name, spec, { timeoutMs }).then(async (client) => {
+        // refresh the inventory from the live server (cheap: it just started)
+        try {
+          const tools = await client.listTools()
+          saveInventory(cacheKey(name, spec), name, tools)
+        } catch { /* inventory refresh is best-effort; the call proceeds */ }
+        return client
+      })
+      // v96: a REJECTED connect must not poison the memo for the whole session
+      // (a transient server start failure would otherwise make every later
+      // call reuse the rejection). Evict on failure so the next call retries.
+      p.catch(() => lazyClients.delete(name))
+      lazyClients.set(name, p)
+    }
+    return lazyClients.get(name)
+  }
   for (const [name, spec] of configuredServers(config)) {
+    const inv = lazy ? freshInventory(name, spec) : null
+    if (inv) {
+      // fresh cached inventory → advertise stubs, connect on first call
+      out.tools.push(...inventoryToPlugins(name, spec, inv.tools, { ensureConnected, timeoutMs }))
+      out.clients.push({
+        name,
+        close() {
+          const p = lazyClients.get(name)
+          if (!p) return
+          lazyClients.delete(name)
+          Promise.resolve(p).then((c) => { try { c.close() } catch { /* already gone */ } }).catch(() => {})
+        },
+      })
+      continue
+    }
     let client
     try {
       client = await connectServer(name, spec, { timeoutMs })
@@ -286,6 +339,7 @@ export async function loadMcpTools(config, { timeoutMs } = {}) {
     }
     try {
       const tools = await client.listTools()
+      if (lazy) saveInventory(cacheKey(name, spec), name, tools)
       out.clients.push(client)
       out.tools.push(...mcpToolsToPlugins(client, tools))
     } catch (e) {
@@ -294,4 +348,131 @@ export async function loadMcpTools(config, { timeoutMs } = {}) {
     }
   }
   return out
+}
+
+// --- v96 lazy-connect inventory cache --------------------------------------
+
+const INVENTORY_TTL_MS = 24 * 60 * 60 * 1000
+const MAX_CACHED_SERVERS = 64
+const MAX_CACHED_TOOLS = 256
+
+function lazyEnabled(config) {
+  const env = String(process.env.FORGE_MCP_LAZY ?? "").toLowerCase()
+  if (env === "0" || env === "false" || env === "off") return false
+  if (config?.mcp && typeof config.mcp === "object" && config.mcp.lazy === false) return false
+  return true
+}
+
+function inventoryPath() {
+  return pathMod.join(resolveDataDir(), "cache", "mcp-tools.json")
+}
+
+/** Cache key = server name + command/args fingerprint: two configs that share
+ *  a name but run different commands never collide (tests included). */
+function cacheKey(name, spec) {
+  const cmd = [spec.command, ...(spec.args ?? [])].join("\u0000")
+  let h = 5381
+  for (let i = 0; i < cmd.length; i++) h = ((h << 5) + h + cmd.charCodeAt(i)) | 0
+  return `${name}:${(h >>> 0).toString(36)}`
+}
+
+function loadInventoryFile() {
+  try {
+    const j = JSON.parse(fsMod.readFileSync(inventoryPath(), "utf8"))
+    if (j && j.v === 1 && j.servers && typeof j.servers === "object") return j
+  } catch { /* absent/corrupt → cold cache */ }
+  return { v: 1, servers: {} }
+}
+
+/** v97 §33: read-only view of the CACHED MCP tool inventory for capability
+ *  resolution (the unified ladder). Never connects; a cold cache is an empty
+ *  list, honestly. [{ server, tool, description }] */
+export function cachedInventoryTools() {
+  const out = []
+  try {
+    const inv = loadInventoryFile()
+    for (const entry of Object.values(inv.servers ?? {})) {
+      for (const t of entry.tools ?? []) {
+        out.push({ server: entry.name ?? null, tool: t?.name, description: t?.description ?? "" })
+      }
+    }
+  } catch { /* read-only, best-effort */ }
+  return out.slice(0, 256)
+}
+
+function freshInventory(name, spec) {
+  try {
+    const entry = loadInventoryFile().servers[cacheKey(name, spec)]
+    if (!entry || !Array.isArray(entry.tools)) return null
+    const ttl = Number(process.env.FORGE_MCP_TTL_MS) > 0 ? Number(process.env.FORGE_MCP_TTL_MS) : INVENTORY_TTL_MS
+    if (Date.now() - Number(entry.at ?? 0) >= ttl) return null
+    return entry
+  } catch { return null }
+}
+
+function saveInventory(key, name, tools) {
+  try {
+    const file = loadInventoryFile()
+    file.servers[key] = {
+      at: Date.now(), name,
+      tools: (tools ?? []).slice(0, MAX_CACHED_TOOLS).map((t) => ({
+        name: String(t?.name ?? "").slice(0, 200),
+        description: String(t?.description ?? "").slice(0, 500),
+        inputSchema: t?.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : undefined,
+      })),
+    }
+    const keys = Object.keys(file.servers)
+    if (keys.length > MAX_CACHED_SERVERS) {
+      // drop the oldest entries (bounded cache, never unbounded growth)
+      const byAge = keys.sort((a, b) => (file.servers[a].at ?? 0) - (file.servers[b].at ?? 0))
+      for (const k of byAge.slice(0, keys.length - MAX_CACHED_SERVERS)) delete file.servers[k]
+    }
+    writeStateFile(inventoryPath(), JSON.stringify(file))
+  } catch { /* cache is a speedup, never a correctness dependency */ }
+}
+
+function dropInventory(key) {
+  try {
+    const file = loadInventoryFile()
+    if (file.servers[key]) { delete file.servers[key]; writeStateFile(inventoryPath(), JSON.stringify(file)) }
+  } catch { }
+}
+
+/** Build LAZY plugin stubs from a cached inventory: same shape as
+ *  mcpToolsToPlugins, but run() connects the server on first call. */
+function inventoryToPlugins(name, spec, tools, { ensureConnected, timeoutMs }) {
+  return (tools ?? []).map((t) => {
+    const name2 = mcpToolName(name, t.name)
+    const params = normalizeSchema(t.inputSchema)
+    return {
+      name: name2,
+      readOnly: false,
+      def: {
+        type: "function",
+        function: {
+          name: name2,
+          description: String(t.description || `${t.name} (via MCP server ${name})`).slice(0, 500),
+          parameters: params,
+        },
+      },
+      source: `mcp:${name}`,
+      async run(args) {
+        try {
+          const client = await ensureConnected(name, spec)
+          // honesty check: the cached def must still exist on the live server
+          try {
+            const live = await client.listTools()
+            if (!live.some((x) => String(x?.name) === String(t.name))) {
+              dropInventory(cacheKey(name, spec))
+              return `ERROR: mcp tool ${t.name} no longer exists on server ${name} (cached inventory dropped — restart to re-advertise the real tool set)`
+            }
+          } catch { /* listing failed; let the call itself speak */ }
+          const r = await client.callTool(t.name, args)
+          return r.isError ? `ERROR: ${r.text || "MCP tool reported an error"}` : (r.text || "(no output)")
+        } catch (e) {
+          return `ERROR: ${e.message}`
+        }
+      },
+    }
+  })
 }

@@ -428,7 +428,7 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
       schedule(DURABILITY.CRITICAL)
     },
 
-    noteRepair(n = 1) { rec.repair_count = (rec.repair_count ?? 0) + n; rec.resource_usage.retries = rec.retry_count; schedule() },
+    noteRepair(n = 1) { rec.repair_count = (rec.repair_count ?? 0) + n; rec.resource_usage.repairs = rec.repair_count; rec.resource_usage.retries = rec.retry_count; schedule() },
     /** Count a resume after the segment safety fuse; returns the new count. */
     noteContinuation(n = 1) {
       rec.continuation_count = (rec.continuation_count ?? 0) + n

@@ -115,6 +115,20 @@ export function createDecisionEngine({ cwd = process.cwd(), taskId = null, onWai
 
   function pendingList() { return items.filter((d) => d.status === DECISION_STATUS.PENDING) }
 
+  /** v96 unifywise: the Core and the meta controller each hold an engine
+   *  instance over the SAME askings.json. A decision the OTHER instance
+   *  asked after this one loaded would otherwise stay invisible to this
+   *  instance's pending list (a stale in-memory copy). reload() re-reads
+   *  the file — cheap, bounded, honest. */
+  function reload() {
+    const fresh = loadAskings(cwd)
+    // never lose a decision this instance just asked but has not persisted…
+    // persist() writes immediately on ask(), so anything in `items` not on
+    // disk yet is a race window of milliseconds — the file is authoritative.
+    items = fresh.length >= items.length ? fresh : items
+    return items.length
+  }
+
   /**
    * Should we ask at all? Autonomous default: NO when this exact key was
    * asked recently, or when it was already answered in this project.
@@ -180,7 +194,7 @@ export function createDecisionEngine({ cwd = process.cwd(), taskId = null, onWai
       .slice(-max)
   }
 
-  return { ask, resolve, shouldAsk, pendingList, list, expireOlderThan, get size() { return items.length } }
+  return { ask, resolve, shouldAsk, pendingList, reload, list, expireOlderThan, get size() { return items.length } }
 }
 
 /**

@@ -328,6 +328,15 @@ export function emptyCompose(klass = null) {
     blast: emptyBlast(),
     claims: [],
     decisions: [],
+    // v96 unifywise: the strategy/models/variants/knowtype fields used to be
+    // undefined on the empty shape until the tail try-blocks ran — callers
+    // reading an early-exit compose (MICRO gating) saw holes. Same defaults
+    // as the tail assigns.
+    strategy: [],
+    strategyJustified: "",
+    models: [],
+    variants: [],
+    knowtype: [],
   }
 }
 
@@ -643,6 +652,13 @@ export function formatCompose(c) {
   if (gapBlock) lines.push(gapBlock)
   for (const line of formatClaimLines(c.claims)) lines.push(line)
   for (const line of formatDecisionLines(c.decisions)) lines.push(line)
+  // v96 unifywise: the v93 §23 justified strategy pick ("X: 67% ok over 3
+  // samples; task-name match; LOW SAMPLES — weak evidence…") was computed on
+  // every compose and then rendered into NO prompt — computed-then-ignored.
+  // It now reaches the planner/agent compose block (bounded, ≤4 lines).
+  if (c.strategyJustified && typeof c.strategyJustified === "string" && c.strategyJustified.trim()) {
+    lines.push(c.strategyJustified.slice(0, 400))
+  }
   return lines.join("\n")
 }
 

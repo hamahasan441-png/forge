@@ -18,10 +18,6 @@ import http from "node:http"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v94a-"))
 process.env.FORGE_HOME = HOME
-// v94 gapclose: these suites pin the empty-config → lexical-fallback contract;
-// the LSP auto-start table (a host typescript-language-server could otherwise
-// resolve .js mid-test) is pinned by tests/test-lsp-autostart.mjs instead.
-process.env.FORGE_LSP_AUTOSTART = "0"
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v94a-work-"))
 process.chdir(WORK)
 fs.mkdirSync(path.join(WORK, "src"), { recursive: true })
@@ -192,7 +188,7 @@ console.log("== H. orphan processes + resource bounds ==")
 console.log("== I. package + documentation truth ==")
 {
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", here), "utf8"))
-  eqv("ADV: package version is 94.0.0", pkg.version, "94.0.0")
+  eqv("ADV: package version is 98.0.0", pkg.version, "98.0.0")
   for (const m of ["runtimesession.js", "toolcreate.js", "runtime.js", "repl.js", "codesearch.js", "worldmodel.js", "completion.js", "bus.js", "core.js"]) {
     ok(`ADV: ${m} shipped in files[]`, pkg.files.includes(m))
   }
@@ -209,8 +205,9 @@ console.log("== I. package + documentation truth ==")
   ok("ADV: /tools is dynamic (no hardcoded count)", /toolCount\(\)/.test(chatSrc))
   const read = (p) => fs.readFileSync(new URL(p, here), "utf8")
   ok("ADV: inner README claims v94", /v94/.test(read("../README.md")))
-  ok("ADV: PACKAGE_INFO claims v94.0.0", /v94\.0\.0/.test(read("../../PACKAGE_INFO.txt")))
-  ok("ADV: root README claims 94.0.0 + 29 tools", /94\.0\.0/.test(read("../../README.md")) && /29 tools/.test(read("../../README.md")))
+  // v96 unifywise: the metadata claims track the CURRENT version (98.0.0)
+  ok("ADV: PACKAGE_INFO claims v98.0.0", /v98\.0\.0/.test(read("../../PACKAGE_INFO.txt")))
+  ok("ADV: root README claims 98.0.0 + 29 tools", /98\.0\.0/.test(read("../../README.md")) && /29 tools/.test(read("../../README.md")))
 }
 function eqv(name, got, want) { ok(`${name} (got ${JSON.stringify(got)})`, got === want) }
 

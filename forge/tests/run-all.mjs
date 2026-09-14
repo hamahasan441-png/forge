@@ -196,16 +196,21 @@ const suites = [
   ["knowwise", "node", ["test-knowwise.mjs"]],
   // ---- v94 deepwise: plan competition + adoption, pre-mutation critique ----
   ["deepwise", "node", ["test-deepwise.mjs"]],
-  // ---- v94 gapclose: TODO burn-down — runtime probes/kill walk, checkpoint
-  //      drift reconcile, sandbox re-probe, persistent semantic index,
-  //      multi-step tool probes, LSP auto-start -----------------------------
-  ["health-proto", "node", ["test-runtime-health-protocol.mjs"]],
-  ["kill-walk", "node", ["test-runtime-kill-walk.mjs"]],
-  ["cp-drift", "node", ["test-checkpoint-drift.mjs"]],
-  ["sandbox-reprobe", "node", ["test-sandbox-reprobe.mjs"]],
-  ["sem-index", "node", ["test-semantic-index-persist.mjs"]],
-  ["tool-multistep", "node", ["test-toolcreate-multistep.mjs"]],
-  ["lsp-auto", "node", ["test-lsp-autostart.mjs"]],
+  // ---- v94 fastwise: freshness caches + likely-next prefetch + dedup audit -
+  ["fastwise", "node", ["test-fastwise.mjs"]],
+  // ---- v94 todowise: the TODO.md open-gap ledger, closed with proof ----
+  ["todowise", "node", ["test-todowise.mjs"]],
+  // ---- v95 worktreewise: isolated worktree execution for DAG nodes --------
+  ["worktreewise", "node", ["test-worktreewise.mjs"]],
+  // ---- v96 unifywise: every disconnected wire reconnected and pinned ------
+  ["unifywise", "node", ["test-unifywise.mjs"]],
+  ["envfingerprint", "node", ["test-envfingerprint.mjs"]],
+  // ---- v97 unifiedwise: one coherent engineering intelligence ----
+  ["sourceresolve", "node", ["test-sourceresolve.mjs"]],
+  ["v97", "node", ["test-v97.mjs"]],
+  // ---- v98 shipwise: structured extraction wired + verified git delivery ----
+  ["gitship", "node", ["test-gitship.mjs"]],
+  ["v98", "node", ["test-v98.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

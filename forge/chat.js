@@ -36,6 +36,7 @@ import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
+import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
 import { indexSkills, loadSkill, resolveSkillsDir } from "./skills.js"
@@ -47,13 +48,16 @@ import { engineFor } from "./langengine.js"
 import { composeOnce, clearComposeOnce, formatCompose } from "./compose.js"
 import { ingestAcquire } from "./knowgap.js"
 import { classifyTask } from "./classify.js"
-import { saveSession, loadSession, lastSessionFile, listSessions, findSession } from "./sessions.js"
+import { saveSession, loadSession, lastSessionFile, listSessions, findSession, appendTranscript, latestSessionForCwd, projectSessionFile } from "./sessions.js"
+import { classifyUserMessage, formatClassification } from "./msgclass.js"
+import { buildRehydration, formatRehydration } from "./rehydrate.js"
+import { readSourceRecord } from "./sourceresolve.js"
 import { relevantMemory } from "./memory.js"
 import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
 import { classifyTaskComplexity } from "./agent.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
-import { compactHistory, shrinkToolOutput } from "./compaction.js"
+import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { VERSION } from "./version.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore, parseCheckOutput } from "./uistate.js"
@@ -288,19 +292,6 @@ export function isShellLine(t) {
   return chatWordScore(tokens) < 2
 }
 
-/** Overflow-recovery shrink (v20): stub ALL old tool outputs + dedupe. */
-function hardShrink(msgs) {
-  const seen = new Map()
-  return msgs.map((m, i) => {
-    if (m?.role !== "tool" || typeof m.content !== "string" || i >= msgs.length - 6) return m
-    const key = m.content.slice(0, 120)
-    if (seen.has(key)) return { ...m, content: "[duplicate tool output removed]" }
-    seen.set(key, true)
-    if (m.content.length > 600) return { ...m, content: shrinkToolOutput(m.content, 600) } // v21.1: keep head/tail/errors
-    return m
-  })
-}
-
 export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, query = "" } = {}) {
   const lines = [
     "You are forge — a sharp, concise AI assistant in the user's terminal.",
@@ -309,6 +300,7 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
   ]
   if (toolsEnabled) {
     lines.push("", `TOOLS: you can use tools automatically (web_search, fetch_url, bash, read_file, glob_files, grep_files, apply_patch, git_status, todo, think, memory, delegate and more — ${toolCount()} total). Use them whenever they help; results arrive automatically. Writes stay inside the working directory; sensitive files are protected.`)
+    lines.push("", `RULE: ${UNTRUSTED_CONTENT_RULE}`)
   }
   if (deep) {
     lines.push("",
@@ -538,7 +530,7 @@ export function closeChatPlugins(loaded) {
   if (loaded.pluginHost) { try { loaded.pluginHost.close() } catch {} }
 }
 
-export async function runChat({ config, provider, oneShot, resumeFile, deep: deepFlag }) {
+export async function runChat({ config, provider, oneShot, resumeFile, deep: deepFlag, fresh: freshFlag }) {
   let p = provider
   // v20.2: provider failover (opt-in) for the interactive loop — when the active
   // provider fails before any output is shown, switch to the next configured
@@ -666,6 +658,30 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let sessionId = null
   let sessionSummary = null
   let restoredUsage = { prompt: 0, completion: 0, requests: 0 }
+  let autoRehydrated = false
+  // v97 unifiedwise (§6): AUTOMATIC session rehydration. A normal INTERACTIVE
+  // startup in a directory with a previous session reattaches to it —
+  // `--continue` is no longer the ONLY way to recover continuity. Explicit
+  // flags still win:
+  //   --resume/--continue  → that session
+  //   --new / fresh:true   → force a brand-new conversation
+  //   chat.autoRehydrate:false → opt out entirely
+  // Piped/non-TTY and one-shot (`forge ask`, `-m`) NEVER rehydrate: a scripted
+  // question must not inherit an interactive history by surprise, and test
+  // isolation depends on a clean start.
+  if (!resumeFile && !oneShot && !freshFlag && process.stdin.isTTY === true && config.chat?.autoRehydrate !== false) {
+    try {
+      const prev = latestSessionForCwd(process.cwd())
+      // rehydrate only a RECENT session (7 days) — an old conversation in this
+      // dir is history, not active context; surfacing it automatically would
+      // be surprising, and the store keeps it reachable via /resume anyway.
+      const ageMs = prev ? Date.now() - (prev.updatedAt ?? prev.ts ?? 0) : Infinity
+      if (prev?.id && ageMs < 7 * 24 * 3600 * 1000) {
+        resumeFile = projectSessionFile(prev.id)
+        autoRehydrated = true
+      }
+    } catch { /* rehydration is best-effort — never blocks chat */ }
+  }
   if (resumeFile) {
     const s = loadSession(resumeFile)
     if (s) {
@@ -679,8 +695,21 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           if (st.isDirectory()) { process.chdir(s.cwd); ok(`resumed in ${s.cwd}`) }
         } catch { /* cwd gone — stay in the current one */ }
       }
-      ok(`resumed session ${s.id ?? ""} (${messages.length} messages${s.title ? ` • ${dim('"')}${s.title.slice(0, 48)}${dim('"')}` : ""})`)
+      if (autoRehydrated) {
+        ok(`rehydrated previous session in this directory (${messages.length} messages) — ${dim("/new or forge chat --new starts fresh")}`)
+      } else {
+        ok(`resumed session ${s.id ?? ""} (${messages.length} messages${s.title ? ` • ${dim('"')}${s.title.slice(0, 48)}${dim('"')}` : ""})`)
+      }
     } else warn("could not load session — starting fresh")
+  }
+  // v97 §8: the concise active-state summary — what was done, what is open,
+  // what is stale — built from the REAL stores, shown once at rehydration.
+  let rehydrationLines = null
+  if (resumeFile) {
+    try {
+      const r = await buildRehydration(resumeFile, { cwd: process.cwd() })
+      rehydrationLines = formatRehydration(r)
+    } catch { /* summary is best-effort */ }
   }
 
   let lastUsage = null
@@ -857,6 +886,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     return true
   }
 
+  // v97 §7: turns captured for the NON-DESTRUCTIVE raw transcript. Each turn
+  // records its user classification (goal/requirement/correction/…) so the
+  // engineering decisions survive compaction — compaction folds the WORKING
+  // context; the transcript keeps the RAW history, permanently.
+  let turnTranscript = []
+
   /** Persist the conversation — one file per conversation, updated in place. */
   function persist() {
     if (!messages.length) return
@@ -865,6 +900,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // next save join() it under SESSIONS_DIR again — a nested path growing
     // every turn, invisible to listSessions. Store the session ID instead.
     if (f && !sessionId) sessionId = path.basename(f).replace(/\.json$/, "")
+    // v97 §7: flush captured turns to the raw transcript AFTER the session id
+    // exists. This runs before any compaction fold of the NEXT turn, so raw
+    // history is always durably ahead of the working-context compression.
+    if (sessionId && turnTranscript.length) {
+      for (const t of turnTranscript) {
+        try { appendTranscript({ sessionId, projectId: null, role: t.role, content: t.content, classes: t.classes ?? null }) } catch { }
+      }
+      turnTranscript = []
+    }
     return f
   }
 
@@ -986,7 +1030,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     }
     // canonical history: ONE assistant tool_calls message, then one tool result each
     messages.push({ role: "assistant", content: "", tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })) })
-    for (let i = 0; i < parsed.length; i++) messages.push({ role: "tool", tool_call_id: parsed[i].tc.id, content: String(results[i].result) })
+    // v98 shipwise: the chat-side fence choke point — identical law to the
+    // agent loop (header-only fence after cap/redaction, advisory markers)
+    for (let i = 0; i < parsed.length; i++) messages.push({ role: "tool", tool_call_id: parsed[i].tc.id, content: fenceToolResult(parsed[i].tc.name, String(results[i].result), { enabled: fenceEnabled(config) }) })
     injectPendingVision(messages, tools.ctx)
   }
 
@@ -1022,6 +1068,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       userText = `[terminal] ${notes}\n\n${userText}`
     }
     messages.push({ role: "user", content: userText })
+    // v97 §7: classify the user turn (deterministic, advisory) and capture it
+    // for the raw transcript — flushed by persist() once the session exists.
+    {
+      const cls = classifyUserMessage(userText)
+      turnTranscript.push({ role: "user", content: String(userText), classes: cls.classes.map((c) => ({ cls: c.cls, evidence: c.evidence })) })
+      if (cls.classes.length) out(dim(`  · noted: ${formatClassification(cls)}`))
+    }
     messages = compact(messages, config.chat?.maxHistoryMessages)
     if (!ui) process.stdout.write("\n")
     const eff = effortFor(userText)
@@ -1117,7 +1170,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       abort = null
       if (ui && (!full || !full.trim())) dispatchUI({ type: "TASK_RESET" })
     }
-    if (full.trim()) messages.push({ role: "assistant", content: full })
+    if (full.trim()) {
+      messages.push({ role: "assistant", content: full })
+      turnTranscript.push({ role: "assistant", content: String(full) }) // v97 §7 raw transcript
+    }
     const u = lastUsage
     if (u?.prompt_tokens || u?.completion_tokens) out(dim(`  (${u.prompt_tokens ?? "?"} in / ${u.completion_tokens ?? "?"} out tok) • session: ${sessionUsage.prompt} in / ${sessionUsage.completion} out`))
     else out(dim(`  (~${estimateTokens(JSON.stringify(messages))} tok ctx) • session: ${sessionUsage.prompt} in / ${sessionUsage.completion} out`))
@@ -1140,6 +1196,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   console.log(dim(`cwd: ${process.cwd()}`))
   console.log(dim(`skills: ${nSkills ? (config.skills?.enabled !== false ? `${nSkills} enabled` : "disabled") : "none found"} • auto-tools: ${chatToolsEnabled() ? green(toolCount() + " ON") : yellow("off")} • terminal: ${config.chat?.shellAuto === false ? yellow("! only") : green("on")} • deep: ${deep ? green("ON") : "off"} • profile: ${cyan(config.chat?.profile ?? "auto")} • resources: ${res.tier} • /status, /help`))
   if (sessionSummary) console.log(dim(`resumed summary: ${sessionSummary.replace(/\s+/g, " ").slice(0, 140)}`))
+  // v97 §4/§8: source-of-truth line + rehydration state block
+  try {
+    const src = readSourceRecord(process.cwd())
+    if (src) console.log(dim(`source: ${src.sourceType} • authority: ${src.authority}${src.origin ? ` • origin: ${String(src.origin).slice(0, 60)}` : ""}`))
+  } catch { }
+  if (rehydrationLines?.length) {
+    for (const l of rehydrationLines) console.log(dim(`  ${l}`))
+  }
 
   let mode = "normal"
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
@@ -1454,7 +1518,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // path (which already has failover, overflow recovery, verification and
     // checkpoints). The meta controller drives piped/non-TTY autonomous runs
     // and `forge agent`, where its multi-segment lifecycle is printed as lines.
-    const useMeta = !planOnly && config?.agent?.autonomous !== false && !ui
+    //
+    // v96 unifywise — RESUME ALWAYS GOES THROUGH THE CONTROLLER. A resumed
+    // task has persisted DAG/ledger/checkpoint state that ONLY the meta
+    // lifecycle reconciles (recovery.js effect reconciliation + PLAN_RESTORED
+    // + verification epochs). The old TTY branch silently dropped
+    // resumeTaskId and re-ran the objective as a single-shot agent — the
+    // "resume via controller" prompt was a lie in interactive mode. Now a
+    // resume in TTY uses the controller regardless (same rendering pattern as
+    // `forge agent --auto`: the dock shows the embedded agent's tool traffic;
+    // lifecycle events are ignored by the bridge — unknown types are no-ops).
+    const useMeta = !planOnly && (resumeTaskId != null || (config?.agent?.autonomous !== false && !ui))
+    if (useMeta && ui && resumeTaskId != null) out(dim("  · resuming via the task controller — reconciling persisted DAG/ledger state first"))
     const onEvent = ui ? ui.view.onEvent : (config?.agent?.autonomous === false ? agentEventPrinter() : metaEventPrinter(agentEventPrinter()))
     try {
       if (useMeta) {
@@ -1480,6 +1555,27 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           verification: m.verification,
         }
         if (m.status === "WAITING") res.waiting = true
+        // v96 unifywise: TTY controller runs (resume) render through the same
+        // result printer as single-run tasks — the adapted res carries the
+        // agent-result shape printResult expects (text/steps/toolLog/wrote).
+        if (ui) {
+          lastAgentState = store.state
+          ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
+          // v96 unifywise honesty: the dock's "COMPLETED" mark reflects UI
+          // checks, not the task record — a meta run that ended WAITING/
+          // FAILED without a failing check would otherwise look done. The
+          // controller's verdict is printed verbatim when it is not COMPLETED
+          // (same wording as the piped path).
+          if (!planOnly && res.taskStatus && res.taskStatus !== "COMPLETED") {
+            out(yellow(`  status: ${res.taskStatus}${res.waiting ? " — checkpoint saved; the task can resume (forge tasks --resume)" : ""}`))
+          }
+          if (!planOnly && res.taskStatus === "COMPLETED" && (res.text || "").trim()) {
+            messages.push({ role: "user", content: `[agent task] ${task}` })
+            messages.push({ role: "assistant", content: res.text })
+            persist()
+          }
+          out()
+        }
       } else {
         res = await runAgent({ config, provider: p, task, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
         if (ui) {

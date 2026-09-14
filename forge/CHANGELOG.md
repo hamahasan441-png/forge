@@ -5,75 +5,401 @@ reads it at runtime and every user-agent is built from that single source.
 Historical entries below are kept honest and short; completed plans are not
 preserved — leftovers live in TODO.md.
 
-## 94.0.0 — gapclose (TODO burn-down: seven real gaps, closed with evidence)
+## 98.0.0 — shipwise (the delivery release)
 
-Every item below was an OPEN, documented gap in TODO.md — not a new feature
-layer. Each fix ships with its own regression suite (7 new suites, 138 new
-assertions; 162/162 node suites + e2e + cleanroom green). Nothing rewritten.
+The competitive gap analysis (Forge vs Claude Code / Devin / Cursor / Codex /
+OpenHands) named three existential deficits — regex-only language
+intelligence, no git delivery, no injection defense — plus two v97 TODO
+leftovers (artifact verification, visual regression) and one scale problem
+(synchronous walking). v98 closes all six in the house way: nothing
+rewritten, every fix wired into the existing systems, every behavior pinned
+by a test.
 
-- runtime / process cleanup (§56, §133): the kill fallback is now an
-  EVIDENCE-BASED process-table walk. When `kill(-pgid)` fails (platforms
-  without group signals), killTree no longer kills only the leader and
-  silently orphans the `sh -c` grandchildren — `groupPidsPortable()`
-  enumerates real members (/proc pgid scan on linux; `ps -axo
-  pid=,pgid=,ppid=` pgid ∪ ppid-closure on other POSIX; PowerShell CIM /
-  wmic ppid-closure on win32; leader-only honest degradation when no
-  evidence source exists) and signals each. Pinned by forcing the fallback
-  (negative-pid kill stubbed to throw) and proving zero orphan survivors.
-- runtime / health probes (§55): `healthProbe` is protocol-aware
-  (auto|http|tcp). An HTTP status remains HTTP evidence, unchanged. When the
-  GET fails at the transport layer, a TCP connect separates the honest
-  cases: non-HTTP reply + connect ok → reachable, labeled "LISTENING
-  proven, application health NOT provable over HTTP" (a TLS/WebSocket/
-  raw-socket service is no longer false-reported NOT healthy); timeout +
-  connect ok → "listening but hung"; refused → nothing listening. The
-  session evidence lines, claim gate and `runtime` tool output all name the
-  protocol that proved the verdict; strict `protocol:"http"` never falls
-  back.
-- checkpoint / recovery (§80–81): `restoreTransactional` gained phase 5b
-  RECONCILE — every manifest file the restore could NOT write (tooLarge
-  skips, created files kept because they changed since the checkpoint) is
-  hashed against its recorded fingerprint; drift is reported with recorded/
-  current evidence and `treeConsistent` says whether the working tree as a
-  whole matches the checkpoint. Silent divergence between crash and resume
-  is now impossible; a clean restore still reports RESTORED (drift never
-  fakes a failure, and a failure never hides behind drift).
-- sandbox: the bwrap kernel probe cache drops on the first REAL start
-  failure (`resetSandboxProbe()` wired into the v87 bwrapBroken fallback in
-  tools.js) — a kernel hardened after forge started is re-probed by every
-  later detection (doctor, capabilities) instead of being trusted from a
-  stale boot-time read.
-- semantic_search (§51/§121): the chunk corpus persists per project
-  (~/.forge/projects/<hash>/semantic-index.json), fingerprint-invalidated
-  per file (mtime+size, world-model discipline): a fresh process reuses
-  every unchanged file and re-chunks only what changed; an unchanged repo
-  never rewrites its index; FORGE_INDEX=0 disables it; the repository tree
-  itself stays pure read. Every result carries honest `index` stats
-  (loadedFromDisk / rebuilt / saved / skip reason).
-- tool creation (§46): designs may carry a `probeScript` — an ordered list
-  of run() calls executed in ONE child process (module state carries
-  between steps: login → act → verify). Each step is checked against the
-  declared output schema plus its own oracle (outputType / outputIncludes);
-  VERIFIED requires EVERY step to pass and the failing step is named. A
-  soft-error step (exit 0 with "ERROR: …" output) can no longer ride the
-  exit code to promotion. Single-probe verification is byte-identical.
-- LSP (§18): first-party AUTO-START table for the top languages
-  (typescript-language-server; pyright-langserver → pylsp; gopls;
-  rust-analyzer). User `lsp.servers` config always wins; a candidate is
-  used ONLY when the binary actually exists on PATH (the resolved absolute
-  path spawns — evidence, never invention); FORGE_LSP_AUTOSTART=0 /
-  lsp.autoStart:false disable it; a missing binary produces an honest
-  "PATH probed for X (not found)" error. The verification-ledger gate in
-  meta.js stays config-only ON PURPOSE (no surprise heavy server spawns
-  mid-segment); auto-start serves the on-demand structured path
-  (extractStructured layer-3 provenance `lsp:auto:<lang>`, session tools,
-  direct collectDiagnosticsForFiles callers).
-- test hygiene: the legacy LSP suites (test-lsp, test-lsp-lifecycle,
-  test-v93l, test-v94a) pin `FORGE_LSP_AUTOSTART=0` so a host toolchain
-  binary can never make them environment-dependent; test-v27's import pin
-  accepts the extra sandbox binding and additionally pins the re-probe
-  wiring. The table contract is pinned by the new test-lsp-autostart suite
-  against a real (stub) language-server binary on PATH.
+- STRUCTURED EXTRACTION WIRED (the #1 gap since v93): langstruct.js — ONE
+  LSP session per server (user config + the autostart table), bounded fan-out
+  (time budget, file cap, concurrency), honest per-file fallbacks (server
+  failure / zero symbols keep the lexical record and say so). Enriched
+  records carry `symbolDetails: [{name, kind, line}]` + `extraction:
+  {layer: 3, source: "lsp:<server>"}` and are written into the SHARED
+  incremental index; the world model serves them to every consumer (repo
+  map, locate, impact, knowgraph). The wiring is honest about cache
+  semantics: enriched records are fingerprint-stamped at read time, and
+  extractOne now reuses fresh index records (the same cacheHit law as
+  walkIndexed) so a rebuild SERVES the structured record instead of
+  overwriting it with a lexical re-extraction. INDEX_VERSION bumps 1→2 once
+  (one-time re-extraction per project); memgraph's cycle-avoiding INDEX_VER
+  copy moves in lockstep (the bump caught it drifting — compose/world
+  lessons silently read empty until it was fixed).
+- NATIVE JSON TIER (layer 1, the first above-regex production parse):
+  .json records get JSON.parse with top-level keys as symbols; invalid JSON
+  is reported as a failed native parse, never an empty success.
+- VERIFIED GIT DELIVERY (gitship.js — kernel policy, never a tool; the wire
+  stays 1:1): after the 9-check completion gate says ok, maybeShip() commits
+  ONLY the run's verified files (explicit pathspec, never -A; .forge/**
+  never ships; foreign dirty files are named and never staged), with
+  forge trailers (Forge-Task-Id / Forge-Run) for crash reconciliation and
+  an honest nothing-to-commit skip when the files already match HEAD.
+  Identity: repo config wins, else per-invocation `forge-agent <forge@local>`
+  (repo/global config NEVER written). branch:"auto" BOOKMARKS forge/<task>
+  at the delivery commit (git branch — the user's checkout is never
+  switched). push:"explicit" requires a live AUTHORIZATION ask; force is
+  structurally absent from the arg arrays. A PR-ready text artifact is
+  rendered from gate/ledger data (no remote API, no token trust). All OFF
+  by default; `gitship` is a PRIVILEGED config section so a checked-in
+  project config can never turn delivery on for everyone who clones. A
+  delivery failure NEVER flips the task status — pre-v98 behavior (verified
+  files in the working tree) is exactly the fallback. Events: GITSHIP_MODE/
+  SKIPPED/COMMITTED (persisted to events.jsonl).
+- PROMPT-INJECTION DEFENSE (contentfence.js, G4): every tool result enters
+  the conversation through ONE constant attribution fence (header-only —
+  the v20.0.1 exit-marker law is pinned by test), with an ADVISORY marker
+  scan (instruction-override, role spoofing, identity rewrite, exfiltration
+  prompt, policy disarm — surfaced in the header, never fatal). The shared
+  data-not-instructions rule rides BOTH system prompts (agent RULES 8 +
+  chat). `tools.contentFence` is a privileged key — a project config
+  cannot strip the fence.
+- WORLD MODEL AT SCALE (the TODO leftover): the documented 0/"unlimited" =
+  NO CAP was UNREACHABLE (the resolver's !isFinite guard destroyed
+  Infinity and silently fell back to 2000 — verified, fixed, pinned).
+  extractOne batches index writes (one load + one save per incremental
+  pass — was a quadratic N×N fsync amplification). expand()/locate()
+  reuse their completed walk (the 3-walk chain became 1). buildAsync():
+  the stat walk runs CHUNKED (cooperative setImmediate yields), in-flight
+  callers share ONE promise (the fastwise warm-memo law), and a short
+  async-fresh window collapses the per-query drift walks — invalidate()
+  closes it immediately so mutations are never masked. The pure-sync
+  surface (every existing test) keeps per-call drift semantics untouched.
+- CONTRACT_DRIFT BEFORE-CAPTURE FIX (a real v97 bug): the §21 "pre-mutation"
+  contracts were captured through the world getter, which REBUILDS and
+  re-extracts from disk — so "before" was actually AFTER and drift could
+  never fire. worldmodel.persistedRecords() reads the LAST RECORDED TRUTH
+  from the persisted snapshot (no walk, no re-extraction), which is what
+  the comment always claimed.
+- ARTIFACT EVIDENCE (the TODO leftover): runtimesession.artifactRuntimeEvidence()
+  observes what a build ACTUALLY produced in the conventional output
+  locations for the matched adapter (dist/, build/, app/build/outputs/,
+  target/ …) — bounded, read-only, never invented (no adapter → not
+  applicable). Observed artifacts become VTYPE.ARTIFACT ledger records
+  with positive evidence; their absence at critical risk (where
+  verificationPlanForRisk has ALWAYS declared runtimeValidation that
+  nothing enforced) is now a required action the gate refuses to complete
+  over — the declared-then-ignored flag is enforced.
+- BROWSER VISUAL REGRESSION (the TODO leftover): `browser visual_diff
+  {name}` — first run CREATES the baseline (snapshot text + screenshot
+  sha256) in the project state dir; later runs COMPARE (unifiedDiff of the
+  canonical node text + pixel-exact hash verdict) with §42-style evidence
+  phrasing (MATCH = positive evidence, DIFF = evidence AGAINST, re-baseline
+  only via update:true). CDP screenshots gain captureBeyondViewport
+  (full-page). visual_diff is a verification action (verifier agents may
+  use it; page-mutating actions stay blocked).
+- AGENT LSP TOOL GATE: the read-only LSP tools (definition/references/
+  hover/diagnostics) now light up on the AUTOSTART table too — the last
+  surface still gated on user config alone, matching what layer 3 reports.
+- Tests: tests/test-v98.mjs (95 assertions, 7 sections) +
+  tests/test-gitship.mjs (39 assertions, 9 sections) registered in
+  run-all; FORGE-BENCH grows to 22 cases (+21-artifact-evidence,
+  +22-injection-fence), 22/22 green. Version pins updated across the
+  suites (131 test pins + e2e + cleanroom).
+
+## 97.0.0 — unifiedwise (the one-brain release)
+
+FORGE ∞ v97 FINAL UNIFIED ENGINEERING INTELLIGENCE UPGRADE, implemented in
+the directive's own phase order (inspect first; no engine rewritten — new
+modules where nothing existed, wiring where things were disconnected):
+
+- §4 LOCAL-FIRST SOURCE RESOLUTION (non-negotiable): sourceresolve.js — the
+  resolution ladder (explicit file → folder → local ZIP → https URL → git
+  repo → workspace; remote search NEVER happens implicitly). ZIP-as-project
+  is real: inspect (root/manifests/languages/tests/git metadata) → safe
+  extraction (zip-slip guarded, CRC-checked, capped) → operate on the LOCAL
+  project. Source records persist (sourceType/sourceId/origin/authority/
+  reason/evidence/history) under the project dir; an explicit local archive
+  WINS over a git cwd and the conflict is recorded; unresolvable inputs are
+  refused, never guessed. CLI: `forge source`, `--source` on agent/chat/ask.
+- §3 CANONICAL ENGINEERING STATE: core.engineeringState() — one read-only
+  aggregate over the existing stores (identity, source, goal, work/DAG,
+  verification, blockers, knowledge, resources, next-best-action). No second
+  truth, no private copies.
+- §5-§8 SESSION CONTINUITY: raw conversation transcripts (per-turn
+  <id>.transcript.jsonl with ts/role/content/sessionId/projectId/classes —
+  compaction folds the working context but NEVER destroys history anymore);
+  per-message user classification (goal/requirement/correction/decision/
+  preference/…, msgclass.js); AUTOMATIC rehydration — a normal `forge chat`
+  in a directory with a recent session reattaches without --continue
+  (chat.autoRehydrate:false or --new to opt out); §8 reconstruction with
+  reality reconciliation (files that vanished are reported stale) in
+  rehydrate.js.
+- §15 WORLD MODEL CEILING REMOVED: the cap is a CONFIGURABLE BUDGET
+  (FORGE_WORLD_MAX_FILES / world.maxFiles; 0 = unlimited), indexing is
+  PRIORITIZED (manifests → entry points → src → rest → tests — never readdir
+  luck), the stat walk always completes (stats.totalScanned), expand() pages
+  in more on demand, and a locate() miss against a truncated world
+  auto-expands once — a huge repo takes longer, never becomes invisible.
+  semantic search follows the same budget.
+- §26 COMPETING HYPOTHESES: a hard failure creates a belief DISTRIBUTION
+  (diagnosis 0.5 / structural causal candidate 0.3 / environment-or-tooling
+  0.2 when origin is unknown) — never one guess; hypothesisDistribution()
+  exposes the normalized ranked set.
+- §29 PREDICTIONS EXTENDED: expectedTests + expectedSteps declared up front,
+  settled against reality (testsDelta/stepsDelta), calibration reports
+  testBias/stepBias and the planner prompt names them.
+- §33 UNIFIED CAPABILITY LADDER: one resolver across native tools → skills →
+  MCP inventory → created tools (ACTIVE+verified only), with honest GAPS.
+  Wired into the agent system prompt (gap line) and `forge caps <capability>`.
+  §35: the created-tool lifecycle is CLI-reachable (`forge tool
+  life|create|activate|deactivate`) — unverified tools still NEVER activate.
+- §21 CONTRACT DRIFT: after a mutating segment, removed producers (renamed
+  routes/tables/protos) and orphaned consumers are detected against the
+  pre-mutation world and emitted as CONTRACT_DRIFT evidence.
+- §41 RUNTIME LIFECYCLE: runtime `up` — (build) → launch → WAIT-READY
+  (bounded health polling with backoff; readiness is EARNED by a probe) →
+  verdict with per-stage evidence; a process that dies while waiting fails
+  fast with the process evidence.
+- §42 UI VERIFICATION EVIDENCE: the browser captures console errors, page-log
+  errors and failed network loads (CDP Runtime.consoleAPICalled, Log.
+  entryAdded, Network.loadingFailed); new `errors` action surfaces them — a
+  rendering page with errors is NOT verified.
+- §56/§88 TASK REPLAY: replay.js + `forge replay <run|task>` renders the
+  recorded timeline (goal → state → action → decision → evidence → result)
+  from the run journal, events ledger and task record — read-only, never a
+  reconstructed story. CONTRACT_DRIFT/WORLD_INVALIDATED/ENVIRONMENT_DRIFT
+  now persist to events.jsonl.
+- §49 ZERO-WASTE: identical CONCURRENT model requests coalesce into ONE
+  network call (in-flight only; nothing cached after completion).
+- §52 ADAPTIVE PARALLELISM: the worktree writer ceiling is configurable
+  (worktree.maxNodes / FORGE_WORKTREE_WRITERS, default 2, cap 8); conflict
+  keys and the serialized merge lane are unchanged.
+- §86 FORGE-BENCH 20/20: the four missing long-horizon categories added
+  (runtime-failure, model-switch, session-rehydration, ZIP/local-source) and
+  two new metrics (evidence quality — a runtime failure must yield a
+  competing hypothesis set; memory continuity — transcript + classification
+  survive, keyed by cwd).
+- Tests: test-sourceresolve.mjs (38) + test-v97.mjs (109), all 162 fast
+  suites green.
+
+## 96.0.0 — unifywise (the wiring release)
+
+Inspection first: five parallel audits of all ~140 modules found v95 had
+implemented nearly everything — what was missing was WIRING. This version
+reconnects the disconnected (no engine rewritten, every fix a repair):
+engmemory task/conversation relevance bonuses fire; TTY resume goes through
+the controller (resumeTaskId was silently dropped in the interactive path);
+the Core lifecycle map matches meta's real events and meta emits TASK_RESUMED
++ REPAIR_COMPLETED (every phase recordable); empirics + variant outcomes have
+production writers; §24 infogain experiments ride segment-1 context (the
+"planner prompt carries it" comment was false); the taskmodel origin ledger is
+fed from the plan (the no-assumption-as-requirement review check sees real
+data); the completion gate checks requirement coverage (unaddressed
+requirements block COMPLETED via required actions); the §30 structured handoff
+reaches the reassigned worker; episode stage recorders receive the Ω kernel's
+hypotheses/experiments/verifications/failed-approaches (and episodes persist
+via securefs); runMany maxParallel is a real gate; conflict resolution
+consults the world model (honest existence-claims only); MCP connects lazily
+from a per-spec inventory cache (cold cache = the old eager behavior, warm
+cache defers the spawn to first call, vanished tools are honest errors);
+LSP autostart feeds verification diagnostics on the default path (opt-in
+flag, pinned default kept); dag accepts "trivial" risk (one ladder with
+plannerisk/verifyledger); external SIGTERM is KILLED not TIMEOUT; dead code
+removed (reportConflict import, void fs, formatStrategy, hardShrink twins,
+download twins). NEW: envfingerprint.js — the §50 environment fingerprint +
+drift layer (advisory ENVIRONMENT_DRIFT with per-signal engineering impact,
+FORGE_ENVFP=0 off); core.nextBestAction() — the §24 surface as read-only
+introspection (pending decision > terminal next_action > live phase > idle),
+in status() for the TUI, NOT a second decider; context budgetOverflow is
+reported. Proven by tests/test-unifywise.mjs (72 assertions, 19 sections)
+and tests/test-envfingerprint.mjs (27 assertions, 7 sections); 160/160 fast
+suites green.
+
+## 95.0.0 — worktreewise (isolated worktree execution for DAG nodes)
+
+The last open KERNEL item of the TODO ledger — "nodes would run in a per-node
+git worktree so parallel segments never see each other's partial writes;
+design exists, no implementation, no test" — implemented, wired and proven by
+the new `tests/test-worktreewise.mjs` (75 assertions, 9 sections, suite
+"worktreewise", registered in run-all). No engine was rewritten: the fan-out
+gains one dispatch lane, the single-writer discipline is kept per tree, and
+every fallback is honest.
+
+- worktree.js (NEW) — the worktree lifecycle over git plumbing (execFile with
+  argument arrays, never a shell string): `createWorktree` (detached checkout
+  of HEAD under .forge/worktrees/<run>-<node>), `captureChanges` (one
+  binary-safe patch via `git add -A -N` + `git diff --binary`, .forge state
+  excluded by pathspec so forge's own bookkeeping can never be merged into a
+  project), `mergeBack` (CHECKED then applied: plain `--check`, 3-way
+  `--check`, then apply — a conflicting patch NEVER half-applies; the
+  conflicting files are NAMED; the tree stays untouched), `removeWorktree`
+  (force + prune, registry updated to a terminal status so a removed
+  worktree can never look live), `sweepOrphans` (crash-resume pattern: a
+  worktree whose run AND owning pid are gone is swept at the next task
+  start), `planIsolation` (eligibility: mutating, NO dependencies — a
+  dependent node builds on shared-tree output a HEAD checkout cannot see —
+  DECLARED conflict keys, pairwise disjoint, disjoint from the current
+  node's keys, bounded by `worktree.maxNodes`, default 2), and
+  `uncommittedFiles` (the shared-tree in-flight guard). Gates: default ON in
+  a git repo; `FORGE_WORKTREE=0|false|off` or `config.worktree.enabled=false`
+  opts out; non-git and no-HEAD are honest refusals.
+- worknode.mjs (NEW) — the child-process worker entry. agent.js binds every
+  subsystem to process.cwd(), so an isolated node runs as a CHILD PROCESS
+  whose cwd IS its worktree — parallel agents can never chdir-race in one
+  process, and the child's writes can only land in its own tree. The spec
+  (mode 600 — it carries the provider key) and the result JSON live OUTSIDE
+  the worktree so captureChanges never sees them; any non-zero exit means
+  NO result — the parent maps that to an honest worker failure, never a
+  fabricated completion.
+- meta.js — the dispatch lane: after the read-only fan-out, READY MUTATING
+  nodes that pass `planIsolation` AND whose declared targets have no
+  uncommitted shared-tree changes are dispatched to per-node worktrees
+  (role: coder — the one mutating role). They run CONCURRENTLY with the main
+  agent (disjoint trees; true parallelism), and the MERGE BACK is serialized
+  behind a post-agent barrier: `isoJobs` settle (capture → merge → ledger
+  evidence → markCompleted with the merge record → removeWorktree) only
+  after the main agent's writes are done and before the segment's
+  verification accounting — the main tree has exactly one writer at every
+  instant, so a lost update is impossible. Honest failure paths: worker
+  failed/timed_out/exhausted → worktree discarded, node FAILED with the
+  worker's reason; merge conflict → WORKTREE_CONFLICT event + bus mirror,
+  the conflicting files named, the node FAILED, the worktree KEPT for
+  inspection; clean worktree with a report → acceptance evidence; nothing
+  at all → "outcome unverifiable". Creation failure or an ineligible node
+  emits WORKTREE_UNAVAILABLE and stays serialized exactly as before — the
+  never-list rule ("never run DAG nodes in a shared tree when they mutate
+  the same files") is the reason this exists, not a license to break it.
+  Task start sweeps orphaned worktrees from crashed runs
+  (WORKTREE_ORPHAN_SWEPT). New events: WORKTREE_MODE, WORKTREE_CREATED,
+  WORKTREE_MERGED, WORKTREE_CONFLICT, WORKTREE_FAILED, WORKTREE_REMOVED,
+  WORKTREE_UNAVAILABLE, WORKTREE_ORPHAN_SWEPT.
+- searchproviders.js — the v94 latent bug the version bump caught: a LOCAL
+  `const VERSION = "94.0.0"` shadowed the single source of truth, so the
+  search provider's user-agent advertised a stale version on every request
+  (proven live by the version-consistency suite's real local HTTP server).
+  It now imports VERSION from version.js — the v20.2 one-file rule restored.
+- package.json — worktree.js + worknode.mjs added to files[]; version
+  95.0.0. Test pins updated with intent preserved (VERSION assertions now
+  expect 95.0.0 across the v2x–v9x suites and e2e-forge.sh).
+
+## 94.0.0 — todowise (the TODO ledger, closed with proof)
+
+One strengthening patch per open TODO.md item, each proven by the new
+`tests/test-todowise.mjs` (81 assertions, suite #160, registered in
+run-all). No engine was rewritten; every fix strengthens the module that
+owned the gap:
+
+- runtimesession — PROTOCOL-AWARE health probe: HTTP stays primary (status
+  + latency evidence); on HTTP failure a real TCP connect (new
+  `tcpConnectProbe`) separates "nothing listening" (ok:false, level
+  "none") from "listener confirmed, no HTTP response" (ok:true, level
+  "tcp", honest "no HTTP probe available" note). The §11 claim gate, the
+  session evidence log and the `runtime` tool rendering are level-aware —
+  a TCP/WebSocket service is no longer falsely NOT healthy, and "server
+  started" is provable for it (process + listener). healthProbe is now
+  async (it awaits the TCP fallback).
+- runtime — EVIDENCE-BASED group kill: new `signalGroup`,
+  `groupMembersEvidence`, `parsePsMembers` (exported). When kill(-pgid) is
+  refused, members are enumerated from /proc (Linux) or a bounded `ps`
+  parse (portable) and signaled individually; per-entry `killEvidence`
+  records the method; the kill note names the walk. The old fallback
+  signaled only the leader and orphaned grandchildren — same fix wired
+  into tools.js runBash killTree. createProcessManager accepts a test
+  `signalFn` injection.
+- sandbox — KERNEL RE-PROBE: new `reprobeKernelSupport()` /
+  `kernelProbeCount()`; the first observed bwrap startup failure re-probes
+  the overflowuid/overflowgid verdict on the spot (tools.js v87 fallback
+  path), so a kernel hardened after forge started stops burning a failed
+  bwrap start per command. resetKernelProbe stays as the test affordance.
+- checkpoint — WORKING-TREE DRIFT VERIFICATION: write tools seal a
+  post-write hash (`sealEdited` — write_file, edit_file, multi_edit,
+  apply_patch), and `restoreTransactional` gains a DRIFT phase that
+  classifies each file against the manifest's (sha, postSha) pair:
+  clean / forge-owned (undo proceeds) / EXTERNAL (kept, status "DRIFT",
+  ok:false — unattributable work is never clobbered) / unattributed
+  (reverts, drift REPORTED) / missing (recreated). The checkpoint is not
+  retired on DRIFT. The legacy restoreOne (`forge undo` / restoreRun)
+  gets the same external-work protection.
+- codesearch — PERSISTENT SEMANTIC INDEX: chunk docs persist under
+  ~/.forge/projects/<hash>/semantic-index.json (atomic write, versioned,
+  bounded), fingerprint-validated per file with the house
+  `${mtimeMs}:${size}` signature — drift beats the index (changed files
+  re-chunk), deleted files are dropped, corruption rebuilds, small corpora
+  (< 64 docs) skip persistence by design, FORGE_INDEX=0 opts out of load
+  AND save. A fresh process adopts unchanged chunks and pays only the stat
+  walk (cross-process, proven with real child processes). The module's
+  writes are now only its own cache files under ~/.forge (honesty note
+  updated); search results are unchanged — adopted docs feed the SAME
+  rankDocs pipeline.
+- toolcreate — MULTI-STEP SCRIPTED PROBES: designTool accepts
+  `probeSteps: [{args, expectOk?, expectContains?, label?}]` (validated,
+  capped at 12), verifyTool accepts an explicit `steps` override. The
+  child imports the plugin ONCE and runs the sequence in order — module
+  state survives across steps, so login → act tools are finally
+  promotion-testable. Per-step evidence (ran/threw/error/matchedSchema/
+  expectOk/expectContains/preview), a throwing step aborts the sequence,
+  `passed` requires ALL steps green; no script → the classic single-probe
+  contract, byte-for-byte.
+- lsp — FIRST-PARTY AUTO-START TABLE: ts/js (typescript-language-server),
+  python (pyright-langserver | pylsp), go (gopls), rust (rust-analyzer).
+  A spec is used ONLY when the binary is actually on PATH (presence
+  probed, memoized); user config always wins; `lsp.autostart:false` opts
+  out. serverForFile falls back to the table, lspAvailability counts it,
+  and extractStructured now runs the structured path by default on
+  machines with a real server (proven end-to-end against a stand-in LSP
+  over real stdio). Trust model unchanged: forge-shipped commands, never
+  model output.
+- TODO.md — all seven open items closed (each had exactly the test the
+  item demanded); the two policy-gated leftovers (research crawler skill,
+  DAG worktree isolation) stay open by their own promotion rules.
+- Tests: test-v27 import pin and test-v93r healthProbe call updated for
+  the async probe + wider sandbox import (intent unchanged). 157/157 fast
+  suites, full suite green.
+
+## 94.0.0 — fastwise (same intelligence, less wasted work)
+
+What changed vs the deepwise build (deepwise made judgment wise; fastwise
+makes the same judgment cheap and keeps it honest):
+
+- NEW fastwise.js — ONE shared freshness layer, composed of house
+  conventions instead of a second cache subsystem: createFreshMemo
+  (fixed-window TTL like searchproviders' cacheGet, injectable `now` for
+  deterministic tests, oldest-at eviction, the engmemory/critique
+  `${mtimeMs}:${size}` signature as an optional drift check — drift beats
+  the TTL, failures are never cached, a rejected pass is forgotten);
+  fileFingerprint (the house signature with the "absent" sentinel).
+- NEW likely-next prefetch: warmCaches runs ONE idle, deferred, unref'd
+  warm pass per project per freshness window (60s TTL, FASTWISE_TTL_MS) —
+  persists the world-model snapshot (later createWorldModel instances pay
+  only the stat-only drift walk) and warms the semantic chunk cache with
+  one bounded offline BM25 pass (embed=null; FORGE_INDEX=0 skips it —
+  never fakes, never writes). Guided by likelyNext: plan-frontier file
+  paths + knowwise knowledge-graph hubs, read through engmemory's ONE KG
+  parser (no second graph implementation; the knowwise KG bootstrap is
+  NOT duplicated — meta owns it, fastwise never touches it). Wired in
+  meta beside the KG bootstrap timer; emits FASTWISE_WARMED once per
+  fresh pass.
+- modelstrategy.resolveLane: execution lanes (fast/balanced/deep) from
+  signals forge already had — task complexity (classifyTaskComplexity),
+  device tier/burst (injected from the resource manager), optional role
+  class (crewroute stays the owner) — feeding the EXISTING selectModel
+  opts (latencyBudgetMs 12s + costBias low for light tasks, nothing
+  artificial for deep work, cost bias on low-tier devices). One strategy
+  engine; no new decision path; deterministic.
+- modelstrategy performance fix with a freshness contract:
+  loadPerformance used to re-read model-performance.json on EVERY call
+  (effectiveStats calls it twice per candidate — up to ~24 sync reads in
+  one selectModel); now an mtime+size memo that re-reads the moment the
+  file actually changes and never serves a stale or corrupt file.
+  recordOutcome/clearPerformance behavior unchanged (pins re-verified).
+- docs: forge --help documents FORGE_FASTWISE=0; README (root + inner)
+  fastwise paragraph; PACKAGE_INFO fastwise bullet; package.json files[]
+  += fastwise.js.
+- DEDUP AUDIT (new test-fastwise.mjs section): tool names unique (29),
+  capabilities 1:1 both directions, 34 catalog names unique, all 58
+  aliases unique and disjoint from names, 102 skill dirs with unique
+  case-insensitive names, unique frontmatter names, unique SKILL.md
+  content hashes, no nested SKILL.md shadowing a top-level dir, chat
+  commands unique — zero duplicates found, and now guarded so they cannot
+  silently return. Suite count 158 → 159 (86 assertions in the new
+  suite); no existing assertion weakened.
+- doc repair inherited from deepwise: removed a stray duplicated
+  `**v94 "gapwise"**` heading line in both READMEs.
 
 ## 94.0.0 — deepwise (judgment before action, continued)
 

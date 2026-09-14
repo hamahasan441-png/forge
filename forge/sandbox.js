@@ -29,30 +29,41 @@ import { resolveShell } from "./sysshell.js"
 const RO_TRY = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt"]
 
 let kernProbe = undefined // undefined = not probed yet
+let kernProbes = 0
 
 /** Can unprivileged bwrap actually build a user namespace on this kernel? */
 function bwrapKernelSupport() {
   if (process.platform !== "linux") return false
   if (kernProbe !== undefined) return kernProbe
   const readable = (p) => { try { fs.readFileSync(p); return true } catch { return false } }
+  kernProbes++
   kernProbe = readable("/proc/sys/kernel/overflowuid") && readable("/proc/sys/kernel/overflowgid")
   return kernProbe
 }
 
-/** v94 gapclose (TODO sandbox): the kernel probe is cached once per process —
- *  a kernel hardened (or relaxed) AFTER forge started is never re-probed, so
- *  every later detection (doctor, capabilities, a fresh wrapBash path) would
- *  keep trusting the stale boot-time answer. tools.js calls this on the first
- *  REAL bwrap start failure: the next detection re-reads the kernel. Cheap
- *  (two file reads), and only ever called after evidence that the cached
- *  answer is wrong. */
-export function resetSandboxProbe() {
+/** v94 todowise: cheap kernel RE-PROBE. The overflowuid/overflowgid verdict is
+ *  cached once per process; a kernel hardened AFTER forge started keeps
+ *  serving the stale "supported" verdict and every sandboxed command burns a
+ *  failed bwrap start. On the first observed bwrap startup failure the caller
+ *  re-probes (tools.js v87 fallback) so findSandboxBinary() sees the REAL
+ *  kernel state — hardened → bwrap treated as missing, commands run through
+ *  the resolved shell without the dead wrapper. Re-probes are counted
+ *  (kernelProbeCount) so a test can prove one actually happened. */
+export function reprobeKernelSupport() {
+  kernProbe = undefined
+  return bwrapKernelSupport()
+}
+
+/** Test affordance: reset WITHOUT re-probing (the next findSandboxBinary()
+ *  probes lazily). Production paths use reprobeKernelSupport(). */
+export function resetKernelProbe() {
   kernProbe = undefined
 }
 
-/** Probe-cache visibility for doctor/tests: undefined = not probed yet. */
-export function sandboxProbeState() {
-  return kernProbe
+/** How many real kernel probes this process performed (tests assert the
+ *  re-probe actually happened — never a claimed reset). */
+export function kernelProbeCount() {
+  return kernProbes
 }
 
 function isSetuid(p) {

@@ -50,10 +50,16 @@ console.log("== completed PLAN files are gone ==")
   const checked = (todo.match(/^- \[[xX]\]/gm) || []).length
   eq("no checked items", checked, 0)
   const open = (todo.match(/^- \[ \]/gm) || []).length
-  ok("has open todos", open >= 5, open)
+  // v94 todowise closed the seven runtime/sandbox/search/checkpoint/LSP/
+  // tool-creation items WITH tests (test-todowise.mjs) — the floor dropped
+  // from 5 to 2. v95 worktreewise closed the KERNEL item (isolated worktree
+  // execution, tests/test-worktreewise.mjs) — the ONE policy-gated leftover
+  // (research-crawler promotion) remains, so the floor is 1. The pin's
+  // intent is unchanged: TODO.md is never allowed to look fake-clean.
+  ok("has open todos", open >= 1, open)
   ok("skill forge leftover", /Research crawler/.test(todo))
   ok("STALE leftover", /isolated worktree|chat-compact/.test(todo))
-  ok("kernel leftover", /isolated worktree/.test(todo))
+  ok("kernel closure is documented (the fix enforces the never-list rule)", /isolated worktree/.test(todo) && /worktreewise/.test(todo))
   ok("never crawler", /Research crawler/.test(todo))
 }
 
@@ -77,9 +83,9 @@ console.log("== no side writes / frozen kernel + package ==")
   eq("classifyTaskComplexity frozen", classifyTaskComplexity("fix a typo"), "trivial")
   eq("typo still MICRO", classifyTask("fix a typo in README").class, TASK_CLASS.MICRO)
   eq("evaluateSkills typo empty", evaluateSkills("fix a typo in README", [{ name: "coding-agent", desc: "Coding workflow with planning" }]).length, 0)
-  eq("VERSION is 94.0.0", VERSION, "94.0.0")
+  eq("VERSION is 98.0.0", VERSION, "98.0.0")
   const pkg = JSON.parse(fs.readFileSync(path.join(FORGE, "package.json"), "utf8"))
-  eq("package.json is 94.0.0", pkg.version, "94.0.0")
+  eq("package.json is 98.0.0", pkg.version, "98.0.0")
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
   eq("custom is still index 17 (pick 18)", CATALOG[17]?.name, "custom")
   eq("apinex still after custom", CATALOG[18]?.name, "apinex")

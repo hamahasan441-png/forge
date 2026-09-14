@@ -403,6 +403,18 @@ export function createEngMemory({
     return `--- requirements (do not silently drop any) ---\n${picked.map((r) => r.text).join("\n")}`.slice(0, 1600)
   }
 
+  /** v96 unifywise: the raw REQUIREMENT records (id/text/files), for the
+   *  completion gate's requirement-coverage check (§9 traceability). Bounded
+   *  to the ingest cap; STALE requirements are still requirements (staleness
+   *  is about the files they cite, not their existence). */
+  function requirementRecords() {
+    load()
+    return records
+      .filter((r) => r.layer === MEM_LAYER.REQUIREMENT && r.status !== MEM_STATUS.REJECTED)
+      .slice(-40)
+      .map((r) => ({ id: r.id, text: r.text, files: r.files ?? [] }))
+  }
+
   /**
    * §13 fast retrieval: merge → dedupe → rerank → smallest high-value
    * context. Composes this store with the project memory pool, lessons and
@@ -423,7 +435,7 @@ export function createEngMemory({
         if (!includeStale && r.status === MEM_STATUS.STALE) continue
         if (!includeHistorical && r.status === MEM_STATUS.HISTORICAL) continue
         if (r.status === MEM_STATUS.REJECTED) continue
-        candidates.push({ text: r.text, layer: r.layer, status: r.status, source: r.source, confidence: r.confidence, at: r.at, files: r.files ?? [], evidence: r.evidenceRef != null, rec: r })
+        candidates.push({ text: r.text, layer: r.layer, status: r.status, source: r.source, confidence: r.confidence, at: r.at, files: r.files ?? [], evidence: r.evidenceRef != null, rec: r, taskId: r.taskId ?? null, conversationId: r.conversationId ?? null })
       }
     } catch { }
     // L3 project memory pool (BM25-ranked by the memory module itself)
@@ -649,7 +661,7 @@ export function createEngMemory({
   return {
     recordMemory, markVerified, markRejected, revalidate, markFilesChanged,
     setTask, touchFiles, setHypothesis, noteEvidence, noteDecision,
-    observeSegment, ingestRequirements, requirementsBlock,
+    observeSegment, ingestRequirements, requirementsBlock, requirementRecords,
     retrieve, retrievalBlock, consolidate, conversationContext,
     rememberCheckpoint, onTaskCompleted, stats,
     _introspect: () => ({ records, projectId, conversation, hot, generation }),

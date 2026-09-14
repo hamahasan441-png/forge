@@ -17,7 +17,12 @@ import { DEFAULT_DIR } from "./config.js"
 import { isStale, writesFromIndex } from "./evidence.js"
 import { linkRecords, consumersOf, testsForFiles, implForFiles } from "./xlang.js"
 
-const INDEX_VER = 1
+// v98 shipwise: kept in LOCKSTEP with index.js INDEX_VERSION (currently 2).
+// This is a local copy to avoid the import cycle (memory.js ↔ index.js) — it
+// MUST be bumped whenever index.js bumps, or every index snapshot silently
+// reads as null (the v98 bump caught exactly this: compose/world lessons all
+// went empty). A mismatch is a bug, not a fallback.
+const INDEX_VER = 2
 const RADIUS_CAP = 48
 const CITED_CAP = 8
 

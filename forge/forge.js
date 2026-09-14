@@ -70,7 +70,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "new"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -95,26 +95,64 @@ if (flags["no-color"] || !process.stdout.isTTY) process.env.NO_COLOR = "1"
 // JSON document and nothing else, so forge can be scripted.
 const JSON_OUT = flags.json === true || flags.json === "true"
 
-async function runSkillDownload(urls) {
-  const { downloadSkills, formatDownloadReport, listDownloads, skillDownloadsDir } = await import("./skilldl.js")
+// v97 unifiedwise (§4): --source <path|zip|url|git-url> — local-first source
+// resolution shared by chat/agent/ask. Resolves what the user actually means,
+// materializes archives/clones into ~/.forge/sources/, records the authority,
+// and chdirs into the resulting LOCAL project. A local ZIP never loses to a
+// git remote; an unresolvable source STOPS the run (never a guess).
+async function activateSourceFlag() {
+  const raw = flags.source
+  if (!raw) return true
+  const { activateSource, formatSource } = await import("./sourceresolve.js")
+  const r = await activateSource(String(raw), { cwd: process.cwd() })
+  if (!r.ok) { err(`source resolution failed: ${r.error}`); process.exit(1); return false }
+  let target = r.localPath
+  // audit A10: an explicit FILE source means "work on this file" — the working
+  // directory is its parent, never the file itself.
+  if (target) {
+    try { const st = fs.statSync(target); if (st.isFile()) target = path.dirname(target) } catch { }
+  }
+  if (target && target !== process.cwd()) {
+    try { process.chdir(target) } catch { err(`cannot enter source directory ${target}`); process.exit(1); return false }
+  }
+  console.log(dim(formatSource(r.resolution)))
+  if (r.reused) console.log(dim("  (source already materialized — reused, not re-extracted)"))
+  return true
+}
+
+// v96 unifywise: ONE download runner (the skill/tool variants were copy-paste
+// twins differing only in module bindings and three strings — the same
+// pipeline must never live twice). Output is byte-identical to the previous
+// per-kind functions.
+async function runDownloads(kind, urls) {
+  const mod = await import("./skilldl.js")
   const { SKILL_LIFE } = await import("./evolve.js")
+  const isSkill = kind === "skill"
+  const api = {
+    download: isSkill ? mod.downloadSkills : mod.downloadTools,
+    list: isSkill ? mod.listDownloads : mod.listToolDownloads,
+    dir: isSkill ? mod.skillDownloadsDir : mod.toolDownloadsDir,
+    header: isSkill ? "skill downloads" : "tool downloads",
+    hint: `forge ${kind} download <https-url>`,
+    note: isSkill ? "DOWNLOAD ≠ VERIFY. Candidates are not trusted." : "DOWNLOAD ≠ VERIFY. Candidates are not live tools.",
+  }
   const list = (urls || []).map((u) => String(u || "").trim()).filter(Boolean)
   if (!list.length) {
-    const have = listDownloads()
-    if (JSON_OUT) { emitJson({ dir: skillDownloadsDir(), downloads: have }); return 0 }
-    console.log(bold(`skill downloads`) + dim(`  (${have.length}) — ${skillDownloadsDir()}`))
+    const have = api.list()
+    if (JSON_OUT) { emitJson({ dir: api.dir(), downloads: have }); return 0 }
+    console.log(bold(api.header) + dim(`  (${have.length}) — ${api.dir()}`))
     if (!have.length) {
-      console.log(dim('  none yet — forge skill download <https-url>'))
+      console.log(dim(`  none yet — ${api.hint}`))
       return 0
     }
     for (const r of have) {
       const life = r.lifecycle || SKILL_LIFE.CANDIDATE
       console.log(`  ${cyan((r.skillName || r.id).padEnd(28))} ${life}  ${dim(r.status || "")}  ${dim(r.sourceUrl || "")}`)
     }
-    console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not trusted."))
+    console.log(dim(`  ${api.note}`))
     return 0
   }
-  const results = await downloadSkills(list, JSON_OUT ? {} : {
+  const results = await api.download(list, JSON_OUT ? {} : {
     onProgress: (p) => {
       if (p.phase === "start") process.stderr.write(dim(`  download start ${p.url}\n`))
       else if (p.phase === "read" && p.received) {
@@ -129,63 +167,20 @@ async function runSkillDownload(urls) {
   } else {
     for (const r of results) {
       if (r.ok) {
-        console.log(formatDownloadReport(r))
+        console.log(mod.formatDownloadReport(r))
         const rec = r.record || {}
         console.log(dim(`  ${rec.filename || ""}  sha256=${String(rec.sha256 || "").slice(0, 12)}…  ${rec.size ?? 0} B`))
         console.log()
       } else {
-        err(formatDownloadReport(r).trim())
+        err(mod.formatDownloadReport(r).trim())
       }
     }
   }
   return results.every((r) => r.ok) ? 0 : 1
 }
 
-async function runToolDownload(urls) {
-  const { downloadTools, formatDownloadReport, listToolDownloads, toolDownloadsDir } = await import("./skilldl.js")
-  const { SKILL_LIFE } = await import("./evolve.js")
-  const list = (urls || []).map((u) => String(u || "").trim()).filter(Boolean)
-  if (!list.length) {
-    const have = listToolDownloads()
-    if (JSON_OUT) { emitJson({ dir: toolDownloadsDir(), downloads: have }); return 0 }
-    console.log(bold(`tool downloads`) + dim(`  (${have.length}) — ${toolDownloadsDir()}`))
-    if (!have.length) {
-      console.log(dim('  none yet — forge tool download <https-url>'))
-      return 0
-    }
-    for (const r of have) {
-      const life = r.lifecycle || SKILL_LIFE.CANDIDATE
-      console.log(`  ${cyan((r.skillName || r.id).padEnd(28))} ${life}  ${dim(r.status || "")}  ${dim(r.sourceUrl || "")}`)
-    }
-    console.log(dim("  DOWNLOAD ≠ VERIFY. Candidates are not live tools."))
-    return 0
-  }
-  const results = await downloadTools(list, JSON_OUT ? {} : {
-    onProgress: (p) => {
-      if (p.phase === "start") process.stderr.write(dim(`  download start ${p.url}\n`))
-      else if (p.phase === "read" && p.received) {
-        const tot = p.total ? `${p.received}/${p.total}` : `${p.received} B`
-        const pct = p.pct == null ? "" : ` ${p.pct}%`
-        process.stderr.write(dim(`  download ${tot}${pct}\n`))
-      }
-    },
-  })
-  if (JSON_OUT) {
-    emitJson({ results: results.map((r) => ({ ok: r.ok, error: r.error || null, reused: r.reused || false, record: r.record || null })) })
-  } else {
-    for (const r of results) {
-      if (r.ok) {
-        console.log(formatDownloadReport(r))
-        const rec = r.record || {}
-        console.log(dim(`  ${rec.filename || ""}  sha256=${String(rec.sha256 || "").slice(0, 12)}…  ${rec.size ?? 0} B`))
-        console.log()
-      } else {
-        err(formatDownloadReport(r).trim())
-      }
-    }
-  }
-  return results.every((r) => r.ok) ? 0 : 1
-}
+async function runSkillDownload(urls) { return runDownloads("skill", urls) }
+async function runToolDownload(urls) { return runDownloads("tool", urls) }
 
 async function runVerify(kind, names) {
   const { verifySkills, verifyTools, formatVerifyReport } = await import("./skilldl.js")
@@ -405,10 +400,58 @@ async function main() {
       const msg = flags.m ?? flags.message ?? (positional[1] ? positional.slice(1).join(" ") : null)
       const resume = flags.continue === true || flags.resume === true ? lastSessionFile() : (typeof flags.resume === "string" ? findSession(flags.resume) : null)
       if (typeof flags.resume === "string" && !resume) { err(`no session matches "${flags.resume}" — try: forge sessions`); process.exit(1); return }
+      if (!(await activateSourceFlag())) return // v97 §4: local-first source resolution
       // v19: interactive chat without a message uses AutoPick too (--pick = chooser)
       if (!msg && !resume) p = flags.pick && process.stdin.isTTY ? await smartStart(cfg, p) : autoPick(cfg, p)
       const { runChat } = await loadChat()
-      await runChat({ config: cfg, provider: p, oneShot: msg, resumeFile: resume, deep: flags.deep === true ? true : undefined })
+      await runChat({ config: cfg, provider: p, oneShot: msg, resumeFile: resume, deep: flags.deep === true ? true : undefined, fresh: flags.new === true })
+      return
+    }
+    case "replay": {
+      // v97 §56/§88: replay a run/task from the RECORDED ledgers (run journal,
+      // events ledger, task record) — goal → state → action → decision →
+      // evidence → result. Read-only; required for debugging Forge itself.
+      const { resolveReplayTarget, buildReplay, formatReplay } = await import("./replay.js")
+      const { listRuns } = await import("./runlog.js")
+      const target = resolveReplayTarget(positional[1], { cwd: process.cwd(), last: flags.last === true })
+      if (!target) {
+        const runs = listRuns({ cwd: process.cwd(), max: 5 })
+        if (!runs.length) { info("no runs yet in this directory — run `forge agent \"<task>\"` first"); return }
+        err(`no run/task matches "${positional[1] ?? ""}" — recent runs:`)
+        for (const r of runs) console.log(dim(`  ${r.runId}  ${String(r.task ?? "").slice(0, 60)} (${r.status})`))
+        process.exit(1)
+        return
+      }
+      const r = buildReplay({ runId: target.runId ?? null, taskId: target.taskId ?? null, cwd: process.cwd() })
+      if (JSON_OUT) { emitJson(r); return }
+      if (!r.timeline.length) { info(`nothing recorded for ${target.runId ? `run ${target.runId}` : `task ${target.taskId}`}`); return }
+      console.log(formatReplay(r))
+      return
+    }
+    case "source": {
+      // v97 §4: inspect/record the resolved source — read-only unless a path
+      // to an archive/URL is given (then it materializes into ~/.forge/sources).
+      const input = positional[1] ?? null
+      const { resolveSource, readSourceRecord, activateSource, formatSource } = await import("./sourceresolve.js")
+      if (!input) {
+        const rec = readSourceRecord(process.cwd())
+        if (!rec) { info("no source record for this directory yet — it is created on the first run with --source, or by `forge source <path|zip|url>`"); return }
+        if (JSON_OUT) { console.log(JSON.stringify(rec, null, 2)); return }
+        ok(`source record for ${process.cwd()}`)
+        console.log(dim(`  type: ${rec.sourceType} • authority: ${rec.authority}`))
+        if (rec.origin) console.log(dim(`  origin: ${rec.origin}`))
+        if (rec.localPath) console.log(dim(`  local: ${rec.localPath}`))
+        if (rec.archivePath) console.log(dim(`  archive: ${rec.archivePath}`))
+        if (rec.reason) console.log(dim(`  why: ${rec.reason}`))
+        if (rec.conflict) console.log(dim(`  conflict: ${rec.conflict.candidates.join(" vs ")} → winner ${rec.conflict.winner} (${rec.conflict.why})`))
+        return
+      }
+      const r = await activateSource(input, { cwd: process.cwd() })
+      if (!r.ok) { err(`source resolution failed: ${r.error}`); process.exit(1); return }
+      if (JSON_OUT) { console.log(JSON.stringify({ ok: true, resolution: { ...r.resolution, extract: undefined }, localPath: r.localPath, record: r.record }, null, 2)); return }
+      ok(`resolved source: ${r.resolution.sourceType}`)
+      console.log(dim(formatSource(r.resolution)))
+      if (r.localPath) console.log(dim(`  local project: ${r.localPath}`))
       return
     }
     case "resume": {
@@ -434,6 +477,7 @@ async function main() {
         if (raw) msg = raw
       }
       if (!msg) { err('usage: forge ask "question"   (or: echo question | forge ask)'); process.exit(1); return }
+      if (!(await activateSourceFlag())) return // v97 §4
       const { runChat } = await loadChat()
       await runChat({ config: cfg, provider: p, oneShot: msg, deep: flags.deep === true ? true : undefined })
       return
@@ -445,6 +489,7 @@ async function main() {
       const task = positional.slice(1).join(" ") || (typeof flags.task === "string" ? flags.task : "") || (typeof flags.plan === "string" ? flags.plan : "")
       if (!task) { err('usage: forge agent "<task>"   (or: forge agent --plan "<task>")'); process.exit(1); return }
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
+      if (!(await activateSourceFlag())) return // v97 §4: --source wins over cwd/git — local first
       const planMode = flags.plan !== undefined
       console.log(dim(`forge agent — ${bold(task)}${flags.deep === true ? "  " + green("DEEP") : ""}`))
       console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps}${planMode ? " • PLAN MODE (read-only)" : ""}`))
@@ -1145,8 +1190,83 @@ async function main() {
         if (code) process.exit(code)
         return
       }
-      err(`unknown: forge tool ${sub} — use: forge tool download <https-url> | forge tool verify <name|all>`)
+      // v97 §35: the created-tool lifecycle, wired. design/implement/verify/
+      // activate exist since v93 — these commands make them REACHABLE without
+      // a test harness. An unverified tool is NEVER activated (the module
+      // itself enforces that; the CLI just exposes the pipeline).
+      if (sub === "life" || sub === "created") {
+        const { listToolLife } = await import("./toolcreate.js")
+        const list = listToolLife(process.cwd())
+        if (JSON_OUT) { emitJson({ tools: list }); return }
+        if (!list.length) { info("no created tools yet — design one with: forge tool create <name> <description>"); return }
+        console.log(bold(`created tools (${list.length})`))
+        for (const t of list) {
+          console.log(`  ${t.lifecycle === "ACTIVE" ? green("●") : t.verified ? cyan("◆") : yellow("○")} ${cyan(t.name.padEnd(28))} ${dim(`${t.lifecycle}${t.verified ? " • verified" : ""}`)} ${dim(String(t.description ?? "").slice(0, 60))}`)
+        }
+        return
+      }
+      if (sub === "activate" || sub === "deactivate") {
+        const name = positional[2]
+        if (!name) { err(`usage: forge tool ${sub} <name>`); process.exit(1); return }
+        const tc = await import("./toolcreate.js")
+        const r = sub === "activate" ? tc.activateTool(process.cwd(), name) : tc.deactivateTool(process.cwd(), name)
+        if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
+        if (!r.ok) { err((r.blocked ?? []).join("; ") || `${sub} failed`); process.exit(1); return }
+        ok(`${sub}d ${name}`)
+        if (sub === "activate") console.log(dim("  the tool loads on the next agent run (ACTIVE + verified only)"))
+        return
+      }
+      if (sub === "create") {
+        const name = positional[2]
+        const description = positional[3]
+        if (!name || !description) { err('usage: forge tool create <name> "<description of the capability gap>" --task "<the task that needs it>"'); process.exit(1); return }
+        const tc = await import("./toolcreate.js")
+        const d = tc.designTool({ cwd: process.cwd(), name, description, task: typeof flags.task === "string" ? flags.task : description })
+        if (JSON_OUT) { emitJson(d); process.exit(d.ok === false ? 1 : 0); return }
+        if (d.ok === false) { for (const b of d.blocked ?? ["design blocked"]) err(b); process.exit(1); return }
+        ok(`designed ${name} (CANDIDATE) — ${dim("implement it (toolcreate implementTool), then forge tool verify + activate")}`)
+        console.log(dim(`  next: implementTool runs the generated isolated plugin; behavioral verification gates activation`))
+        return
+      }
+      err(`unknown: forge tool ${sub} — use: forge tool download <https-url> | forge tool verify <name|all> | forge tool life | forge tool create <name> "<description>" | forge tool activate <name> | forge tool deactivate <name>`)
       process.exit(1)
+      return
+    }
+    case "caps": {
+      // v97 §33: the unified capability ladder, user-facing. Resolves one
+      // capability across native tools → skills → MCP → created tools and says
+      // honestly when nothing provides it.
+      const cap = positional[1]
+      if (!cap) { err('usage: forge caps <capability>   (e.g. forge caps test_execution)'); process.exit(1); return }
+      const { createRegistry, capabilityLadder, capabilityCoverage, capabilitiesImpliedByTask, CAPABILITY } = await import("./capabilities.js")
+      const { indexSkills, resolveSkillsDir } = await import("./skills.js")
+      const { mergeLearnedSkills } = await import("./evolve.js")
+      const { cachedInventoryTools } = await import("./mcp.js")
+      const { listToolLife } = await import("./toolcreate.js")
+      const reg = createRegistry({ config })
+      const idx = (() => {
+        try { const dir = resolveSkillsDir(config.skills?.dir); return dir ? mergeLearnedSkills(indexSkills(dir), process.cwd()) : [] } catch { return [] }
+      })()
+      const mcpTools = cachedInventoryTools()
+      const created = listToolLife(process.cwd())
+      const ladder = capabilityLadder({ registry: reg, capability: cap, skills: idx, mcpTools, createdTools: created })
+      if (JSON_OUT) { emitJson(ladder); return }
+      console.log(bold(`capability: ${cap}`))
+      for (const t of ladder.tiers) {
+        const label = { native: "1. native tools", skill: "2. skills", mcp: "3. MCP", created: "4. created tools" }[t.source]
+        if (t.items.length) {
+          console.log(`  ${green("✓")} ${label}`)
+          for (const i of t.items.slice(0, 4)) console.log(dim(`     ${i.name}${i.server ? ` (${i.server})` : ""}${i.risk ? ` risk=${i.risk}` : ""}${i.verified === true ? " • verified" : ""}`))
+        } else {
+          console.log(`  ${dim("·")} ${dim(label + " — none")}`)
+        }
+      }
+      if (ladder.gap) {
+        console.log(yellow(`  ✗ GAP: ${ladder.recommendation}`))
+        console.log(dim("  known capabilities: " + Object.values(CAPABILITY).join(", ")))
+      } else {
+        ok(ladder.recommendation)
+      }
       return
     }
     case "skills": {
@@ -1692,7 +1812,7 @@ async function main() {
           emitJson({ version: VERSION, cases: BENCH_CASES.map((c) => ({ id: c.id, name: c.name })) })
           return
         }
-        console.log(bold(`FORGE-BENCH v${VERSION}`) + dim("  12 progressive cases, no live model"))
+        console.log(bold(`FORGE-BENCH v${VERSION}`) + dim("  20 deterministic cases, no live model"))
         for (const c of BENCH_CASES) console.log(`  ${cyan(c.id.padEnd(22))} ${c.name}`)
         return
       }
@@ -1960,7 +2080,7 @@ ${bold("usage")}
   ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
-  ${cyan("forge bench")}                  FORGE-BENCH — 16 deterministic eval cases, no live model ${dim("(--list, --json)")}
+  ${cyan("forge bench")}                  FORGE-BENCH — 20 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
@@ -1982,6 +2102,7 @@ ${bold("environment (full power on any device — Termux/NetHunter ready)")}
   ${cyan("FORGE_SKILL_ALLOW_PRIVATE=1")}    allow skill download from private mirrors
   ${cyan("FORGE_BLAST_RADIUS=0")}           disable the per-edit blast-radius prediction note
   ${cyan("FORGE_CRITIQUE=0")}               disable the pre-edit self-critique checklist (secret paths, missing targets, edit thrash, hub files)
+  ${cyan("FORGE_FASTWISE=0")}               disable idle cache warming + likely-next prefetch (world snapshot, semantic chunks)
   ${cyan("FORGE_INDEX=0")}                  disable the persistent parse cache
   ${cyan("FORGE_FAILOVER=1")}               provider failover on outages (also: ${cyan("config set failover true")})
 

@@ -131,6 +131,12 @@ export function createCrewRouter({ cwd = process.cwd(), config = null } = {}) {
   /** §37 — record a real outcome. verified=true only when verification passed. */
   function record({ klass = null, role = "researcher", model = null, ok = false, verified = false, latencyMs = 0, tokens = 0, regressions = 0 } = {}) {
     if (!model) return false
+    // v96 unifywise: the Core and the meta controller each hold a router over
+    // the SAME crewperf.json. Mutating only this instance's in-memory copy and
+    // overwriting the file could erase the other instance's just-written
+    // outcomes (lost update). Re-read before mutate — read-modify-write on the
+    // file as the single source of truth (bounded: 240 entries, tiny JSON).
+    try { data = loadCrewPerf(cwd) } catch { /* keep local copy on read failure */ }
     const k = key(klass, role, model)
     const e = data[k] ?? { runs: 0, ok: 0, verified: 0, latencyMs: 0, tokens: 0, regressions: 0 }
     e.runs++

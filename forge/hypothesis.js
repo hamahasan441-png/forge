@@ -130,11 +130,47 @@ export function createHypothesisEngine() {
     return rank()[0] || null
   }
 
+  /** v97 §26 — COMPETING HYPOTHESIS SET. `candidates` = [{description,
+   *  confidence}] whose confidences should sum to ≤ 1 (they are a belief
+   * distribution over one failure, not independent odds). The set is created
+   * atomically; evidence updates on one member do not silently distort the
+   * others, and `distribution()` re-normalizes the LIVE members so ranking
+   * always shows a proper H1/H2/H3… picture. */
+  function addSet(candidates = []) {
+    const list = (Array.isArray(candidates) ? candidates : [])
+      .filter((c) => c && c.description)
+      .slice(0, 5)
+    if (!list.length) return []
+    const created = []
+    for (const c of list) {
+      const h = add({ description: c.description, confidence: c.confidence })
+      if (h && h.status === HSTATUS.OPEN && !h._fromSet) created.push(h)
+    }
+    for (const h of created) h._fromSet = true
+    return created
+  }
+
+  /** v97 §26 — the live belief distribution over open/supported hypotheses
+   *  (normalized to sum 1 across live members, ranked). This is the honest
+   *  "H1 45% / H2 30% / H3 15%…" view — never a fabricated certainty. */
+  function distribution() {
+    const live = rank()
+    const total = live.reduce((a, h) => a + Math.max(0, h.confidence), 0)
+    if (!total) return live.map((h) => ({ id: h.id, description: h.description, confidence: h.confidence, share: 0 }))
+    return live.map((h) => ({
+      id: h.id,
+      description: h.description,
+      confidence: h.confidence,
+      share: Number((Math.max(0, h.confidence) / total).toFixed(3)),
+      status: h.status,
+    }))
+  }
+
   function snapshot() {
     return [...items.values()].map((h) => ({ ...h, supportingEvidence: [...h.supportingEvidence], contradictingEvidence: [...h.contradictingEvidence], tests: [...h.tests] }))
   }
 
-  return { add, get, support, contradict, confirm, reject, stale, recordTest, looping, rank, best, snapshot, size: () => items.size }
+  return { add, addSet, get, support, contradict, confirm, reject, stale, recordTest, looping, rank, best, distribution, snapshot, size: () => items.size }
 }
 
 function clamp01(n) {

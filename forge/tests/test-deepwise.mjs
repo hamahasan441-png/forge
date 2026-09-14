@@ -79,7 +79,11 @@ const alts = pr.alternatives({ riskLadder: "high", uncertainty: 0.4 }, highChain
   const again = pr.alternatives({ riskLadder: "high", uncertainty: 0.4 }, highChain)
   eq("competition is deterministic", JSON.stringify(again), JSON.stringify(alts))
   const none = pr.alternatives({ riskLadder: "low", uncertainty: 0.2 }, highChain)
-  ok("low-risk plans still get no alternatives", Array.isArray(none) && none.length === 0, JSON.stringify(none))
+  // v96 unifywise: ONE return shape — alternatives() now returns the same
+  // object shape for every risk ladder; `needed:false` + empty `all` marks
+  // "no reshaping warranted" (previously a bare [] here and an object for
+  // high risk — callers had to guard both shapes).
+  ok("low-risk plans still get no alternatives", none && none.needed === false && Array.isArray(none.all) && none.all.length === 0 && none.recommended === null, JSON.stringify(none))
 }
 
 console.log("== deepwise: winnerDefs structure (adoption-safe by construction) ==")
@@ -218,7 +222,10 @@ console.log("== deepwise: reality→risk closure (experiments move live risk) ==
   const meta_src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
   ok("repairSegment accepts liveRisk (optional — additive signature)", /liveRisk = null/.test(meta_src))
   ok("repair outcomes feed liveRisk.experiment (the closure exists in the real loop)", meta_src.includes("liveRisk?.experiment(fixed)"))
-  ok("all three repairSegment call sites pass liveRisk", meta_src.includes("changedFiles: [...changedFiles], liveRisk })") && meta_src.includes("finalRisk: finalRiskLevel, liveRisk,"))
+  // v96 unifywise: all three call sites now pass liveRisk AND the episodeSink
+  // (the episodic stage recorders wired in v96 — hypotheses/experiments/
+  // verification/failed-approaches are fed by the repair loop).
+  ok("all three repairSegment call sites pass liveRisk", meta_src.includes("changedFiles: [...changedFiles], liveRisk, episodeSink })") && meta_src.includes("finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink })") && meta_src.includes("finalRisk: finalRiskLevel, liveRisk, episodeSink,"))
   ok("meta.js wires adoptDecision into the planner", meta_src.includes("adoptDecision(alts)") && meta_src.includes("planDefs = alts.winnerDefs"))
   ok("adoption re-stamps node predictions and restarts live risk", meta_src.includes("preds2") && meta_src.includes("liveRisk = createLiveRisk(planRisk.successProbability)"))
 }

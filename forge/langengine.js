@@ -14,7 +14,7 @@ import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { namedLangIn } from "./langreason.js"
 import { discoverToolchain, detectLanguage } from "./lang.js"
-import { serverForFile } from "./lsp.js"
+import { serverForFile, autostartAvailability } from "./lsp.js"
 
 export const GENERATED_DIRS = Object.freeze([
   "dist", "build", "target", "out", ".next", "__pycache__", "node_modules",
@@ -56,17 +56,24 @@ export function binaryOnPath(bin) {
 
 export function lspAvailability(config = {}) {
   const servers = config?.lsp?.servers
-  if (!servers || typeof servers !== "object") return []
   const out = []
-  for (const [name, spec] of Object.entries(servers)) {
-    if (!spec || spec.disabled === true) continue
-    const command = spec.command || ""
-    out.push({
-      name,
-      command,
-      available: command ? binaryOnPath(command) : false,
-    })
+  if (servers && typeof servers === "object") {
+    for (const [name, spec] of Object.entries(servers)) {
+      if (!spec || spec.disabled === true) continue
+      const command = spec.command || ""
+      out.push({
+        name,
+        command,
+        available: command ? binaryOnPath(command) : false,
+      })
+    }
   }
+  // v94 todowise: the first-party auto-start table counts toward
+  // availability — only rows whose binary is actually on PATH are listed,
+  // so layer 3 can honestly report "structured extraction available" on a
+  // machine with typescript-language-server / pyright / gopls / rust-analyzer
+  // even with zero user config.
+  out.push(...autostartAvailability({ config }))
   return out.slice(0, 12)
 }
 
@@ -340,7 +347,9 @@ export function engineFor(task, { cwd = process.cwd(), config = null, klass = nu
   return formatLangEngine(info, { task, klass })
 }
 
-/** True when an LSP server is configured for this file (does not spawn it). */
+/** True when an LSP server is resolvable for this file — user-configured OR
+ *  reachable through the first-party auto-start table with the binary
+ *  actually on PATH (v94 todowise). Never spawns the server. */
 export function lspConfiguredFor(file, config) {
   return Boolean(serverForFile(config, file))
 }

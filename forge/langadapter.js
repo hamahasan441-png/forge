@@ -183,9 +183,11 @@ export function parseLayered(file, src = "", { config = null } = {}) {
   // v93 gap fix: lspAvailability returns an ARRAY of configured servers —
   // the old `lsp?.configured?.length` read a shape that never existed, so
   // layer 3 could never report available even with servers configured.
+  // v94 todowise: the first-party auto-start table counts too, so layer 3 is
+  // the default structured path on machines with a real language server.
   const lspServers = lspAvailability(config ?? {})
   const lspReady = Array.isArray(lspServers) && lspServers.some((s) => s.available)
-  layers.push({ layer: 3, name: "lsp", available: lspReady, why: lspReady ? `configured servers: ${lspServers.filter((s) => s.available).map((s) => s.name).join(", ")}` : "no LSP server configured" })
+  layers.push({ layer: 3, name: "lsp", available: lspReady, why: lspReady ? `servers: ${lspServers.filter((s) => s.available).map((s) => s.name).join(", ")}` : "no LSP server configured and no auto-start server binary on PATH" })
   // 4. compiler / type checker
   const adapter = adapterFor(file, src)
   layers.push({ layer: 4, name: "compiler", available: Boolean(adapter.capabilities.compiler), detail: adapter.capabilities.compiler ?? null })

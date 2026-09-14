@@ -30,10 +30,6 @@ const ok = (n, c) => { if (c) { PASS++; console.log(`  ok   ${n}`) } else { FAIL
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lsp-"))
 process.env.FORGE_HOME = DIR // isolate the agent's ~/.forge before agent.js loads
-// v94 gapclose: this suite pins the CONFIGURED-server contract; the auto-start
-// table (a real host toolchain binary could otherwise resolve mid-test) is
-// pinned by tests/test-lsp-autostart.mjs instead. Hermetic = deterministic.
-process.env.FORGE_LSP_AUTOSTART = "0"
 
 // A minimal but real LSP server: Content-Length framing, JSON-RPC 2.0.
 const STUB = String.raw`

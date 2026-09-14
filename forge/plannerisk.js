@@ -307,9 +307,18 @@ export const ADOPT_MARGIN = 0.03
 export const NON_ADOPTABLE = new Set(["conservative-order"]) // drops declared dependencies — advised, never auto-adopted
 
 export function alternatives(assessment, planDefs = []) {
-  if (!assessment || assessment.riskLadder !== "high" && assessment.riskLadder !== "critical") return []
+  // v96 unifywise: ONE return shape. This function used to return [] (an
+  // array) for low/medium-risk plans and an object for high/critical — every
+  // caller had to guard with `alts?.recommended` AND `!Array.isArray(alts)`.
+  // Low-risk plans now get the same { needed:false, ... } shape; `needed`
+  // is the one flag callers check.
+  if (!assessment || assessment.riskLadder !== "high" && assessment.riskLadder !== "critical") {
+    return { needed: false, recommended: null, all: [], basis: "risk ladder does not warrant reshaping", original: null, bestIsOriginal: true, winner: null, winnerDefs: null, margin: 0 }
+  }
   const nodes = planDefs.map((n) => ({ ...n }))
-  if (!nodes.length) return []
+  if (!nodes.length) {
+    return { needed: false, recommended: null, all: [], basis: "no nodes to reshape", original: null, bestIsOriginal: true, winner: null, winnerDefs: null, margin: 0 }
+  }
   const opts = { klass: "MEDIUM", resources: null, calibration: null, lessons: [] }
   // deepwise: the original plan competes on the SAME thin-prior options as
   // the variants — an apples-to-apples comparison, not a rigged one.
@@ -342,6 +351,7 @@ export function alternatives(assessment, planDefs = []) {
   const bestIsOriginal = original.expectedVerifiedProgress >= best.expectedVerifiedProgress
   const winner = bestIsOriginal ? original : best
   return {
+    needed: true,
     recommended: winner, all: variants, basis: "expected verified progress, not raw cost",
     // deepwise (additive): winner vs original, and the winner's real node
     // definitions when adoption is structurally safe to consider.
@@ -401,8 +411,18 @@ export function informationGainExperiments({ assessment, planDefs = [], knowledg
   if (mutating.length > 2) {
     out.push({ experiment: "dry-run the riskiest step", kind: "ISOLATE", cost: 2, reduces: "execution uncertainty", how: "replay the highest-risk mutation against a scratch copy first", mutating: false })
   }
-  out.sort((a, b) => (a.cost - b.cost))
-  return { needed: out.length > 0, experiments: out.slice(0, 3), why: "high uncertainty — cheapest uncertainty-reducing experiments first" }
+  // v96 unifywise: rank by EXPECTED REDUCTION PER UNIT COST, not cost alone —
+  // the header contract said "(uncertainty reduction)/cost" while the code
+  // sorted by raw cost (a cheap-but-useless experiment beat an informative
+  // one). Each experiment now carries its expected reduction (deterministic:
+  // a target-surface inspection reduces the most, a dry-run less, a gap
+  // acquisition reduces what its gap says it does) and the sort honors it.
+  for (const e of out) {
+    e.expectedReduction = e.kind === "INSPECT" ? 0.5 : e.kind === "ISOLATE" ? 0.35 : Number(e.reduces ? 0.3 : 0.2)
+    e.value = Number((e.expectedReduction / Math.max(1, e.cost)).toFixed(3))
+  }
+  out.sort((a, b) => (b.value - a.value) || (a.cost - b.cost))
+  return { needed: out.length > 0, experiments: out.slice(0, 3), why: "high uncertainty — highest uncertainty-reduction-per-cost experiments first" }
 }
 
 // ---------------------------------------------------------------------------

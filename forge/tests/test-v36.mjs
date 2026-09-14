@@ -67,7 +67,7 @@ console.log("== radiusOf / expandWrites ==")
 console.log("== graphFromIndex ==")
 {
   const idx = {
-    version: 1,
+    version: 2,
     files: {
       "util.js": { mtime: 2000, size: 10, symbols: ["add"], lang: "javascript", imports: [], test: false, contracts: [] },
       "app.js": { mtime: 1000, size: 12, symbols: [], lang: "javascript", imports: ["./util.js"], test: false, contracts: [] },
@@ -104,7 +104,7 @@ console.log("== relevantMemory drops stale project notes ==")
   const pdir = projectDir(WORK)
   fs.mkdirSync(pdir, { recursive: true })
   fs.writeFileSync(path.join(pdir, "index.json"), JSON.stringify({
-    version: 1,
+    version: 2,
     files: {
       "util.js": { mtime: Date.now() + 60_000, size: 20, symbols: ["add"], lang: "javascript", imports: [], test: false, contracts: [] },
       "app.js": { mtime: 1, size: 10, symbols: [], lang: "javascript", imports: ["./util.js"], test: false, contracts: [] },
@@ -131,9 +131,9 @@ console.log("== frozen kernel + package ==")
   ok("project cannot flip assumeYes", dropped.includes("tools.assumeYes"))
   eq("classifyTaskComplexity frozen", classifyTaskComplexity("fix a typo"), "trivial")
   eq("typo still MICRO", classifyTask("fix a typo in README").class, TASK_CLASS.MICRO)
-  eq("VERSION is 94.0.0", VERSION, "94.0.0")
+  eq("VERSION is 98.0.0", VERSION, "98.0.0")
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  eq("package.json is 94.0.0", pkg.version, "94.0.0")
+  eq("package.json is 98.0.0", pkg.version, "98.0.0")
   ok("files includes memgraph.js", pkg.files.includes("memgraph.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
 }
