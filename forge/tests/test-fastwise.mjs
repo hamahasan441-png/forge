@@ -322,12 +322,12 @@ console.log("== fastwise: DEDUP AUDIT — zero duplicate skills, tools, aliases 
   ok(`all ${aliases.length} aliases unique across entries (no routing ambiguity)`, new Set(aliases).size, aliases.length)
   ok("no alias steals a catalog name", aliases.every((a) => !fpNames.includes(a)), JSON.stringify(aliases.filter((a) => fpNames.includes(a))))
 
-  // — bundled skills: 102 dirs, unique frontmatter, unique content —
+  // — bundled skills: 106 dirs, unique frontmatter, unique content —
   const skillsDir = new URL("../skills/", import.meta.url)
   const entries = fs.readdirSync(skillsDir, { withFileTypes: true })
   const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort()
   const nonDirs = entries.filter((e) => !e.isDirectory()).map((e) => e.name).sort()
-  eq("102 bundled skill directories", dirs.length, 102)
+  eq("106 bundled skill directories", dirs.length, 106)
   eq("exactly one non-dir entry: the superpowers attribution", JSON.stringify(nonDirs), JSON.stringify(["superpowers-LICENSE"]))
   ok("directory names unique case-insensitively", new Set(dirs.map((d) => d.toLowerCase())).size, dirs.length)
 
@@ -343,8 +343,8 @@ console.log("== fastwise: DEDUP AUDIT — zero duplicate skills, tools, aliases 
     bodyHashes.push(crypto.createHash("sha256").update(raw).digest("hex"))
   }
   eq("every skill dir has a SKILL.md", missing, 0)
-  eq("frontmatter names unique across all 102 (casefolded, quote-stripped)", new Set(fmNames).size, 102)
-  eq("no two skills ship identical SKILL.md content", new Set(bodyHashes).size, 102)
+  eq("frontmatter names unique across all 106 (casefolded, quote-stripped)", new Set(fmNames).size, 106)
+  eq("no two skills ship identical SKILL.md content", new Set(bodyHashes).size, 106)
   const dirCase = dirs.map((d) => d.toLowerCase())
   const fmShadowers = fmNames.filter((n, i) => n && n !== dirCase[i] && dirCase.includes(n))
   ok("no frontmatter name shadows a different skill directory", fmShadowers.length === 0, JSON.stringify(fmShadowers))

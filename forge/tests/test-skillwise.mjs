@@ -56,8 +56,8 @@ const PURE_SKILLS = PACK.filter((n) => !NOTES_SKILLS.includes(n))
 {
   for (const name of PACK) ok(`bundled: ${name}`, fs.existsSync(path.join(SKILLS, name, "SKILL.md")))
   const rep = checkSkills(SKILLS)
-  ok("all 102 bundled skills validate", rep.ok === true, JSON.stringify(rep.skills.filter((s) => !s.ok).slice(0, 3)))
-  eq("102 bundled skills total", rep.total, 102)
+  ok("all 106 bundled skills validate", rep.ok === true, JSON.stringify(rep.skills.filter((s) => !s.ok).slice(0, 3)))
+  eq("106 bundled skills total", rep.total, 106)
   for (const name of PACK) {
     const s = rep.skills.find((x) => x.name === name)
     ok(`pack skill clean: ${name}`, s && s.ok && s.issues.length === 0, JSON.stringify(s?.issues))

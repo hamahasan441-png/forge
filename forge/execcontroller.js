@@ -37,14 +37,23 @@ export const STUCK_REASON = {
   NO_PROGRESS: "no_progress",           // no files, no node, no worker movement
 }
 
-/** Base per-segment step budget by task class (classify.js classes). */
+/**
+ * Base per-segment step budget by task class (classify.js classes).
+ * v99 loopwise: the v98 table (MICRO 8 … ARCHITECTURAL 40, fallback 24) made
+ * a healthy coding run surface a "stopped at the step budget" event every
+ * ~25 steps — segments are a CHECKPOINT cadence, never a wall (meta always
+ * continues on budgetHit), but the heartbeat was so tight the run spent more
+ * effort observing than building. Bases are raised ~2x; the shrink factors
+ * (failure/pressure/latency) and the floor are unchanged, so degrading runs
+ * still converge to short, checkpoint-dense segments exactly as before.
+ */
 const CLASS_SEGMENT_BASE = {
-  MICRO: 8,
-  SMALL: 14,
-  MEDIUM: 22,
-  LARGE: 32,
-  ARCHITECTURAL: 40,
-  RECOVERY: 20,
+  MICRO: 14,
+  SMALL: 24,
+  MEDIUM: 40,
+  LARGE: 60,
+  ARCHITECTURAL: 88,
+  RECOVERY: 30,
 }
 
 export function createExecutionController({
@@ -86,7 +95,7 @@ export function createExecutionController({
    * model decision; never wider than the safety clamps.
    */
   const segmentSize = ({ klass = null, failureRate = 0, pressureLevel = "nominal", avgToolLatencyMs = 0 } = {}) => {
-    let steps = CLASS_SEGMENT_BASE[klass] ?? 24
+    let steps = CLASS_SEGMENT_BASE[klass] ?? 40
     // failing strategies get SHORTER segments: checkpoints and strategy
     // changes arrive sooner (bounded shrink, never below the floor)
     if (failureRate > 0) steps *= 1 - Math.min(0.4, failureRate * 0.8)
@@ -94,7 +103,7 @@ export function createExecutionController({
     else if (pressureLevel === "watch") steps *= 0.9
     if (avgToolLatencyMs > 15000) steps *= 0.7
     else if (avgToolLatencyMs > 8000) steps *= 0.85
-    return Math.max(8, Math.min(64, Math.round(steps)))
+    return Math.max(8, Math.min(128, Math.round(steps)))
   }
 
   /**

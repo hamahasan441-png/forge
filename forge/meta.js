@@ -54,6 +54,9 @@ import { maybeShip } from "./gitship.js" // v98 shipwise: verified delivery (ker
 import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured enrichment of changed files
 import { artifactRuntimeEvidence } from "./runtimesession.js" // v98 shipwise: runtime/artifact evidence for the ledger
 import { redact } from "./secrets.js"
+import { runCodeReview } from "./codereview.js" // v99 loopwise: the post-mutation reviewer pass
+import { tryNativeAutoFix } from "./autofix.js" // v99 loopwise: deterministic lint/format repair fast path
+import { critiquePlan, planRevisionPrompt } from "./plancritique.js" // v99 loopwise: plan-quality gate + one revision pass
 import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
 import { AGENT_BUDGETS } from "./config.js"
 import { createKernel } from "./omega.js"
@@ -379,6 +382,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   let planText = ""
   let planDefs = []
+  // v99 loopwise: whether the planner already received ONE explicit revision
+  // request (the cycle re-plan). The critique below stays advisory in that
+  // case — the planner was already given feedback once this task; a second
+  // revision pass in the same planning phase is diminishing returns.
+  let plannerAlreadyRevised = false
   let planValidation = null
   let planRepaired = false
   // RESUME: the task already has a validated DAG on disk. Re-planning would
@@ -601,6 +609,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         const cyc = repair.cycle
         emit({ type: "PLAN_CYCLE_DETECTED", taskId, runId: taskRunId, members: cyc.members, edges: cyc.edges, action: "re-plan" })
         ts.transition(TASK_STATUS.REPAIRING, { reason: `plan has a dependency cycle (${cyc.edges.join(", ").slice(0, 200)}) — re-planning` })
+        plannerAlreadyRevised = true
         const replanRes = await agent({
           config, provider: prov, signal,
           task: `${state.objective}\n\nYour previous plan contained a DEPENDENCY CYCLE: ${cyc.edges.join(", ")} (steps ${cyc.members.join(", ")} depend on each other). A step may only depend on steps that come strictly before it. Produce a corrected, concise dependency-aware plan as a numbered list (one action per line, 4-8 steps, mark read-only investigation steps and implementation steps). Do NOT execute.`,
@@ -670,6 +679,60 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         planValidation,
         state: state.status,
         task: state,
+      }
+    }
+    // v99 loopwise — the PLANNER quality gate: structure was validated
+    // above; QUALITY was not. One deterministic critique (coverage vs the
+    // objective's own terms, granularity, verification presence, read-only
+    // balance); when majors exist, ONE bounded planOnly revision pass that
+    // must beat the original score AND re-validate, else the original plan
+    // stands. Fast-path synthesized plans (MICRO/SMALL/RECOVERY) are exempt —
+    // deterministic by design, a revision model call would defeat the point.
+    if (!restoredDAG && !fastPath && !recoveryPath && planDefs.length && planValidation.ok && config?.planner?.critique !== false) {
+      try {
+        const critique = critiquePlan({ objective: state.objective, planDefs, planText })
+        if (critique.findings.length) {
+          emit({ type: "PLAN_CRITIQUE", taskId, runId: taskRunId, findings: critique.findings.map((f) => `${f.severity}: ${f.id}`), score: Number(critique.score.toFixed(2)), advisory: plannerAlreadyRevised })
+        }
+        const revisionAsk = plannerAlreadyRevised ? null : planRevisionPrompt({ objective: state.objective, planText, findings: critique.findings })
+        if (revisionAsk) {
+          const revRes = await agent({
+            config, provider: prov, signal, task: revisionAsk,
+            taskId, runId: taskRunId, segmentId: "seg-plancritique", nodeId: null,
+            planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep,
+            onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
+          })
+          const revText = revRes?.text ?? ""
+          let revDefs = dagLib.parsePlanToDAG(revText)
+          let revValidation = dagLib.validatePlan(revDefs)
+          // the revision gets the SAME structural repair the original plan
+          // gets (e.g. "mutates but declares no verification requirement"
+          // is repairable) — a revision must not be rejected for a defect
+          // the pipeline already knows how to fix deterministically
+          if (!revValidation.ok && revValidation.recoverable) {
+            const revRepair = dagLib.repairPlan(revDefs, state.objective, revValidation)
+            if (revRepair.ok) {
+              revDefs = revRepair.nodes
+              revValidation = dagLib.validatePlan(revDefs)
+            }
+          }
+          if (revValidation.ok) {
+            const revCritique = critiquePlan({ objective: state.objective, planDefs: revDefs, planText: revText })
+            if (revCritique.score > critique.score) {
+              planText = revText
+              planDefs = revDefs
+              planValidation = revValidation
+              planRepaired = true
+              emit({ type: "PLAN_REVISED", taskId, runId: taskRunId, reason: `quality critique: score ${critique.score.toFixed(2)} → ${revCritique.score.toFixed(2)}`, findingsBefore: critique.findings.length, findingsAfter: revCritique.findings.length, nodes: planDefs.length })
+            } else {
+              emit({ type: "PLAN_REVISION_REJECTED", taskId, runId: taskRunId, reason: `revision did not improve (score ${revCritique.score.toFixed(2)} ≤ ${critique.score.toFixed(2)}) — original stands` })
+            }
+          } else {
+            emit({ type: "PLAN_REVISION_REJECTED", taskId, runId: taskRunId, reason: `revision failed validation (${revValidation.code ?? "invalid"}) — original stands` })
+          }
+        }
+      } catch (e) {
+        emit({ type: "PLAN_CRITIQUE", taskId, runId: taskRunId, error: String(e?.message ?? e).slice(0, 160) })
       }
     }
     if (!restoredDAG) ts.setPlan(planDefs.map((n) => n.objective ?? n.title ?? n.id), planRepaired ? "model+repaired" : "model")
@@ -873,6 +936,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   let repairCount = 0
   let replanCount = 0
   let evidenceRequests = 0
+  // v99 loopwise: the most recent read-only verifier report (threaded into
+  // repairSegment so the fixer sees the defects that were already observed)
+  let lastVerifierReport = null
+  // v99 loopwise: post-mutation code-review budget (config: review.maxPerTask,
+  // default 4 — the reviewer pass is one bounded read-only agent run each)
+  let codeReviewsDone = 0
   let totalToolCalls = 0
   const changedFiles = new Set()
   const seenExisting = new Set()
@@ -886,6 +955,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const addRequiredAction = (a) => { if (a) requiredActions.add(String(a).slice(0, 400)) }
   const clearRequiredActions = () => requiredActions.clear()
+  // v99 loopwise FIX (latent v94 bug): required actions were add-only until
+  // whole-gate success — a `review:` blocker added at attempt #1 survived a
+  // CLEAN re-review at attempt #2 and deadlocked the task into WAITING.
+  // The recurring prefixes below are all re-derived inside attemptCompletion
+  // on every attempt, so they are dropped at the top of each attempt and
+  // re-added only while still true. Event-driven actions (recover:,
+  // reconcile:) are NOT recurring and stay sticky.
+  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: "]
+  const refreshRecurringActions = () => { for (const p of RECURRING_ACTION_PREFIXES) for (const a of [...requiredActions]) if (a.startsWith(p)) requiredActions.delete(a) }
 
   /** P0: no mutation boundary may be crossed while a worker is still alive. */
   const settleWorkers = async (graceMs) => {
@@ -968,6 +1046,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
    * @returns {{done: boolean, gate: object}}
    */
   const attemptCompletion = async ({ text, segment = 0, segmentId = null, nodeId = null } = {}) => {
+    // v99 loopwise: recurring required actions are re-derived below — clear
+    // the stale copies from earlier attempts first (see refreshRecurringActions)
+    refreshRecurringActions()
     // 1. never complete while a worker is alive
     await settleWorkers()
     const fr = recomputeFinalRisk()
@@ -1184,7 +1265,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         agent, config, provider: prov, signal, emit, state,
         error: gate.reasons.join("; ") || v?.reason || "completion gate refused",
         segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
-        finalRisk: finalRiskLevel, liveRisk, episodeSink,
+        finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: lastVerifierReport,
       })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
@@ -1914,6 +1995,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     const recs = res.toolRecords ?? []
     const segChanged = new Set()
+    // v99 loopwise: this segment's LSP diagnostics — collected once at the
+    // verification gate, reused by the post-mutation reviewer pass
+    let segDiags = []
     for (const r of recs) {
       for (const f of r.files_changed ?? []) {
         const abs = path.resolve(process.cwd(), f)
@@ -2074,8 +2158,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // structured extraction but no verification evidence. A missing/failed
     // server is still skipped, never a gate failure.
     if (segChanged.size && config?.tools?.lsp !== false) {
+      let diags = []
       try {
-        const diags = await collectDiagnosticsForFiles(config, [...segChanged], { cwd: process.cwd(), allowAutostart: true })
+        diags = await collectDiagnosticsForFiles(config, [...segChanged], { cwd: process.cwd(), allowAutostart: true })
         for (const d of diags) {
           const relFile = path.relative(process.cwd(), d.file)
           const rec = ledger.recordCommand(`lsp_diagnostics ${relFile}`, d.text, {
@@ -2091,6 +2176,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           emit({ type: d.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
         }
       } catch { /* best-effort: a broken language server must not crash the gate */ }
+      // v99 loopwise: the gate's diagnostics are REUSED by the reviewer pass
+      // below — one LSP spawn serves both the gate and the review.
+      segDiags = diags
     }
 
     // v93 §13 (gap fix): a mutation invalidates EXACTLY what it touched —
@@ -2267,7 +2355,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
       ts.noteError("SEGMENT_FAILED", res.error)
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk, episodeSink })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: lastVerifierReport })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       if (consecutiveFailures >= 3 || !recovered) {
@@ -2362,7 +2450,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (dag && currentNodeId) { try { dagLib.markRepairing(dag, currentNodeId, v.reason); persistDAG() } catch { } }
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: repairCount + 1, error: v.reason })
-      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink })
+      const recovered = await repairSegment({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: lastVerifierReport })
       repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0
@@ -2441,6 +2529,57 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       continue
     }
 
+    // --- v99 loopwise: the REVIEWER pass ------------------------------------
+    // A clean segment that mutated files gets ONE bounded read-only code
+    // review of the actual change (diff + LSP diagnostics + failing ledger
+    // evidence), before the completion gate is asked anything. This is the
+    // "second pair of eyes" the v98 surfaces lacked: review.js checked
+    // METADATA at completion; this checks the CODE per mutation. Blockers
+    // become required actions (which block completion and drive repair —
+    // and are re-derived on every later completion attempt, never stale).
+    // Bounded: maxPerTask reviews (default 4), skipped at trivial risk,
+    // honest when the reviewer pass is unavailable (deterministic findings
+    // alone still review), never throws.
+    {
+      const maxReviews = Number.isFinite(Number(config?.review?.maxPerTask)) ? Math.max(0, Number(config.review.maxPerTask)) : 4
+      const reviewOn = config?.review?.code !== false && maxReviews > 0 && codeReviewsDone < maxReviews
+      if (reviewOn && segChanged.size && finalRiskLevel !== "trivial" && !res.error) {
+        codeReviewsDone++
+        try {
+          emit({ type: "CODE_REVIEW_STARTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, files: [...segChanged].map((f) => path.relative(process.cwd(), f)).slice(0, 16) })
+          const failingRecords = (ledger.records() ?? [])
+            .filter((r) => Number(r.exit_code ?? r.exitCode ?? 0) !== 0 && r.command)
+            .slice(-8)
+            .map((r) => ({ command: r.command, exit_code: Number(r.exit_code ?? r.exitCode ?? 0), evidence: r.evidence ?? null }))
+          const review = await runCodeReview({
+            agent, config, provider: prov, signal, emit,
+            objective: state.objective,
+            files: [...segChanged],
+            diagnostics: segDiags,
+            ledgerFailures: failingRecords,
+            taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+          })
+          emit({
+            type: "CODE_REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+            ok: review.blockers.length === 0,
+            findings: review.findings.length, blockers: review.blockers.length,
+            detail: review.findings.slice(0, 8).map((f) => `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ""} ${f.issue}`),
+            sources: review.sources, facts: review.facts,
+          })
+          if (episodeSink && review.findings.length) {
+            episodeSink.addEvidence(`code review: ${review.findings.slice(0, 4).map((f) => `${f.severity} ${f.file}: ${String(f.issue ?? "").slice(0, 80)}`).join(" | ")}`)
+          }
+          // blockers → required actions (recurring prefix; re-derived on every
+          // completion attempt — refreshRecurringActions keeps them honest)
+          for (const b of review.blockers.slice(0, 4)) {
+            addRequiredAction(`codereview: ${b.file}: ${String(b.issue ?? b.id).slice(0, 160)}`)
+          }
+        } catch (e) {
+          emit({ type: "CODE_REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: true, findings: 0, blockers: 0, detail: [], error: String(e?.message ?? e).slice(0, 160) })
+        }
+      }
+    }
+
     // --- the ONE authoritative whole-task completion decision (P0) ---------
     // Nothing above may declare COMPLETED. The gate asks the global question:
     // is the whole DAG finished, are all workers settled, is the evidence
@@ -2455,7 +2594,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.setNextAction(`verify: run ${v.missing.join(" / ")} before declaring success`)
       ts.transition(TASK_STATUS.VERIFYING, { reason: "requesting risk-proportional evidence" })
       emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `objective met but evidence is thin for risk=${finalRiskLevel} — run ${v.missing.join(", ")} to verify`, missing: v.missing })
-      await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel, impact })
+      lastVerifierReport = (await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel, impact }))?.report ?? null
       // the verifier produced new evidence: the node may now be completed
       completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-verification" })
       const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
@@ -2622,7 +2761,7 @@ function segmentEvents(emit, segment, ids = {}) {
   }
 }
 
-async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null }) {
+async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null, verifierReport = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
   const ctxBlock = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1600 })
   const failText = String(error ?? verification?.reason ?? "")
@@ -2711,7 +2850,71 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       })
     }
   } catch { steerHint = "" }
-  const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${failText.slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}${hypoHint}${steerHint}\n\nIf TRY FIRST is present, apply that known repair to the named files, then verify. Otherwise inspect the relevant files first, then make a minimal surgical fix, then run verification.`
+  // v99 loopwise FIXER — the defect report: the repair prompt used to get a
+  // bare error string and had to RE-DISCOVER what the kernel already knew
+  // (LSP diagnostics, failing ledger evidence, the verifier's own defect
+  // text). Assemble the structured DEFECT REPORT the fixer actually needs.
+  let defectBlock = ""
+  {
+    const lines = []
+    if (changedFiles.length) {
+      try {
+        const diags = await collectDiagnosticsForFiles(config, changedFiles.slice(0, 20), { cwd: process.cwd(), allowAutostart: true, budgetMs: 8000 })
+        const bad = diags.filter((d) => d.passed === false).slice(0, 12)
+        if (bad.length) {
+          lines.push("LIVE LSP DIAGNOSTICS on the changed files (file:line — message):")
+          for (const d of bad) lines.push(`  ${path.relative(process.cwd(), d.file)} — ${String(d.text ?? "").split("\n")[0].slice(0, 160)}`)
+        }
+      } catch { /* diagnostics are best-effort context */ }
+    }
+    try {
+      const fails = (ledger.records() ?? []).filter((r) => Number(r.exit_code ?? r.exitCode ?? 0) !== 0 && r.command).slice(-5)
+      if (fails.length) {
+        lines.push("FAILING VERIFICATION RECORDS (most recent last):")
+        for (const f of fails) lines.push(`  ${String(f.command).slice(0, 140)} → exit ${f.exit_code ?? f.exitCode}${f.evidence ? ` — ${String(f.evidence).split("\n")[0].slice(0, 100)}` : ""}`)
+      }
+    } catch { /* ledger read is best-effort */ }
+    if (verifierReport?.text) {
+      lines.push(`READ-ONLY VERIFIER REPORT (defects observed, not fixed):\n  ${String(verifierReport.text).replace(/\n/g, "\n  ").slice(0, 1200)}`)
+    }
+    if (lines.length) defectBlock = `\n\n--- DEFECT REPORT (observed evidence — trust this over assumptions) ---\n${lines.join("\n")}`
+  }
+  // v99 loopwise FIXER — deterministic fast path: a lint/format-shaped
+  // failure gets the project's OWN formatter once, before any LLM tokens are
+  // spent. Evidence is recorded exactly like an agent-run check; on success
+  // the repair is done and the LLM pass is skipped entirely.
+  {
+    const changedRel = changedFiles.map((f) => path.relative(process.cwd(), f)).filter(Boolean)
+    const fix = tryNativeAutoFix({ cwd: process.cwd(), config, failureText: `${failText}\n${defectBlock}`, changedFiles: changedRel })
+    if (fix.tried && fix.applied) {
+      try {
+        const rec = ledger.recordCommand(`autofix: ${fix.command}`, fix.tail || "formatter completed cleanly", {
+          exitCode: fix.exitCode, affectedFiles: changedRel, taskId, nodeId, segmentId,
+          verificationEpoch: state.verification_epoch ?? 0, scope: "repair",
+        })
+        ts.noteVerification(rec)
+        ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
+        emit({ type: "VERIFICATION_PASSED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: 0, evidence: rec.evidence, verificationId: rec.verification_id, autofix: true })
+      } catch { /* evidence is best-effort */ }
+      emit({ type: "REPAIR_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, ok: true, attemptHint: "native autofix", autofix: fix.command })
+      emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segment, segmentId, nodeId, reason: `deterministic autofix applied: ${fix.command}`, ok: true })
+      try {
+        recordLesson({
+          failure: String(error ?? verification?.reason ?? "").slice(0, 200),
+          cause: `lint/format-class failure — project formatter fixed it deterministically`,
+          failedStrategy: "LLM repair for a mechanical failure",
+          successfulRepair: fix.command,
+          applicableContext: state.objective, task: state.objective, confidence: 0.8,
+          symptoms: failText.slice(0, 400), rootCause: "formatting/lint violation", solution: fix.command,
+          files: changedRel.slice(0, 12), symbols: [], model: provider?.model ?? null,
+          strategy: "autofix: deterministic formatter before LLM repair",
+        }, process.cwd())
+      } catch { /* lessons are best-effort */ }
+      return true
+    }
+    if (fix.tried) emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segment, segmentId, nodeId, reason: `native autofix tried but exited ${fix.exitCode} — falling through to LLM repair`, ok: false })
+  }
+  const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${failText.slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}${hypoHint}${steerHint}${defectBlock}\n\nIf TRY FIRST is present, apply that known repair to the named files, then verify. Otherwise inspect the relevant files first, then make a minimal surgical fix, then run verification.`
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
     const r = await agent({ config, provider, signal, task: diag, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
@@ -2817,11 +3020,14 @@ async function requestVerification({ agent, config, provider, signal, emit, stat
     }
     const changedRel = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
     // judged against the FINAL risk, not the planning risk
+    // v99 loopwise: the verifier's own defect REPORT travels with the
+    // verdict — the fixer no longer has to re-discover what was already
+    // observed. Callers treat this as truthy/falsy exactly as before.
     const st = ledger.status(risk, changedRel, { nodeId })
-    return st.ok && !st.anyFailure
+    return { ok: st.ok && !st.anyFailure, report: { at: Date.now(), missing, text: String(r?.text ?? "").slice(0, 2400) } }
   } catch (e) {
     ts.noteError("VERIFY_FAILED", e?.message ?? String(e))
-    return false
+    return { ok: false, report: null }
   }
 }
 

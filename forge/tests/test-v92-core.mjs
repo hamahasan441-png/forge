@@ -103,7 +103,7 @@ console.log("== 2. runMeta: world-model consultation at planning (§5/§10) ==")
   const events = []
   let planTask = null
   const runAgent = async (o) => {
-    if (o.planOnly) { planTask = o.task; return { text: "1. inspect src/app.js\n2. edit src/app.js", toolRecords: [], commandChecks: [], toolLog: [] } }
+    if (o.planOnly) { planTask ??= o.task; return { text: "1. inspect src/app.js\n2. edit src/app.js", toolRecords: [], commandChecks: [], toolLog: [] } }
     return {
       text: "All done, complete and verified.", budgetHit: false, steps: 2,
       toolRecords: [{ tool: "edit_file", files_changed: [path.join(WORK, "src", "app.js")] }],
@@ -221,7 +221,7 @@ console.log("== 5. the §9 loop closes across runs: calibration steers the next 
   const events = []
   let planTask = null
   const runAgent = async (o) => {
-    if (o.planOnly) { planTask = o.task; return { text: "1. edit src/app.js\n2. verify", toolRecords: [], commandChecks: [], toolLog: [] } }
+    if (o.planOnly) { planTask ??= o.task; return { text: "1. edit src/app.js\n2. verify", toolRecords: [], commandChecks: [], toolLog: [] } }
     return {
       text: "All done, complete and verified.", budgetHit: false, steps: 2,
       toolRecords: [{ tool: "edit_file", files_changed: [path.join(WORK, "src", "app.js")] }],

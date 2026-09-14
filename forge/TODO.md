@@ -26,15 +26,36 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## v98 "shipwise" — leftovers (completed plan removed, house style)
+## v99 "loopwise" — leftovers (completed plan removed, house style)
 
-- [ ] tree-sitter consumption: the layer-2 probe reports the binary but
-      extraction still never uses it (the CLI's grammar/output schema is a
-      per-language surface; LSP tier-3 is the default structured path now)
-- [ ] docker-image verification goes no deeper than bringUp health + artifact
-      existence (image digest/layer checks are not implemented)
-- [ ] gitship PR CREATION (not just PR text) — needs a consented remote API
-      path (token sourcing is unsolved by policy, providers.js:104)
+- [ ] tree-sitter consumption (inherited from v98): the layer-2 probe
+      reports the binary but extraction still never uses it (the CLI's
+      grammar/output schema is a per-language surface; LSP tier-3 is the
+      default structured path)
+- [ ] docker-image verification goes no deeper than bringUp health +
+      artifact existence (image digest/layer checks are not implemented)
+- [ ] the code-review pass trusts the reviewer agent's self-reported line
+      numbers (deterministic findings carry observed evidence; reviewer
+      findings are advisory-majors unless a deterministic signal confirms)
+- [ ] autofix allowlist is a static table — a project using a formatter
+      not in the table falls through to the LLM repair (safe, just slower)
+- [ ] skill registry URLs are hints, not verified manifests (a moved
+      branch fails the download honestly; no periodic revalidation)
+- [ ] the reviewer/verifier/repair passes each pay their own model call —
+      no shared session (bounded budgets exist; consolidation is future
+      work)
+
+CLOSED in v99: gitship PR creation — `gitship.pr = "gh"` opens real PRs
+through the user's OWN gh CLI (passthrough; forge never holds a GitHub
+token; consent-gated like push; requires the pushed commit). The v98
+blocker ("token sourcing unsolved by policy") was solved by NOT sourcing
+a token at all.
+
+## v98 "shipwise" — leftovers (superseded by the v99 list above)
+
+CLOSED by v99: gitship PR creation — `gitship.pr = "gh"` (gh CLI passthrough,
+never a forge-held token). The v98 blocker ("token sourcing unsolved by
+policy") was solved by NOT sourcing a token at all.
 
 
 ## Open items

@@ -55,9 +55,9 @@ const { maybeShip, gitshipMode, renderPrText } = await import("../gitship.js")
 
 console.log("== 1. policy resolution ==")
 {
-  eq("all OFF by default", gitshipMode({}), { commit: "off", branch: "off", push: "off" })
-  eq("garbage falls back to off", gitshipMode({ gitship: { commit: "yes-please", branch: "explode", push: "force" } }), { commit: "off", branch: "off", push: "off" })
-  eq("valid modes resolve", gitshipMode({ gitship: { commit: "ask", branch: "auto", push: "explicit" } }), { commit: "ask", branch: "auto", push: "explicit" })
+  eq("all OFF by default", gitshipMode({}), { commit: "off", branch: "off", push: "off", pr: "off" })
+  eq("garbage falls back to off", gitshipMode({ gitship: { commit: "yes-please", branch: "explode", push: "force", pr: "api" } }), { commit: "off", branch: "off", push: "off", pr: "off" })
+  eq("valid modes resolve", gitshipMode({ gitship: { commit: "ask", branch: "auto", push: "explicit", pr: "gh" } }), { commit: "ask", branch: "auto", push: "explicit", pr: "gh" })
 }
 
 console.log("== 2. default OFF + non-repo honesty ==")

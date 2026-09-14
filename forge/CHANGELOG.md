@@ -5,6 +5,82 @@ reads it at runtime and every user-agent is built from that single source.
 Historical entries below are kept honest and short; completed plans are not
 preserved — leftovers live in TODO.md.
 
+## 99.0.0 — loopwise (the agency release)
+
+The user-facing verdict on v98 was blunt: the agent STOPS too soon (~25
+steps), nothing reviews the code it writes, repairs fly blind, plans are
+never questioned, and reaching the wider skill/MCP ecosystem is manual.
+v99 answers each in the house way — strengthen existing loops, never
+rewrite, every behavior pinned.
+
+- THE STOP FIX: the direct one-shot agent now auto-extends its step AND
+  tool-call budgets while PRODUCTIVE (fresh successful writes, passing
+  verification checks, or ≥4 distinct tool signatures in the last 10
+  steps — and never with a 4× signature loop or a 6-error streak), in
+  increments bounded by the same hard caps (1000 steps / 500 calls).
+  Each extension emits `step_budget_extended` with its evidence; a
+  stalled run still stops honestly (INCOMPLETE + checkpoint + resume) and
+  budget exhaustion still never completes (§5). Segment callers
+  (maxStepsOverride) are untouched — meta's segment table instead DOUBLES
+  (MEDIUM 22→40, LARGE 32→60, ARCHITECTURAL 40→88, RECOVERY 20→30,
+  MICRO 8→14, SMALL 14→24, fallback 24→40, cap 64→128; shrink factors
+  and floor unchanged).
+- THE REVIEWER: codereview.js — after a clean mutating segment, ONE
+  bounded read-only review of the actual change: working diff vs HEAD
+  (per-file caps, working-tree truth — never the index), the gate's LSP
+  diagnostics REUSED (one spawn serves both), failing ledger evidence,
+  secret + debugger + TODO + mega-edit smells on ADDED lines.
+  Deterministic findings stand alone; a reviewer agent pass adds
+  strict-JSON findings (honest parse: garbage never invents); blockers
+  become required actions; `CODE_REVIEW_*` events persist; cost bounded
+  by `review.maxPerTask` (default 4). Also fixes the v94 latent deadlock:
+  required actions were add-only until whole-gate success — recurring
+  prefixes (review:/requirement /codereview:/critical-risk runtime
+  validation:) are now dropped and re-derived on every completion
+  attempt.
+- THE FIXER: repairSegment gets a structured DEFECT REPORT (live LSP
+  diagnostics on changed files, the last 5 failing verification records,
+  the read-only verifier's report — requestVerification now RETURNS it
+  instead of discarding) and a deterministic fast path (autofix.js): a
+  lint/format-shaped failure runs the project's OWN formatter once —
+  allowlisted direct invocations only (no `npm run`), shellguard "safe"
+  classified, 90s bound, result recorded as ledger evidence; the LLM
+  repair runs only when the failure is not mechanical or the fix failed.
+- THE PLANNER: plancritique.js — deterministic plan-QUALITY gate
+  (coverage vs the objective's own terms, blob-node detection,
+  verification-step presence for mutating plans, read-only balance,
+  blind-first-step) plus ONE bounded revision pass when majors exist;
+  the revision is adopted only if it re-validates (with the same
+  structural repair the original plan gets) AND beats the original
+  critique score. `PLAN_CRITIQUE` / `PLAN_REVISED` /
+  `PLAN_REVISION_REJECTED` events; fast-path synthesized plans exempt.
+- REACH: mcpcatalog.js — 12 curated well-known MCP servers
+  (filesystem, memory, sequential-thinking, git, sqlite, postgres,
+  playwright, puppeteer, brave-search, github, context7, fetch) with
+  `forge mcp add/catalog/remove`: presets write the USER config through
+  the same path `forge config set` uses (the privileged mcp section has
+  exactly one sanctioned write path), required env vars become explicit
+  empty placeholders with the exact fill command printed — secrets are
+  never invented, prompted for, or stored by the catalog. skillregistry.js
+  — curated best GitHub skill repos (obra/superpowers, anthropics/skills,
+  Egonex-AI/Understand-Anything, zai-org/GLM-Skills) with raw SKILL.md
+  URLs ready for the existing SSRF-guarded download path, `forge skill
+  search` (local index, deterministic scoring) and `forge skill
+  recommend` (stemmed matching). 4 new bundled skills: code-reviewer,
+  perf-tuning, api-design, data-migration (106 total).
+- DELIVERY: gitship.pr = "gh" opens real pull requests through the
+  user's OWN gh CLI — passthrough, not an API client: forge never holds
+  a GitHub token; requires explicit config + live consent (like push) +
+  the commit actually pushed + gh authenticated; the PR body IS the
+  PR-ready artifact; "PR already exists" is reported, never fatal to the
+  delivery.
+- PROOF: FORGE-BENCH 22→24 (+23-step-extension, +24-reviewer-fixer-
+  planner); new suite tests/test-v99.mjs (95 assertions, 9 sections:
+  raised table, real-loop extension/loop/kill-switch/override behavior,
+  reviewer units + meta wiring, planner gate behavior, autofix gating,
+  catalog/registry integrity, gitship pr honesty, source pins for the
+  deadlock fix). 165 fast suites green; e2e/cleanroom pins updated.
+
 ## 98.0.0 — shipwise (the delivery release)
 
 The competitive gap analysis (Forge vs Claude Code / Devin / Cursor / Codex /

@@ -413,10 +413,10 @@ console.log("== P5 §52: worktree writer ceiling is configurable ==")
   ok("meta honors config/env (cap 8)", /FORGE_WORKTREE_WRITERS/.test(src) && /Math\.min\(8/.test(src))
 }
 
-console.log("== P6 §86: bench covers the 15 spec categories (22 cases; v98 added 21-artifact-evidence + 22-injection-fence) ==")
+console.log("== P6 §86: bench covers the 15 spec categories (24 cases; v98 +21/22, v99 +23-step-extension +24-reviewer-fixer-planner) ==")
 {
   const { BENCH_CASES, runBench } = await import("../bench.js")
-  eq("22 cases", BENCH_CASES.length, 22)
+  eq("24 cases", BENCH_CASES.length, 24)
   const summary = runBench()
   eq("all pass", summary.failed, 0)
   const ids = BENCH_CASES.map((c) => c.id)

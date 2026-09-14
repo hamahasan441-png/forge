@@ -23,6 +23,10 @@ import * as sessMod from "./sessions.js"
 import * as srMod from "./sourceresolve.js"
 import * as rtMod from "./runtimesession.js"
 import * as fenceMod from "./contentfence.js"
+import * as crMod from "./codereview.js"
+import * as pcMod from "./plancritique.js"
+import * as afMod from "./autofix.js"
+import * as xcMod from "./execcontroller.js"
 import { reconsiderModel } from "./modelstrategy.js"
 import { TASK_CLASS, strategyFor } from "./classify.js"
 import { FAILURE } from "./diagnose.js"
@@ -332,6 +336,65 @@ export const BENCH_CASES = [
         ok = ok && flagged.includes("⚠ injection-shaped marker(s)")
         ok = ok && fence("bash", "x", { enabled: false }) === "x" // explicit opt-out honored
         ok = ok && fenceMod.UNTRUSTED_CONTENT_RULE.length > 80 // the shared rule line is substantive
+        return ok
+      },
+    },
+  },
+  {
+    id: "23-step-extension",
+    name: "productive step-budget extension: keeps going while building, stops when stuck",
+    task: "implement a large feature across many files",
+    classifyOnly: true,
+    expect: {
+      class: TASK_CLASS.SMALL,
+      custom: () => {
+        // v99 loopwise (P1): the direct one-shot agent historically stopped
+        // dead at agent.maxSteps ("run stopped at the step budget", the
+        // "~25-step stop" experience). Now a PRODUCTIVE run extends its
+        // budget in bounded increments (same hard cap); a signature loop or
+        // error streak never does. Segment callers are untouched.
+        const src = fs.readFileSync(new URL("./agent.js", import.meta.url), "utf8")
+        let ok = /const productiveExtension = \(\)/.test(src)
+        ok = ok && /step_budget_extended/.test(src)
+        ok = ok && /autoExtendEligible = !readonly && !verifier && sub == null && maxStepsOverride == null/.test(src)
+        ok = ok && /maxStepsHardCap\)/.test(src.slice(src.indexOf("const productiveExtension"), src.indexOf("const productiveExtension") + 700)) // bounded by the hard cap
+        ok = ok && /toolSigCounts/.test(src) // loop detection feeds the gate
+        ok = ok && /stepExtensions, maxStepsInitial, lastExtensionEvidence/.test(src) // honest reporting
+        // and the segment table actually raised (the meta-side of the fix)
+        const ctl = xcMod.createExecutionController({ taskId: "bench", runId: "bench" })
+        ok = ok && ctl.segmentSize({ klass: "MEDIUM" }) >= 40 && ctl.segmentSize({ klass: "ARCHITECTURAL" }) >= 88
+        return ok
+      },
+    },
+  },
+  {
+    id: "24-reviewer-fixer-planner",
+    name: "reviewer/fixer/planner: diff review findings, defect-report repair, plan-quality gate",
+    task: "review the change, fix the failing lint, and revise the plan",
+    classifyOnly: true,
+    expect: {
+      class: TASK_CLASS.LARGE,
+      custom: () => {
+        // v99 loopwise (P2): the reviewer reads the ACTUAL diff (secrets and
+        // debugger in ADDED lines are blockers/majors), the fixer's native
+        // fast path only fires on lint-shaped failures with an allowlisted
+        // safe command, and the planner gate catches blob plans with no
+        // verification step.
+        const parsed = crMod.parseReviewerReport('{"findings":[{"severity":"blocker","file":"a.js","line":7,"id":"inv","issue":"inverted condition","fix_hint":"flip"}]}')
+        let ok = parsed.ok && parsed.findings[0].line === 7
+        ok = ok && crMod.parseReviewerReport("no json here").ok === false // honest parse failure
+        const det = crMod.deterministicFindings({
+          files: [{ file: "a.js", lang: "javascript", added: 30, removed: 2, diagCount: 1, diff: "+const K = 'sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-cccccccccccc'\n+debugger\n" }],
+          totalAdded: 30, totalRemoved: 2, diagnostics: [], ledgerFailures: [{ command: "npm test", exit_code: 1, evidence: "assert" }],
+        })
+        ok = ok && det.some((f) => f.id === "secret_in_code" && f.severity === "blocker")
+        ok = ok && det.some((f) => f.id === "debugger_left" && f.severity === "major")
+        ok = ok && det.some((f) => f.id === "syntax_diagnostics" && f.severity === "blocker")
+        const noFix = afMod.tryNativeAutoFix({ cwd: process.cwd(), config: {}, failureText: "AssertionError: expected 4" })
+        ok = ok && noFix.tried === false // non-lint failure never triggers the formatter
+        const blob = pcMod.critiquePlan({ objective: "refactor auth middleware and add session expiry tests", planDefs: [{ id: "n1", title: "do everything for the auth middleware session expiry refactor" }], planText: "1. all" })
+        ok = ok && blob.findings.some((f) => f.id === "blob_node" && f.severity === "major")
+        ok = ok && blob.findings.some((f) => f.id === "no_verification_step" && f.severity === "major")
         return ok
       },
     },

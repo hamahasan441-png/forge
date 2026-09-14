@@ -12,8 +12,62 @@ execution and proof).**
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 98.0.0 — "shipwise" (the delivery release: structured extraction
-wired, verified commits shipped, prompts fenced, the world model scaled).**
+**Version 99.0.0 — "loopwise" (the agency release: the stop fix, the
+reviewer, the fixer, the planner gate, the reach surfaces).**
+
+**v99 "loopwise"** — the upgrade that makes the agent KEEP GOING, CHECK
+ITS OWN WORK, and FIX IT WITH EVIDENCE. No engine rewritten; every change
+strengthens an existing loop. **THE STOP FIX (P1)** — the direct one-shot
+agent no longer halts dead at its step budget (the "agent stops after
+~25 steps" experience): while a run is PRODUCTIVE (fresh successful
+writes, passing verification checks, or diverse tool use — and NO
+signature loop, no error streak) its step AND tool-call budgets
+auto-extend in bounded increments up to the same hard caps (1000 steps /
+500 calls), each extension visible as a `step_budget_extended` event with
+its evidence; a stalled run stops exactly as before — INCOMPLETE +
+checkpoint + resume, budget exhaustion still never completes (§5 law);
+segment callers (meta) are untouched, and the meta-side segment table
+doubles its bases (MEDIUM 22→40, ARCHITECTURAL 40→88, cap 64→128) so a
+healthy run is no longer interrupted every ~25 steps. **THE REVIEWER
+(P2)** — codereview.js: after a clean segment that mutated files, ONE
+bounded read-only review of the ACTUAL change (working diff vs HEAD, the
+gate's LSP diagnostics reused, failing ledger evidence, secret + smell
+scan of ADDED lines): deterministic findings stand on their own, a
+reviewer agent pass adds strict-JSON findings (parsed honestly — garbage
+reports never invent issues), blockers become required actions that block
+completion and drive repair, `CODE_REVIEW_*` events persist, review cost
+is bounded per task (`review.maxPerTask`, default 4) — and the v94 latent
+deadlock is fixed (required actions were add-only until whole-gate
+success; recurring prefixes are now re-derived on every completion
+attempt). **THE FIXER (P2)** — repairSegment receives a structured DEFECT
+REPORT (live LSP diagnostics on the changed files, the most recent
+failing verification records, the read-only verifier's own defect text —
+requestVerification now returns its report instead of discarding it), and
+a deterministic autofix fast path (autofix.js): a lint/format-shaped
+failure gets the project's OWN formatter ONCE — allowlisted to direct
+formatter invocations, shellguard-classified safe, 90s bound — with the
+result recorded as ledger evidence; only if that fails (or the failure is
+not mechanical) does the LLM repair run. **THE PLANNER (P2)** —
+plancritique.js: the quality gate the planner lacked — coverage against
+the objective's own terms, blob/granularity sanity, verification-step
+presence for mutating plans, read-only balance; when majors exist, ONE
+bounded revision pass that is adopted ONLY if it re-validates (with the
+same structural repair the original gets) AND beats the original score;
+`PLAN_CRITIQUE` / `PLAN_REVISED` / `PLAN_REVISION_REJECTED` events.
+**REACH (P4)** — a curated MCP catalog (mcpcatalog.js: 12 well-known
+servers — filesystem, git, playwright, github, context7, memory,
+sequential-thinking, sqlite, postgres, puppeteer, brave-search, fetch —
+`forge mcp add/catalog/remove`, secrets NEVER invented, the privileged
+mcp section written only through the sanctioned config path), a skill
+registry (skillregistry.js: the best GitHub skill repos with ready
+raw SKILL.md URLs + `forge skill search` local search + `forge skill
+recommend` with stemmed matching), and 4 new bundled skills (code-reviewer,
+perf-tuning, api-design, data-migration — 106 bundled total). **DELIVERY**
+— `gitship.pr = "gh"` opens REAL pull requests through the user's OWN gh
+CLI (passthrough: forge never holds a GitHub token; consent-gated like
+push; requires the commit pushed; the PR body IS the PR-ready artifact).
+FORGE-BENCH grows to 24/24. 164 existing suites stayed green plus the 1
+new one (v99: 95 assertions, 9 sections) — 165 total.
 
 **v98 "shipwise"** — closes the six deficits the competitive gap analysis
 (Forge vs Claude Code / Devin / Cursor / Codex / OpenHands) called
@@ -376,6 +430,22 @@ In chat: Linux commands run in the project folder. Sentences go to the model.
 `DOWNLOAD ≠ TRUST`. A download is CANDIDATE until verify. Learn is VERIFIED
 only. Indexing is not learned. Nothing auto-ACTIVE. Data lives under
 `~/.forge` (`FORGE_DATA_DIR` aliases `FORGE_HOME`).
+
+### Reach surfaces (v99)
+
+```bash
+forge mcp catalog                # 12 curated well-known MCP servers
+forge mcp add playwright         # write the preset (user config only)
+forge mcp test playwright        # connect once, list its tools
+forge mcp remove playwright
+forge skill search "debug"       # local search over 106 bundled skills
+forge skill recommend testing    # curated GitHub skill repos + raw URLs
+```
+
+MCP servers connect lazily (first tool call), never at startup. Secrets are
+never invented — `forge mcp add github` prints the exact config command that
+fills the token. Downloads still go through the one SSRF-guarded,
+verify-then-activate path.
 
 ## Self-test (Node only, no network)
 

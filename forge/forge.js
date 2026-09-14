@@ -1051,6 +1051,39 @@ async function main() {
     }
     case "skill": {
       const sub = (positional[1] || "").toLowerCase()
+      // v99 loopwise: local skill search + curated GitHub skill-repo
+      // recommendations — discovery used to be prompt-name-only.
+      if (sub === "search") {
+        const query = positional.slice(2).join(" ").trim()
+        if (!query) { err("usage: forge skill search <query>"); process.exit(1); return }
+        const { indexSkills, resolveSkillsDir } = await import("./skills.js")
+        const { searchSkills } = await import("./skillregistry.js")
+        const dir = resolveSkillsDir(config.skills?.dir)
+        const idx = indexSkills(dir)
+        const results = searchSkills(query, idx)
+        if (JSON_OUT) { emitJson({ query, dir, results }); return }
+        console.log(bold(`Skill search — "${query}" (${results.length} match(es) in ${idx.length} indexed)`))
+        for (const r of results) console.log(`  ${green(String(Math.round(r.score)).padStart(3))}  ${cyan(r.name.padEnd(28))} ${dim(String(r.desc ?? "").slice(0, 70))}`)
+        if (!results.length) console.log(dim("  (nothing matched — try: forge skill recommend <topic>)"))
+        else console.log(dim("  agents load these by name via the load_skill tool; verify: forge skills --check"))
+        return
+      }
+      if (sub === "recommend") {
+        const query = positional.slice(2).join(" ").trim()
+        const { recommendRepos, githubSearchUrl } = await import("./skillregistry.js")
+        const repos = recommendRepos(query)
+        if (JSON_OUT) { emitJson({ query, repos, webSearch: githubSearchUrl(query) }); return }
+        console.log(bold(`Recommended skill repos${query ? ` for "${query}"` : ""} — curated, best-known`))
+        for (const r of repos) {
+          console.log(`\n  ${cyan(r.repo)}${r.score ? dim(`  (match ${r.score})`) : ""}`)
+          console.log(dim(`      ${r.desc}`))
+          for (const e of r.examples) console.log(`      ${green("•")} ${e.name.padEnd(24)} ${dim(e.url)}`)
+        }
+        console.log(`\n  ${dim("download one:")} forge skill download <raw-SKILL.md-url>`)
+        console.log(`  ${dim("find more on the web:")} ${githubSearchUrl(query)}`)
+        console.log(dim("  downloads are SSRF-guarded and go through verify → activate before an agent can use them"))
+        return
+      }
       if (!sub || sub === "list" || sub === "downloads") {
         const code = await runSkillDownload([])
         if (code) process.exit(code)
@@ -1687,7 +1720,54 @@ async function main() {
         return
       }
 
-      err("usage: forge mcp [list|tools|test <name>]"); process.exit(1); return
+      // v99 loopwise: catalog presets — `forge mcp add <name>` writes a
+      // well-known server spec into the USER config (privileged section, so
+      // this is the ONLY sanctioned write path for it — the same setPath +
+      // saveConfig `forge config set` uses). Secrets are never invented or
+      // prompted: a required env var becomes an explicit empty placeholder
+      // with the exact config command that fills it. Adding costs nothing
+      // until first use (v96 lazy connect).
+      if (sub === "catalog") {
+        const { MCP_CATALOG, runtimeAvailable } = await import("./mcpcatalog.js")
+        if (JSON_OUT) { emitJson({ catalog: MCP_CATALOG }); return }
+        console.log(bold("MCP catalog — well-known servers (forge mcp add <name>)"))
+        for (const e of MCP_CATALOG) {
+          const rt = runtimeAvailable(e) ? green(e.runtime) : yellow(`${e.runtime} (not on PATH)`)
+          const envVars = Object.keys(e.env ?? {})
+          console.log(`  ${cyan(e.name.padEnd(20))} ${dim(e.category.padEnd(10))} ${rt}  ${e.desc}`)
+          if (envVars.length) console.log(dim(`      env: ${envVars.join(", ")}`))
+        }
+        console.log(dim("  add: forge mcp add <name>   •   inspect: forge mcp test <name>   •   remove: forge mcp remove <name>"))
+        return
+      }
+      if (sub === "add") {
+        const name = positional[2]
+        if (!name) { err("usage: forge mcp add <catalog-name>   (see: forge mcp catalog)"); process.exit(1); return }
+        const { catalogEntry, specForEntry, runtimeAvailable, envInstructions } = await import("./mcpcatalog.js")
+        const entry = catalogEntry(name)
+        if (!entry) { err(`unknown preset "${name}" — run ${cyan("forge mcp catalog")} for the list`); process.exit(1); return }
+        const spec = specForEntry(entry)
+        setPath(config, `mcp.servers.${entry.name}`, spec)
+        saveConfig(config)
+        ok(`mcp server "${entry.name}" added — ${[spec.command, ...spec.args].join(" ")}`)
+        console.log(dim(`      ${entry.note ?? ""}`))
+        if (!runtimeAvailable(entry)) console.log(yellow(`      ${entry.runtime} is not on PATH — install it before the first use`))
+        for (const line of envInstructions(entry, entry.name)) {
+          console.log(yellow(`      set the key: ${line}`))
+        }
+        console.log(dim(`      its tools appear as mcp__${entry.name}__* — connected lazily on first call (forge mcp test ${entry.name} to try it now)`))
+        return
+      }
+      if (sub === "remove") {
+        const name = positional[2]
+        if (!name) { err("usage: forge mcp remove <server-name>"); process.exit(1); return }
+        if (!config.mcp?.servers?.[name]) { err(`no MCP server "${name}" in config`); process.exit(1); return }
+        setPath(config, `mcp.servers.${name}`, undefined)
+        saveConfig(config)
+        ok(`mcp server "${name}" removed`)
+        return
+      }
+      err("usage: forge mcp [list|tools|test|catalog|add|remove]"); process.exit(1); return
     }
     case "lsp": {
       // v23: inspect Language Server Protocol servers configured under lsp.servers.
