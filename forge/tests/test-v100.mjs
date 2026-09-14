@@ -425,5 +425,52 @@ console.log("== 15. the context tool reaches the agent over a real server ==")
   srv.close()
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 16. runtime bring-up actually runs a real program (regression) ==")
+{
+  // `runtime up` — discover, build, launch, wait for readiness, health-probe —
+  // threw ReferenceError: green is not defined on EVERY invocation, because
+  // green/red were never defined in tools.js. A tool result is text the model
+  // reads, not terminal output, so the markers are plain. This drives the real
+  // tool against a real HTTP app and asserts the real stages.
+  const net = await import("node:net")
+  const freePort = await new Promise((res) => {
+    const s2 = net.createServer(); s2.listen(0, "127.0.0.1", () => { const p2 = s2.address().port; s2.close(() => res(p2)) })
+  })
+  const app = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-app-"))
+  fs.writeFileSync(path.join(app, "package.json"), JSON.stringify({
+    name: "v100app", version: "1.0.0",
+    scripts: { build: "node -e \"require('fs').writeFileSync('built.txt','ok')\"", start: "node server.js" },
+  }))
+  fs.writeFileSync(path.join(app, "server.js"),
+    `const http=require('http');http.createServer((q,s)=>{s.writeHead(200,{'content-type':'application/json'});s.end(JSON.stringify({ok:true}))}).listen(${freePort},'127.0.0.1',()=>console.log('listening on port ${freePort}'))`)
+
+  const prevCwd = process.cwd()
+  process.chdir(app)
+  const tools = await import("../tools.js")
+  const ctx = tools.makeToolContext({ config: {}, cwd: app })
+
+  const disco = String(await tools.execTool(ctx, "runtime", { action: "discover" }))
+  ok("discover finds the real start script from package.json", /script\.start: node server\.js/.test(disco), disco.slice(0, 200))
+  ok("discover never invents a run command", /run: npm start/.test(disco))
+
+  const up = String(await tools.execTool(ctx, "runtime", { action: "up", command: "node server.js", ready_timeout_ms: 20000 }))
+  ok("bring-up completes (no ReferenceError)", /BRING-UP COMPLETE/.test(up), up.slice(0, 300))
+  ok("launch stage is reported with a real pid", /✓ launch: .*pid \d+/.test(up), up.slice(0, 300))
+  ok("readiness was EARNED by a probe, not assumed", /✓ wait-ready: ready after .* \(http: HTTP 200\)/.test(up), up.slice(0, 300))
+  ok("no color helper leaked into the tool result", !/\u001b\[/.test(up))
+
+  const health = String(await tools.execTool(ctx, "runtime", { action: "health", port: freePort }))
+  ok("health is a real probe against the running app", /HEALTHY/.test(health) && /HTTP 200/.test(health), health.slice(0, 200))
+
+  const status = String(await tools.execTool(ctx, "runtime", { action: "status" }))
+  ok("status reports the live process and its port", /running/.test(status) && String(status).includes(String(freePort)), status.slice(0, 200))
+
+  const stop = String(await tools.execTool(ctx, "runtime", { action: "stop" }))
+  ok("stop signals the process group", /SIGTERM sent to the process group/.test(stop), stop.slice(0, 200))
+  await tools.disposeToolManagers()
+  process.chdir(prevCwd)
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
