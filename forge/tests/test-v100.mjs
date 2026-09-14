@@ -928,5 +928,48 @@ console.log("== 29. the agent uses that one selection for BOTH sides ==")
   ok("agent.js no longer calls selectCapabilities directly", !/[^.\w]selectCapabilities\(/.test(src))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 30. stale skills: the whole chain, on a real lifecycle store ==")
+{
+  // Sections 25 proved the pieces; this proves the CHAIN that was actually
+  // broken — verify → file changes → markStaleSkills writes → pickSkills reads
+  // it back off disk → demoted → labeled. Every step against real files.
+  const evolve = await import("../evolve.js")
+  const sf = await import("../skillforge.js")
+  const ev = await import("../evaluate.js")
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-stale-"))
+  const prev = process.cwd()
+  process.chdir(work)
+  fs.writeFileSync(path.join(work, "target.js"), "export const a = 1\n")
+
+  evolve.recordSkillOutcome({
+    cwd: work, name: "sql-tuning", status: "VERIFIED",
+    gate: { checks: { a: 1, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 1, i: 1 } },
+    files: ["target.js"], task: "tune sql",
+  })
+  eq("the skill starts VERIFIED", evolve.loadSkillLife(work).skills["sql-tuning"]?.lifecycle, "VERIFIED")
+  ok("and is not stale yet", !evolve.loadSkillLife(work).skills["sql-tuning"]?.stale)
+
+  fs.writeFileSync(path.join(work, "target.js"), "export const a = 999\n")
+  const marked = evolve.markStaleSkills(work, ["target.js"])
+  eq("changing the verified-against file marks it stale", marked.marked, 1)
+  const rec = evolve.loadSkillLife(work).skills["sql-tuning"]
+  eq("the flag is persisted", rec?.stale, true)
+  ok("with a reason on record", /related files changed/.test(String(rec?.staleReason)), String(rec?.staleReason))
+
+  const idx = [{ name: "sql-tuning", desc: "tune sql queries" }, { name: "sql-other", desc: "tune sql queries" }]
+  const picks = sf.pickSkills("tune sql queries", idx, { klass: "MEDIUM", cwd: work })
+  const stalePick = picks.find((p) => p.name === "sql-tuning")
+  const freshPick = picks.find((p) => p.name === "sql-other")
+  ok("pickSkills reads the flag back off DISK", stalePick?.stale === true, JSON.stringify(picks.map((p) => p.name)))
+  ok("the stale skill is still offered", Boolean(stalePick))
+  ok("but scores below its fresh equivalent", stalePick.score < freshPick.score, `${stalePick.score} vs ${freshPick.score}`)
+  ok("and is ranked after it", picks.indexOf(stalePick) > picks.indexOf(freshPick))
+  const block = ev.formatSkillPicks(picks)
+  ok("the model is told it is stale", /sql-tuning \(STALE/.test(block), block.slice(0, 200))
+  ok("the fresh one carries no such label", !/sql-other \(STALE/.test(block))
+  process.chdir(prev)
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

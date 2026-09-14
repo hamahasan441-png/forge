@@ -179,9 +179,11 @@ export function latencyFactorOf(stat) {
  * goes first.
  */
 export function measuredRank(relevance, stat) {
-  return (Number(relevance) || 0) + 0.5 > 0
-    ? ((Number(relevance) || 0) + 0.5) * reliabilityOf(stat) * latencyFactorOf(stat)
-    : 0
+  // scoreAgainst only ever ADDS, so relevance is always >= 0 and the guard this
+  // replaced ("relevance + 0.5 > 0 ? … : 0") could never take its false branch.
+  // The +0.5 floor is what keeps a zero-relevance capability orderable by its
+  // record instead of collapsing every such tool to a tied zero.
+  return ((Number(relevance) || 0) + 0.5) * reliabilityOf(stat) * latencyFactorOf(stat)
 }
 
 /**
