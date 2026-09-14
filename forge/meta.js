@@ -1394,8 +1394,84 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     return { ok: true, clearNode: true }
   }
 
-  while (segment < maxSeg) {
+  /**
+   * §29 — a segment budget is a CHECKPOINT CADENCE, not a wall. Reaching it
+   * used to stop the task dead with WAITING/CONTINUE_REQUIRED, so a human had
+   * to type "continue" to get the same work going again — the babysitting the
+   * spec forbids ("never stop because the step counter ended").
+   *
+   * A run that is still making VERIFIED progress now consumes one unit of the
+   * SAME bounded continuation budget automatically and keeps going. Nothing is
+   * widened: `maxContinuations` is unchanged, the absolute segment ceiling
+   * still applies, and a run that is stalled, erroring or aborted falls through
+   * to the honest fuse below exactly as before. Auto-continuation is only ever
+   * granted on evidence, and it is always announced.
+   */
+  // Progress is a DELTA, never a level. "3 nodes are done" is true of a run
+  // that finished them an hour ago and has achieved nothing since; only growth
+  // SINCE THE LAST GRANT proves the extra budget is buying anything.
+  let lastGrantMark = null
+  // Each grant extends by ONE more budget of the size this task class actually
+  // earned — not by the global default, which would jump straight to the
+  // absolute ceiling and spend every continuation in a single step.
+  const segBudgetStep = Math.max(1, maxSeg)
+  // An EXPLICIT budget is a decision, not a default. When a caller or the
+  // user's config pinned maxSegments, that number is the contract and
+  // auto-continuation must never quietly exceed it — the same rule agent.js
+  // already applies to maxStepsOverride. Auto-continuation only widens a
+  // budget that forge itself derived from the task class.
+  const segBudgetIsDerived = maxSegments == null && config?.agent?.maxSegments == null
+  const progressMark = () => {
+    let doneNodes = 0
+    try { for (const n of dag.nodes.values()) if (n?.status === "done" || n?.status === "completed") doneNodes++ } catch { doneNodes = 0 }
+    return { files: changedFiles.size, doneNodes }
+  }
+  // Why the last continuation was refused — reported on the fuse so a run that
+  // stops always says what stopped it, instead of a bare "waiting for resume".
+  let lastRefusal = null
+  const productiveContinuation = () => {
+    const refuse = (why) => { lastRefusal = why; return null }
+    if (!segBudgetIsDerived) return refuse("segment budget was set explicitly — honoring it")
+    if (signal?.aborted) return refuse("run was cancelled")
+    if (continuationCount >= maxContinuations) return refuse(`continuation budget spent (${continuationCount}/${maxContinuations})`)
+    if (maxSeg >= AGENT_BUDGETS.maxSegments) return refuse(`absolute segment ceiling reached (${AGENT_BUDGETS.maxSegments})`)
+    let snap = null
+    try { snap = xctl.snapshot() } catch { return refuse("execution controller unavailable") }
+    // a stalled or repeatedly-erroring run must NOT buy more budget: more of a
+    // failing strategy is waste, and the fuse is what forces a rethink
+    if ((snap?.noProgressStreak ?? 0) > 0) return refuse(`no-progress streak of ${snap.noProgressStreak} — more budget cannot fix a stalled strategy`)
+    if ((snap?.repeatErrorStreak ?? 0) > 0) return refuse(`repeating the same error ${snap.repeatErrorStreak}x — needs a different approach, not more steps`)
+    const mark = progressMark()
+    const base = lastGrantMark ?? { files: 0, doneNodes: 0 }
+    const dFiles = mark.files - base.files
+    const dNodes = mark.doneNodes - base.doneNodes
+    // nothing NEW since the last grant → this budget bought nothing; stop and
+    // let the honest fuse force a checkpoint and a rethink
+    if (dFiles <= 0 && dNodes <= 0) return refuse("no new files changed and no new nodes completed since the last budget grant")
+    lastGrantMark = mark
+    lastRefusal = null
+    return { newFiles: dFiles, newNodesDone: dNodes, totalFiles: mark.files, totalNodesDone: mark.doneNodes }
+  }
+
+  while (true) {
     if (signal?.aborted) { finalStatus = explicitFinalization(FINAL.CANCELLED); break }
+    if (segment >= maxSeg) {
+      const evidence = productiveContinuation()
+      if (!evidence) break
+      const prev = maxSeg
+      maxSeg = Math.min(maxSeg + segBudgetStep, AGENT_BUDGETS.maxSegments)
+      if (maxSeg <= prev) break
+      continuationCount++
+      ts.noteContinuation?.()
+      emit({
+        type: "SEGMENT_BUDGET_AUTO_CONTINUED",
+        taskId, runId: taskRunId, segment,
+        from: prev, to: maxSeg,
+        continuation: continuationCount, maxContinuations,
+        evidence,
+        reason: `still making verified progress since the last budget grant (+${evidence.newFiles} file(s), +${evidence.newNodesDone} node(s) done) — continuing automatically instead of waiting for a human`,
+      })
+    }
 
     segment++
     const segmentId = `seg-${segment}`
@@ -2640,6 +2716,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       checkpointId: cpId,
       continuationRequired: true,
       reason: `segment safety budget (${maxSeg}) reached — checkpointed and waiting for resume (CONTINUE_REQUIRED), not FAILED`,
+      autoContinueRefused: lastRefusal,
     })
     if (continuationCount > maxContinuations) {
       finalStatus = explicitFinalization(FINAL.FAILED)

@@ -779,5 +779,81 @@ console.log("== 25. stale skills: the flag that was written but never read ==")
   ok("markStaleSkills is what writes it", /rec\.stale = true/.test(ev))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 26. the step counter is not a wall: productive runs auto-continue ==")
+{
+  // §29: "a segment ending means CONTINUE / REPLAN / CHECKPOINT, not COMPLETED"
+  // and "never stop because the step counter ended". Reaching the derived
+  // segment budget used to stop the task dead with WAITING/CONTINUE_REQUIRED —
+  // a human had to type "continue" to get the SAME work going again.
+  const meta = await import("../meta.js")
+  const runCase = async ({ productive, maxSegments = null }) => {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-seg-"))
+    const prev = process.cwd()
+    process.chdir(work)
+    let calls = 0
+    const fake = async (args) => {
+      if (args.planOnly) return { text: "1. investigate\n2. implement\n3. test", toolRecords: [], commandChecks: [], toolLog: [] }
+      calls++
+      let recs = []
+      if (productive) {
+        const rel = `out-${calls}.txt`
+        fs.writeFileSync(path.join(process.cwd(), rel), "x")
+        recs = [{ tool: "write_file", status: "ok", files_changed: [rel] }]
+      }
+      return { text: "still working", budgetHit: true, steps: 1, status: "INCOMPLETE",
+               toolRecords: recs, commandChecks: [], toolLog: [], wrote: [] }
+    }
+    const events = []
+    const res = await meta.runMeta({
+      config: { agent: {} }, provider: { id: "mock" }, task: "keep improving the project",
+      runAgent: fake, onEvent: (e) => events.push(e),
+      ...(maxSegments == null ? {} : { maxSegments }),
+    })
+    process.chdir(prev)
+    return {
+      res,
+      auto: events.filter((e) => e.type === "SEGMENT_BUDGET_AUTO_CONTINUED"),
+      fuse: events.filter((e) => e.type === "SEGMENT_SAFETY_FUSE"),
+    }
+  }
+
+  const prod = await runCase({ productive: true })
+  ok("a productive run keeps going without a human", prod.auto.length >= 2, `auto=${prod.auto.length}`)
+  ok("each grant is announced with its evidence",
+    prod.auto.every((e) => /still making verified progress/.test(e.reason) && e.evidence))
+  ok("the grant records what was NEW, not a running total",
+    prod.auto.every((e) => "newFiles" in e.evidence && "newNodesDone" in e.evidence))
+  ok("grants are bounded by the same continuation budget",
+    prod.auto.every((e) => e.continuation <= e.maxContinuations))
+  ok("budget still ends somewhere (never unbounded)", prod.fuse.length === 1)
+  ok("and the stop is still WAITING, never COMPLETED", prod.res?.status === "WAITING", String(prod.res?.status))
+
+  const stalled = await runCase({ productive: false })
+  ok("a stalled run stops far sooner than a productive one",
+    stalled.auto.length < prod.auto.length, `stalled=${stalled.auto.length} productive=${prod.auto.length}`)
+  ok("and the fuse says exactly why it would not continue",
+    /no new files changed and no new nodes completed/.test(String(stalled.fuse[0]?.autoContinueRefused)),
+    String(stalled.fuse[0]?.autoContinueRefused))
+
+  // an EXPLICIT budget is a decision, not a default
+  const pinned = await runCase({ productive: true, maxSegments: 3 })
+  eq("an explicitly pinned budget is never exceeded", pinned.auto.length, 0)
+  ok("and the refusal says the budget was explicit",
+    /set explicitly/.test(String(pinned.fuse[0]?.autoContinueRefused)), String(pinned.fuse[0]?.autoContinueRefused))
+  ok("pinned runs still stop at WAITING, not FAILED", pinned.res?.status === "WAITING", String(pinned.res?.status))
+}
+
+console.log("== 27. every stop explains itself ==")
+{
+  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  ok("the fuse carries the auto-continue refusal reason", /autoContinueRefused: lastRefusal/.test(src))
+  ok("a stalled strategy cannot buy more budget", /more budget cannot fix a stalled strategy/.test(src))
+  ok("a repeating error cannot buy more budget", /needs a different approach, not more steps/.test(src))
+  ok("progress is measured as a DELTA, never a level", /lastGrantMark/.test(src) && /since the last budget grant/.test(src))
+  ok("the increment is the earned class budget, not the global default", /maxSeg \+ segBudgetStep/.test(src))
+  ok("an absolute ceiling still applies", /AGENT_BUDGETS\.maxSegments\)/.test(src))
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
