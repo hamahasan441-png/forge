@@ -160,7 +160,11 @@ console.log("== a hung server times out; a bad command errors ==")
 
 console.log("== serverForFile resolves by extension ==")
 {
-  const cfg = { lsp: { servers: {
+  // autostart:false pins the first-party auto-start table OFF so this exercises
+  // the pure user-config resolution layer deterministically — otherwise a
+  // machine that happens to have rust-analyzer/pyright on PATH would resolve
+  // .rs/.py via autostart and this hermetic unit test would flap.
+  const cfg = { lsp: { autostart: false, servers: {
     ts: { command: "tsserver", extensions: [".ts", ".tsx"] },
     py: { command: "pylsp", extensions: [".py"], disabled: true },
   } } }
@@ -183,7 +187,9 @@ console.log("== createLspSession: read-only plugin-shaped tools ==")
 {
   const file = path.join(DIR, "sess.ts")
   fs.writeFileSync(file, "function greet() {}\nconst y = greet\n")
-  const cfg = { lsp: { servers: { ts: { command: process.execPath, args: [stubPath, "normal"], extensions: [".ts"] } } } }
+  // autostart:false so the ".rs has no server" assertion below is deterministic
+  // regardless of whether rust-analyzer is installed on the test machine.
+  const cfg = { lsp: { autostart: false, servers: { ts: { command: process.execPath, args: [stubPath, "normal"], extensions: [".ts"] } } } }
   const sess = createLspSession(cfg, { cwd: DIR })
   const names = sess.tools.map((t) => t.name)
   ok("exposes the four LSP tools", ["lsp_definition", "lsp_references", "lsp_hover", "lsp_diagnostics"].every((n) => names.includes(n)))

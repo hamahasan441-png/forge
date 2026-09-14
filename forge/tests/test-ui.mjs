@@ -805,7 +805,15 @@ sys.stdout.buffer.write(out)
   ok("pty: recovery screen after crash", r4.text.includes("FORGE RECOVERY") && r4.text.includes("INTERRUPTED") && r4.text.includes("[R] Resume"))
   ok("pty: [V] verifies without running anything", r4.text.includes("nothing to verify (no files touched)"))
   ok("pty: [C] keeps as-is and says how to undo later", r4.text.includes("left as-is") && r4.text.includes("/undo --run RUN-"))
-  ok("pty: nothing was replayed automatically", !r4.text.includes("SUB-AGENT REPORT") && (r4.text.match(/USE_DELEGATE_SLOW/g) || []).length <= 3)
+  // Anti-replay evidence: a genuine auto-replay would re-run the agent loop and
+  // thus DISPATCH the delegate again — printing the sub-agent's report and a
+  // delegate tool-execution row. Absence of both is the real proof that nothing
+  // ran. (The prior brittle `USE_DELEGATE_SLOW count <= 3` proxy miscounted the
+  // test's OWN accumulated history: /tasks legitimately lists every earlier run
+  // that shares this goal string — here the scenario-3 Ctrl+C run AND the
+  // scenario-4 crashed run — so the goal appears in two recovery-screen mentions
+  // plus two /tasks rows with no replay at all.)
+  ok("pty: nothing was replayed automatically", !r4.text.includes("SUB-AGENT REPORT") && !/[✓✗]\s*delegate/.test(r4.text))
 
   // 5. file-changing run → /diff, /checkpoints, /undo --run restores files
   fs.writeFileSync(path.join(work, "patch-base.txt"), "first\nold line\nthird\n")

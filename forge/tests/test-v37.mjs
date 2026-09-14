@@ -113,7 +113,10 @@ console.log("== generated + lsp + binaryOnPath ==")
   ok("node is present", binaryOnPath("node") === true)
   const lsp = lspAvailability({ lsp: { servers: { "rust-analyzer": { command: "definitely-not-a-forge-bin-xyz" } } } })
   eq("lsp unavailable", lsp[0].available, false)
-  eq("empty lsp", lspAvailability({}).length, 0)
+  // autostart:false isolates configured-server availability from the first-party
+  // auto-start table (which legitimately lists rust-analyzer/pyright/etc. when
+  // those binaries are on PATH) so this stays hermetic on any machine.
+  eq("empty lsp", lspAvailability({ lsp: { autostart: false } }).length, 0)
 }
 
 console.log("== formatLangEngine MICRO skip ==")

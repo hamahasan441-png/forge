@@ -33,7 +33,7 @@ import {
   ADAPTERS, detectLanguage, extractSymbols, extractImports, extractExports,
   extractCalls, extractTypes, discoverToolchain,
 } from "./lang.js"
-import { binaryOnPath, lspAvailability } from "./langengine.js"
+import { binaryOnPath } from "./langengine.js"
 import { semanticsFor } from "./langreason.js"
 import { serverForFile, connectServer, pathToUri, languageIdForFile } from "./lsp.js"
 
@@ -185,9 +185,15 @@ export function parseLayered(file, src = "", { config = null } = {}) {
   // layer 3 could never report available even with servers configured.
   // v94 todowise: the first-party auto-start table counts too, so layer 3 is
   // the default structured path on machines with a real language server.
-  const lspServers = lspAvailability(config ?? {})
-  const lspReady = Array.isArray(lspServers) && lspServers.some((s) => s.available)
-  layers.push({ layer: 3, name: "lsp", available: lspReady, why: lspReady ? `servers: ${lspServers.filter((s) => s.available).map((s) => s.name).join(", ")}` : "no LSP server configured and no auto-start server binary on PATH" })
+  // v99 fix: availability is a PER-FILE fact — resolve the server that serves
+  // THIS file (serverForFile: user config first, then the autostart table for
+  // this extension). The old `lspAvailability(config).some(available)` read a
+  // GLOBAL roster, so a .js file falsely reported LSP-available merely because
+  // an unrelated server (e.g. rust-analyzer, pyright) was installed on PATH —
+  // a false capability claim for a language nothing on the box actually serves.
+  const lspServing = (() => { try { return serverForFile(config ?? {}, file) } catch { return null } })()
+  const lspReady = Boolean(lspServing)
+  layers.push({ layer: 3, name: "lsp", available: lspReady, why: lspReady ? `server: ${lspServing.name}` : "no LSP server configured and no auto-start server binary on PATH for this file type" })
   // 4. compiler / type checker
   const adapter = adapterFor(file, src)
   layers.push({ layer: 4, name: "compiler", available: Boolean(adapter.capabilities.compiler), detail: adapter.capabilities.compiler ?? null })
