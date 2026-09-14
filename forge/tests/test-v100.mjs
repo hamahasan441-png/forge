@@ -609,5 +609,78 @@ sys.stdout.buffer.write(out)
   }
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 21. measured selection: proven tools outrank unproven ones ==")
+{
+  const { reliabilityOf, latencyFactorOf, measuredRank, selectCapabilities, isExternal,
+          unhealthyServers, HEALTH_MIN_SAMPLES, HEALTH_FAIL_RATE } = await import("../capfabric.js")
+
+  // damping: thin evidence must never blacklist
+  eq("no history → unproven, not bad (0.5)", reliabilityOf(null), 0.5)
+  ok("one failure does not zero a tool", reliabilityOf({ samples: 1, ok: 0 }) > 0.3)
+  ok("a proven tool outranks an unproven one", reliabilityOf({ samples: 20, ok: 20 }) > reliabilityOf(null))
+  ok("a persistently failing tool ranks below unproven", reliabilityOf({ samples: 20, ok: 1 }) < reliabilityOf(null))
+  eq("no samples → no latency penalty", latencyFactorOf({ samples: 0 }), 1)
+  ok("a slow tool is demoted, never erased", latencyFactorOf({ samples: 2, ms: 40000 }) > 0 && latencyFactorOf({ samples: 2, ms: 40000 }) < 0.6)
+  ok("a fast tool keeps almost all of its score", latencyFactorOf({ samples: 10, ms: 1000 }) > 0.9)
+  ok("relevance still dominates rank",
+    measuredRank(10, { samples: 20, ok: 1 }) > measuredRank(0, { samples: 20, ok: 20 }))
+
+  const mk = (server, tool, desc) => ({
+    name: `mcp__${server}__${tool}`, source: `mcp:${server}`,
+    def: { type: "function", function: { name: `mcp__${server}__${tool}`, description: desc } },
+  })
+  // two equally relevant tools; only history separates them
+  const a = mk("alpha", "run_query", "execute a SQL query")
+  const b = mk("beta", "run_query", "execute a SQL query")
+  const filler = []
+  for (let i = 0; i < 30; i++) filler.push(mk("bulk", `filler_${i}`, "unrelated"))
+  const stats = {
+    "mcp__alpha__run_query": { samples: 20, ok: 19, failed: 1, ms: 2000 },
+    "mcp__beta__run_query": { samples: 20, ok: 2, failed: 18, ms: 60000 },
+  }
+  const sel = selectCapabilities({
+    task: "execute a SQL query", plugins: [a, b, ...filler], nativeNames: [], maxExternal: 1, stats, breaker: false,
+  })
+  eq("the tool with the better record wins the slot",
+    sel.kept.filter(isExternal).map((p) => p.name), ["mcp__alpha__run_query"])
+
+  // without history the order falls back to relevance + config order
+  const noHist = selectCapabilities({ task: "execute a SQL query", plugins: [b, a, ...filler], nativeNames: [], maxExternal: 1 })
+  eq("no history → first equally-relevant tool in config order", noHist.kept.filter(isExternal).map((p) => p.name), ["mcp__beta__run_query"])
+}
+
+console.log("== 22. circuit breaker: a persistently failing server is withheld ==")
+{
+  const { selectCapabilities, isExternal, unhealthyServers, HEALTH_MIN_SAMPLES } = await import("../capfabric.js")
+  const mk = (server, tool) => ({ name: `mcp__${server}__${tool}`, source: `mcp:${server}`, def: { type: "function", function: { name: `mcp__${server}__${tool}`, description: "" } } })
+
+  eq("no stats → no server is unhealthy", unhealthyServers({}).size, 0)
+  eq("thin evidence never trips the breaker",
+    unhealthyServers({ "mcp__flaky__go": { samples: HEALTH_MIN_SAMPLES - 1, failed: HEALTH_MIN_SAMPLES - 1 } }).size, 0)
+  ok("sustained failure trips it",
+    unhealthyServers({ "mcp__dead__go": { samples: 20, failed: 20 } }).has("dead"))
+  ok("an occasionally-failing server is NOT tripped",
+    !unhealthyServers({ "mcp__ok__go": { samples: 20, failed: 4 } }).has("ok"))
+
+  const stats = { "mcp__dead__go": { samples: 20, ok: 0, failed: 20 }, "mcp__live__go": { samples: 20, ok: 20, failed: 0 } }
+  const sel = selectCapabilities({ task: "anything", plugins: [mk("dead", "go"), mk("live", "go")], nativeNames: [], stats })
+  eq("the failing server's tools are withheld", sel.kept.filter(isExternal).map((p) => p.name), ["mcp__live__go"])
+  ok("the reason names the server and the evidence", /server "dead" is failing \(20\/20 calls\) — circuit open/.test(sel.dropped[0].reason), sel.dropped[0].reason)
+  eq("the breaker can be turned off",
+    selectCapabilities({ task: "x", plugins: [mk("dead", "go")], nativeNames: [], stats, breaker: false }).dropped.length, 0)
+  eq("no stats → breaker cannot fire",
+    selectCapabilities({ task: "x", plugins: [mk("dead", "go")], nativeNames: [] }).dropped.length, 0)
+}
+
+console.log("== 23. the agent reads its own recorded history ==")
+{
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("agent.js loads the project's tool stats", /loadToolStats/.test(src))
+  ok("and hands them to the fabric", /stats: \(\(\) => \{ try \{ return loadToolStats/.test(src))
+  ok("the breaker is on by default, and configurable", /breaker: config\.mcp\?\.breaker !== false/.test(src))
+  ok("a stats read can never break the agent", /catch \{ return null \} \}\)\(\)/.test(src))
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

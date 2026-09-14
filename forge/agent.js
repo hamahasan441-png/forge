@@ -33,7 +33,7 @@ import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
 import { selectCapabilities, formatSelection } from "./capfabric.js"
 import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
-import { createToolIntel, recordToolRun } from "./toolintel.js"
+import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
@@ -370,6 +370,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           nativeNames: [...BUILTIN_TOOL_NAMES],
           maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
           dedupe: config.mcp?.dedupe !== false,
+          // measured selection: this project's OWN recorded tool history ranks
+          // the survivors, and opens the circuit on a server that keeps failing.
+          stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch { return null } })(),
+          breaker: config.mcp?.breaker !== false,
         })
         plugins = [...plugins, ...sel.kept]
         mcpClients = mcp.clients
