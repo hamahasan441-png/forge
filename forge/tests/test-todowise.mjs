@@ -160,7 +160,21 @@ console.log("== 2. process-group kill: evidence-based member walk (runtime.js) =
   ok("group-signal refused → pid-walk delivered to every member", r.sent === true && r.method.startsWith("pid-walk(") && r.delivered === walk.members.length, JSON.stringify(r).slice(0, 160))
   ok("the walk used the REAL process table (no injected ps)", r.method.includes("/proc") || r.method.includes("ps"))
   await sleep(400)
-  const survivors = walk.members.filter((p) => { try { process.kill(p, 0); return true } catch { return false } })
+  // A SIGKILL'd member is dead the instant it is signaled, but on a system
+  // whose PID 1 does not reap orphans (many containers), a member whose parent
+  // we also just killed lingers as a ZOMBIE — genuinely dead, only unreaped.
+  // `process.kill(pid, 0)` still succeeds for a zombie, so it is not a valid
+  // liveness oracle here. Real evidence: a member is a survivor only if it
+  // still exists AND is not in Z (zombie) / X (dead) state per /proc.
+  const trulyAlive = (p) => {
+    try { process.kill(p, 0) } catch { return false } // fully gone/reaped
+    try {
+      const stat = fs.readFileSync(`/proc/${p}/stat`, "utf8")
+      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]
+      return state !== "Z" && state !== "X" && state !== "x"
+    } catch { return false } // /proc entry gone → dead
+  }
+  const survivors = walk.members.filter(trulyAlive)
   ok("every group member is actually dead (real evidence, not a claim)", survivors.length === 0, `survivors: ${survivors.join(",")}`)
 
   // (e) the process manager kill path: injected signalFn exercises the same

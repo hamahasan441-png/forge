@@ -32,7 +32,14 @@ const DEFAULT_TIMEOUT_MS = 15000
 const MAX_TIMEOUT_MS = 60000
 const STARTUP_TIMEOUT_MS = 10000
 const TICK_MS = 20
-const QUIET_MS = 250 // how long "| " must be stable to declare "incomplete"
+const QUIET_MS = 250 // how long the continuation prompt must be stable to declare "incomplete"
+// Node's non-TTY REPL emits "... " (dot-dot-dot-space) as the continuation
+// prompt while it accumulates an incomplete multiline statement — NOT "| ".
+// The "| " matcher this replaced never matched any Node version, so incomplete
+// input was misread as a timeout and the .break recovery never fired. "| " is
+// kept as a defensive fallback in case a wrapped runtime ever uses it.
+const CONT_PROMPTS = ["... ", "| "]
+const tailIsCont = (buf) => CONT_PROMPTS.some((p) => buf.endsWith(p))
 const MAX_OUTPUT_BYTES = 65536
 const MAX_SESSIONS = 2
 
@@ -213,7 +220,7 @@ export function createReplManager({
       // has been quiet for QUIET_MS, or the budget/death runs out
       await waitFor(
         s,
-        (x) => tailIs(x, "> ") || (tailIs(x, "| ") && Date.now() - (x.lastLenAt ?? Date.now()) >= QUIET_MS),
+        (x) => tailIs(x, "> ") || (tailIsCont(x.buf) && Date.now() - (x.lastLenAt ?? Date.now()) >= QUIET_MS),
         budget,
       )
       // distinguish: ready ("> "), incomplete ("| "), dead, timeout
@@ -230,7 +237,7 @@ export function createReplManager({
         return { ok: true, output: capped.text, truncated: capped.truncated, session: sessionView(s), ...(restarted ? { note: "session started fresh for this call" } : {}) }
       }
 
-      if (tailIs(s, "| ")) {
+      if (tailIsCont(s.buf)) {
         // incomplete multiline input — reset the REPL with its own .break command
         try { s.child.stdin.write(".break\n") } catch {}
         await waitFor(s, (x) => tailIs(x, "> "), 2000)

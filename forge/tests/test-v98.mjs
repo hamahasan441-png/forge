@@ -137,7 +137,10 @@ process.stdin.on("data", (chunk) => {
   }
 })
 `)
-  const config = { lsp: { servers: { fakelsp: { command: process.execPath, args: [SERVER], extensions: [".js"], languageId: "javascript" } } } }
+  // autostart:false pins the auto-start table off so "plain.py → not a candidate"
+  // holds even on a machine with pyright/pylsp installed (otherwise .py would
+  // resolve via autostart and this hermetic test would flap).
+  const config = { lsp: { autostart: false, servers: { fakelsp: { command: process.execPath, args: [SERVER], extensions: [".js"], languageId: "javascript" } } } }
   const { enrichmentCandidates, enrichRecords, enrichIndex } = await import("../langstruct.js")
 
   fs.writeFileSync(path.join(WORK, "app.js"), "export function structFn() {}\nexport class StructClass {}\n")
