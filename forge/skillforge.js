@@ -121,6 +121,11 @@ export function pickSkills(task, skills = [], opts = {}) {
     lifecycle: (s.name && life[s.name]?.lifecycle)
       || s.lifecycle
       || (s.learned ? SKILL_LIFE.CANDIDATE : SKILL_LIFE.ACTIVE),
+    // v100: markStaleSkills() WROTE this flag whenever the files a skill was
+    // verified against changed, but nothing ever read it back — a stale
+    // playbook was offered exactly like a fresh one (§44: never silently use
+    // stale knowledge). Carry it through so selection can demote and label it.
+    stale: Boolean(s.name && life[s.name]?.stale === true),
   }))
   const scored = evaluateSkills(task, tagged.map((s) => ({
     ...s,

@@ -682,5 +682,102 @@ console.log("== 23. the agent reads its own recorded history ==")
   ok("a stats read can never break the agent", /catch \{ return null \} \}\)\(\)/.test(src))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 24. unified capability index: all four registries, one scale ==")
+{
+  const { buildCapabilityIndex, rankCapabilities, indexSummary, formatCapabilityIndex,
+          lifecyclePrior, CAP_SOURCE, EVIDENCE } = await import("../capindex.js")
+  const { TOOL_DEFS } = await import("../tools.js")
+
+  // lifecycle priors: earned state IS evidence, and unknown is neutral
+  ok("VERIFIED outranks ACTIVE", lifecyclePrior("VERIFIED") > lifecyclePrior("ACTIVE"))
+  ok("ACTIVE outranks CANDIDATE", lifecyclePrior("ACTIVE") > lifecyclePrior("CANDIDATE"))
+  eq("an unknown lifecycle is neutral, not bad", lifecyclePrior(undefined), 0.5)
+  ok("DEPRECATED ranks below unproven", lifecyclePrior("DEPRECATED") < 0.5)
+  ok("STALE demotes even a VERIFIED skill", lifecyclePrior("VERIFIED", { stale: true }) <= 0.2)
+  ok("STALE never reaches zero (a stale playbook can still be right)", lifecyclePrior("VERIFIED", { stale: true }) > 0)
+
+  const idx = buildCapabilityIndex({
+    nativeDefs: TOOL_DEFS,
+    skills: [
+      { name: "systematic-debugging", desc: "root cause analysis", lifecycle: "VERIFIED" },
+      { name: "old-pack", desc: "root cause analysis", lifecycle: "ACTIVE", stale: true },
+    ],
+    mcpPlugins: [{ name: "mcp__pg__run_query", readOnly: false, def: { function: { description: "execute a SQL query" } } }],
+    createdTools: [{ name: "csvfmt", description: "format csv", lifecycle: "ACTIVE" }],
+    stats: { "mcp__pg__run_query": { samples: 12, ok: 11, failed: 1, ms: 6000 } },
+  })
+
+  const sum = indexSummary(idx)
+  eq("every source is represented", Object.keys(sum.bySource).sort(), ["created", "mcp", "native", "skill"])
+  eq("native tools are all indexed", sum.bySource.native, TOOL_DEFS.length)
+  eq("counted evidence is reported separately from inferred", [sum.proven, sum.inferred], [1, 3])
+
+  const mcpEntry = idx.find((e) => e.name === "mcp__pg__run_query")
+  eq("a tool with runs carries COUNTED evidence", mcpEntry.evidence, EVIDENCE.COUNTED)
+  eq("and its real sample count", mcpEntry.samples, 12)
+  ok("its reliability reflects the record", mcpEntry.reliability > 0.8)
+
+  const skillEntry = idx.find((e) => e.name === "systematic-debugging")
+  eq("a skill carries LIFECYCLE evidence, never counted", skillEntry.evidence, EVIDENCE.LIFECYCLE)
+  eq("a skill is read-only (loading a playbook mutates nothing)", skillEntry.readOnly, true)
+  eq("a never-run native tool is honestly unproven", idx.find((e) => e.name === "bash").evidence, EVIDENCE.NONE)
+
+  const staleEntry = idx.find((e) => e.name === "old-pack")
+  eq("a stale skill is flagged in the index", staleEntry.stale, true)
+  ok("and ranks below its fresh twin", staleEntry.reliability < skillEntry.reliability)
+
+  // one scale: a proven MCP tool, a verified skill and unproven natives compete
+  const ranked = rankCapabilities(idx, "debug the failing SQL query", { limit: 5 })
+  ok("ranking returns entries from more than one source",
+    new Set(ranked.map((r) => r.source)).size > 1, JSON.stringify(ranked.map((r) => r.source)))
+  eq("the proven, most relevant capability leads", ranked[0].name, "mcp__pg__run_query")
+  ok("every ranked entry carries its evidence kind", ranked.every((r) => r.evidence))
+  ok("irrelevant capabilities are dropped by default", ranked.every((r) => r.relevance > 0))
+  ok("keepIrrelevant returns the full inventory",
+    rankCapabilities(idx, "zzzz", { keepIrrelevant: true }).length === idx.length)
+  eq("sources can be filtered",
+    new Set(rankCapabilities(idx, "root cause analysis", { sources: [CAP_SOURCE.SKILL] }).map((r) => r.source)).size, 1)
+
+  // relevance still dominates across sources
+  const irrelevantButProven = rankCapabilities(idx, "format csv", { limit: 1 })
+  eq("a relevant created tool beats a proven-but-unrelated one", irrelevantButProven[0].name, "csvfmt")
+
+  ok("the report names counts and evidence", /CAPABILITY INDEX — 33 total \(1 with recorded runs, 3 by lifecycle\)/.test(formatCapabilityIndex(idx)))
+  ok("a stale entry is labeled in the report", /old-pack.*STALE/.test(formatCapabilityIndex(idx)))
+  eq("an empty index is honest", formatCapabilityIndex([]), "no capabilities indexed")
+
+  // partial inputs must not throw
+  ok("a caller that knows only one source still gets an index",
+    buildCapabilityIndex({ skills: [{ name: "x", desc: "y" }] }).length === 1)
+  eq("no inputs → empty index, no throw", buildCapabilityIndex().length, 0)
+}
+
+console.log("== 25. stale skills: the flag that was written but never read ==")
+{
+  const { evaluateSkills, formatSkillPicks } = await import("../evaluate.js")
+  const fresh = { name: "sql-debugging", desc: "debug sql queries", lifecycle: "ACTIVE" }
+  const stale = { name: "sql-tuning", desc: "debug sql queries fast", lifecycle: "ACTIVE", stale: true }
+
+  const picks = evaluateSkills("debug sql queries", [stale, fresh], { klass: "MEDIUM" })
+  eq("the stale skill is still OFFERED, not hidden", picks.length, 2)
+  eq("but it ranks below the fresh match", picks[0].name, "sql-debugging")
+  ok("the stale one is demoted", picks.find((p) => p.name === "sql-tuning").score < picks[0].score)
+  ok("the flag survives into the pick", picks.find((p) => p.name === "sql-tuning").stale === true)
+  ok("the model is told it is stale, never that it is current",
+    /STALE — verified before related files changed/.test(formatSkillPicks(picks)))
+  ok("a fresh skill gets no stale label", !/sql-debugging.*STALE/.test(formatSkillPicks(picks)))
+
+  // the relevance GATE must use the raw score: demoting must never silently drop
+  const onlyStale = evaluateSkills("debug sql queries", [stale], { klass: "MEDIUM" })
+  eq("a stale skill alone is still surfaced", onlyStale.length, 1)
+
+  // the flag actually comes out of the lifecycle store
+  const sf = fs.readFileSync(new URL("../skillforge.js", import.meta.url), "utf8")
+  ok("pickSkills reads `stale` from the skill-life record", /stale: Boolean\(s\.name && life\[s\.name\]\?\.stale === true\)/.test(sf))
+  const ev = fs.readFileSync(new URL("../evolve.js", import.meta.url), "utf8")
+  ok("markStaleSkills is what writes it", /rec\.stale = true/.test(ev))
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
