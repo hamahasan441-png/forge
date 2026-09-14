@@ -472,5 +472,28 @@ console.log("== 16. runtime bring-up actually runs a real program (regression) =
   process.chdir(prevCwd)
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 17. every command path reaches the fabric ==")
+{
+  // The fabric sits inside runAgent, so any path that executes through runAgent
+  // inherits it. This pins the delegation chain so a future refactor that
+  // bypasses runAgent (and therefore the fabric) fails loudly here.
+  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const worknode = fs.readFileSync(new URL("../worknode.mjs", import.meta.url), "utf8")
+  const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
+
+  ok("meta segments execute through agent.js runAgent", /runAgent \?\? \(await import\("\.\/agent\.js"\)\)\.runAgent/.test(meta))
+  ok("DAG work nodes execute through runAgent", /await runAgent\(\{/.test(worknode))
+  ok("chat loads MCP on its own path", /loadMcpTools\(config\)/.test(chat))
+  ok("the fabric is inside runAgent, so every caller inherits it", /selectCapabilities\(\{/.test(agent))
+
+  // the read-only paths (verifier / delegated sub-agent) are the ones that used
+  // to be excluded entirely; they now receive DECLARED read-only tools only
+  ok("read-only runs still reach MCP", /if \(!noTools && config\.tools\?\.mcp !== false\)/.test(agent))
+  ok("and are restricted to declared read-only tools", /mcp\.tools\.filter\(\(t\) => t\.readOnly === true\)/.test(agent))
+  ok("a verifier run is read-only by construction", /readOnly: readonly \|\| verifier/.test(agent))
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
