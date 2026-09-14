@@ -129,11 +129,13 @@ async function runDownloads(kind, urls) {
   const { SKILL_LIFE } = await import("./evolve.js")
   const isSkill = kind === "skill"
   const api = {
-    download: isSkill ? mod.downloadSkills : mod.downloadTools,
+    // v100: skills route by SOURCE (local zip/folder/SKILL.md or URL), so
+    // `forge skill download ./pack.zip` works instead of "invalid URL".
+    download: isSkill ? mod.acquireSkills : mod.downloadTools,
     list: isSkill ? mod.listDownloads : mod.listToolDownloads,
     dir: isSkill ? mod.skillDownloadsDir : mod.toolDownloadsDir,
     header: isSkill ? "skill downloads" : "tool downloads",
-    hint: `forge ${kind} download <https-url>`,
+    hint: isSkill ? `forge skill download <https-url | local zip/folder/SKILL.md>` : `forge ${kind} download <https-url>`,
     note: isSkill ? "DOWNLOAD ≠ VERIFY. Candidates are not trusted." : "DOWNLOAD ≠ VERIFY. Candidates are not live tools.",
   }
   const list = (urls || []).map((u) => String(u || "").trim()).filter(Boolean)
@@ -1151,9 +1153,9 @@ async function main() {
       }
       if (sub === "ingest") {
         const src = positional[2]
-        if (!src) { err("usage: forge skill ingest <zip|folder|SKILL.md>"); process.exit(1); return }
-        const { ingestLocal, formatDownloadReport } = await import("./skilldl.js")
-        const r = ingestLocal(src)
+        if (!src) { err("usage: forge skill ingest <zip|folder|SKILL.md | https-url>"); process.exit(1); return }
+        const { acquireSkills, formatDownloadReport } = await import("./skilldl.js")
+        const [r] = await acquireSkills([src])
         if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
         if (!r.ok) { err(r.error); process.exit(1); return }
         console.log(formatDownloadReport(r))
@@ -1202,7 +1204,7 @@ async function main() {
         ok(`variant ${r.name}  ${r.strategy} v${r.version}  ${r.lifecycle}${r.reused ? " (reused)" : ""}`)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder> | forge skill evidence <name> | forge skill benchmark <name> | forge skill variant <name> <strategy> | forge skill autopromote <name> | forge skill caps <name>`)
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url | local zip/folder/SKILL.md> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder|SKILL.md|url> | forge skill evidence <name> | forge skill benchmark <name> | forge skill variant <name> <strategy> | forge skill autopromote <name> | forge skill caps <name>`)
       process.exit(1)
       return
     }

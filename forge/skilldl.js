@@ -35,6 +35,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { fileURLToPath } from "node:url"
 import crypto from "node:crypto"
 import { resolveDataDir } from "./config.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
@@ -757,6 +758,57 @@ export function ingestLocal(src, { env = process.env, now = Date.now } = {}) {
   }
 }
 
+/**
+ * Where does a skill actually come from? Decided from the SOURCE itself, not
+ * from which command the user happened to type.
+ *
+ * Until now `download` accepted only URLs and `ingest` only local paths, so
+ * handing a local .zip to `download` failed with a bare "invalid URL" — the
+ * zip support was all there (the remote path already unpacks archives, and
+ * ingestLocal already reads zip/folder/SKILL.md), the user just had to guess
+ * the right verb. Nothing about a zip makes it un-downloadable; the two verbs
+ * were an accident of how the code grew.
+ */
+export function classifySkillSource(src) {
+  const s = String(src ?? "").trim()
+  if (!s) return { kind: "unknown", error: "missing source" }
+  // file:// is a local path spelled as a URL
+  if (/^file:\/\//i.test(s)) {
+    try { return { kind: "local", path: fileURLToPath(s) } } catch { return { kind: "unknown", error: "invalid file:// URL" } }
+  }
+  // anything with a scheme is remote and goes through the SSRF-guarded path
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return { kind: "url", url: s }
+  // anything that exists on disk is local, whatever it is named
+  try { if (fs.existsSync(path.resolve(s))) return { kind: "local", path: s } } catch { /* unreadable → not local */ }
+  // a bare host ("example.com/skills/x.md") is a URL with the scheme omitted;
+  // https is assumed because validateDownloadUrl refuses anything else anyway
+  if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(s)) return { kind: "url", url: `https://${s.replace(/^\/+/, "")}` }
+  // Path-SHAPED but absent: say so plainly. "not a URL" would be a confusing
+  // way to tell someone their zip is missing or the path is mistyped.
+  if (/^[~.]{0,2}\//.test(s) || /\.(zip|md|tar|tgz|gz)$/i.test(s)) {
+    return { kind: "unknown", error: `not found: ${path.resolve(s)}` }
+  }
+  return { kind: "unknown", error: `not a file on disk and not a URL: "${s.slice(0, 120)}"` }
+}
+
+/**
+ * Acquire skills from ANY mix of local paths and URLs. Each result keeps the
+ * same { ok, record } shape both paths already produced, so formatDownloadReport
+ * renders either, plus `via` saying which route was taken — the routing is
+ * automatic but never hidden.
+ */
+export async function acquireSkills(sources, opts = {}) {
+  const list = (Array.isArray(sources) ? sources : [sources]).map((x) => String(x || "").trim()).filter(Boolean)
+  const out = []
+  for (const src of list) {
+    const c = classifySkillSource(src)
+    if (c.kind === "local") out.push({ ...ingestLocal(c.path, opts), source: src, via: "ingest" })
+    else if (c.kind === "url") out.push({ ...(await downloadSkill(c.url, opts)), source: src, via: "download" })
+    else out.push({ ok: false, error: c.error, source: src, via: "none" })
+  }
+  return out
+}
+
 export async function downloadSkills(urls, opts = {}) {
   const list = (Array.isArray(urls) ? urls : [urls]).map((u) => String(u || "").trim()).filter(Boolean)
   const results = []
@@ -788,6 +840,12 @@ export function formatDownloadReport(result) {
     rec.lifecycle || SKILL_LIFE.CANDIDATE,
     "",
     "Not trusted. DOWNLOAD ≠ VERIFY.",
+    "",
+    // The safety model is deliberate — downloaded content never becomes live
+    // on its own — but the report used to END here, leaving the user at a dead
+    // end with no idea what the next command was. Naming it costs nothing and
+    // bypasses nothing.
+    `Next:  forge skill verify ${name}   (pass → VERIFIED, then it can be promoted)`,
   ].join("\n") + "\n"
 }
 

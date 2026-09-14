@@ -971,5 +971,67 @@ console.log("== 30. stale skills: the whole chain, on a real lifecycle store =="
   process.chdir(prev)
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 31. a skill zip is accepted wherever a skill is given ==")
+{
+  // The zip support was all there — the remote path already unpacked archives
+  // and ingestLocal already read zip/folder/SKILL.md — but `download` took only
+  // URLs and `ingest` only local paths, so handing a local .zip to `download`
+  // failed with a bare "invalid URL". The SOURCE now decides the route.
+  const dl = await import("../skilldl.js")
+  const zi = await import("../zipingest.js")
+  const { classifySkillSource, acquireSkills } = dl
+
+  eq("a URL is remote", classifySkillSource("https://x.com/a.md").kind, "url")
+  eq("a bare host is a URL with the scheme omitted", classifySkillSource("example.com/s.md").url, "https://example.com/s.md")
+  eq("an empty source is honest", classifySkillSource("").error, "missing source")
+  ok("a path-shaped but ABSENT source says NOT FOUND, not 'not a URL'",
+    /^not found: /.test(classifySkillSource("/nope/missing.zip").error), classifySkillSource("/nope/missing.zip").error)
+  ok("a bare nonsense token is neither", /not a file on disk and not a URL/.test(classifySkillSource("???").error))
+
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-zip-"))
+  const zpath = path.join(work, "pack.zip")
+  fs.writeFileSync(zpath, zi.makeStoreZip({
+    "demo/SKILL.md": "---\nname: zip-demo\ndescription: a demo skill delivered as a zip\n---\n# Demo\nDo the thing.\n",
+    "demo/scripts/run.sh": "#!/bin/sh\necho hi\n",
+  }))
+  eq("an existing zip classifies as local", classifySkillSource(zpath).kind, "local")
+  eq("file:// is a local path spelled as a URL", classifySkillSource(`file://${zpath}`).kind, "local")
+
+  const prevHome = process.env.FORGE_HOME
+  process.env.FORGE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-ziphome-"))
+  const [r] = await acquireSkills([zpath])
+  ok("a LOCAL zip is accepted (this is the reported bug)", r.ok === true, JSON.stringify(r).slice(0, 200))
+  eq("and was routed to ingest, not download", r.via, "ingest")
+  eq("the skill name comes out of the zip", r.record?.skillName, "zip-demo")
+  ok("support files inside the zip are unpacked", (r.record?.unpacked ?? []).includes("scripts/run.sh"), JSON.stringify(r.record?.unpacked))
+
+  const [r2] = await acquireSkills(["/nope/missing.zip"])
+  ok("a missing zip fails with a clear reason", r2.ok === false && /not found/.test(r2.error), r2.error)
+  eq("and is attributed to no route", r2.via, "none")
+
+  const [r3] = await acquireSkills([`file://${zpath}`])
+  ok("a file:// zip is accepted too", r3.ok === true, JSON.stringify(r3).slice(0, 160))
+
+  ok("an empty list is not an error", (await acquireSkills([])).length === 0)
+  ok("the report names the NEXT command instead of dead-ending",
+    /Next:\s+forge skill verify /.test(dl.formatDownloadReport(r)), dl.formatDownloadReport(r).slice(-160))
+  ok("and still says downloads are untrusted", /DOWNLOAD ≠ VERIFY/.test(dl.formatDownloadReport(r)))
+  process.env.FORGE_HOME = prevHome
+}
+
+console.log("== 32. both verbs route by source, in chat and the CLI ==")
+{
+  const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
+  const cli = fs.readFileSync(new URL("../forge.js", import.meta.url), "utf8")
+  ok("/skill download accepts a local path", /acquireSkills: downloadSkills/.test(chat))
+  ok("/skill ingest accepts a URL", /const \[r\] = await acquireSkills\(\[src\]\)/.test(chat))
+  ok("the CLI skill download routes by source", /download: isSkill \? mod\.acquireSkills/.test(cli))
+  ok("the CLI skill ingest routes by source", /const \[r\] = await acquireSkills\(\[src\]\)/.test(cli))
+  ok("tool downloads are UNCHANGED (still URL-only)", /mod\.downloadTools/.test(cli))
+  ok("usage text tells the truth about what is accepted",
+    /local zip\/folder\/SKILL\.md/.test(chat) && /local zip\/folder\/SKILL\.md/.test(cli))
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
