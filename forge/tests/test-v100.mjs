@@ -38,7 +38,17 @@ console.log("== 1. normalizeAnnotations — bounded, never widening ==")
   eq("non-boolean hint dropped", normalizeAnnotations({ readOnlyHint: "yes" }), null)
   eq("unknown key dropped", normalizeAnnotations({ nonsense: true, readOnlyHint: true }), { readOnlyHint: true })
   ok("title is bounded to 120 chars", normalizeAnnotations({ title: "x".repeat(400) }).title.length === 120)
-  ok("never throws on a hostile object", (() => { try { normalizeAnnotations({ get title() { throw new Error("x") } }); return false } catch { return true } })() === true || true)
+  // This assertion previously ended in `|| true`, which made it impossible to
+  // fail — and it was hiding a real one: reading a throwing getter propagated
+  // out of normalizeAnnotations. Annotations come off the wire, so the ACCESS
+  // is the untrusted step.
+  ok("a hostile getter does not throw out of normalizeAnnotations", (() => {
+    try { normalizeAnnotations({ get title() { throw new Error("x") } }); return true } catch { return false }
+  })())
+  eq("and the unreadable field is simply absent",
+    normalizeAnnotations({ get title() { throw new Error("x") }, readOnlyHint: true }), { readOnlyHint: true })
+  ok("a throwing hint falls back to the SAFE default (mutating)",
+    readOnlyHinted({ annotations: { get readOnlyHint() { throw new Error("x") } } }) === false)
 }
 
 console.log("== 2. readOnlyHinted — explicit true only ==")
