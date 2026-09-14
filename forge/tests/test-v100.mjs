@@ -269,5 +269,80 @@ console.log("== 11. crew: read-only MCP tools reach a delegated sub-agent ==")
     mixed.filter((t) => t.readOnly === true).map((t) => t.name), ["mcp__s__peek"])
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 12. Streamable HTTP transport (the hosted-MCP ecosystem) ==")
+{
+  const http = await import("node:http")
+  const TOOLS = [
+    { name: "peek", description: "read only", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+    { name: "poke", description: "mutates", inputSchema: { type: "object", properties: {} } },
+  ]
+  // mode "json" answers application/json; mode "sse" answers text/event-stream
+  const mkServer = (mode) => new Promise((resolve) => {
+    let sawSession = null
+    const srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let m; try { m = JSON.parse(body) } catch { m = null }
+        if (req.headers["mcp-session-id"]) sawSession = req.headers["mcp-session-id"]
+        const reply = (result) => {
+          const payload = { jsonrpc: "2.0", id: m.id, result }
+          if (mode === "sse") {
+            res.writeHead(200, { "content-type": "text/event-stream", "mcp-session-id": "sess-9" })
+            res.end(`event: message\ndata: ${JSON.stringify(payload)}\n\n`)
+          } else {
+            res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "sess-9" })
+            res.end(JSON.stringify(payload))
+          }
+        }
+        if (!m || m.id === undefined) { res.writeHead(202).end(); return } // notification
+        if (m.method === "initialize") return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "remote", version: "2" } })
+        if (m.method === "tools/list") return reply({ tools: TOOLS })
+        if (m.method === "tools/call") return reply({ content: [{ type: "text", text: `called ${m.params?.name}` }] })
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "nope" } }))
+      })
+    })
+    srv.listen(0, "127.0.0.1", () => resolve({ srv, port: srv.address().port, session: () => sawSession }))
+  })
+
+  for (const mode of ["json", "sse"]) {
+    const { srv, port, session } = await mkServer(mode)
+    const url = `http://127.0.0.1:${port}/mcp`
+    // a private address requires the same explicit opt-in as any other fetch
+    const cfg = { mcp: { lazy: false, servers: { remote: { url, allowPrivate: true } } } }
+    const res = await loadMcpTools(cfg, { timeoutMs: 8000 })
+    eq(`[${mode}] both tools loaded over HTTP`, res.tools.length, 2)
+    eq(`[${mode}] namespaced like any other server`, res.tools.map((t) => t.name), ["mcp__remote__peek", "mcp__remote__poke"])
+    eq(`[${mode}] annotations work over HTTP too`, res.tools[0].readOnly, true)
+    eq(`[${mode}] unannotated stays mutating`, res.tools[1].readOnly, false)
+    const out = await res.tools[0].run({})
+    eq(`[${mode}] a tool call round-trips`, out, "called peek")
+    ok(`[${mode}] the session id is echoed back after initialize`, session() === "sess-9", String(session()))
+    for (const c of res.clients) { try { c.close() } catch {} }
+    srv.close()
+  }
+
+  // a private URL WITHOUT the opt-in must be refused, not silently allowed
+  const { srv, port } = await mkServer("json")
+  const denied = await loadMcpTools({ mcp: { lazy: false, servers: { remote: { url: `http://127.0.0.1:${port}/mcp` } } } }, { timeoutMs: 6000 })
+  eq("a private MCP url without opt-in yields no tools", denied.tools.length, 0)
+  ok("and says why", denied.errors.some((e) => /remote/.test(e)), JSON.stringify(denied.errors))
+  for (const c of denied.clients) { try { c.close() } catch {} }
+  srv.close()
+}
+
+console.log("== 13. transport is chosen by spec shape ==")
+{
+  const src = fs.readFileSync(new URL("../mcp.js", import.meta.url), "utf8")
+  ok("a url spec selects the HTTP client", /spec\?\.url\s*\n?\s*\? new McpHttpClient/.test(src))
+  ok("a command spec still selects stdio", /: new McpClient\(name,/.test(src))
+  ok("url-only servers are configurable", /\(s\.command \|\| s\.url\)/.test(src))
+  ok("the inventory cache fingerprints a url distinctly", /spec\.url \? `url/.test(src))
+  ok("HTTP goes through netguard (never a raw fetch)", /pinnedFetch\(this\.url/.test(src))
+  ok("no raw global fetch anywhere in mcp.js", !/[^.\w]fetch\(/.test(src.replace(/pinnedFetch\(/g, "PF(")))
+}
+
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

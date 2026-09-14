@@ -28,6 +28,7 @@
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
 import { spawn } from "node:child_process"
+import { pinnedFetch } from "./netguard.js"
 import pathMod from "node:path"
 import fsMod from "node:fs"
 import { resolveDataDir } from "./config.js"
@@ -200,6 +201,133 @@ class McpClient {
   }
 }
 
+/**
+ * One MCP server reached over Streamable HTTP (spec 2025-03-26) instead of
+ * stdio. Same public surface as the stdio client — name / serverInfo /
+ * capabilities / listTools() / callTool() / close() — so everything downstream
+ * (mcpToolsToPlugins, the inventory cache, the capability fabric) is unchanged.
+ *
+ * Why this exists: forge was stdio-only, which meant every HOSTED MCP server
+ * (the bulk of the ecosystem — Linear, Notion, Sentry, remote GitHub) was
+ * simply unreachable, no matter how it was configured.
+ *
+ * Every request goes through netguard.pinnedFetch, so a remote endpoint gets
+ * the same DNS-pinning / private-address / redirect protection as any other
+ * outbound URL. A server on a private address (a local dev stack) requires the
+ * same explicit opt-in as any other private fetch — never an implicit one.
+ *
+ * The endpoint may answer a POST with either `application/json` (one response)
+ * or `text/event-stream` (SSE frames); both are handled. We are a minimal
+ * client: we issue requests and read responses, and ignore server-initiated
+ * traffic, exactly like the stdio client.
+ */
+class McpHttpClient {
+  constructor(name, { url, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, allowPrivate = false } = {}) {
+    this.name = name
+    this.url = String(url || "")
+    this.extraHeaders = headers && typeof headers === "object" ? headers : {}
+    this.timeoutMs = timeoutMs
+    this.allowPrivate = allowPrivate === true
+    this._nextId = 1
+    this._closed = false
+    this._sessionId = null
+    this.serverInfo = null
+    this.capabilities = null
+  }
+
+  _headers(extra = {}) {
+    const h = {
+      "content-type": "application/json",
+      // both response shapes are acceptable to us
+      accept: "application/json, text/event-stream",
+      "user-agent": `forge-agent/${VERSION}`,
+      ...this.extraHeaders,
+      ...extra,
+    }
+    if (this._sessionId) h["mcp-session-id"] = this._sessionId
+    return h
+  }
+
+  /** Pull the JSON-RPC payload out of an SSE stream: the first `data:` frame
+   *  carrying a JSON object with our id. Non-data lines are protocol noise. */
+  static parseSse(text) {
+    const out = []
+    for (const block of String(text ?? "").split(/\r?\n\r?\n/)) {
+      const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("")
+      if (!data) continue
+      try { out.push(JSON.parse(data)) } catch { /* a non-JSON frame is noise */ }
+    }
+    return out
+  }
+
+  async _rpc(method, params, { notify = false } = {}) {
+    if (this._closed) throw new Error(`MCP server "${this.name}" is closed`)
+    const id = notify ? undefined : this._nextId++
+    const payload = { jsonrpc: "2.0", method, params: params ?? {}, ...(notify ? {} : { id }) }
+    let res
+    try {
+      res = await pinnedFetch(this.url, {
+        method: "POST",
+        headers: this._headers(),
+        body: Buffer.from(JSON.stringify(payload)),
+        timeoutMs: this.timeoutMs,
+        totalTimeoutMs: this.timeoutMs,
+        allowPrivate: this.allowPrivate ? "first-hop" : false,
+        maxBytes: MAX_LINE_BYTES,
+      })
+    } catch (e) {
+      throw new Error(`MCP HTTP request "${method}" to "${this.name}" failed: ${e.message}`)
+    }
+    // the server may hand us a session id on initialize; echo it from then on
+    const sid = res.headers?.["mcp-session-id"]
+    if (sid && !this._sessionId) this._sessionId = String(sid)
+    if (notify) return null
+    if (!res.ok) throw new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"`)
+    const ctype = String(res.headers?.["content-type"] ?? "")
+    const text = res.body?.toString("utf8") ?? ""
+    let msg = null
+    if (/text\/event-stream/i.test(ctype)) {
+      msg = McpHttpClient.parseSse(text).find((m) => m && m.id === id) ?? null
+    } else {
+      try { msg = JSON.parse(text) } catch { msg = null }
+      if (Array.isArray(msg)) msg = msg.find((m) => m && m.id === id) ?? null
+    }
+    if (!msg) throw new Error(`MCP HTTP response from "${this.name}" for "${method}" was not a JSON-RPC result`)
+    if (msg.error) throw new Error(`MCP error ${msg.error.code}: ${msg.error.message || "unknown"}`)
+    return msg.result
+  }
+
+  async start() {
+    if (!/^https?:\/\//i.test(this.url)) throw new Error(`MCP server "${this.name}" has an invalid url`)
+    const init = await this._rpc("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "forge", version: VERSION },
+    })
+    this.serverInfo = init?.serverInfo ?? null
+    this.capabilities = init?.capabilities ?? null
+    try { await this._rpc("notifications/initialized", {}, { notify: true }) } catch { /* best-effort, matches stdio */ }
+    return this
+  }
+
+  async listTools() {
+    const res = await this._rpc("tools/list", {})
+    const tools = Array.isArray(res?.tools) ? res.tools : []
+    return tools.filter((t) => t && typeof t.name === "string")
+  }
+
+  async callTool(tool, args) {
+    const res = await this._rpc("tools/call", { name: tool, arguments: args ?? {} })
+    return { text: flattenContent(res?.content), isError: res?.isError === true }
+  }
+
+  close() {
+    // HTTP is stateless per request: there is no child to reap. Marking closed
+    // makes later calls fail honestly instead of silently reconnecting.
+    this._closed = true
+  }
+}
+
 /** Flatten an MCP content array (text/other parts) into a single string. */
 export function flattenContent(content) {
   if (typeof content === "string") return content
@@ -217,7 +345,11 @@ export function flattenContent(content) {
 
 /** Connect and initialize a server. Caller owns close(). */
 export async function connectServer(name, spec, { timeoutMs } = {}) {
-  const client = new McpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
+  // Transport is chosen by the SHAPE of the spec: a `url` is Streamable HTTP,
+  // a `command` is stdio. Never guessed from anything else.
+  const client = spec?.url
+    ? new McpHttpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
+    : new McpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
   await client.start()
   return client
 }
@@ -226,7 +358,7 @@ export async function connectServer(name, spec, { timeoutMs } = {}) {
 export function configuredServers(config) {
   const servers = config?.mcp?.servers
   if (!servers || typeof servers !== "object") return []
-  return Object.entries(servers).filter(([, s]) => s && typeof s === "object" && s.disabled !== true && s.command)
+  return Object.entries(servers).filter(([, s]) => s && typeof s === "object" && s.disabled !== true && (s.command || s.url))
 }
 
 /**
@@ -413,7 +545,7 @@ function inventoryPath() {
 /** Cache key = server name + command/args fingerprint: two configs that share
  *  a name but run different commands never collide (tests included). */
 function cacheKey(name, spec) {
-  const cmd = [spec.command, ...(spec.args ?? [])].join("\u0000")
+  const cmd = spec.url ? `url\u0000${spec.url}` : [spec.command, ...(spec.args ?? [])].join("\u0000")
   let h = 5381
   for (let i = 0; i < cmd.length; i++) h = ((h << 5) + h + cmd.charCodeAt(i)) | 0
   return `${name}:${(h >>> 0).toString(36)}`
