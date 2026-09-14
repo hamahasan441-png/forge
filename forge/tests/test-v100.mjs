@@ -339,7 +339,7 @@ console.log("== 13. transport is chosen by spec shape ==")
   ok("a url spec selects the HTTP client", /spec\?\.url\s*\n?\s*\? new McpHttpClient/.test(src))
   ok("a command spec still selects stdio", /: new McpClient\(name,/.test(src))
   ok("url-only servers are configurable", /\(s\.command \|\| s\.url\)/.test(src))
-  ok("the inventory cache fingerprints a url distinctly", /spec\.url \? `url/.test(src))
+  ok("the inventory cache fingerprints url and credential-binding shapes distinctly", /JSON\.stringify\(\{ url: spec\.url[\s\S]{0,160}headers: spec\.headers/.test(src))
   ok("HTTP goes through netguard (never a raw fetch)", /pinnedFetch\(this\.url/.test(src))
   ok("no raw global fetch anywhere in mcp.js", !/[^.\w]fetch\(/.test(src.replace(/pinnedFetch\(/g, "PF(")))
 }

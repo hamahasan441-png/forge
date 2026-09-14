@@ -1,155 +1,110 @@
 /**
- * mcpcatalog.js — v99 "loopwise" well-known MCP server catalog.
+ * mcpcatalog.js — curated top-100 MCP catalog.
  *
- * v98 could USE configured MCP servers (stdio JSON-RPC client, lazy connect,
- * inventory cache) but adding one meant hand-writing config paths — there
- * was no catalog, no presets, nothing to discover. This module is a curated,
- * DATA-ONLY catalog of the best-known MCP servers (official reference
- * servers plus high-quality first-party ones). `forge mcp add <name>` writes
- * the preset into the USER config through the same setPath/saveConfig path
- * `forge config set` uses — the mcp section stays privileged (project
- * configs can never inject a server), secrets are never invented or
- * prompted for (a required env var becomes an explicit placeholder the user
- * fills), and nothing here EXECUTES anything: adding a server only writes
- * configuration. Lazy connect (v96) means an added server costs nothing
- * until an agent actually calls one of its tools.
- *
- * House rules: zero dependencies, pure data + config write, no network
- * access at catalog time, honest "unknown server" errors.
+ * The data is generated from active official MCP Registry records and GitHub
+ * repository health metadata, then vendored with the package. Browsing the
+ * catalog is therefore deterministic and offline. Installing remains an
+ * explicit, one-server-at-a-time user action; nothing in this module connects
+ * to or executes a server.
  */
-
 import { execFileSync } from "node:child_process"
+import { GENERATED_MCP_CATALOG } from "./mcpcatalog.generated.js"
+
+export const MCP_CATALOG = GENERATED_MCP_CATALOG
 
 function hasBinary(bin) {
   try { execFileSync(bin, ["--version"], { stdio: "ignore", timeout: 5000 }); return true } catch { return false }
 }
 
-/**
- * Catalog entries. `env` maps required variable names to what they are for —
- * values are descriptions, never secrets. `args` may contain placeholders
- * the add command resolves (or the user edits afterwards).
- */
-export const MCP_CATALOG = Object.freeze([
-  {
-    name: "filesystem", category: "files", runtime: "node",
-    desc: "read/write files scoped to allowed directories",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
-    env: {}, note: 'the trailing "." is the allowed directory — edit mcp.servers.filesystem.args to scope it',
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
-  },
-  {
-    name: "memory", category: "knowledge", runtime: "node",
-    desc: "persistent knowledge-graph memory across sessions",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"],
-    env: {}, note: "stores its graph in a JSON file in the server's working dir",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
-  },
-  {
-    name: "sequential-thinking", category: "reasoning", runtime: "node",
-    desc: "structured step-by-step problem solving with revision",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-    env: {}, note: "no configuration needed",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
-  },
-  {
-    name: "git", category: "dev", runtime: "node",
-    desc: "git operations (status, diff, log, branches) on a repository",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-git", "--repository", "."],
-    env: {}, note: 'the "." after --repository is the repo path — edit to point elsewhere',
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
-  },
-  {
-    name: "sqlite", category: "data", runtime: "node",
-    desc: "SQL queries and schema inspection for a SQLite database",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-sqlite", "--db-path", "app.db"],
-    env: {}, note: "edit --db-path to your database file",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
-  },
-  {
-    name: "postgres", category: "data", runtime: "node",
-    desc: "read-only SQL access to a PostgreSQL database",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost:5432/mydb"],
-    env: {}, note: "replace the connection string argument with yours (reads are schema + SELECT-oriented)",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
-  },
-  {
-    name: "playwright", category: "browser", runtime: "node",
-    desc: "browser automation and web testing (official Playwright MCP)",
-    command: "npx", args: ["-y", "@playwright/mcp@latest"],
-    env: {}, note: "downloads browsers on first use; headless by default",
-    homepage: "https://github.com/microsoft/playwright-mcp",
-  },
-  {
-    name: "puppeteer", category: "browser", runtime: "node",
-    desc: "browser automation, screenshots and web scraping via Puppeteer",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-puppeteer"],
-    env: {}, note: "downloads Chromium on first use",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/puppeteer",
-  },
-  {
-    name: "brave-search", category: "web", runtime: "node",
-    desc: "web and local search via the Brave Search API",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-brave-search"],
-    env: { BRAVE_API_KEY: "Brave Search API key (free tier available)" },
-    note: "requires a Brave Search API key",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search",
-  },
-  {
-    name: "github", category: "dev", runtime: "node",
-    desc: "GitHub API — repos, issues, PRs, code search",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
-    env: { GITHUB_PERSONAL_ACCESS_TOKEN: "GitHub personal access token (repo scope as needed)" },
-    note: "requires a GitHub personal access token; the reference server is archived but functional — GitHub's own Go server ships via Docker",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
-  },
-  {
-    name: "context7", category: "docs", runtime: "node",
-    desc: "up-to-date, version-accurate documentation for libraries and frameworks",
-    command: "npx", args: ["-y", "@upstash/context7-mcp"],
-    env: {}, note: "no configuration needed; great for current API docs",
-    homepage: "https://github.com/upstash/context7",
-  },
-  {
-    name: "fetch", category: "web", runtime: "uvx",
-    desc: "fetch and process web content as markdown (reference server, Python)",
-    command: "uvx", args: ["mcp-server-fetch"],
-    env: {}, note: "requires uv (astral.sh/uv) installed on PATH",
-    homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
-  },
-])
-
-/** Case-insensitive catalog lookup by preset name. */
-export function catalogEntry(name) {
-  const n = String(name ?? "").trim().toLowerCase()
-  if (!n) return null
-  return MCP_CATALOG.find((e) => e.name === n) ?? null
+function normalized(value) {
+  return String(value ?? "").trim().toLowerCase()
 }
 
-/** True when the entry's runtime launcher is available on PATH (cheap probe). */
+/** Case-insensitive lookup by short name, canonical registry name, or alias. */
+export function catalogEntry(name) {
+  const wanted = normalized(name)
+  if (!wanted) return null
+  return MCP_CATALOG.find((entry) => {
+    if (normalized(entry.name) === wanted || normalized(entry.registryName) === wanted) return true
+    return (entry.aliases || []).some((alias) => normalized(alias) === wanted)
+  }) ?? null
+}
+
+/** True when the launcher is available. Hosted HTTPS entries need no binary. */
 export function runtimeAvailable(entry) {
   if (!entry) return false
-  return hasBinary(entry.runtime === "uvx" ? "uvx" : "npx")
+  if (entry.transport === "http" && /^https:\/\//i.test(entry.url || "")) return true
+  return typeof entry.command === "string" && entry.command.length > 0 && hasBinary(entry.command)
+}
+
+/** Environment names referenced by either stdio env or HTTP header bindings. */
+export function requiredEnvironment(entry) {
+  if (!entry) return []
+  const found = new Map()
+  for (const [name, meta] of Object.entries(entry.env || {})) {
+    found.set(name, { name, description: typeof meta === "string" ? meta : meta?.description || "", required: typeof meta === "object" ? meta.required === true : true, secret: typeof meta === "object" ? meta.secret === true : true })
+  }
+  for (const binding of Object.values(entry.headers || {})) {
+    if (!binding?.env) continue
+    found.set(binding.env, { name: binding.env, description: `credential used by an HTTP header for ${entry.name}`, required: binding.required !== false, secret: binding.secret !== false })
+  }
+  return [...found.values()]
 }
 
 /**
- * Build the config spec for a catalog entry. Secrets are NEVER invented: a
- * required env var becomes an empty-string placeholder the user fills via
- * `forge config set mcp.servers.<name>.env.<VAR> <value>` (or deletes).
+ * Build a user config spec. Credentials are references to process environment
+ * variables, never empty placeholders or invented/stored secret values.
  */
 export function specForEntry(entry, { args = null } = {}) {
   if (!entry) return null
-  const spec = { command: entry.command, args: args && args.length ? args : [...entry.args] }
-  const envVars = Object.keys(entry.env ?? {})
-  if (envVars.length) {
+  const spec = entry.transport === "http"
+    ? { url: entry.url }
+    : { command: entry.command, args: args && args.length ? [...args] : [...(entry.args || [])] }
+  if (Object.keys(entry.env || {}).length) {
     spec.env = {}
-    for (const k of envVars) spec.env[k] = ""
+    for (const [name, meta] of Object.entries(entry.env)) {
+      spec.env[name] = { env: name, required: typeof meta === "object" ? meta.required === true : true }
+    }
+  }
+  if (Object.keys(entry.headers || {}).length) {
+    spec.headers = {}
+    for (const [name, binding] of Object.entries(entry.headers)) spec.headers[name] = { ...binding }
   }
   return spec
 }
 
-/** Human-readable env instructions for an added entry. */
-export function envInstructions(entry, name) {
-  const vars = Object.keys(entry?.env ?? {})
-  if (!vars.length) return []
-  return vars.map((v) => `forge config set mcp.servers.${name}.env.${v} <${v}>`)
+/** Shell-neutral guidance: users choose how to supply each environment value. */
+export function envInstructions(entry) {
+  return requiredEnvironment(entry).map(({ name, description, required }) => ({ name, description, required, instruction: `set ${name} in the environment before running forge` }))
+}
+
+/** Bounded, deterministic catalog search used by the CLI and tests. */
+export function searchCatalog(query = "", opts = {}) {
+  const words = normalized(query).split(/[^a-z0-9]+/).filter(Boolean)
+  const category = normalized(opts.category)
+  const runtime = normalized(opts.runtime)
+  const transport = normalized(opts.transport)
+  const auth = normalized(opts.auth)
+  const scored = []
+  for (const entry of MCP_CATALOG) {
+    if (category && normalized(entry.category) !== category) continue
+    if (runtime && normalized(entry.runtime) !== runtime) continue
+    if (transport && normalized(entry.transport) !== transport) continue
+    const needsAuth = requiredEnvironment(entry).some((item) => item.required)
+    if (auth === "required" && !needsAuth) continue
+    if ((auth === "none" || auth === "free") && needsAuth) continue
+    const text = normalized([entry.name, entry.registryName, ...(entry.aliases || []), entry.desc, entry.category].join(" "))
+    if (words.some((word) => !text.includes(word))) continue
+    const relevance = words.reduce((sum, word) => sum + (normalized(entry.name).includes(word) ? 5 : 1), 0)
+    scored.push({ entry, relevance })
+  }
+  scored.sort((a, b) => b.relevance - a.relevance || b.entry.score - a.entry.score || a.entry.name.localeCompare(b.entry.name))
+  const limit = opts.limit == null ? MCP_CATALOG.length : Math.max(0, Number(opts.limit) || 0)
+  return scored.slice(0, limit).map(({ entry }) => entry)
+}
+
+/** Safe human representation: names environment variables, never their values. */
+export function describeSpec(spec = {}) {
+  if (spec.url) return spec.url
+  return [spec.command, ...(spec.args || [])].filter(Boolean).join(" ")
 }

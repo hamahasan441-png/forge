@@ -45,11 +45,12 @@ presence for mutating plans, read-only balance; when majors exist, ONE
 bounded revision pass that is adopted ONLY if it re-validates (with the
 same structural repair the original gets) AND beats the original score;
 `PLAN_CRITIQUE` / `PLAN_REVISED` / `PLAN_REVISION_REJECTED` events.
-**REACH (P4)** — a curated MCP catalog (mcpcatalog.js: 12 well-known
-servers — filesystem, git, playwright, github, context7, memory,
-sequential-thinking, sqlite, postgres, puppeteer, brave-search, fetch —
-`forge mcp add/catalog/remove`, secrets NEVER invented, the privileged
-mcp section written only through the sanctioned config path), a skill
+**REACH (P4)** — a curated MCP catalog (mcpcatalog.js: 100 ranked,
+GitHub-backed servers from a vendored official-registry snapshot, including
+GitHub's maintained server and ECC email/calendar/contacts — searchable with
+`forge mcp catalog`, installed one at a time, credentials referenced from the
+environment, and the privileged mcp section written only through the sanctioned
+config path), a skill
 registry (skillregistry.js: the best GitHub skill repos with ready
 raw SKILL.md URLs + `forge skill search` local search + `forge skill
 recommend` with stemmed matching), and 4 new bundled skills (code-reviewer,
@@ -425,17 +426,20 @@ only. Indexing is not learned. Nothing auto-ACTIVE. Data lives under
 ### Reach surfaces (v99)
 
 ```bash
-forge mcp catalog                # 12 curated well-known MCP servers
-forge mcp add playwright         # write the preset (user config only)
-forge mcp test playwright        # connect once, list its tools
-forge mcp remove playwright
+forge mcp catalog                # first 20 of 100 curated GitHub-backed servers
+forge mcp catalog browser --all  # search; filter with --runtime/--transport/--auth
+forge mcp info ecc               # provenance, pinned version, required environment
+forge mcp add ecc                # write one preset (user config only)
+MCP_ENCRYPTION_KEY=... forge mcp test ecc
+forge mcp remove ecc
 forge skill search "debug"       # local search over 106 bundled skills
 forge skill recommend testing    # curated GitHub skill repos + raw URLs
 ```
 
-MCP servers connect lazily (first tool call), never at startup. Secrets are
-never invented — `forge mcp add github` prints the exact config command that
-fills the token. Downloads still go through the one SSRF-guarded,
+MCP servers connect lazily (first tool call), never at startup. Adding one never
+enables the other 99. Secrets are never invented or stored by catalog presets:
+GitHub and ECC reference `GITHUB_PERSONAL_ACCESS_TOKEN` and
+`MCP_ENCRYPTION_KEY` from the process environment. Downloads still use the SSRF-guarded,
 verify-then-activate path.
 
 ## Self-test (Node only, no network)

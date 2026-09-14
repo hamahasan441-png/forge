@@ -1674,7 +1674,7 @@ async function main() {
       if (sub === "list") {
         const servers = configuredServers(config)
         const all = Object.entries(config.mcp?.servers || {})
-        if (JSON_OUT) { emitJson({ servers: all.map(([name, s]) => ({ name, command: s.command, args: s.args ?? [], disabled: s.disabled === true })) }); return }
+        if (JSON_OUT) { emitJson({ servers: all.map(([name, s]) => ({ name, transport: s.url ? "http" : "stdio", url: s.url || null, command: s.command || null, args: s.args ?? [], disabled: s.disabled === true })) }); return }
         console.log(bold("MCP servers — configured under mcp.servers"))
         if (!all.length) {
           console.log(dim("  (none) — add one with: forge config set mcp.servers.<name>.command <cmd>"))
@@ -1683,7 +1683,8 @@ async function main() {
         }
         for (const [name, s] of all) {
           const tag = s.disabled === true ? red("disabled") : green("enabled")
-          console.log(`  ${cyan(name.padEnd(16))} ${tag}  ${dim([s.command, ...(s.args ?? [])].join(" ").slice(0, 70))}`)
+          const target = s.url || [s.command, ...(s.args ?? [])].filter(Boolean).join(" ")
+          console.log(`  ${cyan(name.padEnd(16))} ${tag}  ${dim(String(target).slice(0, 70))}`)
         }
         console.log(dim(`  ${servers.length} enabled • inspect tools: forge mcp tools • test one: forge mcp test <name>`))
         return
@@ -1693,16 +1694,19 @@ async function main() {
         const name = positional[2]
         if (!name) { err("usage: forge mcp test <server-name>"); process.exit(1); return }
         const spec = config.mcp?.servers?.[name]
-        if (!spec || !spec.command) { err(`no MCP server "${name}" with a command in config`); process.exit(1); return }
-        console.log(dim(`connecting to MCP server ${bold(name)} — ${[spec.command, ...(spec.args ?? [])].join(" ")}`))
+        if (!spec || (!spec.command && !spec.url)) { err(`no MCP server "${name}" with a command or url in config`); process.exit(1); return }
+        const target = spec.url || [spec.command, ...(spec.args ?? [])].filter(Boolean).join(" ")
+        if (!JSON_OUT) console.log(dim(`connecting to MCP server ${bold(name)} — ${target}`))
         let client
         try { client = await connectServer(name, spec, { timeoutMs: spec.timeoutMs }) }
         catch (e) { err(`could not connect: ${e.message}`); process.exit(1); return }
         try {
           const tools = mcpToolsToPlugins(client, await client.listTools())
-          ok(`connected — ${client.serverInfo?.name ?? name}${client.serverInfo?.version ? " v" + client.serverInfo.version : ""} • ${tools.length} tool(s)`)
-          for (const t of tools) console.log(`  ${green("✓")} ${cyan(t.name.padEnd(32))} ${dim(t.def.function.description.slice(0, 60))}`)
           if (JSON_OUT) emitJson({ server: name, serverInfo: client.serverInfo, tools: tools.map((t) => ({ name: t.name, description: t.def.function.description })) })
+          else {
+            ok(`connected — ${client.serverInfo?.name ?? name}${client.serverInfo?.version ? " v" + client.serverInfo.version : ""} • ${tools.length} tool(s)`)
+            for (const t of tools) console.log(`  ${green("✓")} ${cyan(t.name.padEnd(32))} ${dim(t.def.function.description.slice(0, 60))}`)
+          }
         } finally { client.close() }
         return
       }
@@ -1728,32 +1732,53 @@ async function main() {
       // with the exact config command that fills it. Adding costs nothing
       // until first use (v96 lazy connect).
       if (sub === "catalog") {
-        const { MCP_CATALOG, runtimeAvailable } = await import("./mcpcatalog.js")
-        if (JSON_OUT) { emitJson({ catalog: MCP_CATALOG }); return }
-        console.log(bold("MCP catalog — well-known servers (forge mcp add <name>)"))
-        for (const e of MCP_CATALOG) {
+        const { MCP_CATALOG, runtimeAvailable, searchCatalog, requiredEnvironment } = await import("./mcpcatalog.js")
+        const query = positional.slice(2).join(" ").trim()
+        const allMatches = searchCatalog(query, { category: flags.category, runtime: flags.runtime, transport: flags.transport, auth: flags.auth })
+        const limit = JSON_OUT || flags.all === true ? allMatches.length : Math.max(1, Number(flags.limit) || 20)
+        const entries = allMatches.slice(0, limit)
+        if (JSON_OUT) { emitJson({ query, count: entries.length, total: allMatches.length, catalog: entries }); return }
+        console.log(bold(`MCP catalog — curated top ${MCP_CATALOG.length}${query ? ` matching "${query}"` : ""}`))
+        for (const e of entries) {
           const rt = runtimeAvailable(e) ? green(e.runtime) : yellow(`${e.runtime} (not on PATH)`)
-          const envVars = Object.keys(e.env ?? {})
-          console.log(`  ${cyan(e.name.padEnd(20))} ${dim(e.category.padEnd(10))} ${rt}  ${e.desc}`)
+          const envVars = requiredEnvironment(e).map((item) => item.name)
+          console.log(`  ${cyan(e.name.padEnd(24))} ${dim(e.category.padEnd(14))} ${rt}  ${e.desc}`)
           if (envVars.length) console.log(dim(`      env: ${envVars.join(", ")}`))
         }
+        if (allMatches.length > entries.length) console.log(dim(`  showing ${entries.length}/${allMatches.length} • pass --all or --limit <n>`))
+        if (!entries.length) console.log(dim("  (no matching catalog entries)"))
         console.log(dim("  add: forge mcp add <name>   •   inspect: forge mcp test <name>   •   remove: forge mcp remove <name>"))
+        return
+      }
+      if (sub === "info") {
+        const name = positional[2]
+        if (!name) { err("usage: forge mcp info <catalog-name>"); process.exit(1); return }
+        const { catalogEntry, requiredEnvironment, specForEntry, describeSpec } = await import("./mcpcatalog.js")
+        const entry = catalogEntry(name)
+        if (!entry) { err(`unknown preset "${name}" — run ${cyan("forge mcp catalog")} for the list`); process.exit(1); return }
+        const environment = requiredEnvironment(entry)
+        if (JSON_OUT) { emitJson({ entry, spec: specForEntry(entry), environment }); return }
+        console.log(bold(`${entry.name} — ${entry.desc}`))
+        console.log(`  ${dim("source:")} ${entry.homepage}`)
+        console.log(`  ${dim("registry:")} ${entry.registryName}  ${dim("version:")} ${entry.version}`)
+        console.log(`  ${dim("transport:")} ${entry.transport}  ${dim("launch:")} ${describeSpec(specForEntry(entry))}`)
+        if (environment.length) for (const item of environment) console.log(`  ${dim("env:")} ${item.name}${item.required ? " (required)" : " (optional)"} — ${item.description}`)
         return
       }
       if (sub === "add") {
         const name = positional[2]
         if (!name) { err("usage: forge mcp add <catalog-name>   (see: forge mcp catalog)"); process.exit(1); return }
-        const { catalogEntry, specForEntry, runtimeAvailable, envInstructions } = await import("./mcpcatalog.js")
+        const { catalogEntry, specForEntry, runtimeAvailable, envInstructions, describeSpec } = await import("./mcpcatalog.js")
         const entry = catalogEntry(name)
         if (!entry) { err(`unknown preset "${name}" — run ${cyan("forge mcp catalog")} for the list`); process.exit(1); return }
         const spec = specForEntry(entry)
         setPath(config, `mcp.servers.${entry.name}`, spec)
         saveConfig(config)
-        ok(`mcp server "${entry.name}" added — ${[spec.command, ...spec.args].join(" ")}`)
-        console.log(dim(`      ${entry.note ?? ""}`))
+        ok(`mcp server "${entry.name}" added — ${describeSpec(spec)}`)
+        console.log(dim(`      ${entry.homepage}`))
         if (!runtimeAvailable(entry)) console.log(yellow(`      ${entry.runtime} is not on PATH — install it before the first use`))
-        for (const line of envInstructions(entry, entry.name)) {
-          console.log(yellow(`      set the key: ${line}`))
+        for (const item of envInstructions(entry)) {
+          console.log(yellow(`      ${item.required ? "required" : "optional"}: ${item.instruction}`))
         }
         console.log(dim(`      its tools appear as mcp__${entry.name}__* — connected lazily on first call (forge mcp test ${entry.name} to try it now)`))
         return
@@ -1767,7 +1792,7 @@ async function main() {
         ok(`mcp server "${name}" removed`)
         return
       }
-      err("usage: forge mcp [list|tools|test|catalog|add|remove]"); process.exit(1); return
+      err("usage: forge mcp [list|tools|test|catalog|info|add|remove]"); process.exit(1); return
     }
     case "lsp": {
       // v23: inspect Language Server Protocol servers configured under lsp.servers.
@@ -2148,6 +2173,7 @@ ${bold("usage")}
   ${cyan("forge skill ttl <name> [<ms>]")} per-skill TTL override (ms); omit ms to print
   ${cyan("forge tool download <url>")}     download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   ${cyan("forge tool verify <name|all>")}   structurally verify a downloaded tool (hostless playbook, never plugin-host)
+  ${cyan("forge mcp catalog [query]")}      browse 100 GitHub-backed MCP presets; info/add/test/remove one explicitly
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
   ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
