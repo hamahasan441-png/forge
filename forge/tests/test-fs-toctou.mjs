@@ -138,9 +138,9 @@ console.log("== in-project symlinks still work (no over-blocking) ==")
   ok("nested directory creation works", String(r3).includes("created") && fs.readFileSync(path.join(PROJ, "src/deep/a/b/c.txt"), "utf8") === "nested create")
   const r4 = await tool.exec("edit_file", { path: "src/deep/a/b/c.txt", old: "nested", new: "edited" })
   ok("edit_file works", String(r4).startsWith("OK") && fs.readFileSync(path.join(PROJ, "src/deep/a/b/c.txt"), "utf8") === "edited create")
-  fs.chmodSync(path.join(PROJ, "src", "real.txt"), 0o600)
+  fs.chmodSync(path.join(PROJ, "src", "real.txt"), 0o664)
   await tool.exec("write_file", { path: "src/real.txt", content: "keep mode" })
-  ok("existing file mode preserved across atomic replace", (fs.statSync(path.join(PROJ, "src", "real.txt")).mode & 0o777) === 0o600)
+  ok("existing file mode preserved across atomic replace despite umask", (fs.statSync(path.join(PROJ, "src", "real.txt")).mode & 0o777) === 0o664)
   clean()
 }
 
@@ -295,18 +295,29 @@ console.log("== concurrent writers: two tools, one file, no torn content ==")
 
 console.log("== permission failure is explicit, never silent ==")
 {
-  if (process.getuid && process.getuid() === 0) {
-    ok("running as root — permission test not meaningful (skipped)", true)
+  fs.mkdirSync(path.join(PROJ, "ro"))
+  fs.writeFileSync(path.join(PROJ, "ro", "f.txt"), "x")
+  fs.chmodSync(path.join(PROJ, "ro"), 0o555)
+  // Some containers grant CAP_DAC_OVERRIDE to a non-root uid. Probe the
+  // effective behavior rather than assuming getuid() predicts permissions.
+  let permissionEnforced = true
+  try {
+    const probe = path.join(PROJ, "ro", ".permission-probe")
+    fs.writeFileSync(probe, "x")
+    fs.rmSync(probe)
+    permissionEnforced = false
+  } catch (e) {
+    if (e?.code !== "EACCES" && e?.code !== "EPERM") throw e
+  }
+  if (!permissionEnforced) {
+    ok("read-only directory permissions not enforced by this runtime (skipped)", true)
   } else {
-    fs.mkdirSync(path.join(PROJ, "ro"))
-    fs.writeFileSync(path.join(PROJ, "ro", "f.txt"), "x")
-    fs.chmodSync(path.join(PROJ, "ro"), 0o555)
     const r = await tool.exec("write_file", { path: "ro/f.txt", content: "y" })
     ok("write into read-only dir → explicit permission error", /permission denied|EACCES/i.test(String(r)), String(r))
     ok("original content untouched", fs.readFileSync(path.join(PROJ, "ro", "f.txt"), "utf8") === "x")
     ok("no temp file left behind", fs.readdirSync(path.join(PROJ, "ro")).length === 1)
-    fs.chmodSync(path.join(PROJ, "ro"), 0o755)
   }
+  fs.chmodSync(path.join(PROJ, "ro"), 0o755)
   clean()
 }
 

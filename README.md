@@ -3,15 +3,6 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 97.0.0 — "unifiedwise" (the one-brain release: one connected
-loop from source resolution through session memory, world model, reasoning,
-execution and proof).**
-
-# forge
-
-Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
-straight to providers.
-
 **Version 99.0.0 — "loopwise" (the agency release: the stop fix, the
 reviewer, the fixer, the planner gate, the reach surfaces).**
 
