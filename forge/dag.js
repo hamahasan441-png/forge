@@ -133,6 +133,18 @@ function normalizeNode(n) {
     // verification method). Stamped at plan time, persisted with the graph,
     // settled against reality by prediction.js — never model self-confidence.
     prediction: n.prediction && typeof n.prediction === "object" ? n.prediction : null,
+    // v106 — WHY a node ended up in its state. These are written by
+    // invalidateNodes/retryNode/skipNode/markRepairing and were dropped by
+    // every serialize→deserialize round trip, because normalizeNode rebuilds a
+    // fixed field list and these were not on it. So a resumed task showed
+    // nodes sitting in INVALIDATED or SKIPPED with no recorded reason: the
+    // explanation was written, persisted, and thrown away on read.
+    invalidation_reason: n.invalidation_reason ?? n.invalidationReason ?? null,
+    retry_reason: n.retry_reason ?? n.retryReason ?? null,
+    skip_reason: n.skip_reason ?? n.skipReason ?? null,
+    repair_reason: n.repair_reason ?? n.repairReason ?? null,
+    execution_succeeded_at: n.execution_succeeded_at ?? null,
+    verificationMode: n.verificationMode ?? n.verification_mode ?? null,
   }
 }
 

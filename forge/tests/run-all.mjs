@@ -225,6 +225,8 @@ const suites = [
   ["v104", "node", ["test-v104.mjs"]],
   // ---- v105 selfaudit: capability that exists but nothing calls -----------
   ["v105", "node", ["test-v105.mjs"]],
+  // ---- v106 resumewise: a resumed task hears the new instruction ----------
+  ["v106", "node", ["test-v106.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

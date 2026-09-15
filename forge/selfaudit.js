@@ -118,6 +118,27 @@ export function importsOf(code) {
   return [...hits]
 }
 
+/**
+ * Namespace imports: `import * as dagLib from "./dag.js"` → { dagLib: "./dag.js" }.
+ *
+ * Found by using the analyzer, not by designing it. meta.js calls
+ * `dagLib.invalidateNodes(...)`, which countRefs deliberately ignores because
+ * it looks like member access — so a freshly wired, load-bearing call site was
+ * still reported as orphaned capability. Any module imported this way needs
+ * its exports counted through the alias too.
+ */
+export function namespaceImportsOf(code) {
+  const out = {}
+  for (const m of String(code ?? "").matchAll(/import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s*from\s*["'](\.[^"']+)["']/g)) out[m[1]] = m[2]
+  return out
+}
+
+/** Count `alias.name` occurrences — the namespace-import call shape. */
+export function countMemberRefs(code, alias, name) {
+  const re = new RegExp(`\\b${alias}\\s*\\.\\s*${name}(?![A-Za-z0-9_$])`, "g")
+  return (String(code ?? "").match(re) || []).length
+}
+
 /** Source files under `dir`, recursively, skipping the usual noise. */
 export function sourceFiles(dir, { exts = [".js", ".mjs"], skip = SKIP_DIRS, maxFiles = 4000 } = {}) {
   const out = []
@@ -264,6 +285,19 @@ export function analyzeModules({ dir, testDir = null, entryPoints = [], read = n
         .join("\n")
     : ""
 
+  /** Resolve a relative specifier against the importing file's directory. */
+  const resolveSpec = (fromFile, spec) => {
+    const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromFile), spec)).replace(/^\.\//, "")
+    for (const cand of [base, `${base}.js`, `${base}/index.js`]) if (src.has(cand)) return cand
+    return base
+  }
+  const nsImports = new Map([...src].map(([f, raw]) => [f, namespaceImportsOf(raw)]))
+  // tests are one blob, so every alias any test uses has to be tried
+  const testNamespaceAliases = [...new Set(
+    (testDir ? sourceFiles(testDir, { exts: [".mjs", ".js", ".ts"] }) : [])
+      .flatMap((f) => { try { return Object.keys(namespaceImportsOf(readFile(path.join(testDir, f)))) } catch { return [] } }),
+  )]
+
   // Who imports whom. NOTE: this reads the RAW source, not the stripped copy —
   // stripNonCode() blanks string literals, and an import path IS a string
   // literal, so running this on stripped code reported 146 of 148 modules as
@@ -274,10 +308,8 @@ export function analyzeModules({ dir, testDir = null, entryPoints = [], read = n
     for (const spec of importsOf(raw)) {
       // resolve "./x.js" / "../lib/y.js" against the IMPORTING file's directory,
       // then try the extensionless forms node resolves for you
-      const base = path.posix.normalize(path.posix.join(path.posix.dirname(f), spec)).replace(/^\.\//, "")
-      for (const cand of [base, `${base}.js`, `${base}/index.js`]) {
-        if (importers.has(cand)) { importers.get(cand).add(f); break }
-      }
+      const resolved = resolveSpec(f, spec)
+      if (importers.has(resolved)) importers.get(resolved).add(f)
     }
   }
 
@@ -303,8 +335,16 @@ export function analyzeModules({ dir, testDir = null, entryPoints = [], read = n
       // uses inside its own module, minus the single definition occurrence
       const self = Math.max(0, countRefs(code, name) - 1)
       let cross = 0
-      for (const [other, otherCode] of stripped) { if (other !== file) cross += countRefs(otherCode, name) }
-      const testRefs = countRefs(testBlob, name)
+      for (const [other, otherCode] of stripped) {
+        if (other === file) continue
+        cross += countRefs(otherCode, name)
+        // …and through a namespace alias, if this module imports it that way
+        for (const [alias, target] of Object.entries(nsImports.get(other) ?? {})) {
+          if (resolveSpec(other, target) === file) cross += countMemberRefs(otherCode, alias, name)
+        }
+      }
+      let testRefs = countRefs(testBlob, name)
+      for (const alias of testNamespaceAliases) testRefs += countMemberRefs(testBlob, alias, name)
       if (self > 0 || cross > 0) continue
 
       const cosmetic = COSMETIC.test(name) || METRIC.test(name)

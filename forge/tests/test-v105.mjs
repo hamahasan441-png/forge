@@ -239,12 +239,28 @@ console.log("== 7. GROUND TRUTH: it reproduces the findings made by hand ==")
   for (const key of ["tools.js:TOOL_DEFS", "agent.js:runAgent", "tools.js:execTool", "router.js:planChain", "dag.js:buildDAG"])
     ok(`load-bearing, so NOT flagged: ${key}`, !flagged.has(key), key)
 
-  // STILL OPEN, and deliberately so: audited, reported, not fixed. When either
-  // of these is finally wired, this assertion is what tells you.
+  // STILL OPEN, and deliberately so: audited, reported, not fixed. When this
+  // is finally wired, this assertion is what tells you.
   ok("still-open lead is found: recovery.js:reconcileEffectByKind",
     flagged.has("recovery.js:reconcileEffectByKind"))
-  ok("still-open lead is found: dag.js:invalidateNodes (no production caller yet)",
-    flagged.has("dag.js:invalidateNodes"))
+
+  // dag.js:invalidateNodes WAS on that list. v106 gave it a production caller
+  // (meta.js invalidates the plan nodes a resumed requirement change killed),
+  // and this assertion flipped from "found" to "not found" the moment it did —
+  // which is the ground-truth test doing its job rather than being edited to
+  // agree. It is called through a namespace alias (`dagLib.invalidateNodes`),
+  // so it also pins that the analyzer follows those.
+  ok("dag.js:invalidateNodes is now WIRED, and the audit sees it",
+    !flagged.has("dag.js:invalidateNodes"))
+
+  // namespace imports: the false-positive class that hid the v106 wiring
+  const { namespaceImportsOf, countMemberRefs } = await import("../selfaudit.js")
+  eq("a namespace import is recognised", namespaceImportsOf(`import * as dagLib ${spec("./dag.js")}`), { dagLib: "./dag.js" })
+  eq("a plain import is not one", namespaceImportsOf(`import { a } ${spec("./x.js")}`), {})
+  eq("alias calls are counted", countMemberRefs("dagLib.invalidateNodes(g, ids)", "dagLib", "invalidateNodes"), 1)
+  eq("with whitespace", countMemberRefs("dagLib . invalidateNodes(g)", "dagLib", "invalidateNodes"), 1)
+  eq("a different alias does not count", countMemberRefs("other.invalidateNodes(g)", "dagLib", "invalidateNodes"), 0)
+  eq("a longer member name does not count", countMemberRefs("dagLib.invalidateNodesTwice(g)", "dagLib", "invalidateNodes"), 0)
 
   ok("forge audits itself without a single island (entry points aside)",
     r.findings.filter((f) => f.kind === FINDING.ISLAND_MODULE).length === 0,
