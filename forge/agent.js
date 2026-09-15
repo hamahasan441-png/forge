@@ -80,7 +80,7 @@ const ROLE_DIRECTIVES = {
   integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -152,6 +152,14 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     const learnings = learningsBlock !== null ? learningsBlock : relevantLearnings(task, { cwd })
     if (learnings) lines.push("", learnings)
   }
+  // v108 rootwise — the gap this closes: chat.js:1605 sends an INTERACTIVE TTY
+  // run to runAgent, not to the meta controller, and this prompt builder never
+  // touched engmemory, episodes or the task store. So on a real terminal forge
+  // remembered nothing about its own project — no open work, no settled
+  // decision, and no question it was still waiting on an answer to. Computed
+  // async by the caller (it reads stores), same injectable pattern as memory
+  // and the repo map above; null means "not gathered", never "nothing to say".
+  if (continuity) lines.push("", continuity)
   if (skillsEnabled) {
     // The decision was already made once, by selectForTurn, together with the
     // MCP side — this consumes it rather than re-running a second, independent
@@ -537,6 +545,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   let memoryBlock = null
   let learningsBlock = null
   let repoMapBlock = null
+  // v108: gathered here because it reads the task store, run journals and
+  // engineering memory. A delegated sub-agent is deliberately excluded — it is
+  // answering a narrow question inside a run that already has this context, and
+  // paying for it again in every sub-agent is how a context budget disappears.
+  let continuityBlockText = null
+  if (!isDelegatedSubAgent && task && config?.agent?.continuity !== false) {
+    try {
+      const { continuityBlock } = await import("./continuity.js")
+      continuityBlockText = (await continuityBlock({ cwd: process.cwd(), query: task, maxChars: 1600 })) || null
+    } catch { /* continuity is context, never a gate — a run must not depend on it */ }
+  }
   if (!isDelegatedSubAgent && task) {
     try {
       const embCfg = resolveEmbeddingsConfig(config)
@@ -574,7 +593,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // independent retrievals, one after another, on the event loop.
   const endContext = tracer.span(PHASE.CONTEXT)
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
   endContext()

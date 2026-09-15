@@ -28,6 +28,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { SESSIONS_DIR as _SESSIONS_DIR_IMPORT, DEFAULT_DIR } from "./config.js"
 import { projectHash } from "./memory.js"
+import { projectRoot } from "./projectkey.js"
 
 const SESSIONS_DIR = _SESSIONS_DIR_IMPORT // rebindable via withSessionsDir (test seam)
 const TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024 // per-conversation raw history cap (trim-oldest, never silent)
@@ -189,13 +190,17 @@ export function readTranscript(id, { limit = 400 } = {}) {
 /** Sessions whose recorded cwd matches this directory (§6 auto-rehydration).
  *  Newest-first, bounded scan of the store. */
 export function sessionsForCwd(cwd, { max = 5, scan = 300 } = {}) {
-  const target = path.resolve(cwd)
+  // v108 rootwise: a session belongs to a PROJECT, not to the exact directory
+  // it was started in. Comparing absolute paths made `cd src` hide every
+  // session recorded at the repository root (reproduced: latestSessionForCwd
+  // returned null from a subdirectory of the very repo it had just worked in).
+  const target = projectRoot(cwd)
   const out = []
   for (const file of sessionFiles().slice(0, scan)) {
     if (out.length >= max) break
     try {
       const j = JSON.parse(fs.readFileSync(file, "utf8"))
-      if (j?.cwd && path.resolve(j.cwd) === target) out.push(j)
+      if (j?.cwd && projectRoot(j.cwd) === target) out.push(j)
     } catch { }
   }
   return out

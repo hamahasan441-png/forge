@@ -25,6 +25,7 @@ import fs from "node:fs"
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
+import { sameProject } from "./projectkey.js"
 
 export const TASKS_DIR = path.join(DEFAULT_DIR, "tasks")
 const MAX_TASKS = 200
@@ -479,7 +480,10 @@ export function listTasks({ cwd = null, status = null, max = 50 } = {}) {
       try {
         const j = JSON.parse(fs.readFileSync(path.join(TASKS_DIR, f), "utf8"))
         if (!j || typeof j !== "object") continue
-        if (cwd && path.resolve(j.cwd || "") !== path.resolve(cwd)) continue
+        // v108 rootwise: an open task belongs to the PROJECT. Comparing absolute
+        // paths made `cd src` report zero open tasks in a repo that had several
+        // (reproduced), so a resumed session saw no work in progress.
+        if (cwd && !sameProject(j.cwd || "", cwd)) continue
         if (status && j.status !== status) continue
         out.push(j)
       } catch {}

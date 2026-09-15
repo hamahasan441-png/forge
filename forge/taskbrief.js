@@ -71,6 +71,39 @@ export function launchKind(line) {
   return LAUNCH.STANDALONE
 }
 
+/**
+ * v108 — is this line an ANSWER to a question that was just asked?
+ *
+ * `launchKind` alone cannot tell. "SQLite" classifies as nothing, so the
+ * conservative rule (unclassified → the line is its own task) makes it
+ * STANDALONE — correct with no question on the table, and exactly wrong right
+ * after forge asked "SQLite or flat JSON?". What makes a line an answer is not
+ * its wording, it is the question sitting in front of it.
+ *
+ * Three signals, strongest first. A line carrying real task content is never an
+ * answer, whatever else matches — a new instruction outranks a stale question,
+ * and that guard is what keeps v107's promise that a task line runs as written.
+ */
+export function isAnswerLike(line, { options = [] } = {}) {
+  const t = String(line ?? "").trim()
+  if (!t) return false
+  const names = (classifyUserMessage(t).classes ?? []).map((x) => x.cls)
+  if (names.some((n) => CONTENT_CLASSES.has(n))) return false
+  const norm = (x) => String(x ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+  const nt = norm(t)
+  // 1. it names one of the options forge offered
+  for (const o of Array.isArray(options) ? options : []) {
+    for (const cand of [o?.label, o?.id, o]) {
+      const nc = norm(cand)
+      if (nc && (nt === nc || nt.split(" ").includes(nc) || nt.includes(nc))) return true
+    }
+  }
+  // 2. it is consent, a pick, or a refusal
+  if (names.some((n) => REFERENTIAL_CLASSES.has(n))) return true
+  // 3. it is too short to be an instruction — a bare noun is an answer
+  return nt.split(" ").filter(Boolean).length <= 6
+}
+
 /** Flatten a chat message's content to text (vision turns arrive as parts). */
 export function messageText(m) {
   const c = m?.content
@@ -101,6 +134,35 @@ export function userTurns(messages = []) {
 
 const clip = (s, n) => (String(s).length > n ? String(s).slice(0, n - 1) + "…" : String(s))
 
+/**
+ * v108 — the last question forge asked, so the user's answer is not orphaned.
+ *
+ * "It asks me something, I answer, and it doesn't know what I'm talking about."
+ * A referential line IS an answer, and an answer without its question is
+ * meaningless: "SQLite" or "option 2" says nothing on its own. v107 carried the
+ * goal and the requirements across this seam and still dropped the one turn the
+ * answer is a reply to, because it only ever read `role === "user"`.
+ *
+ * Only the LAST assistant turn is considered, and only when it actually asks:
+ * an older question has been overtaken, and a statement is not a question just
+ * because it came from forge.
+ */
+export function lastQuestionAsked(messages = []) {
+  const list = Array.isArray(messages) ? messages : []
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i]
+    if (m?.role === "user") return null            // the user already moved on
+    if (m?.role !== "assistant") continue
+    const text = messageText(m).trim()
+    if (!text) continue
+    // the question is the last interrogative line — what the user is answering
+    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean)
+    for (let j = lines.length - 1; j >= 0; j--) if (lines[j].includes("?")) return clip(lines[j], 300)
+    return null
+  }
+  return null
+}
+
 function bucket(turns, cls, { exclude = new Set(), max = 6, limit = 200 } = {}) {
   const seen = new Set()
   const out = []
@@ -128,14 +190,21 @@ function bucket(turns, cls, { exclude = new Set(), max = 6, limit = 200 } = {}) 
  *   whenever `objective === line`, so a caller can tell "carried context" from
  *   "ran it as typed" without comparing strings.
  */
-export function conversationBrief({ line = "", messages = [], maxChars = 4000 } = {}) {
+export function conversationBrief({ line = "", messages = [], pendingQuestion = null, questionOptions = [], maxChars = 4000 } = {}) {
   const launch = String(line ?? "").trim()
-  const kind = launchKind(launch)
   const turns = userTurns(messages)
+  const asked = lastQuestionAsked(messages) ?? (pendingQuestion ? clip(pendingQuestion, 300) : null)
+  // A line answering a question forge just asked is referential even when its
+  // own wording says nothing ("SQLite"). Composition is purely additive — the
+  // launch line always survives verbatim — so widening the test here can add
+  // context to a run but can never take the user's instruction away.
+  const kind = launchKind(launch) === LAUNCH.REFERENTIAL
+    ? LAUNCH.REFERENTIAL
+    : (asked && isAnswerLike(launch, { options: questionOptions }) ? LAUNCH.REFERENTIAL : launchKind(launch))
 
   const empty = {
     kind, objective: launch, composed: false, underspecified: false,
-    goal: null, requirements: [], constraints: [], decisions: [], corrections: [], invalidated: [],
+    goal: null, requirements: [], constraints: [], decisions: [], corrections: [], invalidated: [], question: null,
     summary: "",
   }
   if (kind === LAUNCH.STANDALONE || kind === LAUNCH.EMPTY) return empty
@@ -171,7 +240,11 @@ export function conversationBrief({ line = "", messages = [], maxChars = 4000 } 
     }
   }
 
-  const carried = goal || requirements.length || constraints.length || decisions.length || corrections.length
+  // the question this line is answering — from the conversation, or from the
+  // decision store when forge asked it in an earlier session
+  const question = asked
+
+  const carried = goal || requirements.length || constraints.length || decisions.length || corrections.length || question
   if (!carried) return { ...empty, underspecified: true }
 
   const sections = []
@@ -180,6 +253,7 @@ export function conversationBrief({ line = "", messages = [], maxChars = 4000 } 
   if (decisions.length) sections.push(`DECIDED: ${decisions.join("; ")}`)
   if (corrections.length) sections.push(`CORRECTED (the later statement wins): ${corrections.join("; ")}`)
   if (invalidated.length) sections.push(`NO LONGER VALID (do not build these): ${invalidated.join("; ")}`)
+  if (question) sections.push(`THE LAUNCH INSTRUCTION BELOW ANSWERS THIS QUESTION: ${question}`)
 
   const blocks = [
     goal ?? null,
@@ -197,10 +271,11 @@ export function conversationBrief({ line = "", messages = [], maxChars = 4000 } 
   if (decisions.length) counts.push(`${decisions.length} decision(s)`)
   if (corrections.length) counts.push(`${corrections.length} correction(s)`)
   if (invalidated.length) counts.push(`${invalidated.length} invalidated`)
+  if (question) counts.push("the question it answers")
 
   return {
     kind, objective, composed: true, underspecified: false,
-    goal, requirements, constraints, decisions, corrections, invalidated,
+    goal, requirements, constraints, decisions, corrections, invalidated, question,
     summary: counts.join(", "),
   }
 }

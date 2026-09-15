@@ -627,6 +627,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ? engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
       : ""
     if (enginePrefix) emit({ type: "PLAN_ENGINE", taskId, runId: taskRunId })
+    // v108 rootwise: the planner sees lessons, predictions, the world model and
+    // compose — but never the task store, the run journals or a question the
+    // user was still being waited on. A plan built without knowing what is
+    // already underway plans it again.
+    let continuityPrefix = ""
+    if (!restoredDAG && !fastPath && !recoveryPath) {
+      try {
+        const { continuityBlock } = await import("./continuity.js")
+        continuityPrefix = await continuityBlock({ cwd: process.cwd(), query: state.objective, conversationId, maxChars: 1400 })
+      } catch { continuityPrefix = "" }
+    }
     let composePrefix = ""
     if (!restoredDAG && !fastPath && !recoveryPath) {
       try {
@@ -654,7 +665,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -2333,6 +2344,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
       })
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
+      // v108: a check that PASSED is proof the files it covered are sound
+      // again. Without this, engMem.markFilesChanged (line 2228) was a one-way
+      // door: every record citing an edited file went STALE, retrieve() hid it,
+      // and nothing in the repository ever brought one back — so a project's
+      // engineering memory decayed monotonically to invisible.
+      if (chk.passed && !rec.invalidated) {
+        try {
+          const revived = engMem.markFilesVerified(rec.affectedFiles ?? [], { verificationId: rec.verification_id, command: rec.command })
+          if (revived) emit({ type: "MEMORY_REVALIDATED", taskId, runId: taskRunId, segmentId, count: revived, command: rec.command })
+        } catch { /* reviving memory must never fail a verification */ }
+      }
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
       emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })

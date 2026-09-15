@@ -333,6 +333,35 @@ export function createEngMemory({
     return n
   }
 
+  /**
+   * v108 — THE INVERSE OF markFilesChanged, and the reason memory stopped
+   * rotting.
+   *
+   * §14 sends every record citing a touched file to STALE, and retrieve()
+   * excludes STALE by default. The two functions that bring a record back —
+   * revalidate() and markVerified() — had NO production caller anywhere in the
+   * repository. So a project's engineering memory only ever decayed: edit a
+   * file and everything forge had learned about it became permanently
+   * invisible, even after the edit was proven correct.
+   *
+   * Proof is what revives a record, and forge already has it: a verification
+   * command that PASSED names the files it covered. That is evidence, not an
+   * assumption, so this revives only what was actually re-proven — a record
+   * citing a file no passing check touched stays STALE, honestly.
+   */
+  function markFilesVerified(files, evidenceRef = null) {
+    load()
+    const set = new Set((files ?? []).map((f) => String(f)).filter(Boolean))
+    if (!set.size) return 0
+    let n = 0
+    for (const rec of records.slice()) {
+      if (rec.status !== MEM_STATUS.STALE) continue
+      if (!(rec.files ?? []).some((f) => set.has(f))) continue
+      if (revalidate(rec.id, { ok: true, evidenceRef })) n++
+    }
+    return n
+  }
+
   /** §11 L1 — hot memory writers (bounded, never persisted). */
   function setTask(t) { hot.task = String(t ?? "").slice(0, 200) }
   function touchFiles(files) { for (const f of (files ?? []).slice(0, 24)) hot.activeFiles.add(String(f)) }
@@ -406,11 +435,24 @@ export function createEngMemory({
   /** v96 unifywise: the raw REQUIREMENT records (id/text/files), for the
    *  completion gate's requirement-coverage check (§9 traceability). Bounded
    *  to the ingest cap; STALE requirements are still requirements (staleness
-   *  is about the files they cite, not their existence). */
+   *  is about the files they cite, not their existence).
+   *
+   *  v108 — SCOPED TO THIS TASK. The store is per PROJECT, and this filtered by
+   *  layer and status but not by owner, so meta.js:1211 handed a new task every
+   *  requirement any earlier task in the same directory had ingested, and
+   *  meta.js:1222 turned each uncovered one into a blocking required action.
+   *  Reproduced: task A ingests three billing requirements; unrelated task B is
+   *  then handed all three and can never cover them — false INCOMPLETION, the
+   *  mirror of the false-completion metric this gate exists to prevent.
+   *
+   *  Strict equality, so a null taskId (adhoc) sees only other unowned records
+   *  rather than inheriting a real task's. A resumed run keeps its own taskId
+   *  and is unaffected. */
   function requirementRecords() {
     load()
     return records
       .filter((r) => r.layer === MEM_LAYER.REQUIREMENT && r.status !== MEM_STATUS.REJECTED)
+      .filter((r) => (r.taskId ?? null) === (taskId ?? null))
       .slice(-40)
       .map((r) => ({ id: r.id, text: r.text, files: r.files ?? [] }))
   }
@@ -659,7 +701,7 @@ export function createEngMemory({
   }
 
   return {
-    recordMemory, markVerified, markRejected, revalidate, markFilesChanged,
+    recordMemory, markVerified, markRejected, revalidate, markFilesChanged, markFilesVerified,
     setTask, touchFiles, setHypothesis, noteEvidence, noteDecision,
     observeSegment, ingestRequirements, requirementsBlock, requirementRecords,
     retrieve, retrievalBlock, consolidate, conversationContext,

@@ -655,6 +655,16 @@ async function main() {
       if (typeof flags.resume === "string") {
         const rec = readTask(flags.resume)
         if (!rec) { err(`no task matches "${flags.resume}" — try: forge tasks`); process.exit(1); return }
+        // v108: `p` and `cfg` were never declared in this case block (every
+        // sibling declares its own), so this threw "ReferenceError: p is not
+        // defined" for every VALID task id — the guard above masked it for
+        // unknown ids, so it failed precisely when the command was meant to
+        // work. Reproduced before the fix: `forge tasks --resume <id>` printed
+        // "✗ p is not defined" and exited 1. The documented way to resume an
+        // interrupted task had never once reached a model.
+        const cfg = await onboardIfMissing(config)
+        const p = needProvider(cfg)
+        if (!p) return
         // v91: resume runs through the ∞ Core (world model + episodes + bus).
         const { createForgeCore } = await import("./core.js")
         const { createAgentConsole } = await loadAgentView()
