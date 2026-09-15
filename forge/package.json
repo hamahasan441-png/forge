@@ -144,6 +144,7 @@
     "sourceresolve.js",
     "strategy.js",
     "sysshell.js",
+    "taskbrief.js",
     "taskmodel.js",
     "taskstate.js",
     "telemetry.js",

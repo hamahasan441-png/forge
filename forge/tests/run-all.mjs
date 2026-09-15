@@ -227,6 +227,8 @@ const suites = [
   ["v105", "node", ["test-v105.mjs"]],
   // ---- v106 resumewise: a resumed task hears the new instruction ----------
   ["v106", "node", ["test-v106.mjs"]],
+  // ---- v107 carrywise: the launch line is not always the task -------------
+  ["v107", "node", ["test-v107.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])
