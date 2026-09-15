@@ -296,6 +296,8 @@ export const FAST_PATH_CHECK = {
   // plenty of honest runs change a file in a repo that has no command to run,
   // and turning those into INCOMPLETE would be a lie in the other direction.
   WRITES_VERIFIED: "writesVerified",
+  // v102 — recorded only when the caller passes review blockers (enforce mode)
+  REVIEW_CLEAN: "reviewClean",
 }
 
 export const FAST_PATH_STATUS = {
@@ -338,7 +340,7 @@ export function unverifiedWrites({ writesSoFar = [], commandChecks = [] } = {}) 
  * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
  * result reads ONE shape from ONE module.
  */
-export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false } = {}) {
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null } = {}) {
   const blockers = []
   const checks = {}
   const add = (name, ok, reason) => {
@@ -360,6 +362,14 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
   if (requireVerification === true) {
     add(FAST_PATH_CHECK.WRITES_VERIFIED, uncovered.length === 0,
       `${uncovered.length} file(s) changed with no passing check covering them: ${uncovered.slice(0, 5).join(", ")}`)
+  }
+
+  // v102: adversarial-review blockers, when the caller runs the review in
+  // ENFORCE mode. Passing none (the default) leaves this gate exactly as it
+  // was — the review reports, and the caller decides whether it also gates.
+  const revBlockers = Array.isArray(reviewBlockers) ? reviewBlockers.filter(Boolean) : []
+  if (revBlockers.length) {
+    add(FAST_PATH_CHECK.REVIEW_CLEAN, false, `adversarial review blocked completion: ${revBlockers.slice(0, 4).join(", ")}`)
   }
 
   const ok = blockers.length === 0

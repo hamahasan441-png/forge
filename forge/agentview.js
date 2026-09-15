@@ -218,6 +218,13 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     const uncovered = res?.verification?.unverified ?? []
     if (uncovered.length) row("Unverified", o.th.warn(`${uncovered.length} changed file${uncovered.length === 1 ? "" : "s"} with no passing test/build check`) + o.th.muted(`  ${uncovered.slice(0, 2).map((f) => String(f).split("/").pop()).join(", ")}${uncovered.length > 2 ? ` +${uncovered.length - 2}` : ""}`))
     else if (res?.verification?.checksPassing) row("Verified", o.th.muted(`${res.verification.checksPassing} passing check${res.verification.checksPassing === 1 ? "" : "s"} cover ${res.verification.wrote.length} changed file${res.verification.wrote.length === 1 ? "" : "s"}`))
+    // v102: the review that only the meta controller used to run
+    const rev = res?.review
+    if (rev?.required) {
+      if (rev.blockers?.length) row("Review", o.th.fail(`BLOCKED — ${rev.blockers.map((b) => b.id).join(", ")}`) + o.th.muted(`  ${rev.blockers[0].detail}`))
+      else if (rev.findings?.length) row("Review", o.th.warn(`${rev.findings.length} finding${rev.findings.length === 1 ? "" : "s"}`) + o.th.muted(`  ${rev.findings.map((f) => f.id).join(", ")}`))
+      else row("Review", o.th.muted(`clean (${rev.checks.length} checks)`))
+    }
     if (s.checkpoint) row("Checkpoint", shortCheckpoint(s.checkpoint))
     if (elapsedMs >= 60000) row("Elapsed", fmtClock(elapsedMs))
     if (checkKeys.length) {

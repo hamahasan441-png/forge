@@ -61,6 +61,7 @@ import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
 import { canCompleteFastPath, unverifiedWrites } from "./completion.js"
+import { reviewRun, formatReview } from "./review.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
@@ -943,7 +944,44 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // on budgetHit either way; direct callers get the honest status.
     const exhausted = budgetHit && (!answerPresent || coercedByNudge)
     const verificationGap = unverifiedWrites({ writesSoFar, commandChecks })
-    const fastGate = canCompleteFastPath({ finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks, unverified: verificationGap.unverified, requireVerification: config.agent?.requireVerification === true })
+    // v102 — the adversarial review finally runs on the path everything uses.
+    // It has always existed (review.js) and has always been reachable ONLY
+    // through the Ω kernel, which only meta.js builds; `forge agent`,
+    // interactive Agent Mode, every sub-agent and every DAG node come through
+    // here and were never reviewed. No model call, no new computation: the
+    // change set and its blast radius are already on the tool records.
+    // ROLLBACK_POSSIBLE asks whether this run can be undone — the write tools
+    // already checkpointed, so the answer is on disk rather than invented.
+    const rollbackPoint = (() => {
+      try { return listCheckpoints(process.cwd(), 50).find((c) => c.runId === runId)?.id ?? null }
+      catch (e) { swallowed("agent", "find rollback point", e); return null }
+    })()
+    const reviewMode = String(config.agent?.review ?? "report").toLowerCase()
+    const runReview = reviewMode === "off" ? null : (() => {
+      try {
+        return reviewRun({
+          klass, objective: task, records: intel.records(),
+          // P4's gap is the review's verification evidence: files changed with
+          // no passing check covering them is exactly "verification not satisfied"
+          verificationOk: writesSoFar.length === 0 ? true : verificationGap.unverified.length === 0,
+          checkpoint: rollbackPoint,
+        })
+      } catch (e) { swallowed("agent", "adversarial review", e); return null }
+    })()
+    if (runReview?.required) {
+      onEvent?.({ type: "review", ok: runReview.ok, klass: runReview.klass, escalated: runReview.escalated,
+        findings: runReview.findings.map((f) => f.id), blockers: runReview.blockers.map((b) => b.id),
+        text: formatReview(runReview), ...identityMeta() })
+    }
+    const fastGate = canCompleteFastPath({
+      finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks,
+      unverified: verificationGap.unverified,
+      requireVerification: config.agent?.requireVerification === true,
+      // "report" (the default) surfaces blockers without changing the verdict —
+      // v88 deliberately removed the write guards these checks shadow, and
+      // silently reversing that decision is not this change's call to make.
+      reviewBlockers: reviewMode === "enforce" ? (runReview?.blockers ?? []).map((b) => b.id) : [],
+    })
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
     let checkpointId = null
     if (!fastGate.ok && fastGate.status === "INCOMPLETE") {
@@ -957,7 +995,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
