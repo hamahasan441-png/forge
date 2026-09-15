@@ -36,6 +36,7 @@ import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
 import { createTracer, PHASE } from "./tracer.js"
+import { swallowed, snapshot as softfailSnapshot } from "./softfail.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
@@ -129,7 +130,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     try {
       const map = repoMapBlock !== null ? repoMapBlock : buildRepoMap(cwd, { query: task || "" })
       if (map) lines.push("", map)
-    } catch { }
+    } catch (e) { swallowed("agent", "build repo map", e) }
   }
   if (task) {
     // v23: when semantic retrieval is enabled, runAgent precomputes the hybrid
@@ -337,7 +338,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         for (const pp of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${pp.name}${pp.readOnly ? " (read-only)" : ""} — ${pp.source}`, ...identityMeta() })
         for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}`, ...identityMeta() })
       }
-    } catch { }
+    } catch (e) { swallowed("agent", "load tool plugins", e) }
     // v93 gap fix §19: CREATED tools register here — but ONLY lifecycle
     // ACTIVE with passing behavioral verification (toolcreate.js loads
     // exactly those; CANDIDATE/TESTING/INACTIVE never reach the agent).
@@ -348,7 +349,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         plugins = [...plugins, ...safe]
         if (!isDelegatedSubAgent) for (const ct of safe) onEvent?.({ type: "info", text: `created tool loaded: ${ct.name} (ACTIVE, behaviorally verified)`, ...identityMeta() })
       }
-    } catch { /* created tools are additive, never break the agent */ }
+    } catch (e) { swallowed("agent", "load created tools", e) /* additive, never break the agent */ }
   }
   let mcpClients = []
   let mcpLoaded = []
@@ -377,7 +378,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         mcpClients = mcp.clients
       }
       for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}`, ...identityMeta() })
-    } catch { }
+    } catch (e) { swallowed("agent", "load mcp tools", e) }
   }
 
   // ── THE SINGLE SELECTION ──────────────────────────────────────────────────
@@ -399,7 +400,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     skillOptions: { klass: turnKlass, skillsDir, cwd: process.cwd() },
     nativeDefs: [],
     nativeNames: [...BUILTIN_TOOL_NAMES],
-    stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch { return null } })(),
+    stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch (e) { swallowed("agent", "load tool stats", e); return null } })(),
     mcpOptions: {
       maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
       dedupe: config.mcp?.dedupe !== false,
@@ -504,7 +505,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       if (decision?.chain?.active?.length) {
         onEvent?.({ type: "info", text: `routing: ${decision.chain.reason}`, ...identityMeta() })
       }
-    } catch { }
+    } catch (e) { swallowed("agent", "route model chain", e) }
   }
 
   // v24 semantic retrieval: when retrieval.embeddings is enabled, rerank the
@@ -892,7 +893,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), error: null }
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

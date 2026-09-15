@@ -167,5 +167,78 @@ console.log("== 8. the agent loop is actually instrumented ==")
   ok("the run result carries the trace", /trace: tracer\.snapshot\(\)/.test(src))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 9. swallowed failures: intent vs accident ==")
+{
+  const sf = await import("../softfail.js")
+  sf.reset()
+
+  // The whole value of this module is this distinction. A best-effort path is
+  // WRITTEN to survive ENOENT; a TypeError there is a bug that has been hiding.
+  const enoent = Object.assign(new Error("no such file"), { code: "ENOENT" })
+  sf.swallowed("memory", "load index", enoent)
+  sf.swallowed("memory", "load index", enoent)
+  sf.swallowed("runtime", "kill child", Object.assign(new Error("gone"), { code: "ESRCH" }))
+  sf.swallowed("worldmodel", "index symbols", new TypeError("Cannot read properties of undefined"))
+
+  const snap = sf.snapshot()
+  eq("every swallow is counted", snap.total, 4)
+  eq("repeats collapse into one site", snap.distinct, 3)
+  eq("exactly the bug-shaped one is suspicious", snap.suspicious, 1)
+  eq("and it is listed FIRST", snap.entries[0].where, "worldmodel")
+  eq("repeats carry their count", snap.entries.find((e) => e.where === "memory").count, 2)
+  ok("an expected code is not suspicious", snap.entries.find((e) => e.kind === "ENOENT").suspicious === false)
+  ok("ESRCH (killing a dead child) is not suspicious", snap.entries.find((e) => e.kind === "ESRCH").suspicious === false)
+
+  const rep = sf.format(snap)
+  ok("the report marks the suspicious one", /! worldmodel\/index symbols \[TypeError\]/.test(rep), rep)
+  ok("and explains what the mark means", /usually mean a real bug was hiding/.test(rep))
+
+  sf.reset()
+  eq("reset clears", sf.snapshot().total, 0)
+  eq("a quiet run produces NO report at all", sf.format(), "")
+}
+
+console.log("== 10. the reporter can never make things worse ==")
+{
+  const sf = await import("../softfail.js")
+  sf.reset()
+  ok("a non-Error value is accepted", (() => { sf.swallowed("x", "y", "just a string"); return sf.snapshot().total === 1 })())
+  ok("null is accepted", (() => { sf.swallowed("x", "z", null); return sf.snapshot().total === 2 })())
+  ok("it returns the error so a call site stays a one-liner", sf.swallowed("x", "w", enoentLike()) instanceof Error)
+  ok("a hostile getter cannot take down the reporter", (() => {
+    try { sf.swallowed("x", "v", { get code() { throw new Error("hostile") } }); return true } catch { return false }
+  })())
+  ok("undefined where/what still records", (() => { sf.swallowed(undefined, undefined, new Error("e")); return sf.snapshot().distinct > 0 })())
+
+  // bounded: a runaway loop must not grow the table without limit
+  sf.reset()
+  for (let i = 0; i < 500; i++) sf.swallowed(`mod${i}`, "op", new Error("e"))
+  const s2 = sf.snapshot()
+  ok("the table is bounded", s2.distinct <= 300, String(s2.distinct))
+  ok("and says how many it could not record", s2.dropped > 0, String(s2.dropped))
+  ok("the report admits the truncation", /not recorded - table full/.test(sf.format(s2)))
+  sf.reset()
+
+  function enoentLike() { return Object.assign(new Error("nope"), { code: "ENOENT" }) }
+}
+
+console.log("== 11. the agent reports what it silently lost ==")
+{
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  // Each of these swallows used to mean the agent ran with LESS CAPABILITY and
+  // nobody could tell: no repo overview, no plugins, no MCP tools, no routing.
+  for (const [what, re] of [
+    ["the repo map", /swallowed\("agent", "build repo map"/],
+    ["tool plugins", /swallowed\("agent", "load tool plugins"/],
+    ["MCP tools", /swallowed\("agent", "load mcp tools"/],
+    ["model routing", /swallowed\("agent", "route model chain"/],
+    ["tool stats", /swallowed\("agent", "load tool stats"/],
+    ["created tools", /swallowed\("agent", "load created tools"/],
+  ]) ok(`losing ${what} is now recorded`, re.test(src))
+  ok("the run result carries the swallow report", /softFailures: softfailSnapshot\(\)/.test(src))
+  ok("control flow is unchanged — the agent still swallows", /catch \(e\) \{ swallowed\("agent", "build repo map", e\) \}/.test(src))
+}
+
 console.log(`\n== v101 instrument suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
