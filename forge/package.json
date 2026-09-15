@@ -146,6 +146,7 @@
     "textdiff.js",
     "toolcreate.js",
     "toolintel.js",
+    "tracer.js",
     "tools.js",
     "ui.js",
     "uistate.js",

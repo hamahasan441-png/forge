@@ -35,6 +35,7 @@ import { selectForTurn } from "./capindex.js"
 import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
+import { createTracer, PHASE } from "./tracer.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
@@ -281,6 +282,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     deepEffort = resolved.deep
     if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
   }
+  // v101 P0: phase tracing. telemetry.js counts WHAT happened; this records
+  // WHERE THE WALL-CLOCK WENT, so an optimization can be attributed to the
+  // phase it claims to improve instead of judged on total runtime alone.
+  const tracer = createTracer()
   const maxStepsInitial = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps, readonly ? 10 : AGENT_BUDGETS.maxStepsHardCap)
   let maxSteps = maxStepsInitial
   const maxToolCallsInitial = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(10, config.agent?.maxToolCalls ?? AGENT_BUDGETS.maxToolCalls))
@@ -649,6 +654,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       log?.step(steps)
       onEvent?.({ type: "step", step: steps, ...identityMeta() })
       let msg
+      // declared OUTSIDE the try so every exit path — success, provider error,
+      // failover, retry — closes the span exactly once (end() is idempotent).
+      const endModel = tracer.span(PHASE.MODEL)
       try {
         msg = await chatOnce({
           protocol: p.protocol,
@@ -664,7 +672,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           connectMs: config.retry?.connectMs,
           requestTimeoutMs: config.retry?.requestTimeoutMs,
         })
+        endModel()
       } catch (e) {
+        endModel({ error: true })
         if (e instanceof ProviderError && e.contextOverflow && overflowBudget > 0) {
           overflowBudget--
           onEvent?.({ type: "compacted", before: messages.length, after: -1, estTok: estimateTokens(JSON.stringify(messages)), budgetTok: 0, reason: "context overflow — compressing and retrying", ...identityMeta() })
@@ -739,10 +749,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           content: msg.content || "",
           tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
         })
+        const endTools = tracer.span(PHASE.TOOL)
         const results = await intel.runBatch(
           msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) })),
           { step: steps }
         )
+        endTools()
+        // per-tool attribution: "tools took 40s" is far less useful than
+        // knowing WHICH tool did. runBatch already timed each call.
+        for (let i = 0; i < msg.toolCalls.length; i++) {
+          const ms = Number(results?.[i]?.ms)
+          if (Number.isFinite(ms)) tracer.mark(`tool:${msg.toolCalls[i]?.name ?? "unknown"}`, ms,
+            { error: String(results?.[i]?.result ?? "").startsWith("ERROR") })
+        }
         for (let i = 0; i < msg.toolCalls.length; i++) {
           const tc = msg.toolCalls[i]
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
@@ -873,7 +892,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
