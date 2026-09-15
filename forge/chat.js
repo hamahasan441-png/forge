@@ -50,6 +50,7 @@ import { ingestAcquire } from "./knowgap.js"
 import { classifyTask } from "./classify.js"
 import { saveSession, loadSession, lastSessionFile, listSessions, findSession, appendTranscript, latestSessionForCwd, projectSessionFile } from "./sessions.js"
 import { classifyUserMessage, formatClassification } from "./msgclass.js"
+import { requirementDelta, formatDelta } from "./reqdelta.js"
 import { buildRehydration, formatRehydration } from "./rehydrate.js"
 import { readSourceRecord } from "./sourceresolve.js"
 import { relevantMemory } from "./memory.js"
@@ -891,6 +892,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   // engineering decisions survive compaction — compaction folds the WORKING
   // context; the transcript keeps the RAW history, permanently.
   let turnTranscript = []
+  // v103 §6: the requirements this conversation has stated so far — what a
+  // later "change the target to X" is measured against.
+  const sessionRequirements = []
 
   /** Persist the conversation — one file per conversation, updated in place. */
   function persist() {
@@ -1074,6 +1078,30 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       const cls = classifyUserMessage(userText)
       turnTranscript.push({ role: "user", content: String(userText), classes: cls.classes.map((c) => ({ cls: c.cls, evidence: c.evidence })) })
       if (cls.classes.length) out(dim(`  · noted: ${formatClassification(cls)}`))
+      // v103 §6 — msgclass has always classified the turn and stopped there.
+      // When a turn CHANGES the requirements and earlier ones are on record,
+      // work out what survives: the delta is shown, and travels with the turn
+      // so the model plans from what is still valid instead of starting over.
+      const kinds = new Set(cls.classes.map((c) => c.cls))
+      const changing = kinds.has("scope_change") || kinds.has("correction") || kinds.has("requirement") || kinds.has("constraint")
+      if (changing && sessionRequirements.length) {
+        try {
+          const d = requirementDelta({ previous: sessionRequirements, message: String(userText) })
+          // Only speak when something actually moved. An addition that
+          // invalidates nothing is already obvious from the message itself.
+          if (d.platformChange || d.invalidated.length || d.removed.length) {
+            const line = formatDelta(d)
+            if (line) out(dim(`  · ${line}`))
+            messages.push({ role: "user", content: `[requirement delta] ${line}\nRe-plan only what is invalidated. Do NOT restart the parts listed as preserved.` })
+          }
+        } catch { /* the delta is advisory — never lose a turn to it */ }
+      }
+      // goals, requirements and constraints are what a later delta is measured
+      // against; nothing else is a requirement.
+      if (kinds.has("goal") || kinds.has("requirement") || kinds.has("constraint")) {
+        sessionRequirements.push(String(userText).slice(0, 400))
+        if (sessionRequirements.length > 40) sessionRequirements.shift()
+      }
     }
     messages = compact(messages, config.chat?.maxHistoryMessages)
     if (!ui) process.stdout.write("\n")

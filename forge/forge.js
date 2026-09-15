@@ -495,6 +495,19 @@ async function main() {
       const planMode = flags.plan !== undefined
       console.log(dim(`forge agent — ${bold(task)}${flags.deep === true ? "  " + green("DEEP") : ""}`))
       console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps}${planMode ? " • PLAN MODE (read-only)" : ""}`))
+      // v103 §2: said BEFORE the work, not after it. Running from forge's own
+      // checkout on a task that never mentions forge is the case where the
+      // agent would otherwise build the user's project inside forge itself.
+      try {
+        const { resolveWorkspace } = await import("./workspace.js")
+        const ws = resolveWorkspace({ cwd: process.cwd(), task })
+        if (ws.conflict) {
+          warn(`this directory is forge's OWN source tree — "${task.slice(0, 48)}${task.length > 48 ? "…" : ""}" does not look like a task about forge`)
+          console.log(dim(`  if the project lives elsewhere, stop and re-run there (or pass ${cyan("--cwd <dir>")}); new files created here will be flagged`))
+        } else if (ws.targetIsForge && ws.selfTargeted) {
+          console.log(dim(`  working on forge itself — edits here change the agent's own code`))
+        }
+      } catch { /* the warning is additive; never block a run on it */ }
       console.log()
       const t0 = Date.now()
       // v20.4: in a terminal the run is rendered from UI state (live dock,

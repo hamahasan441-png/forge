@@ -114,6 +114,7 @@
     "recovery.js",
     "rehydrate.js",
     "render.js",
+    "reqdelta.js",
     "repl.js",
     "replan.js",
     "replay.js",
@@ -161,6 +162,7 @@
     "vision.js",
     "worknode.mjs",
     "worktree.js",
+    "workspace.js",
     "worldmodel.js",
     "xlang.js",
     "zipingest.js"
