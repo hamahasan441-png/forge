@@ -724,6 +724,22 @@ console.log("== 23. the nudge turns a false completion into a real one ==")
   const strictRun = await direct({ requireVerification: true })
   eq("with requireVerification on, the same run is INCOMPLETE", strictRun.status, "INCOMPLETE")
   ok("and the gate says why", strictRun.completionGate.reasons.some((r) => /no passing check/.test(r)), JSON.stringify(strictRun.completionGate.reasons))
+
+  console.log("== 26. the nudge must not cost a run its answer ==")
+  {
+    // the model answers, gets nudged, and then the provider dies (empty
+    // responses forever). Before the nudge existed this run COMPLETED.
+    const dead = (n) =>
+      n === 1 ? call("w1", "write_file", { path: "sum.js", content: BROKEN })
+      : n === 2 ? { role: "assistant", content: "Fixed sum.js. Complete." }
+      : { role: "assistant", content: "" }
+    const r = await run(dead)
+    ok("it was nudged", r.nudged === true)
+    ok("the run does not FAIL on the provider hiccup the nudge caused", r.r.agentError === null, String(r.r.agentError))
+    eq("the withdrawn answer is restored", r.r.agentStatus, "COMPLETED")
+    ok("and the change is still reported as unverified — the point is not lost", r.r.falseCompletion === true)
+  }
+
 }
 
 console.log(`\n== v101 instrument suite: ${PASS} passed, ${FAIL} failed ==`)

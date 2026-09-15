@@ -582,6 +582,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // v101 P4: fires AT MOST ONCE per run, and only on a run that actually
   // changed something without ever checking it. See the gate below.
   let verifyNudgeFired = false
+  // the answer the nudge withdrew, kept ONLY as a fallback (see below)
+  let withdrawnText = ""
   let emptyStreak = 0
   // v94 masterwise (§6/§7): budget-nudge coercion tracking — see below
   let budgetNudgeFired = false
@@ -846,6 +848,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           steps--
           continue
         }
+        // v101 P4: if the verification nudge withdrew a real answer and the
+        // provider then died, the run must not FAIL where it would have
+        // COMPLETED before the nudge existed. Restore the withdrawn answer and
+        // end honestly — the result still reports the changes as unverified,
+        // which is the whole point, and that is strictly better than losing
+        // the work to a provider hiccup the nudge caused.
+        if (withdrawnText) {
+          finalText = withdrawnText
+          onEvent?.({ type: "info", text: "the provider stopped responding after the verification nudge — restoring the answer it gave before, still reported as unverified", ...identityMeta() })
+          break
+        }
         throw new ProviderError(`model returned an empty response ${EMPTY_RESPONSE_RETRIES + 1} times in a row — provider or model issue (or the response was filtered); no final answer was produced`, { retryable: false })
       }
       emptyStreak = 0
@@ -891,6 +904,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // The answer is WITHDRAWN, not kept: the model must restate it after
           // checking. Otherwise a run that spent its remaining budget verifying
           // would report the pre-check answer as if it had survived the check.
+          withdrawnText = finalText
           finalText = ""
           let hint = ""
           try {
