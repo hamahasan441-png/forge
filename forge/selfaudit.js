@@ -169,6 +169,66 @@ export function countRefs(code, name) {
   return (flat.match(re) || []).length
 }
 
+
+/**
+ * The body of `name`'s definition, by brace matching from its declaration.
+ * Bounded; returns "" when the shape is not a braced function.
+ */
+export function bodyOf(code, name) {
+  const decl = new RegExp(`^export\\s+(?:async\\s+)?function\\s+${name}\\b`, "m")
+  const m = decl.exec(String(code ?? ""))
+  if (!m) return ""
+  // The body's `{` is NOT simply the first one after the declaration: a default
+  // parameter gets there first. `defaultRegistry(config = {})` matched the `{}`
+  // in the parameter list, closed immediately, and returned an empty body — so
+  // every function with a defaulted object parameter looked like it had no body
+  // at all. Take the first brace at parenthesis depth zero instead.
+  let open = -1
+  let paren = 0
+  for (let i = m.index; i < code.length && i - m.index < 4000; i++) {
+    const ch = code[i]
+    if (ch === "(") paren++
+    else if (ch === ")") paren--
+    else if (ch === "{" && paren === 0) { open = i; break }
+  }
+  if (open < 0) return ""
+  let depth = 0
+  for (let i = open; i < code.length && i - open < 20000; i++) {
+    if (code[i] === "{") depth++
+    else if (code[i] === "}") { depth--; if (depth === 0) return code.slice(open + 1, i) }
+  }
+  return ""
+}
+
+/**
+ * Is this export a THIN ALIAS — a body that does nothing but hand off to
+ * something else?
+ *
+ * Found by USING the analyzer rather than by designing it. The first real run
+ * ranked six leads at the top, and four were one-liners delegating to a
+ * function that is itself used:
+ *
+ *   defaultRegistry  → createRegistry({ config })
+ *   applyUnifiedDiff → applyParsedPatch(filesMap, parsePatch(patchText))
+ *   isPrivateAddress → blockedAddressReason(ip) !== null
+ *   canCompleteDAG   → canCompleteTask({ … })
+ *
+ * Every one is a TRUE positive — nothing calls them — and every one is
+ * worthless as a lead, because the capability behind them is wired and
+ * working. An unused convenience wrapper is not lost capability. Crowding the
+ * top of the report with these is how an analyzer teaches people to skim past
+ * it, so they are still reported, and ranked below the real thing.
+ */
+export function isThinAlias(body) {
+  const code = String(body ?? "").trim()
+  if (!code) return false
+  // strip the delegation's own arguments so a long argument list does not
+  // disguise a one-line hand-off
+  const statements = code.split(/;|\n/).map((x) => x.trim()).filter(Boolean)
+  if (statements.length > 1 && !/^return\b/.test(code)) return false
+  return /^return\s+[A-Za-z_$][\w$]*\s*\(/.test(code) || /^return\s+[A-Za-z_$][\w$]*\s*\(/.test(statements[0] ?? "")
+}
+
 /**
  * Analyze a directory of modules.
  *
@@ -248,12 +308,13 @@ export function analyzeModules({ dir, testDir = null, entryPoints = [], read = n
       if (self > 0 || cross > 0) continue
 
       const cosmetic = COSMETIC.test(name) || METRIC.test(name)
+      const thin = kind === "function" && isThinAlias(bodyOf(code, name))
       findings.push({
         kind: testRefs > 0 ? FINDING.ORPHANED_CAPABILITY : FINDING.DEAD_EXPORT,
-        file, name, kind_of_export: kind, loc, testRefs, cosmetic,
+        file, name, kind_of_export: kind, loc, testRefs, cosmetic, thin,
         evidence: testRefs > 0
-          ? `${file} exports ${name}; ${testRefs} test reference(s) exercise it; NO production code calls it`
-          : `${file} exports ${name}; nothing references it anywhere, tests included`,
+          ? `${file} exports ${name}; ${testRefs} test reference(s) exercise it; NO production code calls it${thin ? " — but it only delegates, so the capability behind it is not lost" : ""}`
+          : `${file} exports ${name}; nothing references it anywhere, tests included${thin ? " — a delegating wrapper, not lost capability" : ""}`,
       })
     }
   }
@@ -282,7 +343,8 @@ export function analyzeModules({ dir, testDir = null, entryPoints = [], read = n
  */
 export function rankFindings(findings = []) {
   const weight = (f) => {
-    if (f.kind === FINDING.ORPHANED_CAPABILITY) return 100 + Math.min(60, f.testRefs * 3) - (f.cosmetic ? 80 : 0)
+    // a thin alias is a true finding and a bad lead: demoted, never dropped
+    if (f.kind === FINDING.ORPHANED_CAPABILITY) return 100 + Math.min(60, f.testRefs * 3) - (f.cosmetic ? 80 : 0) - (f.thin ? 70 : 0)
     if (f.kind === FINDING.ISLAND_MODULE) return 50 + Math.min(40, Math.floor(f.loc / 20))
     return 10 + Math.min(10, f.testRefs) - (f.cosmetic ? 8 : 0)
   }
@@ -306,7 +368,7 @@ export function formatAudit(report, { limit = 20 } = {}) {
   lines.push("")
   for (const f of report.findings.slice(0, limit)) {
     const where = f.name ? `${f.file}:${f.name}` : f.file
-    lines.push(`  ${f.kind.padEnd(21)} ${where}`)
+    lines.push(`  ${f.kind.padEnd(21)} ${where}${f.thin ? "  (thin alias)" : ""}${f.cosmetic ? "  (cosmetic)" : ""}`)
     lines.push(`    ${f.evidence}`)
   }
   if (report.findings.length > limit) lines.push(`  … and ${report.findings.length - limit} more`)
