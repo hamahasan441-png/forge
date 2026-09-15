@@ -23,6 +23,8 @@ export const REVIEW_CHECK = {
   // v103 §2 — new project files created inside forge's own source tree while
   // the task never said it was about forge.
   WORKSPACE_MATCHES_TASK: "workspace_matches_task",
+  // v104 §4 — files written outside the resolved workspace entirely.
+  WRITES_STAY_IN_WORKSPACE: "writes_stay_in_workspace",
 }
 
 const SECRET_HINT = /(?:^|[\\/])(\.env(?:\..+)?|credentials|\.pem|\.p12|id_rsa|id_ed25519|\.netrc|\.npmrc)$/i
@@ -140,6 +142,17 @@ export function adversarialReview(input = {}) {
     })
   }
 
+  const outside = (input.outside ?? []).map(String)
+  if (ws) {
+    note(REVIEW_CHECK.WRITES_STAY_IN_WORKSPACE, {
+      ok: outside.length === 0,
+      blocker: outside.length > 0,
+      detail: outside.length
+        ? `${outside.length} file(s) written outside the workspace (${ws.targetWorkspace}): ${outside.slice(0, 3).join(", ")}`
+        : "every write landed inside the workspace",
+    })
+  }
+
   note(REVIEW_CHECK.ROLLBACK_POSSIBLE, {
     ok: true,
     detail: input.checkpoint ? `checkpoint ${String(input.checkpoint).slice(0, 40)}` : "no checkpoint recorded (advisory)",
@@ -215,15 +228,15 @@ export function changeSetOf(records = []) {
  *
  * @returns the adversarialReview result plus { escalated, escalatedFrom, files, impact }
  */
-export function reviewRun({ klass = null, objective = "", records = [], verificationOk = null, checkpoint = null, escalate = true, workspace = null, created = [] } = {}) {
+export function reviewRun({ klass = null, objective = "", records = [], verificationOk = null, checkpoint = null, escalate = true, workspace = null, created = [], outside = [] } = {}) {
   const { files, impact } = changeSetOf(records)
   const wide = files.length >= ESCALATE_FILES || impact.radius >= ESCALATE_RADIUS
   // v103 §2: writing a NEW file into forge's own tree for a task that never
   // named forge is reviewable on its own, whatever the task was called — the
   // reproduction was a single write_file that classified as a small task.
   const strayed = Boolean(workspace?.conflict) && created.length > 0
-  const escalated = escalate && !needsReview(klass) && (wide || strayed)
+  const escalated = escalate && !needsReview(klass) && (wide || strayed || outside.length > 0)
   const effective = escalated ? TASK_CLASS.LARGE : klass
-  const rev = adversarialReview({ klass: effective, objective, files, impact, verificationOk, checkpoint, workspace, created })
+  const rev = adversarialReview({ klass: effective, objective, files, impact, verificationOk, checkpoint, workspace, created, outside })
   return { ...rev, escalated, escalatedFrom: escalated ? (klass ?? null) : null, files, impact }
 }

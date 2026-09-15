@@ -578,6 +578,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     todoPath: path.join(DEFAULT_DIR, "todo.json"),
     readOnly: false,
     allowOutsideProject: unrestricted || config.tools?.allowOutsideProject === true,
+    // v104 §5: EXPLICIT only — `unrestricted` ships true and must not silently
+    // grant a filesystem-wide scan the user never asked for.
+    allowOutsideTraversal: config.tools?.allowOutsideProject === true,
     allowSudo: unrestricted || config.tools?.allowSudo === true,
     allowNetworkUpload: unrestricted || config.tools?.allowNetworkUpload === true,
     allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true,

@@ -211,3 +211,22 @@ export function formatWorkspace(ws) {
   }
   return ""
 }
+
+/**
+ * v104 §4 — did this write land outside the resolved workspace?
+ *
+ * v88 removed the write boundary deliberately, so this does not block a write.
+ * It answers the question the completion report needs: did a task edit a tree
+ * nobody pointed it at? Path containment against the target, realpath'd, with
+ * the same "no workspace resolved → nothing to compare" honesty as the rest of
+ * this module.
+ */
+export function outsideWorkspace(ws, file) {
+  const root = ws?.targetWorkspace
+  if (!root || !file) return false
+  if (String(file) === "(shell write)") return false   // unknown target, never guessed at
+  const real = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+  const r = real(root)
+  const f = real(file)
+  return !(f === r || f.startsWith(r + path.sep))
+}
