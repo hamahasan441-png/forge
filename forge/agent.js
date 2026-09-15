@@ -547,10 +547,16 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { /* BM25 fallback — retrieval must never break a run */ }
   }
 
+  // v101 P2: the prompt build is where the untraced time was hiding. When
+  // embeddings are not configured (the default), agentSystemPrompt computes the
+  // repo map, memory and learnings SYNCHRONOUSLY inside itself — three
+  // independent retrievals, one after another, on the event loop.
+  const endContext = tracer.span(PHASE.CONTEXT)
   let messages = [
     { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
+  endContext()
   // v89 perf: FORGE_DEBUG_PROMPT=<path> dumps the exact first request payload —
   // the ground truth for prompt-economy work (sizes per block, no guessing).
   if (process.env.FORGE_DEBUG_PROMPT) {

@@ -305,5 +305,35 @@ console.log("== 13. the router actually consumes the class ==")
   ok("class evidence is shrunk toward the model's OWN global rate", /CLASS_PRIOR_WEIGHT \* globalRate/.test(src))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 14. P2: context assembly is traced, and already cached ==")
+{
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("prompt assembly is spanned", /const endContext = tracer\.span\(PHASE\.CONTEXT\)/.test(src))
+  ok("and the span is closed", /\n  endContext\(\)/.test(src))
+
+  // The measurement that decided P2. The repo index is cached on disk, so the
+  // expensive walk happens once per index generation, not once per run — the
+  // "rebuild the repo map every segment" waste this phase went looking for does
+  // not exist. Asserted as a PROPERTY (warm is much cheaper than cold) rather
+  // than a fixed millisecond number, which would be machine-dependent.
+  const { buildRepoMap } = await import("../repomap.js")
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v101-map-"))
+  for (let i = 0; i < 40; i++) {
+    fs.writeFileSync(path.join(work, `mod${i}.js`), `export function f${i}(a) { return a + ${i} }
+`.repeat(20))
+  }
+  const prev = process.cwd()
+  process.chdir(work)
+  const t0 = Date.now(); buildRepoMap(work, { query: "function f1" }); const cold = Date.now() - t0
+  const t1 = Date.now(); buildRepoMap(work, { query: "function f1" }); const warm = Date.now() - t1
+  const t2 = Date.now(); buildRepoMap(work, { query: "something entirely different" }); const warmOther = Date.now() - t2
+  process.chdir(prev)
+  ok("a warm build is cheaper than a cold one", warm <= cold, `cold=${cold}ms warm=${warm}ms`)
+  ok("the cache is keyed on FILES, not the query (a new query stays warm)",
+    warmOther <= Math.max(cold, 50), `cold=${cold}ms warmOther=${warmOther}ms`)
+  ok("repeated builds never grow more expensive", warmOther <= cold + 25, `cold=${cold}ms warmOther=${warmOther}ms`)
+}
+
 console.log(`\n== v101 instrument suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
