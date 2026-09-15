@@ -31,6 +31,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { inspectProjectDir, gitRemoteUrl, readSourceRecord } from "./sourceresolve.js"
+import { projectRoot } from "./projectkey.js"
 
 /** How the target workspace was decided, most authoritative first. */
 export const RESOLUTION = Object.freeze({
@@ -93,16 +94,18 @@ export function repositoryIdentityOf(dir) {
   try { return fs.realpathSync(dir) } catch { return path.resolve(dir) }
 }
 
-/** Walk up for the enclosing git repository root; null when there is none. */
+/**
+ * Walk up for the enclosing git repository root; null when there is none.
+ *
+ * v108: the walk itself lives in projectkey.js, which memory.js also uses to
+ * key every per-project store. Two copies of "where does this project begin"
+ * is exactly how the stores and the workspace resolver would drift apart, so
+ * there is one. This wrapper keeps the narrower contract it always had —
+ * a GIT root or null, never a manifest and never the directory itself.
+ */
 export function repositoryRootOf(dir) {
-  let cur = path.resolve(dir ?? ".")
-  for (let i = 0; i < 64; i++) {
-    try { if (fs.existsSync(path.join(cur, ".git"))) return cur } catch { /* unreadable → keep walking */ }
-    const up = path.dirname(cur)
-    if (up === cur) return null
-    cur = up
-  }
-  return null
+  const root = projectRoot(dir ?? ".")
+  try { return fs.existsSync(path.join(root, ".git")) ? root : null } catch { return null }
 }
 
 /** A coarse project type from the manifests already detected by sourceresolve. */

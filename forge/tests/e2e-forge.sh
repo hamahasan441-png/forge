@@ -736,7 +736,12 @@ check "sessions show title" "$out" "OVERFLOW_ONCE"
 REF=$($F sessions 2>&1 </dev/null | grep -oE "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9-]+-[a-z0-9]+" | head -1)
 out=$(cd "$T/work" && printf '' | $F resume "$REF" 2>&1)
 check "forge resume loads session" "$out" "resumed session"
-check "forge resume restores cwd" "$out" "resumed in "
+# v108: this resume genuinely crosses projects — the session was recorded in the
+# forge checkout and is resumed from a temp dir — so forge now says so instead of
+# announcing the move with one dim "resumed in" line. The invariant under test is
+# that the cwd IS restored, so assert the destination, not the wording.
+check "forge resume restores cwd" "$out" "$PWD"
+check "forge resume warns when it changes project" "$out" "DIFFERENT project"
 
 # 89. export renders tool calls + tool results
 out=$(printf 'USE_TOOL inline please\n/export %s\n/exit\n' "$T/work/export2.md" | $F chat 2>&1)

@@ -22,6 +22,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { listCheckpoints } from "./checkpoint.js"
+import { sameProject } from "./projectkey.js"
 
 export const RUNS_DIR = path.join(DEFAULT_DIR, "runs")
 const MAX_RUNS = 200
@@ -132,7 +133,8 @@ export function listRuns({ cwd = null, max = 20 } = {}) {
       try {
         const j = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), "utf8"))
         if (!j || typeof j !== "object") continue
-        if (cwd && path.resolve(j.cwd || "") !== path.resolve(cwd)) continue
+        // v108 rootwise: same project, not same directory (see taskstate.js).
+      if (cwd && !sameProject(j.cwd || "", cwd)) continue
         out.push(j)
       } catch {}
     }

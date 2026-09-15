@@ -20,6 +20,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { projectDir } from "./memory.js"
+import { openTask, TASK_STATUS } from "./taskstate.js"
 
 export const DECISION_TYPE = {
   INFORMATION: "INFORMATION",
@@ -98,6 +99,49 @@ export function buildDecision({
     answer_note: null,
     consequences,
   }
+}
+
+/**
+ * v108 rootwise — ANSWERING A QUESTION, from anywhere.
+ *
+ * Reproduced before this existed: `ask()` persisted the question and moved the
+ * task to WAITING_FOR_USER; `core.answerDecision()` was the only resolver in
+ * the repository and had NO production caller; `/decision` in chat only LISTED
+ * pending questions and told the user to "answer in the running forge session",
+ * which is not a thing that exists. A later run then found the question still
+ * pending AND was refused permission to re-ask it ("asked recently — do not nag
+ * the user"). So forge could ask, and nobody could answer, forever.
+ *
+ * This is the shared leaf both callers use: resolve the record, and hand the
+ * task that was waiting on it back to the runnable world. Core keeps its own
+ * bus/event work on top; chat calls this directly. One implementation.
+ *
+ * @param ref  a decision id, or the decision KEY (resolve() accepts either).
+ */
+export function answerDecision({ cwd = process.cwd(), ref, choice = null, note = null, cancelled = false } = {}) {
+  if (!ref) return null
+  const eng = createDecisionEngine({ cwd })
+  const d = eng.resolve(ref, { choice, note, cancelled })
+  if (!d) return null
+  // The task that asked is sitting in WAITING_FOR_USER with nothing to wake it.
+  // Answering IS the event that unblocks it, so say so on the record — a resume
+  // then finds a task that can run instead of one that is still waiting.
+  // the record's field is `task_id` (buildDecision, §40 schema) — not taskId
+  if (d.task_id) {
+    try {
+      const ts = openTask(d.task_id, { create: false, cwd })
+      if (ts?.record && ts.record.status === TASK_STATUS.WAITING_FOR_USER) {
+        // PLANNING, not READY: taskstate's own TRANSITIONS table does not allow
+        // WAITING_FOR_USER → READY (taskstate.js:131), and the honest next step
+        // after a human decision lands is to plan again from it rather than to
+        // assume the pre-question plan still holds. The guard is the table's,
+        // not a second opinion about it.
+        ts.transition(TASK_STATUS.PLANNING, { reason: `decision ${d.decision_id} answered: ${d.answer ?? "(cancelled)"}` })
+        ts.save?.()
+      }
+    } catch { /* the answer is recorded either way — never lose it to a task write */ }
+  }
+  return d
 }
 
 /**

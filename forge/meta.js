@@ -60,6 +60,8 @@ import { critiquePlan, planRevisionPrompt } from "./plancritique.js" // v99 loop
 import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
 import { AGENT_BUDGETS } from "./config.js"
 import { createKernel } from "./omega.js"
+import { classifyUserMessage } from "./msgclass.js"
+import { requirementDelta, formatDelta } from "./reqdelta.js"
 import { shouldReplan, replanPrompt, planLessonsPrefix } from "./replan.js"
 // v91 ∞ CORE wiring: communication bus, crew intelligence, decisions, self-review
 import { createBus, MESSAGE_TYPE } from "./bus.js"
@@ -125,8 +127,100 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     cwd: process.cwd(),
   })
   const state = ts.record
+
+  // v106 §continuity — a RESUME that carries a NEW instruction.
+  //
+  // meta.js:124 reads `objective: resumeRec?.objective ?? task`, and after that
+  // line every consumer reads state.objective. So resuming a task with a
+  // changed requirement DISCARDED the new instruction outright: reproduced by
+  // resuming an Android task with "change the target to Flutter" and watching
+  // the model never once see the word Flutter — it kept building the Android
+  // app. The user's correction vanished between two lines of code.
+  const resumeInstruction = (() => {
+    if (!resumeRec) return null
+    const t = String(task ?? "").trim()
+    if (!t) return null
+    if (t === String(resumeRec.objective ?? "").trim()) return null
+    // "continue" / "carry on" is consent to keep going, not a requirement
+    // change, and must never disturb a valid plan.
+    const cls = (() => { try { return classifyUserMessage(t).classes.map((c) => c.cls) } catch { return [] } })()
+    if (cls.includes("continue") && !cls.includes("scope_change") && !cls.includes("correction")) return null
+    return t
+  })()
   const taskRunId = state.run_id || "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
   state.run_id = taskRunId
+
+  /**
+   * v106 — carry a resumed run's NEW instruction into the objective, BEFORE
+   * anything plans from it.
+   *
+   * Two defects, one cause. The instruction was discarded outright
+   * (meta.js:124 keeps the stored objective and every later consumer reads
+   * state.objective) — reproduced by resuming an Android task with "change the
+   * target to Flutter" and watching the model never once see the word Flutter.
+   * And dag.invalidateNodes() — "COMPLETED nodes that do not depend on
+   * invalidated ground truth are PRESERVED" — had no production caller at all,
+   * which forge's own `selfaudit` reports.
+   *
+   * Ordering is the whole trick: the objective must change before classify and
+   * the planner read it, while node invalidation can only happen once the DAG
+   * is materialized. So the delta is computed once, here, and applied in two
+   * places.
+   */
+  const resumeDelta = (() => {
+    if (!resumeInstruction) return null
+    let d = null
+    try { d = requirementDelta({ previous: [state.objective], message: resumeInstruction }) }
+    catch (e) {
+      emit({ type: "REQUIREMENTS_CHANGED", taskId, runId: taskRunId, error: String(e?.message ?? e).slice(0, 200), applied: false })
+      return null
+    }
+    // The objective carries the change AND what it killed, so every prompt
+    // built from state.objective sees both. Appended, never replaced — the
+    // requirements the user said to keep must survive verbatim.
+    const dead = [...d.invalidated, ...d.changed].map((i) => i.text).filter(Boolean)
+    state.objective = [
+      state.objective,
+      "",
+      `[requirement change] ${resumeInstruction}`,
+      dead.length ? `NO LONGER VALID (do not continue building these): ${dead.join("; ")}` : "",
+      d.preserved.length ? `STILL REQUIRED: ${d.preserved.map((i) => i.text).join("; ")}` : "",
+    ].filter(Boolean).join("\n").slice(0, 4000)
+    // resumePrompt() builds segment 1's task from `resumeRec` — the snapshot
+    // read off disk BEFORE this update (meta.js: `segTask = resumeRec && …`).
+    // Updating only state.objective left the one prompt that a resumed run
+    // actually sends still carrying the superseded objective, which is the
+    // whole bug over again one layer down.
+    if (resumeRec) resumeRec.objective = state.objective
+    try { ts.save?.() } catch { /* persistence is best-effort; the run continues */ }
+    emit({
+      type: "REQUIREMENTS_CHANGED", taskId, runId: taskRunId,
+      instruction: resumeInstruction.slice(0, 200),
+      platformChange: d.platformChange ?? null,
+      summary: formatDelta(d).slice(0, 400),
+      applied: true,
+    })
+    return d
+  })()
+
+  /** Invalidate only the plan nodes the change actually killed; everything
+   *  else keeps whatever status it had, COMPLETED included. */
+  function invalidateForResume(graph) {
+    if (!resumeDelta || !graph) return null
+    let scored = resumeDelta
+    try { scored = requirementDelta({ previous: [], message: resumeInstruction, nodes: [...graph.nodes.values()] }) } catch { return null }
+    const affected = scored.affectedNodes.map((n) => n.id)
+    if (!affected.length) return null
+    let r = { invalidated: [], blocked: [] }
+    try { r = dagLib.invalidateNodes(graph, affected, { reason: scored.summary }) } catch { return null }
+    emit({
+      type: "PLAN_INVALIDATED", taskId, runId: taskRunId,
+      invalidatedNodes: r.invalidated, blockedNodes: r.blocked,
+      preservedNodes: scored.unaffectedNodes.map((n) => n.id),
+      reason: scored.summary.slice(0, 300),
+    })
+    return r
+  }
 
   // v96 unifywise (§50): environment fingerprint + drift. One bounded capture
   // (process facts free, toolchain presence stat-only, versions TTL-memoized)
@@ -392,6 +486,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // RESUME: the task already has a validated DAG on disk. Re-planning would
   // throw away the graph the interrupted run was executing (and pay for a
   // model call that can contradict it), so we restore instead.
+  /**
+   * v106 — carry a resumed run's NEW instruction into the plan.
+   *
+   * Two things were broken and they are the same bug. The instruction was
+   * discarded (meta.js:124), and dag.invalidateNodes() — "COMPLETED nodes that
+   * do not depend on invalidated ground truth are PRESERVED" — had no
+   * production caller anywhere, which forge's own `selfaudit` reported.
+   *
+   * So: measure what the new instruction actually changes, invalidate only the
+   * nodes that rest on the part that died, and leave everything else COMPLETED.
+   * Not a restart, and not a silent continuation of work the user just
+   * countermanded.
+   */
   const restoredDAG = Boolean(resumeRec && state.dag)
   try {
     if (restoredDAG) {
@@ -520,6 +627,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ? engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
       : ""
     if (enginePrefix) emit({ type: "PLAN_ENGINE", taskId, runId: taskRunId })
+    // v108 rootwise: the planner sees lessons, predictions, the world model and
+    // compose — but never the task store, the run journals or a question the
+    // user was still being waited on. A plan built without knowing what is
+    // already underway plans it again.
+    let continuityPrefix = ""
+    if (!restoredDAG && !fastPath && !recoveryPath) {
+      try {
+        const { continuityBlock } = await import("./continuity.js")
+        continuityPrefix = await continuityBlock({ cwd: process.cwd(), query: state.objective, conversationId, maxChars: 1400 })
+      } catch { continuityPrefix = "" }
+    }
     let composePrefix = ""
     if (!restoredDAG && !fastPath && !recoveryPath) {
       try {
@@ -547,7 +665,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -885,13 +1003,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   try {
     if (planDefs.length) {
       dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(planDefs)
+      invalidateForResume(dag)
       persistDAG()
       emit({ type: "DAG_BUILT", taskId, runId: taskRunId, nodes: dag.order.length, graph: dagLib.serializeDAG(dag) })
       // v91 §3: plan + DAG exist and are valid — the task is READY.
       ts.transition(TASK_STATUS.READY, { reason: `plan valid, ${dag.order.length} DAG node(s) ready` })
       bus91.send({ sender: "core", receiver: "*", type: MESSAGE_TYPE.PROGRESS, content: `plan ready: ${dag.order.length} node(s)`, priority: 1 })
     } else if (state.dag) {
+      // A RESTORED DAG takes this branch, not the one above: `restoredDAG`
+      // sets planDefs = [] precisely because the recorded graph is
+      // authoritative. That is the branch a resume with a changed requirement
+      // actually lands in, so the invalidation has to happen here too.
       dag = dagLib.deserializeDAG(state.dag)
+      if (invalidateForResume(dag)) persistDAG()
     }
   } catch (e) {
     ts.noteError("DAG_FAILED", e?.message ?? String(e))
@@ -2220,6 +2344,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
       })
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
+      // v108: a check that PASSED is proof the files it covered are sound
+      // again. Without this, engMem.markFilesChanged (line 2228) was a one-way
+      // door: every record citing an edited file went STALE, retrieve() hid it,
+      // and nothing in the repository ever brought one back — so a project's
+      // engineering memory decayed monotonically to invisible.
+      if (chk.passed && !rec.invalidated) {
+        try {
+          const revived = engMem.markFilesVerified(rec.affectedFiles ?? [], { verificationId: rec.verification_id, command: rec.command })
+          if (revived) emit({ type: "MEMORY_REVALIDATED", taskId, runId: taskRunId, segmentId, count: revived, command: rec.command })
+        } catch { /* reviving memory must never fail a verification */ }
+      }
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
       emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })

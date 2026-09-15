@@ -22,10 +22,16 @@ import { listRuns, interruptedRuns } from "./runlog.js"
  * missing is reported as unknown, never fabricated.
  */
 export async function buildRehydration(sessionFile, { cwd = process.cwd() } = {}) {
-  const s = loadSession(sessionFile)
-  if (!s) return null
+  // v108: a null sessionFile is no longer nothing to say. The run journals, the
+  // task store and the world model describe this project whether or not a chat
+  // session was ever saved — and `forge agent`, the autonomous controller and a
+  // piped chat all have no session at all. They were the callers with zero
+  // continuity, so the reconstruction now works without one: the session block
+  // is null and everything store-derived is still reported, honestly.
+  const s = sessionFile ? loadSession(sessionFile) : null
+  if (sessionFile && !s) return null
   const out = {
-    session: { id: s.id, title: s.title ?? null, summary: s.summary ?? null, updatedAt: s.updatedAt ?? s.ts ?? 0, cwd: s.cwd ?? null },
+    session: s ? { id: s.id, title: s.title ?? null, summary: s.summary ?? null, updatedAt: s.updatedAt ?? s.ts ?? 0, cwd: s.cwd ?? null } : null,
     goal: null, requirements: [], decisions: [],
     completed: [], incomplete: [], failed: [],
     filesTouched: [], commandsRun: 0,
@@ -34,10 +40,10 @@ export async function buildRehydration(sessionFile, { cwd = process.cwd() } = {}
   }
   // goal: the session title is the first user message — the honest proxy for
   // the original goal (the full goal lives in the transcript/messages)
-  out.goal = s.title ?? null
+  out.goal = s?.title ?? null
 
   // raw transcript: what the user actually said (survives compaction, §7)
-  const transcript = readTranscript(s.id, { limit: 400 })
+  const transcript = s ? readTranscript(s.id, { limit: 400 }) : []
   out.transcriptTurns = transcript.length
   const userTurns = transcript.filter((t) => t.role === "user")
   for (const t of userTurns.slice(-12)) {
@@ -51,7 +57,7 @@ export async function buildRehydration(sessionFile, { cwd = process.cwd() } = {}
 
   // run journals for this cwd — completed/incomplete/failed work (§5)
   try {
-    const runs = listRuns({ cwd: s.cwd || cwd, max: 12 })
+    const runs = listRuns({ cwd: s?.cwd || cwd, max: 12 })
     for (const r of runs) {
       const label = `${String(r.task ?? "").slice(0, 60)} (${r.status}${r.files ? `, ${Object.keys(r.files).length} file(s)` : ""})`
       if (r.status === "completed") out.completed.push(label)
@@ -63,7 +69,7 @@ export async function buildRehydration(sessionFile, { cwd = process.cwd() } = {}
   } catch { }
   // interrupted runs are the actionable "incomplete" truth
   try {
-    for (const r of interruptedRuns({ cwd: s.cwd || cwd }).slice(0, 3)) {
+    for (const r of interruptedRuns({ cwd: s?.cwd || cwd }).slice(0, 3)) {
       out.incomplete.push(`${String(r.task ?? "").slice(0, 60)} (INTERRUPTED — recoverable)`)
     }
   } catch { }
@@ -71,7 +77,7 @@ export async function buildRehydration(sessionFile, { cwd = process.cwd() } = {}
   // task records (autonomous tasks for this cwd)
   try {
     const { listTasks } = await import("./taskstate.js")
-    const tasks = listTasks({ cwd: s.cwd || cwd, max: 10 })
+    const tasks = listTasks({ cwd: s?.cwd || cwd, max: 10 })
     for (const t of tasks) {
       const label = `${String(t.objective ?? "").slice(0, 60)} [${t.status}]`
       if (t.status === "COMPLETED") out.completed.push(label)
@@ -109,9 +115,11 @@ function dedupe(arr) {
 export function formatRehydration(r, { maxLines = 12 } = {}) {
   if (!r) return []
   const lines = []
-  const age = r.session.updatedAt ? Math.round((Date.now() - r.session.updatedAt) / 60000) : null
-  lines.push(`previous session in this directory: "${r.session.title ?? "(untitled)"}"${age != null ? ` • ${age < 60 ? age + " min" : Math.round(age / 60) + " h"} ago` : ""}`)
-  if (r.session.summary) lines.push(`summary: ${String(r.session.summary).replace(/\s+/g, " ").slice(0, 160)}`)
+  if (r.session) {
+    const age = r.session.updatedAt ? Math.round((Date.now() - r.session.updatedAt) / 60000) : null
+    lines.push(`previous session in this project: "${r.session.title ?? "(untitled)"}"${age != null ? ` • ${age < 60 ? age + " min" : Math.round(age / 60) + " h"} ago` : ""}`)
+    if (r.session.summary) lines.push(`summary: ${String(r.session.summary).replace(/\s+/g, " ").slice(0, 160)}`)
+  }
   if (r.completed.length) lines.push(`completed: ${r.completed.slice(0, 3).join(" | ")}`)
   if (r.incomplete.length) lines.push(`incomplete: ${r.incomplete.slice(0, 3).join(" | ")}`)
   if (r.failed.length) lines.push(`failed: ${r.failed.slice(0, 2).join(" | ")}`)

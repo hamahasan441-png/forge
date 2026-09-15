@@ -37,16 +37,56 @@ import { DEFAULT_DIR } from "./config.js"
 import { redact } from "./secrets.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import { entryIsStale, worldFromCwd } from "./memgraph.js"
+import { projectRoot, legacyKeyInput } from "./projectkey.js"
 
 export const GLOBAL_MEMORY_PATH = path.join(DEFAULT_DIR, "memory.md")
 export const PROJECTS_DIR = path.join(DEFAULT_DIR, "projects")
 
+/**
+ * v108 rootwise — the key is the PROJECT, not the directory you happened to be
+ * standing in. Before this, `projectHash("/repo") !== projectHash("/repo/src")`,
+ * so `cd src` gave forge a brand-new empty project: no memory, no sessions, no
+ * open tasks (reproduced, all three). Someone who always launched from the
+ * repository root is unaffected — the root of a root is the root, so their key
+ * is byte-identical and nothing moves.
+ */
 export function projectHash(cwd) {
-  return crypto.createHash("sha1").update(path.resolve(cwd)).digest("hex").slice(0, 12)
+  return crypto.createHash("sha1").update(projectRoot(cwd)).digest("hex").slice(0, 12)
+}
+
+/** The key this directory WOULD have had before v108. Read-only: used to adopt
+ *  a store written by an older forge, never to write a new one. */
+export function legacyProjectDir(cwd) {
+  const legacy = crypto.createHash("sha1").update(legacyKeyInput(cwd)).digest("hex").slice(0, 12)
+  return path.join(PROJECTS_DIR, legacy)
 }
 
 export function projectDir(cwd) {
-  return path.join(PROJECTS_DIR, projectHash(cwd))
+  const dir = path.join(PROJECTS_DIR, projectHash(cwd))
+  adoptLegacyStore(cwd, dir)
+  return dir
+}
+
+/**
+ * One-time, non-destructive adoption of a pre-v108 store.
+ *
+ * Only when the new project dir does NOT exist and the legacy one does, and
+ * only when they differ — i.e. exactly the subdirectory-launch case the key
+ * change fixes. If both exist, both are left alone: merging two real stores is
+ * not a decision this function is entitled to make. Nothing is ever deleted.
+ */
+let adopted = null
+function adoptLegacyStore(cwd, dir) {
+  try {
+    if (adopted === null) adopted = new Set()
+    if (adopted.has(dir)) return
+    adopted.add(dir)
+    if (fs.existsSync(dir)) return
+    const legacy = legacyProjectDir(cwd)
+    if (legacy === dir || !fs.existsSync(legacy)) return
+    fs.mkdirSync(PROJECTS_DIR, { recursive: true })
+    fs.renameSync(legacy, dir)
+  } catch { /* adoption is best-effort — a fresh store is correct, just emptier */ }
 }
 
 export function projectMemoryPath(cwd) {
@@ -221,7 +261,9 @@ function formatMemory(picked, cwd) {
   const p = picked.filter((e) => e.tier === "project").map((e) => `- ${e.l}`)
   const out = []
   if (g.length) out.push("USER MEMORY (persistent):\n" + g.join("\n"))
-  if (p.length) out.push(`PROJECT MEMORY (${path.basename(path.resolve(cwd))}):\n` + p.join("\n"))
+  // v108: name the PROJECT, not the subdirectory you are standing in — the
+  // memory belongs to the project and saying "(src)" misreports where it lives.
+  if (p.length) out.push(`PROJECT MEMORY (${path.basename(projectRoot(cwd))}):\n` + p.join("\n"))
   return out.join("\n\n").slice(0, 1600)
 }
 

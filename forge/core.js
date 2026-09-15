@@ -25,7 +25,7 @@
  */
 import { createBus, MESSAGE_TYPE, busPath } from "./bus.js"
 import { createHandoffLedger } from "./handoff.js"
-import { createDecisionEngine, DECISION_STATUS } from "./decisionengine.js"
+import { createDecisionEngine, DECISION_STATUS, answerDecision as answerDecisionRecord } from "./decisionengine.js"
 import { createWorldModel } from "./worldmodel.js"
 import { createEpisodeStore, EPISODE_RESULT } from "./episodes.js"
 import { createCrewRouter } from "./crewroute.js"
@@ -355,10 +355,19 @@ export function createForgeCore({
     }
   }
 
-  /** Resolve a pending human decision (§40) — Core owns the transition back. */
+  /**
+   * Resolve a pending human decision (§40) — Core owns the transition back.
+   *
+   * v108: the record-and-unblock half moved to decisionengine.answerDecision so
+   * that chat can answer a question too. It had to: this function was the ONLY
+   * resolver in the repository and had no production caller, so a question forge
+   * asked could never be answered by anyone. Core still owns what is Core's —
+   * the live task handle, the bus and the event.
+   */
   function answerDecision(decisionId, { choice, note = null } = {}) {
-    const d = decisions.resolve(decisionId, { choice, note })
+    const d = answerDecisionRecord({ cwd, ref: decisionId, choice, note })
     if (!d) return null
+    try { decisions.reload?.() } catch { /* the file is authoritative; this is a cache */ }
     if (task && !TERMINALish(task.status)) {
       try { task.transition(TASK_STATUS.EXECUTING, { reason: `decision ${d.decision_id} answered: ${d.answer}` }) } catch { }
     }
