@@ -60,7 +60,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites } from "./completion.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
@@ -578,6 +578,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
   const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
   const BUDGET_NUDGE_PREFIX = "(system) tool-call budget exhausted"
+  const VERIFY_NUDGE_PREFIX = "(system) you changed files but never ran a check"
+  // v101 P4: fires AT MOST ONCE per run, and only on a run that actually
+  // changed something without ever checking it. See the gate below.
+  let verifyNudgeFired = false
   let emptyStreak = 0
   // v94 masterwise (§6/§7): budget-nudge coercion tracking — see below
   let budgetNudgeFired = false
@@ -862,6 +866,45 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           break
         }
       }
+
+      // v101 P4 — the false-completion gate. The eval (evalbench.js) puts ONE
+      // number above solve rate: an agent that reports COMPLETED on work that
+      // does not pass. The cheapest honest defence is to not let the run end
+      // on an UNCHECKED change: every write this run made, with no passing
+      // check covering it, gets one chance to be checked before the answer
+      // stands.
+      //
+      // Deliberately narrow, because a nudge costs a model call:
+      //   - at most ONCE per run, never a loop
+      //   - only when files were actually written and NONE is covered
+      //   - never on read-only / plan / verifier runs (they write nothing)
+      //   - never once the step or tool-call budget is gone — there is no room
+      //     to act on it, and a coerced answer is already handled above
+      //   - off with config.agent.verifyNudge === false
+      // It never runs a command itself: the agent chooses, exactly as
+      // verify.js's "executor: agent" contract has always required.
+      if (!verifyNudgeFired && config.agent?.verifyNudge !== false && !readonly && !planOnly && !verifier
+          && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
+        const gap = unverifiedWrites({ writesSoFar, commandChecks })
+        if (gap.unverified.length) {
+          verifyNudgeFired = true
+          // The answer is WITHDRAWN, not kept: the model must restate it after
+          // checking. Otherwise a run that spent its remaining budget verifying
+          // would report the pre-check answer as if it had survived the check.
+          finalText = ""
+          let hint = ""
+          try {
+            const { focusedVerify } = await import("./verify.js")
+            const fv = focusedVerify(process.cwd(), gap.unverified.filter((f) => f !== "(shell write)"))
+            // recommendedVerify NEVER invents a command; an empty one stays empty
+            if (fv?.command) hint = ` The project's own check is: ${fv.command}${fv.tests?.length ? ` (tests connected to your changes: ${fv.tests.slice(0, 4).join(", ")})` : ""}.`
+          } catch { /* a missing hint must never cost the nudge itself */ }
+          const names = gap.unverified.slice(0, 6).map((f) => path.relative(process.cwd(), f) || f).join(", ")
+          onEvent?.({ type: "verify_nudge", files: gap.unverified.length, names, step: steps, ...identityMeta() })
+          messages.push({ role: "user", content: `${VERIFY_NUDGE_PREFIX}: ${names}${gap.unverified.length > 6 ? ` (+${gap.unverified.length - 6} more)` : ""}.${hint} Run a real check that covers those changes now and report what it printed. If this repository genuinely has no way to check them, say so explicitly in your final answer instead — do not claim the work is verified.` })
+          continue
+        }
+      }
       break
     }
 
@@ -885,7 +928,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // like no answer at all: INCOMPLETE + checkpoint + resume. meta continues
     // on budgetHit either way; direct callers get the honest status.
     const exhausted = budgetHit && (!answerPresent || coercedByNudge)
-    const fastGate = canCompleteFastPath({ finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks })
+    const verificationGap = unverifiedWrites({ writesSoFar, commandChecks })
+    const fastGate = canCompleteFastPath({ finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks, unverified: verificationGap.unverified, requireVerification: config.agent?.requireVerification === true })
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
     let checkpointId = null
     if (!fastGate.ok && fastGate.status === "INCOMPLETE") {
@@ -899,7 +943,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

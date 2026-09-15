@@ -292,6 +292,10 @@ export const FAST_PATH_CHECK = {
   NO_ERROR: "noError",
   NOT_BUDGET_EXHAUSTED: "notBudgetExhausted",
   EVIDENCE_PRESERVED: "evidencePreserved",
+  // v101 P4 — opt-in (config.agent.requireVerification). OFF by default:
+  // plenty of honest runs change a file in a repo that has no command to run,
+  // and turning those into INCOMPLETE would be a lie in the other direction.
+  WRITES_VERIFIED: "writesVerified",
 }
 
 export const FAST_PATH_STATUS = {
@@ -301,11 +305,40 @@ export const FAST_PATH_STATUS = {
 }
 
 /**
+ * v101 P4 — which of this run's writes no passing check ever covered.
+ *
+ * The ordering data has been collected since v21.1 and used only to detect
+ * STALE evidence ("tests passed, THEN the agent edited src/x.js"). The same
+ * two numbers answer a question nobody was asking: which files were changed
+ * and never checked at all. A check records `writeIndex` = how many writes
+ * preceded it, so every write at or after the LAST PASSING check's index is
+ * uncovered — by exactly the staleness rule already in use, not a new one.
+ *
+ * Returns plain data. It decides nothing; callers decide what to do with it.
+ */
+export function unverifiedWrites({ writesSoFar = [], commandChecks = [] } = {}) {
+  const writes = Array.isArray(writesSoFar) ? writesSoFar : []
+  const checks = Array.isArray(commandChecks) ? commandChecks : []
+  const passing = checks.filter((c) => c?.passed === true)
+  // -1 → no passing check at all, so every write is uncovered
+  const lastPassingIndex = passing.reduce((max, c) => Math.max(max, Number(c.writeIndex) || 0), passing.length ? 0 : -1)
+  const uncovered = lastPassingIndex < 0 ? writes.slice() : writes.slice(lastPassingIndex)
+  const dedup = (a) => [...new Set(a.filter(Boolean))]
+  return {
+    wrote: dedup(writes),
+    unverified: dedup(uncovered),
+    covered: dedup(lastPassingIndex < 0 ? [] : writes.slice(0, lastPassingIndex)),
+    checksRun: checks.length,
+    checksPassing: passing.length,
+  }
+}
+
+/**
  * Evaluate the fast-path completion contract. Same shape as canCompleteTask
  * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
  * result reads ONE shape from ONE module.
  */
-export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null } = {}) {
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false } = {}) {
   const blockers = []
   const checks = {}
   const add = (name, ok, reason) => {
@@ -320,6 +353,14 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
   add(FAST_PATH_CHECK.NO_ERROR, !error, String(error ?? "") || "run errored")
   add(FAST_PATH_CHECK.NOT_BUDGET_EXHAUSTED, budgetHit !== true, "step budget exhausted before a final answer")
   add(FAST_PATH_CHECK.EVIDENCE_PRESERVED, Array.isArray(toolLog) && Array.isArray(commandChecks), "run evidence (tool log / command checks) missing")
+  // Opt-in only. When it is off the result is byte-for-byte what it was
+  // before this check existed — the files are still REPORTED either way, so
+  // the caller can see the gap without the gate deciding for them.
+  const uncovered = Array.isArray(unverified) ? unverified.filter(Boolean) : []
+  if (requireVerification === true) {
+    add(FAST_PATH_CHECK.WRITES_VERIFIED, uncovered.length === 0,
+      `${uncovered.length} file(s) changed with no passing check covering them: ${uncovered.slice(0, 5).join(", ")}`)
+  }
 
   const ok = blockers.length === 0
   let status = "COMPLETED"
@@ -328,6 +369,10 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
     else if (error) status = FAST_PATH_STATUS.FAILED
     else status = FAST_PATH_STATUS.INCOMPLETE
   }
+  // NB: no extra key. test-v93g pins that this result has exactly the shape of
+  // canCompleteTask — one shape from one module — and the unverified FILES are
+  // reported on the run result (`verification`), which is where data belongs.
+  // The gate returns a verdict.
   return { ok, allowed: ok, status, blockers, checks, reasons: blockers.map((b) => b.reason) }
 }
 

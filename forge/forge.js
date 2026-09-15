@@ -577,6 +577,13 @@ async function main() {
         // status from the ONE completion contract — budget exhaustion is
         // INCOMPLETE, checkpointed and resumable, never "completed".
         if (res.status && res.status !== "COMPLETED") console.log(yellow(`  status: ${res.status}${res.reason ? ` (${res.reason})` : ""}${res.resume ? ` — checkpoint ${res.resume.checkpointId} saved; the task can resume` : ""}`))
+        // v101 P4: a change nobody checked is the shape a false completion
+        // takes. Say it on the run that produced it, not in a log.
+        if (res.verification?.unverified?.length) {
+          const names = res.verification.unverified.slice(0, 3).map((f) => path.relative(process.cwd(), f) || f).join(", ")
+          console.log(yellow(`  unverified: ${res.verification.unverified.length} changed file(s) — no passing test/build check covers them — ${names}${res.verification.unverified.length > 3 ? ` (+${res.verification.unverified.length - 3} more)` : ""}`) + dim("  (the per-edit ✓ above is syntax, not a test)"))
+        } else if (res.verification?.checksPassing) console.log(dim(`  verified: ${res.verification.checksPassing} passing check(s) cover ${res.verification.wrote.length} changed file(s)`))
+        else if (res.verification?.checksRun) console.log(yellow(`  checks ran but none passed (${res.verification.checksRun})`))
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       }
       debugRunSummary(res)
@@ -2202,6 +2209,7 @@ ${bold("usage")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 20 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
+                                 ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

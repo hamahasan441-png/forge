@@ -212,6 +212,12 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     if (files.length) row("Changes", `${files.length} file${files.length === 1 ? "" : "s"}` + o.th.muted(oneShot ? `  (forge undo --run rolls back)` : `  (/diff to review${res?.runId ? ", /undo --run to roll back" : ""})`))
     row("Tests", tests)
     row("Build", build)
+    // v101 P4: the shape a false completion takes is a change nobody checked.
+    // The premium result card says it on the same screen as "COMPLETED", not
+    // three commands away.
+    const uncovered = res?.verification?.unverified ?? []
+    if (uncovered.length) row("Unverified", o.th.warn(`${uncovered.length} changed file${uncovered.length === 1 ? "" : "s"} with no passing test/build check`) + o.th.muted(`  ${uncovered.slice(0, 2).map((f) => String(f).split("/").pop()).join(", ")}${uncovered.length > 2 ? ` +${uncovered.length - 2}` : ""}`))
+    else if (res?.verification?.checksPassing) row("Verified", o.th.muted(`${res.verification.checksPassing} passing check${res.verification.checksPassing === 1 ? "" : "s"} cover ${res.verification.wrote.length} changed file${res.verification.wrote.length === 1 ? "" : "s"}`))
     if (s.checkpoint) row("Checkpoint", shortCheckpoint(s.checkpoint))
     if (elapsedMs >= 60000) row("Elapsed", fmtClock(elapsedMs))
     if (checkKeys.length) {

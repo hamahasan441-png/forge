@@ -559,5 +559,172 @@ console.log("== 17. P0c: the eval scores the TEST's verdict, not the agent's cla
   }
 }
 
+// ---------------------------------------------------------------------------
+// P4: the capability the eval asked for. The eval's headline metric is FALSE
+// COMPLETION, and section 17 proved runAgent hands out COMPLETED to an agent
+// that changed a file and never checked it. The ordering data needed to catch
+// that has been collected since v21.1 and used only for STALENESS.
+console.log("== 22. unverifiedWrites: which changes no passing check covered ==")
+{
+  const { unverifiedWrites, canCompleteFastPath, FAST_PATH_CHECK } = await import("../completion.js")
+
+  eq("nothing written → nothing unverified", unverifiedWrites({}).unverified, [])
+  eq("written, never checked → all of it",
+    unverifiedWrites({ writesSoFar: ["a.js", "b.js"], commandChecks: [] }).unverified, ["a.js", "b.js"])
+  eq("a passing check covers the writes that PRECEDED it",
+    unverifiedWrites({ writesSoFar: ["a.js"], commandChecks: [{ passed: true, writeIndex: 1 }] }).unverified, [])
+  eq("...and not the ones that came after (the v21.1 staleness rule, reused)",
+    unverifiedWrites({ writesSoFar: ["a.js", "b.js"], commandChecks: [{ passed: true, writeIndex: 1 }] }).unverified, ["b.js"])
+  eq("a FAILING check covers nothing",
+    unverifiedWrites({ writesSoFar: ["a.js"], commandChecks: [{ passed: false, writeIndex: 1 }] }).unverified, ["a.js"])
+  eq("the latest passing check wins, not the first",
+    unverifiedWrites({ writesSoFar: ["a.js", "b.js", "c.js"], commandChecks: [{ passed: true, writeIndex: 1 }, { passed: true, writeIndex: 3 }] }).unverified, [])
+  eq("duplicate writes to one file are reported once",
+    unverifiedWrites({ writesSoFar: ["a.js", "a.js"], commandChecks: [] }).unverified, ["a.js"])
+  eq("garbage in → empty, never a throw", unverifiedWrites({ writesSoFar: null, commandChecks: "nope" }).unverified, [])
+
+  // the gate: opt-in, and identical to the old behaviour when off
+  const base = { finalText: "done", toolLog: [], commandChecks: [] }
+  ok("OFF by default: an unchecked change still completes", canCompleteFastPath({ ...base, unverified: ["a.js"] }).ok === true)
+  ok("and the check is not even recorded when off", canCompleteFastPath({ ...base, unverified: ["a.js"] }).checks[FAST_PATH_CHECK.WRITES_VERIFIED] === undefined)
+  const strict = canCompleteFastPath({ ...base, unverified: ["a.js"], requireVerification: true })
+  ok("ON: an unchecked change is NOT completion", strict.ok === false && strict.status === "INCOMPLETE")
+  ok("and the blocker names the file", strict.reasons.some((r) => /a\.js/.test(r)), JSON.stringify(strict.reasons))
+  ok("ON with everything checked: completes", canCompleteFastPath({ ...base, unverified: [], requireVerification: true }).ok === true)
+  // the gate returns a VERDICT and nothing else — test-v93g pins that its keys
+  // match canCompleteTask exactly, so the files live on the run result instead
+  // (asserted against a real run in section 25)
+  eq("the gate's shape is untouched", Object.keys(canCompleteFastPath({ ...base, unverified: ["a.js"] })).sort(),
+    ["allowed", "blockers", "checks", "ok", "reasons", "status"])
+}
+
+console.log("== 23. the nudge turns a false completion into a real one ==")
+{
+  const http = await import("node:http")
+  const { runAgent } = await import("../agent.js")
+  const { EVAL_TASKS, runEvalTask } = await import("../evalbench.js")
+
+  const BROKEN = "export function sum(numbers) {\n  let total = 0\n  for (let i = 1; i < numbers.length; i++) total += numbers[i]\n  return total\n}\n"
+  const FIXED = "export function sum(numbers) {\n  let total = 0\n  for (let i = 0; i < numbers.length; i++) total += numbers[i]\n  return total\n}\n"
+  const CHECK_CMD = "node -e \"import('./sum.js').then(m=>{if(m.sum([1,2,3])!==6){console.error('test FAILED');process.exit(1)}console.log('test passed')})\""
+
+  /** An agent that writes a WRONG fix and declares victory. Given a nudge, it
+   *  runs a check, sees the failure, and fixes it for real. Same script both
+   *  times — only the nudge differs, so the nudge is the only variable. */
+  function mkModel(script) {
+    let calls = 0
+    const seen = []
+    const server = http.createServer((req, res) => {
+      if (!req.url.includes("chat/completions")) { res.writeHead(404).end(); return }
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        calls++
+        seen.push(body)
+        const message = script(calls)
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", object: "chat.completion", created: Date.now(), model: "mock-1",
+          choices: [{ index: 0, message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 5, completion_tokens: 5 } }))
+      })
+    })
+    return { server, seen, calls: () => calls }
+  }
+  const call = (id, name, args) => ({ role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] })
+  const sloppyFixer = (n) =>
+    n === 1 ? call("w1", "write_file", { path: "sum.js", content: BROKEN })
+    : n === 2 ? { role: "assistant", content: "Fixed sum.js. The task is complete." }
+    : n === 3 ? call("t1", "bash", { command: CHECK_CMD })
+    : n === 4 ? call("w2", "write_file", { path: "sum.js", content: FIXED })
+    : n === 5 ? call("t2", "bash", { command: CHECK_CMD })
+    : { role: "assistant", content: "The check passes now: sum([1,2,3]) === 6. Complete." }
+
+  async function run(script, agentCfg = {}, extra = {}) {
+    const m = mkModel(script)
+    await new Promise((r) => m.server.listen(0, "127.0.0.1", r))
+    try {
+      const r = await runEvalTask(EVAL_TASKS[0], {
+        runAgent: (a) => runAgent({ ...a, ...extra }),
+        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 10, ...agentCfg } },
+        provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${m.server.address().port}`, apiKey: "k", model: "mock-1" },
+        timeoutMs: 60_000,
+      })
+      return { r, nudged: m.seen.some((b) => b.includes("you changed files but never ran a check")), calls: m.calls() }
+    } finally { m.server.close() }
+  }
+
+  const off = await run(sloppyFixer, { verifyNudge: false })
+  ok("kill switch honored: no nudge in the model's context", off.nudged === false)
+  ok("without it the sloppy agent scores a FALSE COMPLETION", off.r.falseCompletion === true, `status=${off.r.agentStatus} solved=${off.r.solved}`)
+
+  const on = await run(sloppyFixer)
+  ok("ON BY DEFAULT: the same agent gets nudged", on.nudged === true)
+  ok("it then checks, sees the failure, and really fixes it", on.r.solved === true, `err=${on.r.agentError} verif=${String(on.r.verification).slice(0, 120)}`)
+  ok("→ no false completion", on.r.falseCompletion === false)
+  ok("the honest answer costs steps, and that is the trade", on.r.steps > off.r.steps, `${on.r.steps} vs ${off.r.steps}`)
+
+  console.log("== 24. the nudge is narrow: it must not tax honest runs ==")
+  // an agent that checks its own work before answering
+  const careful = (n) =>
+    n === 1 ? call("w1", "write_file", { path: "sum.js", content: FIXED })
+    : n === 2 ? call("t1", "bash", { command: CHECK_CMD })
+    : { role: "assistant", content: "Fixed and checked — the test passes. Complete." }
+  const good = await run(careful)
+  ok("an agent that already checked is NOT nudged", good.nudged === false)
+  ok("and is scored solved", good.r.solved === true)
+  eq("no wasted model call", good.calls, 3)
+
+  // an agent that only reads and answers a question
+  const reader = (n) => n === 1 ? call("r1", "read_file", { path: "sum.js" })
+    : { role: "assistant", content: "It sums the numbers, stopping one short of the end." }
+  const question = await run(reader)
+  ok("a run that wrote nothing is never nudged", question.nudged === false)
+
+  // an agent whose check FAILED is still nudged: a failing check is not cover
+  const failing = (n) =>
+    n === 1 ? call("w1", "write_file", { path: "sum.js", content: BROKEN })
+    : n === 2 ? call("t1", "bash", { command: "node -e \"console.error('boom'); process.exit(1)\"" })
+    : n === 3 ? { role: "assistant", content: "Done anyway. Complete." }
+    : n === 4 ? call("w2", "write_file", { path: "sum.js", content: FIXED })
+    : n === 5 ? call("t2", "bash", { command: CHECK_CMD })
+    : { role: "assistant", content: "Now it passes. Complete." }
+  const red = await run(failing)
+  ok("a FAILING check is not cover — still nudged", red.nudged === true)
+  ok("and the second attempt is scored on the hidden test", red.r.solved === true, String(red.r.verification).slice(0, 120))
+
+  // read-only runs write nothing, and must never pay for the nudge
+  const ro = await run(reader, {}, { readOnly: true })
+  ok("read-only runs are never nudged", ro.nudged === false)
+
+  console.log("== 25. the run REPORTS the gap whether or not it is enforced ==")
+  // One unchecked write, then an answer. Each run gets its OWN model: a mock
+  // whose call counter carries over is a different agent the second time.
+  const oneUncheckedWrite = (n) => n === 1
+    ? call("w1", "write_file", { path: "sum.js", content: BROKEN })
+    : { role: "assistant", content: "Done. Complete." }
+  async function direct(agentCfg) {
+    const m = mkModel(oneUncheckedWrite)
+    await new Promise((r) => m.server.listen(0, "127.0.0.1", r))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-p4-"))
+    fs.writeFileSync(path.join(dir, "sum.js"), "export function sum(){}\n")
+    const prev = process.cwd()
+    try {
+      process.chdir(dir)
+      return await runAgent({
+        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 6, verifyNudge: false, ...agentCfg } },
+        provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${m.server.address().port}`, apiKey: "k", model: "mock-1" },
+        task: "fix sum", journal: false,
+      })
+    } finally { process.chdir(prev); m.server.close() }
+  }
+  const lax = await direct({})
+  ok("an unchecked change is named in the result", lax.verification.unverified.some((f) => /sum\.js$/.test(f)), JSON.stringify(lax.verification))
+  eq("and the run still COMPLETED, because enforcement is opt-in", lax.status, "COMPLETED")
+  eq("verifyNudged reports honestly that it did not fire", lax.verifyNudged, false)
+
+  const strictRun = await direct({ requireVerification: true })
+  eq("with requireVerification on, the same run is INCOMPLETE", strictRun.status, "INCOMPLETE")
+  ok("and the gate says why", strictRun.completionGate.reasons.some((r) => /no passing check/.test(r)), JSON.stringify(strictRun.completionGate.reasons))
+}
+
 console.log(`\n== v101 instrument suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
