@@ -225,7 +225,38 @@ export function renderLedger(l, { maxChars = 6000 } = {}) {
  * @param opts.keepTurns     whole turns kept verbatim at the tail (default 3)
  * @returns {{ messages, changed, stats }}
  */
+/**
+ * v102 — the guard for the invariant this module was written to stop breaking.
+ *
+ * historyIsWellFormed() has been here, exported and tested, since compaction
+ * was rewritten — and nothing ever called it. It checks exactly the defect
+ * named at the top of this file: an assistant message carrying tool_calls and
+ * the tool results answering it are ONE unit, and a history that splits them
+ * is rejected by every provider ("tool_call_id not found") — which kills a
+ * long run at the moment compaction was supposed to save it.
+ *
+ * So compaction now checks its own work. A compaction that BREAKS a
+ * well-formed history is refused and the original is returned: no shrink this
+ * turn is survivable, a history the provider rejects is not. A history that
+ * arrived broken is left alone — compaction did not break it, and refusing
+ * every compaction because of someone else's bug would be the worse failure.
+ */
+export function guardCompaction(before, after) {
+  const beforeOk = historyIsWellFormed(before)
+  if (!beforeOk) return { messages: after, refused: false, reason: "input was already malformed — not compaction's doing" }
+  if (historyIsWellFormed(after)) return { messages: after, refused: false, reason: null }
+  return { messages: before, refused: true, reason: "compaction produced a history with unanswered tool calls — kept the original" }
+}
+
 export async function compactHistory(messages, opts = {}) {
+  const input = messages
+  const r = await compactHistoryInner(messages, opts)
+  const g = guardCompaction(input, r.messages)
+  if (!g.refused) return r
+  return { messages: g.messages, changed: false, stats: { ...r.stats, after: input.length, stage: "refused", refused: true, reason: g.reason } }
+}
+
+async function compactHistoryInner(messages, opts = {}) {
   const { window = 128000, force = false, summarize = null, keepTurns = KEEP_TURNS_DEFAULT } = opts
   const stripped = stripOldVisionParts(messages, { keep: 1 })
   const visionStripped = stripped !== messages

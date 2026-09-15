@@ -217,6 +217,8 @@ const suites = [
   ["v100", "node", ["test-v100.mjs"]],
   // ---- v101 P0 "the instrument": phase tracing (where the wall-clock went) --
   ["v101", "node", ["test-v101.mjs"]],
+  // ---- v102 reviewwise: the adversarial review reaches agent.js ------------
+  ["v102", "node", ["test-v102.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

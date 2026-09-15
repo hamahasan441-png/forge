@@ -584,6 +584,15 @@ async function main() {
           console.log(yellow(`  unverified: ${res.verification.unverified.length} changed file(s) — no passing test/build check covers them — ${names}${res.verification.unverified.length > 3 ? ` (+${res.verification.unverified.length - 3} more)` : ""}`) + dim("  (the per-edit ✓ above is syntax, not a test)"))
         } else if (res.verification?.checksPassing) console.log(dim(`  verified: ${res.verification.checksPassing} passing check(s) cover ${res.verification.wrote.length} changed file(s)`))
         else if (res.verification?.checksRun) console.log(yellow(`  checks ran but none passed (${res.verification.checksRun})`))
+        // v102: the adversarial review now runs on this path too. Blockers are
+        // shown loudly; findings are advisory and stay on one line.
+        if (res.review?.required) {
+          const ids = (l) => l.map((x) => x.id).join(", ")
+          if (res.review.blockers?.length) console.log(red(`  review: BLOCKED — ${ids(res.review.blockers)}`) + dim(`  ${res.review.blockers[0].detail}`))
+          if (res.review.findings?.length) console.log(yellow(`  review: ${res.review.findings.length} finding(s) — ${ids(res.review.findings)}`) + dim(`  ${res.review.findings[0].detail}`))
+          if (res.review.escalated) console.log(dim(`  (reviewed because the change set was wide — ${res.review.files.length} file(s) — not because the task text said so)`))
+          if (!res.review.blockers?.length && !res.review.findings?.length) console.log(dim(`  review: clean (${res.review.checks.length} checks)`))
+        }
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       }
       debugRunSummary(res)
@@ -2236,6 +2245,7 @@ ${bold("usage")}
   ${cyan("forge bench")}                  FORGE-BENCH — 20 deterministic eval cases, no live model ${dim("(--list, --json)")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
+                                 ${dim("every run is reviewed (secrets touched, blast radius vs tests, unknown impact) — agent.review: report (default) | enforce (blockers → INCOMPLETE) | off")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

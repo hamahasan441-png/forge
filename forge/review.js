@@ -74,7 +74,13 @@ export function adversarialReview(input = {}) {
   note(REVIEW_CHECK.NO_ASSUMPTION_AS_REQUIREMENT, {
     ok: smuggled.length === 0,
     blocker: smuggled.length > 0,
-    detail: smuggled.length ? `assumption spoken as a requirement: ${smuggled[0].text}` : "no assumption promoted to a requirement",
+    // "nothing to inspect" is not the same as "inspected and clean" — a path
+    // with no task model (every direct run) must not read as a passed check.
+    detail: smuggled.length
+      ? `assumption spoken as a requirement: ${smuggled[0].text}`
+      : input.taskModel
+        ? "no assumption promoted to a requirement"
+        : "not inspected — no task model on this path",
   })
 
   const radius = Number(impact.radius) || files.length
@@ -135,4 +141,65 @@ export function formatReview(rev) {
   if (rev.blockers?.length) bits.push(`blockers: ${rev.blockers.map((b) => b.id).join(", ")}`)
   if (rev.findings?.length) bits.push(`findings: ${rev.findings.map((f) => f.id).join(", ")}`)
   return bits.join(" • ")
+}
+
+// ---------------------------------------------------------------------------
+// v102 — the same review, for a run that has no meta controller
+// ---------------------------------------------------------------------------
+//
+// adversarialReview has only ever been reachable through the Ω kernel, which
+// only meta.js builds. `forge agent "..."`, interactive Agent Mode, every
+// sub-agent and every DAG node run through agent.js instead, and none of them
+// has ever been reviewed — although every input the review needs is already
+// computed there and thrown away at run end: toolintel records each mutation's
+// files_changed and its predicted blast radius (radius, importers, tests,
+// unknown), and the run knows its own class, verification state and checkpoint.
+//
+// This folds those records into the review's input shape. It computes nothing
+// new and calls no model.
+
+/** Widths at which an observed change set earns a review its task text did not. */
+export const ESCALATE_FILES = 5
+export const ESCALATE_RADIUS = 8
+
+/** Fold this run's tool records into { files, impact }. */
+export function changeSetOf(records = []) {
+  const files = []
+  const importers = new Set()
+  const tests = new Set()
+  let radius = 0
+  let unknown = false
+  let scope = null
+  for (const r of Array.isArray(records) ? records : []) {
+    for (const f of r?.files_changed ?? []) if (f && !files.includes(f)) files.push(f)
+    const b = r?.blast
+    if (!b) continue
+    radius = Math.max(radius, Number(b.radius) || 0)
+    if (b.unknown === true) unknown = true
+    if (b.scope) scope = b.scope
+    for (const i of b.importers ?? []) importers.add(i)
+    for (const t of b.tests ?? []) tests.add(t)
+  }
+  return {
+    files,
+    impact: { radius, importers: [...importers], tests: [...tests], unknown, scope: scope ? [scope] : [] },
+  }
+}
+
+/**
+ * Review a finished direct run.
+ *
+ * The task TEXT decides the class, but the CHANGE SET is observed — so a run
+ * classified MEDIUM that ended up rewriting nine files is reviewed anyway, and
+ * says so. That is strictly more evidence than meta's text-only gate has.
+ *
+ * @returns the adversarialReview result plus { escalated, escalatedFrom, files, impact }
+ */
+export function reviewRun({ klass = null, objective = "", records = [], verificationOk = null, checkpoint = null, escalate = true } = {}) {
+  const { files, impact } = changeSetOf(records)
+  const wide = files.length >= ESCALATE_FILES || impact.radius >= ESCALATE_RADIUS
+  const escalated = escalate && !needsReview(klass) && wide
+  const effective = escalated ? TASK_CLASS.LARGE : klass
+  const rev = adversarialReview({ klass: effective, objective, files, impact, verificationOk, checkpoint })
+  return { ...rev, escalated, escalatedFrom: escalated ? (klass ?? null) : null, files, impact }
 }
