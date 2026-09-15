@@ -110,6 +110,49 @@ console.log("== 4. exports are found in every shape ==")
 }
 
 // ---------------------------------------------------------------------------
+console.log("== 4b. thin aliases: true findings that are bad leads ==")
+{
+  const { bodyOf, isThinAlias } = await import("../selfaudit.js")
+
+  // THE REGRESSION: the body's `{` is not the first one after the declaration.
+  // A defaulted object parameter gets there first, closes immediately, and
+  // every such function looked like it had an empty body.
+  eq("a default object parameter does not steal the body",
+    bodyOf("export function f(config = {}) {\n  return g(config)\n}", "f").trim(), "return g(config)")
+  eq("nested parens in the signature are handled",
+    bodyOf("export function f(a = (1), { b } = {}) {\n  return h(a)\n}", "f").trim(), "return h(a)")
+  eq("an async export is found too",
+    bodyOf("export async function f(x = {}) {\n  return k(x)\n}", "f").trim(), "return k(x)")
+  eq("a name that is not there yields nothing", bodyOf("export function other() { return 1 }", "f"), "")
+
+  ok("a one-line hand-off is a thin alias", isThinAlias("\n  return createRegistry({ config })\n"))
+  ok("a comparison hand-off is too", isThinAlias("\n  return blockedAddressReason(ip) !== null\n"))
+  ok("real logic is NOT", isThinAlias("\n  const a = 1\n  if (a) return 2\n  return 3\n") === false)
+  ok("a literal return is not a delegation", isThinAlias("\n  return 42\n") === false)
+  ok("an empty body is not", isThinAlias("") === false)
+
+  // the four that crowded the first real run's top six
+  const forgeRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..")
+  const { analyzeModules: an, stripNonCode: strip } = await import("../selfaudit.js")
+  for (const [file, name] of [
+    ["capabilities.js", "defaultRegistry"],     // → createRegistry
+    ["diffpatch.js", "applyUnifiedDiff"],       // → applyParsedPatch
+    ["netguard.js", "isPrivateAddress"],        // → blockedAddressReason
+  ]) {
+    const body = bodyOf(strip(fs.readFileSync(path.join(forgeRoot, file), "utf8")), name)
+    ok(`${file}:${name} is recognised as a thin alias`, isThinAlias(body), JSON.stringify(body).slice(0, 80))
+  }
+
+  const r = an({ dir: forgeRoot, testDir: path.join(forgeRoot, "tests"),
+    entryPoints: ["forge.js", "plugin-host.js", "selfaudit.js"], skipDirs: ["skills"] })
+  const orph = r.findings.filter((f) => f.kind === FINDING.ORPHANED_CAPABILITY)
+  ok("thin aliases are still reported, not dropped", orph.some((f) => f.thin), String(orph.filter((f) => f.thin).length))
+  ok("but none of them crowds the top five",
+    orph.slice(0, 5).every((f) => !f.thin), JSON.stringify(orph.slice(0, 5).map((f) => `${f.name}${f.thin ? "(thin)" : ""}`)))
+  ok("and the report says why a thin one is not lost capability",
+    orph.filter((f) => f.thin).every((f) => /only delegates/.test(f.evidence)))
+}
+
 console.log("== 5. a synthetic project with known answers ==")
 {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v105-proj-"))
