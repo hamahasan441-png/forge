@@ -223,6 +223,8 @@ const suites = [
   ["v103", "node", ["test-v103.mjs"]],
   // ---- v104 boundwise: the workspace boundary enforced in code -----------
   ["v104", "node", ["test-v104.mjs"]],
+  // ---- v105 selfaudit: capability that exists but nothing calls -----------
+  ["v105", "node", ["test-v105.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

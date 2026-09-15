@@ -132,6 +132,7 @@
     "securefs.js",
     "selfdiag.js",
     "selfreview.js",
+    "selfaudit.js",
     "sessions.js",
     "shellguard.js",
     "skilldl.js",
