@@ -240,5 +240,70 @@ console.log("== 11. the agent reports what it silently lost ==")
   ok("control flow is unchanged — the agent still swallows", /catch \(e\) \{ swallowed\("agent", "build repo map", e\) \}/.test(src))
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 12. P3: routing learns per task CLASS, not one blended number ==")
+{
+  const ms = await import("../modelstrategy.js")
+  ms.clearPerformance()
+
+  eq("task class is derived from the text", ms.deriveTaskClass("debug the failing login test"), "debugging")
+  eq("planning is distinguished", ms.deriveTaskClass("plan the new auth architecture"), "planning")
+  eq("review is distinguished", ms.deriveTaskClass("review this diff"), "review")
+  eq("refactor is distinguished", ms.deriveTaskClass("rename the helper across files"), "refactor")
+  eq("coding is the catch-all for building", ms.deriveTaskClass("add a retry helper"), "coding")
+  eq("empty text has no class", ms.deriveTaskClass(""), null)
+  eq("unrecognized text has no class (never guessed)", ms.deriveTaskClass("zzz qqq"), null)
+
+  // Two models with IDENTICAL global records but MIRRORED strengths. Global
+  // routing cannot tell them apart; that is the evidence being thrown away.
+  for (let i = 0; i < 20; i++) {
+    ms.recordOutcome({ model: "alpha", provider: "p", ok: i < 15, taskClass: i < 10 ? "debugging" : "planning" })
+    ms.recordOutcome({ model: "beta", provider: "p", ok: i < 15, taskClass: i < 10 ? "planning" : "debugging" })
+  }
+  const gA = ms.effectiveStats("alpha", "p")
+  const gB = ms.effectiveStats("beta", "p")
+  eq("globally the two models are indistinguishable", gA.successRate, gB.successRate)
+
+  const dA = ms.effectiveStats("alpha", "p", { taskClass: "debugging" })
+  const dB = ms.effectiveStats("beta", "p", { taskClass: "debugging" })
+  ok("at debugging, the model with that record wins", dA.successRate > dB.successRate, `${dA.successRate} vs ${dB.successRate}`)
+  const pA = ms.effectiveStats("alpha", "p", { taskClass: "planning" })
+  const pB = ms.effectiveStats("beta", "p", { taskClass: "planning" })
+  ok("at planning, the preference REVERSES", pB.successRate > pA.successRate, `${pB.successRate} vs ${pA.successRate}`)
+  ok("the separation is large, not noise", Math.abs(dA.successRate - dB.successRate) > 0.2)
+
+  eq("class evidence is reported, not just applied", dA.classSamples, 10)
+  eq("and flagged as class-derived", dA.fromClassHistory, true)
+  ok("the global rate is still reported alongside", dA.globalSuccessRate === gA.successRate)
+
+  // the safety property: no class evidence must change nothing
+  const unknown = ms.effectiveStats("alpha", "p", { taskClass: "nonexistent" })
+  eq("an unseen class falls back EXACTLY to global", unknown.successRate, gA.successRate)
+  eq("and says it is not class-derived", unknown.fromClassHistory, false)
+  const none = ms.effectiveStats("alpha", "p")
+  eq("no taskClass at all is unchanged behavior", none.successRate, gA.successRate)
+  eq("and carries no class", none.taskClass, null)
+
+  // a single class sample must not swing routing wildly
+  ms.clearPerformance()
+  for (let i = 0; i < 20; i++) ms.recordOutcome({ model: "gamma", provider: "p", ok: true, taskClass: "coding" })
+  ms.recordOutcome({ model: "gamma", provider: "p", ok: false, taskClass: "debugging" })
+  const one = ms.effectiveStats("gamma", "p", { taskClass: "debugging" })
+  const gGlobal = ms.effectiveStats("gamma", "p")
+  ok("one bad run does not collapse the class rate", one.successRate > 0.5, String(one.successRate))
+  ok("but it does pull it below the global rate", one.successRate < gGlobal.successRate)
+  ms.clearPerformance()
+}
+
+console.log("== 13. the router actually consumes the class ==")
+{
+  const src = fs.readFileSync(new URL("../modelstrategy.js", import.meta.url), "utf8")
+  ok("selectModel derives a class when the caller gives none", /const taskClass = opts\.taskClass \?\? deriveTaskClass\(task\)/.test(src))
+  ok("the class reaches the scorer", /scoreModel\(\{ model, provider: p, caps, limits, catalogWindow: cat\?\.contextWindow, taskClass \}\)/.test(src))
+  ok("the scorer asks for class-aware stats", /effectiveStats\(model, provider\?\.name \?\? null, \{ taskClass \}\)/.test(src))
+  ok("the reason names the class, so a choice can be explained", /at \$\{perf\.taskClass\}/.test(src))
+  ok("class evidence is shrunk toward the model's OWN global rate", /CLASS_PRIOR_WEIGHT \* globalRate/.test(src))
+}
+
 console.log(`\n== v101 instrument suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
