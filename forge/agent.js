@@ -30,10 +30,13 @@ import { loadToolPlugins } from "./plugins.js"
 import { loadActiveCreatedTools, listToolLife } from "./toolcreate.js"
 import { capabilityCoverage, capabilitiesImpliedByTask } from "./capabilities.js" // v97 §33 ladder
 import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
-import { selectCapabilities, formatSelection } from "./capfabric.js"
+import { formatSelection } from "./capfabric.js"
+import { selectForTurn } from "./capindex.js"
 import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
+import { createTracer, PHASE } from "./tracer.js"
+import { swallowed, snapshot as softfailSnapshot } from "./softfail.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
@@ -57,7 +60,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites } from "./completion.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
@@ -75,7 +78,7 @@ const ROLE_DIRECTIVES = {
   integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [] }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -127,7 +130,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     try {
       const map = repoMapBlock !== null ? repoMapBlock : buildRepoMap(cwd, { query: task || "" })
       if (map) lines.push("", map)
-    } catch { }
+    } catch (e) { swallowed("agent", "build repo map", e) }
   }
   if (task) {
     // v23: when semantic retrieval is enabled, runAgent precomputes the hybrid
@@ -138,8 +141,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     if (learnings) lines.push("", learnings)
   }
   if (skillsEnabled) {
-    const idx = skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), cwd) : []
-    const picks = pickSkills(task || "", idx, { klass, skillsDir, cwd })
+    // The decision was already made once, by selectForTurn, together with the
+    // MCP side — this consumes it rather than re-running a second, independent
+    // selection here. (Fallback keeps this function usable on its own.)
+    const idx = skillPicks ? (skillIndex ?? []) : (skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), cwd) : [])
+    const picks = skillPicks ?? pickSkills(task || "", idx, { klass, skillsDir, cwd })
     const block = formatSkillPicks(picks)
     if (block) lines.push("", block)
     // v97 §33: THE UNIFIED CAPABILITY LADDER — for every capability this task
@@ -277,6 +283,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     deepEffort = resolved.deep
     if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
   }
+  // v101 P0: phase tracing. telemetry.js counts WHAT happened; this records
+  // WHERE THE WALL-CLOCK WENT, so an optimization can be attributed to the
+  // phase it claims to improve instead of judged on total runtime alone.
+  const tracer = createTracer()
   const maxStepsInitial = Math.min(maxStepsOverride ?? config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps, readonly ? 10 : AGENT_BUDGETS.maxStepsHardCap)
   let maxSteps = maxStepsInitial
   const maxToolCallsInitial = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(10, config.agent?.maxToolCalls ?? AGENT_BUDGETS.maxToolCalls))
@@ -328,7 +338,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         for (const pp of plugins) onEvent?.({ type: "info", text: `tool plugin loaded: ${pp.name}${pp.readOnly ? " (read-only)" : ""} — ${pp.source}`, ...identityMeta() })
         for (const e of loaded.errors) onEvent?.({ type: "info", text: `tool plugin skipped: ${e}`, ...identityMeta() })
       }
-    } catch { }
+    } catch (e) { swallowed("agent", "load tool plugins", e) }
     // v93 gap fix §19: CREATED tools register here — but ONLY lifecycle
     // ACTIVE with passing behavioral verification (toolcreate.js loads
     // exactly those; CANDIDATE/TESTING/INACTIVE never reach the agent).
@@ -339,9 +349,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         plugins = [...plugins, ...safe]
         if (!isDelegatedSubAgent) for (const ct of safe) onEvent?.({ type: "info", text: `created tool loaded: ${ct.name} (ACTIVE, behaviorally verified)`, ...identityMeta() })
       }
-    } catch { /* created tools are additive, never break the agent */ }
+    } catch (e) { swallowed("agent", "load created tools", e) /* additive, never break the agent */ }
   }
   let mcpClients = []
+  let mcpLoaded = []
   if (!noTools && config.tools?.mcp !== false) {
     try {
       // A delegated sub-agent loads CACHE-ONLY: it never spawns a server itself.
@@ -363,27 +374,49 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         // the read-only contract already permits (tools.js only adds a plugin
         // to WRITE_TOOLS when !readOnly), so this widens capability without
         // widening authority.
-        const usable = isDelegatedSubAgent ? mcp.tools.filter((t) => t.readOnly === true) : mcp.tools
-        const sel = selectCapabilities({
-          task: String(task ?? ""),
-          plugins: usable,
-          nativeNames: [...BUILTIN_TOOL_NAMES],
-          maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
-          dedupe: config.mcp?.dedupe !== false,
-          // measured selection: this project's OWN recorded tool history ranks
-          // the survivors, and opens the circuit on a server that keeps failing.
-          stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch { return null } })(),
-          breaker: config.mcp?.breaker !== false,
-        })
-        plugins = [...plugins, ...sel.kept]
+        mcpLoaded = isDelegatedSubAgent ? mcp.tools.filter((t) => t.readOnly === true) : mcp.tools
         mcpClients = mcp.clients
-        for (const t of sel.kept) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
-        const summary = formatSelection(sel)
-        if (summary && !isDelegatedSubAgent) onEvent?.({ type: "info", text: summary, ...identityMeta() })
-        for (const d of sel.dropped) onEvent?.({ type: "mcp_tool_withheld", tool: d.name, reason: d.reason, ...identityMeta() })
       }
       for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}`, ...identityMeta() })
-    } catch { }
+    } catch (e) { swallowed("agent", "load mcp tools", e) }
+  }
+
+  // ── THE SINGLE SELECTION ──────────────────────────────────────────────────
+  // One call decides what capabilities this turn offers, across every registry.
+  // Both underlying selectors are still the ones doing their own job (MCP
+  // dedupe / circuit-breaker / budget; skill lifecycle / staleness) — what is
+  // unified is the DECISION: one place, one combined view, one optional shared
+  // ceiling. Previously these ran at two points in the loop with no shared
+  // accounting, so nothing knew the combined context cost being offered.
+  const turnKlass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
+  const turnSkillIndex = (config.skills?.enabled !== false && skillsDir)
+    ? (() => { try { return mergeLearnedSkills(indexSkills(skillsDir), process.cwd()) } catch { return [] } })()
+    : []
+  const turnSelection = selectForTurn({
+    task: String(task ?? ""),
+    mcpPlugins: mcpLoaded,
+    skillIndex: turnSkillIndex,
+    pickSkillsFn: pickSkills,
+    skillOptions: { klass: turnKlass, skillsDir, cwd: process.cwd() },
+    nativeDefs: [],
+    nativeNames: [...BUILTIN_TOOL_NAMES],
+    stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch (e) { swallowed("agent", "load tool stats", e); return null } })(),
+    mcpOptions: {
+      maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
+      dedupe: config.mcp?.dedupe !== false,
+      breaker: config.mcp?.breaker !== false,
+    },
+    contextBudget: Number(config.agent?.capabilityBudget) > 0 ? Number(config.agent.capabilityBudget) : 0,
+  })
+  if (turnSelection.mcp.kept.length) {
+    plugins = [...plugins, ...turnSelection.mcp.kept]
+    for (const t of turnSelection.mcp.kept) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
+  }
+  {
+    const summary = formatSelection(turnSelection.mcp)
+    if (summary && !isDelegatedSubAgent) onEvent?.({ type: "info", text: summary, ...identityMeta() })
+    for (const d of turnSelection.mcp.dropped) onEvent?.({ type: "mcp_tool_withheld", tool: d.name, reason: d.reason, ...identityMeta() })
+    for (const t of turnSelection.trimmed) onEvent?.({ type: "capability_trimmed", capability: t.name, kind: t.kind, reason: t.reason, ...identityMeta() })
   }
   let lspSession = null
   // v98 shipwise: the autostart table counts too — the read-only LSP tools
@@ -472,7 +505,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       if (decision?.chain?.active?.length) {
         onEvent?.({ type: "info", text: `routing: ${decision.chain.reason}`, ...identityMeta() })
       }
-    } catch { }
+    } catch (e) { swallowed("agent", "route model chain", e) }
   }
 
   // v24 semantic retrieval: when retrieval.embeddings is enabled, rerank the
@@ -514,10 +547,16 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { /* BM25 fallback — retrieval must never break a run */ }
   }
 
+  // v101 P2: the prompt build is where the untraced time was hiding. When
+  // embeddings are not configured (the default), agentSystemPrompt computes the
+  // repo map, memory and learnings SYNCHRONOUSLY inside itself — three
+  // independent retrievals, one after another, on the event loop.
+  const endContext = tracer.span(PHASE.CONTEXT)
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
+  endContext()
   // v89 perf: FORGE_DEBUG_PROMPT=<path> dumps the exact first request payload —
   // the ground truth for prompt-economy work (sizes per block, no guessing).
   if (process.env.FORGE_DEBUG_PROMPT) {
@@ -539,6 +578,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
   const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
   const BUDGET_NUDGE_PREFIX = "(system) tool-call budget exhausted"
+  const VERIFY_NUDGE_PREFIX = "(system) you changed files but never ran a check"
+  // v101 P4: fires AT MOST ONCE per run, and only on a run that actually
+  // changed something without ever checking it. See the gate below.
+  let verifyNudgeFired = false
+  // the answer the nudge withdrew, kept ONLY as a fallback (see below)
+  let withdrawnText = ""
   let emptyStreak = 0
   // v94 masterwise (§6/§7): budget-nudge coercion tracking — see below
   let budgetNudgeFired = false
@@ -622,6 +667,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       log?.step(steps)
       onEvent?.({ type: "step", step: steps, ...identityMeta() })
       let msg
+      // declared OUTSIDE the try so every exit path — success, provider error,
+      // failover, retry — closes the span exactly once (end() is idempotent).
+      const endModel = tracer.span(PHASE.MODEL)
       try {
         msg = await chatOnce({
           protocol: p.protocol,
@@ -637,7 +685,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           connectMs: config.retry?.connectMs,
           requestTimeoutMs: config.retry?.requestTimeoutMs,
         })
+        endModel()
       } catch (e) {
+        endModel({ error: true })
         if (e instanceof ProviderError && e.contextOverflow && overflowBudget > 0) {
           overflowBudget--
           onEvent?.({ type: "compacted", before: messages.length, after: -1, estTok: estimateTokens(JSON.stringify(messages)), budgetTok: 0, reason: "context overflow — compressing and retrying", ...identityMeta() })
@@ -712,10 +762,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           content: msg.content || "",
           tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
         })
+        const endTools = tracer.span(PHASE.TOOL)
         const results = await intel.runBatch(
           msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) })),
           { step: steps }
         )
+        endTools()
+        // per-tool attribution: "tools took 40s" is far less useful than
+        // knowing WHICH tool did. runBatch already timed each call.
+        for (let i = 0; i < msg.toolCalls.length; i++) {
+          const ms = Number(results?.[i]?.ms)
+          if (Number.isFinite(ms)) tracer.mark(`tool:${msg.toolCalls[i]?.name ?? "unknown"}`, ms,
+            { error: String(results?.[i]?.result ?? "").startsWith("ERROR") })
+        }
         for (let i = 0; i < msg.toolCalls.length; i++) {
           const tc = msg.toolCalls[i]
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
@@ -789,6 +848,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           steps--
           continue
         }
+        // v101 P4: if the verification nudge withdrew a real answer and the
+        // provider then died, the run must not FAIL where it would have
+        // COMPLETED before the nudge existed. Restore the withdrawn answer and
+        // end honestly — the result still reports the changes as unverified,
+        // which is the whole point, and that is strictly better than losing
+        // the work to a provider hiccup the nudge caused.
+        if (withdrawnText) {
+          finalText = withdrawnText
+          onEvent?.({ type: "info", text: "the provider stopped responding after the verification nudge — restoring the answer it gave before, still reported as unverified", ...identityMeta() })
+          break
+        }
         throw new ProviderError(`model returned an empty response ${EMPTY_RESPONSE_RETRIES + 1} times in a row — provider or model issue (or the response was filtered); no final answer was produced`, { retryable: false })
       }
       emptyStreak = 0
@@ -807,6 +877,46 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           if (m.role === "user") { coercedByNudge = String(m.content ?? "").startsWith(BUDGET_NUDGE_PREFIX); break }
           if (m.role === "tool") continue
           break
+        }
+      }
+
+      // v101 P4 — the false-completion gate. The eval (evalbench.js) puts ONE
+      // number above solve rate: an agent that reports COMPLETED on work that
+      // does not pass. The cheapest honest defence is to not let the run end
+      // on an UNCHECKED change: every write this run made, with no passing
+      // check covering it, gets one chance to be checked before the answer
+      // stands.
+      //
+      // Deliberately narrow, because a nudge costs a model call:
+      //   - at most ONCE per run, never a loop
+      //   - only when files were actually written and NONE is covered
+      //   - never on read-only / plan / verifier runs (they write nothing)
+      //   - never once the step or tool-call budget is gone — there is no room
+      //     to act on it, and a coerced answer is already handled above
+      //   - off with config.agent.verifyNudge === false
+      // It never runs a command itself: the agent chooses, exactly as
+      // verify.js's "executor: agent" contract has always required.
+      if (!verifyNudgeFired && config.agent?.verifyNudge !== false && !readonly && !planOnly && !verifier
+          && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
+        const gap = unverifiedWrites({ writesSoFar, commandChecks })
+        if (gap.unverified.length) {
+          verifyNudgeFired = true
+          // The answer is WITHDRAWN, not kept: the model must restate it after
+          // checking. Otherwise a run that spent its remaining budget verifying
+          // would report the pre-check answer as if it had survived the check.
+          withdrawnText = finalText
+          finalText = ""
+          let hint = ""
+          try {
+            const { focusedVerify } = await import("./verify.js")
+            const fv = focusedVerify(process.cwd(), gap.unverified.filter((f) => f !== "(shell write)"))
+            // recommendedVerify NEVER invents a command; an empty one stays empty
+            if (fv?.command) hint = ` The project's own check is: ${fv.command}${fv.tests?.length ? ` (tests connected to your changes: ${fv.tests.slice(0, 4).join(", ")})` : ""}.`
+          } catch { /* a missing hint must never cost the nudge itself */ }
+          const names = gap.unverified.slice(0, 6).map((f) => path.relative(process.cwd(), f) || f).join(", ")
+          onEvent?.({ type: "verify_nudge", files: gap.unverified.length, names, step: steps, ...identityMeta() })
+          messages.push({ role: "user", content: `${VERIFY_NUDGE_PREFIX}: ${names}${gap.unverified.length > 6 ? ` (+${gap.unverified.length - 6} more)` : ""}.${hint} Run a real check that covers those changes now and report what it printed. If this repository genuinely has no way to check them, say so explicitly in your final answer instead — do not claim the work is verified.` })
+          continue
         }
       }
       break
@@ -832,7 +942,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // like no answer at all: INCOMPLETE + checkpoint + resume. meta continues
     // on budgetHit either way; direct callers get the honest status.
     const exhausted = budgetHit && (!answerPresent || coercedByNudge)
-    const fastGate = canCompleteFastPath({ finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks })
+    const verificationGap = unverifiedWrites({ writesSoFar, commandChecks })
+    const fastGate = canCompleteFastPath({ finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks, unverified: verificationGap.unverified, requireVerification: config.agent?.requireVerification === true })
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
     let checkpointId = null
     if (!fastGate.ok && fastGate.status === "INCOMPLETE") {
@@ -846,7 +957,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), error: null }
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

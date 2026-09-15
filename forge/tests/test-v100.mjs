@@ -38,7 +38,17 @@ console.log("== 1. normalizeAnnotations — bounded, never widening ==")
   eq("non-boolean hint dropped", normalizeAnnotations({ readOnlyHint: "yes" }), null)
   eq("unknown key dropped", normalizeAnnotations({ nonsense: true, readOnlyHint: true }), { readOnlyHint: true })
   ok("title is bounded to 120 chars", normalizeAnnotations({ title: "x".repeat(400) }).title.length === 120)
-  ok("never throws on a hostile object", (() => { try { normalizeAnnotations({ get title() { throw new Error("x") } }); return false } catch { return true } })() === true || true)
+  // This assertion previously ended in `|| true`, which made it impossible to
+  // fail — and it was hiding a real one: reading a throwing getter propagated
+  // out of normalizeAnnotations. Annotations come off the wire, so the ACCESS
+  // is the untrusted step.
+  ok("a hostile getter does not throw out of normalizeAnnotations", (() => {
+    try { normalizeAnnotations({ get title() { throw new Error("x") } }); return true } catch { return false }
+  })())
+  eq("and the unreadable field is simply absent",
+    normalizeAnnotations({ get title() { throw new Error("x") }, readOnlyHint: true }), { readOnlyHint: true })
+  ok("a throwing hint falls back to the SAFE default (mutating)",
+    readOnlyHinted({ annotations: { get readOnlyHint() { throw new Error("x") } } }) === false)
 }
 
 console.log("== 2. readOnlyHinted — explicit true only ==")
@@ -220,10 +230,13 @@ console.log("== 8. capability fabric: relevance budget ==")
 console.log("== 9. fabric is wired into the agent loop ==")
 {
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
-  ok("agent.js imports the fabric", /import \{ selectCapabilities, formatSelection \} from "\.\/capfabric\.js"/.test(src))
-  ok("MCP tools pass through selectCapabilities before reaching plugins", /selectCapabilities\(\{[\s\S]{0,400}plugins: usable/.test(src))
-  ok("the selected set derives from the loaded MCP tools", /const usable = isDelegatedSubAgent \? mcp\.tools\.filter/.test(src))
-  ok("only the SELECTED tools are added to plugins", /plugins = \[\.\.\.plugins, \.\.\.sel\.kept\]/.test(src))
+  ok("agent.js imports the fabric's reporting and the unified selector",
+    /import \{ formatSelection \} from "\.\/capfabric\.js"/.test(src) && /import \{ selectForTurn \} from "\.\/capindex\.js"/.test(src))
+  ok("MCP tools pass through the unified selection before reaching plugins",
+    /selectForTurn\(\{[\s\S]{0,400}mcpPlugins: mcpLoaded/.test(src))
+  ok("the selected set derives from the loaded MCP tools",
+    /mcpLoaded = isDelegatedSubAgent \? mcp\.tools\.filter/.test(src))
+  ok("only the SELECTED tools are added to plugins", /plugins = \[\.\.\.plugins, \.\.\.turnSelection\.mcp\.kept\]/.test(src))
   ok("withheld tools are reported, never silent", /mcp_tool_withheld/.test(src))
   ok("clients are still taken from the full load (no leak)", /mcpClients = mcp\.clients/.test(src))
 }
@@ -486,7 +499,7 @@ console.log("== 17. every command path reaches the fabric ==")
   ok("meta segments execute through agent.js runAgent", /runAgent \?\? \(await import\("\.\/agent\.js"\)\)\.runAgent/.test(meta))
   ok("DAG work nodes execute through runAgent", /await runAgent\(\{/.test(worknode))
   ok("chat loads MCP on its own path", /loadMcpTools\(config\)/.test(chat))
-  ok("the fabric is inside runAgent, so every caller inherits it", /selectCapabilities\(\{/.test(agent))
+  ok("the selection is inside runAgent, so every caller inherits it", /selectForTurn\(\{/.test(agent))
 
   // the read-only paths (verifier / delegated sub-agent) are the ones that used
   // to be excluded entirely; they now receive DECLARED read-only tools only
@@ -688,6 +701,354 @@ console.log("== 23. the agent reads its own recorded history ==")
   ok("and hands them to the fabric", /stats: \(\(\) => \{ try \{ return loadToolStats/.test(src))
   ok("the breaker is on by default, and configurable", /breaker: config\.mcp\?\.breaker !== false/.test(src))
   ok("a stats read can never break the agent", /catch \{ return null \} \}\)\(\)/.test(src))
+}
+
+// ---------------------------------------------------------------------------
+console.log("== 24. unified capability index: all four registries, one scale ==")
+{
+  const { buildCapabilityIndex, rankCapabilities, indexSummary, formatCapabilityIndex,
+          lifecyclePrior, CAP_SOURCE, EVIDENCE } = await import("../capindex.js")
+  const { TOOL_DEFS } = await import("../tools.js")
+
+  // lifecycle priors: earned state IS evidence, and unknown is neutral
+  ok("VERIFIED outranks ACTIVE", lifecyclePrior("VERIFIED") > lifecyclePrior("ACTIVE"))
+  ok("ACTIVE outranks CANDIDATE", lifecyclePrior("ACTIVE") > lifecyclePrior("CANDIDATE"))
+  eq("an unknown lifecycle is neutral, not bad", lifecyclePrior(undefined), 0.5)
+  ok("DEPRECATED ranks below unproven", lifecyclePrior("DEPRECATED") < 0.5)
+  ok("STALE demotes even a VERIFIED skill", lifecyclePrior("VERIFIED", { stale: true }) <= 0.2)
+  ok("STALE never reaches zero (a stale playbook can still be right)", lifecyclePrior("VERIFIED", { stale: true }) > 0)
+
+  const idx = buildCapabilityIndex({
+    nativeDefs: TOOL_DEFS,
+    skills: [
+      { name: "systematic-debugging", desc: "root cause analysis", lifecycle: "VERIFIED" },
+      { name: "old-pack", desc: "root cause analysis", lifecycle: "ACTIVE", stale: true },
+    ],
+    mcpPlugins: [{ name: "mcp__pg__run_query", readOnly: false, def: { function: { description: "execute a SQL query" } } }],
+    createdTools: [{ name: "csvfmt", description: "format csv", lifecycle: "ACTIVE" }],
+    stats: { "mcp__pg__run_query": { samples: 12, ok: 11, failed: 1, ms: 6000 } },
+  })
+
+  const sum = indexSummary(idx)
+  eq("every source is represented", Object.keys(sum.bySource).sort(), ["created", "mcp", "native", "skill"])
+  eq("native tools are all indexed", sum.bySource.native, TOOL_DEFS.length)
+  eq("counted evidence is reported separately from inferred", [sum.proven, sum.inferred], [1, 3])
+
+  const mcpEntry = idx.find((e) => e.name === "mcp__pg__run_query")
+  eq("a tool with runs carries COUNTED evidence", mcpEntry.evidence, EVIDENCE.COUNTED)
+  eq("and its real sample count", mcpEntry.samples, 12)
+  ok("its reliability reflects the record", mcpEntry.reliability > 0.8)
+
+  const skillEntry = idx.find((e) => e.name === "systematic-debugging")
+  eq("a skill carries LIFECYCLE evidence, never counted", skillEntry.evidence, EVIDENCE.LIFECYCLE)
+  eq("a skill is read-only (loading a playbook mutates nothing)", skillEntry.readOnly, true)
+  eq("a never-run native tool is honestly unproven", idx.find((e) => e.name === "bash").evidence, EVIDENCE.NONE)
+
+  const staleEntry = idx.find((e) => e.name === "old-pack")
+  eq("a stale skill is flagged in the index", staleEntry.stale, true)
+  ok("and ranks below its fresh twin", staleEntry.reliability < skillEntry.reliability)
+
+  // one scale: a proven MCP tool, a verified skill and unproven natives compete
+  const ranked = rankCapabilities(idx, "debug the failing SQL query", { limit: 5 })
+  ok("ranking returns entries from more than one source",
+    new Set(ranked.map((r) => r.source)).size > 1, JSON.stringify(ranked.map((r) => r.source)))
+  eq("the proven, most relevant capability leads", ranked[0].name, "mcp__pg__run_query")
+  ok("every ranked entry carries its evidence kind", ranked.every((r) => r.evidence))
+  ok("irrelevant capabilities are dropped by default", ranked.every((r) => r.relevance > 0))
+  ok("keepIrrelevant returns the full inventory",
+    rankCapabilities(idx, "zzzz", { keepIrrelevant: true }).length === idx.length)
+  eq("sources can be filtered",
+    new Set(rankCapabilities(idx, "root cause analysis", { sources: [CAP_SOURCE.SKILL] }).map((r) => r.source)).size, 1)
+
+  // relevance still dominates across sources
+  const irrelevantButProven = rankCapabilities(idx, "format csv", { limit: 1 })
+  eq("a relevant created tool beats a proven-but-unrelated one", irrelevantButProven[0].name, "csvfmt")
+
+  ok("the report names counts and evidence", /CAPABILITY INDEX — 33 total \(1 with recorded runs, 3 by lifecycle\)/.test(formatCapabilityIndex(idx)))
+  ok("a stale entry is labeled in the report", /old-pack.*STALE/.test(formatCapabilityIndex(idx)))
+  eq("an empty index is honest", formatCapabilityIndex([]), "no capabilities indexed")
+
+  // partial inputs must not throw
+  ok("a caller that knows only one source still gets an index",
+    buildCapabilityIndex({ skills: [{ name: "x", desc: "y" }] }).length === 1)
+  eq("no inputs → empty index, no throw", buildCapabilityIndex().length, 0)
+}
+
+console.log("== 25. stale skills: the flag that was written but never read ==")
+{
+  const { evaluateSkills, formatSkillPicks } = await import("../evaluate.js")
+  const fresh = { name: "sql-debugging", desc: "debug sql queries", lifecycle: "ACTIVE" }
+  const stale = { name: "sql-tuning", desc: "debug sql queries fast", lifecycle: "ACTIVE", stale: true }
+
+  const picks = evaluateSkills("debug sql queries", [stale, fresh], { klass: "MEDIUM" })
+  eq("the stale skill is still OFFERED, not hidden", picks.length, 2)
+  eq("but it ranks below the fresh match", picks[0].name, "sql-debugging")
+  ok("the stale one is demoted", picks.find((p) => p.name === "sql-tuning").score < picks[0].score)
+  ok("the flag survives into the pick", picks.find((p) => p.name === "sql-tuning").stale === true)
+  ok("the model is told it is stale, never that it is current",
+    /STALE — verified before related files changed/.test(formatSkillPicks(picks)))
+  ok("a fresh skill gets no stale label", !/sql-debugging.*STALE/.test(formatSkillPicks(picks)))
+
+  // the relevance GATE must use the raw score: demoting must never silently drop
+  const onlyStale = evaluateSkills("debug sql queries", [stale], { klass: "MEDIUM" })
+  eq("a stale skill alone is still surfaced", onlyStale.length, 1)
+
+  // the flag actually comes out of the lifecycle store
+  const sf = fs.readFileSync(new URL("../skillforge.js", import.meta.url), "utf8")
+  ok("pickSkills reads `stale` from the skill-life record", /stale: Boolean\(s\.name && life\[s\.name\]\?\.stale === true\)/.test(sf))
+  const ev = fs.readFileSync(new URL("../evolve.js", import.meta.url), "utf8")
+  ok("markStaleSkills is what writes it", /rec\.stale = true/.test(ev))
+}
+
+// ---------------------------------------------------------------------------
+console.log("== 26. the step counter is not a wall: productive runs auto-continue ==")
+{
+  // §29: "a segment ending means CONTINUE / REPLAN / CHECKPOINT, not COMPLETED"
+  // and "never stop because the step counter ended". Reaching the derived
+  // segment budget used to stop the task dead with WAITING/CONTINUE_REQUIRED —
+  // a human had to type "continue" to get the SAME work going again.
+  const meta = await import("../meta.js")
+  const runCase = async ({ productive, maxSegments = null }) => {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-seg-"))
+    const prev = process.cwd()
+    process.chdir(work)
+    let calls = 0
+    const fake = async (args) => {
+      if (args.planOnly) return { text: "1. investigate\n2. implement\n3. test", toolRecords: [], commandChecks: [], toolLog: [] }
+      calls++
+      let recs = []
+      if (productive) {
+        const rel = `out-${calls}.txt`
+        fs.writeFileSync(path.join(process.cwd(), rel), "x")
+        recs = [{ tool: "write_file", status: "ok", files_changed: [rel] }]
+      }
+      return { text: "still working", budgetHit: true, steps: 1, status: "INCOMPLETE",
+               toolRecords: recs, commandChecks: [], toolLog: [], wrote: [] }
+    }
+    const events = []
+    const res = await meta.runMeta({
+      config: { agent: {} }, provider: { id: "mock" }, task: "keep improving the project",
+      runAgent: fake, onEvent: (e) => events.push(e),
+      ...(maxSegments == null ? {} : { maxSegments }),
+    })
+    process.chdir(prev)
+    return {
+      res,
+      auto: events.filter((e) => e.type === "SEGMENT_BUDGET_AUTO_CONTINUED"),
+      fuse: events.filter((e) => e.type === "SEGMENT_SAFETY_FUSE"),
+    }
+  }
+
+  const prod = await runCase({ productive: true })
+  ok("a productive run keeps going without a human", prod.auto.length >= 2, `auto=${prod.auto.length}`)
+  ok("each grant is announced with its evidence",
+    prod.auto.every((e) => /still making verified progress/.test(e.reason) && e.evidence))
+  ok("the grant records what was NEW, not a running total",
+    prod.auto.every((e) => "newFiles" in e.evidence && "newNodesDone" in e.evidence))
+  ok("grants are bounded by the same continuation budget",
+    prod.auto.every((e) => e.continuation <= e.maxContinuations))
+  ok("budget still ends somewhere (never unbounded)", prod.fuse.length === 1)
+  ok("and the stop is still WAITING, never COMPLETED", prod.res?.status === "WAITING", String(prod.res?.status))
+
+  const stalled = await runCase({ productive: false })
+  ok("a stalled run stops far sooner than a productive one",
+    stalled.auto.length < prod.auto.length, `stalled=${stalled.auto.length} productive=${prod.auto.length}`)
+  ok("and the fuse says exactly why it would not continue",
+    /no new files changed and no new nodes completed/.test(String(stalled.fuse[0]?.autoContinueRefused)),
+    String(stalled.fuse[0]?.autoContinueRefused))
+
+  // an EXPLICIT budget is a decision, not a default
+  const pinned = await runCase({ productive: true, maxSegments: 3 })
+  eq("an explicitly pinned budget is never exceeded", pinned.auto.length, 0)
+  ok("and the refusal says the budget was explicit",
+    /set explicitly/.test(String(pinned.fuse[0]?.autoContinueRefused)), String(pinned.fuse[0]?.autoContinueRefused))
+  ok("pinned runs still stop at WAITING, not FAILED", pinned.res?.status === "WAITING", String(pinned.res?.status))
+}
+
+console.log("== 27. every stop explains itself ==")
+{
+  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  ok("the fuse carries the auto-continue refusal reason", /autoContinueRefused: lastRefusal/.test(src))
+  ok("a stalled strategy cannot buy more budget", /more budget cannot fix a stalled strategy/.test(src))
+  ok("a repeating error cannot buy more budget", /needs a different approach, not more steps/.test(src))
+  ok("progress is measured as a DELTA, never a level", /lastGrantMark/.test(src) && /since the last budget grant/.test(src))
+  ok("the increment is the earned class budget, not the global default", /maxSeg \+ segBudgetStep/.test(src))
+  ok("an absolute ceiling still applies", /AGENT_BUDGETS\.maxSegments\)/.test(src))
+}
+
+// ---------------------------------------------------------------------------
+console.log("== 28. ONE selection for the turn, across every registry ==")
+{
+  const { selectForTurn } = await import("../capindex.js")
+  const { isExternal } = await import("../capfabric.js")
+  const ext = (server, tool, desc = "") => ({
+    name: `mcp__${server}__${tool}`, source: `mcp:${server}`,
+    def: { type: "function", function: { name: `mcp__${server}__${tool}`, description: desc } },
+  })
+  const skillIdx = [
+    { name: "sql-debugging", desc: "debug sql queries", lifecycle: "VERIFIED" },
+    { name: "css-layout", desc: "fix css layout", lifecycle: "ACTIVE" },
+  ]
+  const pickFn = (task, idx) => idx.filter((s) => s.desc.split(" ").some((w) => task.includes(w)))
+
+  // both decisions come back from ONE call
+  const r = selectForTurn({
+    task: "debug sql queries",
+    mcpPlugins: [ext("pg", "run_query", "execute a SQL query"), ext("fs", "read_file", "read a file")],
+    skillIndex: skillIdx, pickSkillsFn: pickFn,
+    nativeNames: ["read_file"],
+  })
+  ok("the MCP decision is returned", Array.isArray(r.mcp?.kept))
+  ok("the skill decision is returned", Array.isArray(r.skills))
+  ok("both are decided in one call", r.mcp.kept.length > 0 && r.skills.length > 0)
+  ok("the MCP dedupe still runs (native read_file wins)",
+    !r.mcp.kept.some((p) => p.name === "mcp__fs__read_file"), JSON.stringify(r.mcp.kept.map((p) => p.name)))
+  ok("the dedupe reason is still explained", r.mcp.dropped.some((d) => /duplicates the native/.test(d.reason)))
+  ok("the skill selector still runs", r.skills.some((s) => s.name === "sql-debugging"))
+  ok("a combined index over the OFFERED capabilities comes back", r.index.length >= r.mcp.kept.length + r.skills.length)
+
+  // with the shared budget OFF, the result is exactly the two selectors' own
+  eq("no budget → nothing trimmed", r.trimmed.length, 0)
+
+  // the shared ceiling trims the lowest-ranked REGARDLESS of registry
+  const many = [ext("bulk", "a", "unrelated"), ext("bulk", "b", "unrelated"), ext("pg", "run_query", "execute a SQL query")]
+  const budgeted = selectForTurn({
+    task: "execute a SQL query",
+    mcpPlugins: many, skillIndex: skillIdx, pickSkillsFn: pickFn,
+    nativeNames: [], contextBudget: 2,
+  })
+  const offeredCount = budgeted.mcp.kept.length + budgeted.skills.length
+  eq("the combined offer respects the shared ceiling", offeredCount, 2)
+  ok("the most relevant capability survives the ceiling",
+    budgeted.mcp.kept.some((p) => p.name === "mcp__pg__run_query"), JSON.stringify(budgeted.mcp.kept.map((p) => p.name)))
+  ok("every trim is explained", budgeted.trimmed.every((t) => /context budget/.test(t.reason)))
+  ok("trims name which registry they came from", budgeted.trimmed.every((t) => t.kind === "mcp" || t.kind === "skill"))
+
+  // robustness: a throwing skill picker must not break the turn
+  const safe = selectForTurn({
+    task: "x", mcpPlugins: [ext("a", "b")], skillIndex: skillIdx,
+    pickSkillsFn: () => { throw new Error("boom") }, nativeNames: [],
+  })
+  eq("a failing skill picker degrades to no skills, never a throw", safe.skills.length, 0)
+  ok("and the MCP side still decided", safe.mcp.kept.length === 1)
+  eq("no picker at all → no skills, no throw", selectForTurn({ task: "x" }).skills.length, 0)
+}
+
+console.log("== 29. the agent uses that one selection for BOTH sides ==")
+{
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("runAgent calls selectForTurn once", (src.match(/selectForTurn\(\{/g) || []).length === 1)
+  ok("the MCP block only LOADS now", /mcpLoaded = isDelegatedSubAgent \? mcp\.tools\.filter/.test(src))
+  ok("plugins come from the unified decision", /plugins = \[\.\.\.plugins, \.\.\.turnSelection\.mcp\.kept\]/.test(src))
+  ok("the prompt is handed the same decision", /skillPicks: turnSelection\.skills/.test(src))
+  ok("and does not re-run a second skill selection", /const picks = skillPicks \?\? pickSkills\(/.test(src))
+  ok("trims are reported to the user", /capability_trimmed/.test(src))
+  ok("agent.js no longer calls selectCapabilities directly", !/[^.\w]selectCapabilities\(/.test(src))
+}
+
+// ---------------------------------------------------------------------------
+console.log("== 30. stale skills: the whole chain, on a real lifecycle store ==")
+{
+  // Sections 25 proved the pieces; this proves the CHAIN that was actually
+  // broken — verify → file changes → markStaleSkills writes → pickSkills reads
+  // it back off disk → demoted → labeled. Every step against real files.
+  const evolve = await import("../evolve.js")
+  const sf = await import("../skillforge.js")
+  const ev = await import("../evaluate.js")
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-stale-"))
+  const prev = process.cwd()
+  process.chdir(work)
+  fs.writeFileSync(path.join(work, "target.js"), "export const a = 1\n")
+
+  evolve.recordSkillOutcome({
+    cwd: work, name: "sql-tuning", status: "VERIFIED",
+    gate: { checks: { a: 1, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 1, i: 1 } },
+    files: ["target.js"], task: "tune sql",
+  })
+  eq("the skill starts VERIFIED", evolve.loadSkillLife(work).skills["sql-tuning"]?.lifecycle, "VERIFIED")
+  ok("and is not stale yet", !evolve.loadSkillLife(work).skills["sql-tuning"]?.stale)
+
+  fs.writeFileSync(path.join(work, "target.js"), "export const a = 999\n")
+  const marked = evolve.markStaleSkills(work, ["target.js"])
+  eq("changing the verified-against file marks it stale", marked.marked, 1)
+  const rec = evolve.loadSkillLife(work).skills["sql-tuning"]
+  eq("the flag is persisted", rec?.stale, true)
+  ok("with a reason on record", /related files changed/.test(String(rec?.staleReason)), String(rec?.staleReason))
+
+  const idx = [{ name: "sql-tuning", desc: "tune sql queries" }, { name: "sql-other", desc: "tune sql queries" }]
+  const picks = sf.pickSkills("tune sql queries", idx, { klass: "MEDIUM", cwd: work })
+  const stalePick = picks.find((p) => p.name === "sql-tuning")
+  const freshPick = picks.find((p) => p.name === "sql-other")
+  ok("pickSkills reads the flag back off DISK", stalePick?.stale === true, JSON.stringify(picks.map((p) => p.name)))
+  ok("the stale skill is still offered", Boolean(stalePick))
+  ok("but scores below its fresh equivalent", stalePick.score < freshPick.score, `${stalePick.score} vs ${freshPick.score}`)
+  ok("and is ranked after it", picks.indexOf(stalePick) > picks.indexOf(freshPick))
+  const block = ev.formatSkillPicks(picks)
+  ok("the model is told it is stale", /sql-tuning \(STALE/.test(block), block.slice(0, 200))
+  ok("the fresh one carries no such label", !/sql-other \(STALE/.test(block))
+  process.chdir(prev)
+}
+
+// ---------------------------------------------------------------------------
+console.log("== 31. a skill zip is accepted wherever a skill is given ==")
+{
+  // The zip support was all there — the remote path already unpacked archives
+  // and ingestLocal already read zip/folder/SKILL.md — but `download` took only
+  // URLs and `ingest` only local paths, so handing a local .zip to `download`
+  // failed with a bare "invalid URL". The SOURCE now decides the route.
+  const dl = await import("../skilldl.js")
+  const zi = await import("../zipingest.js")
+  const { classifySkillSource, acquireSkills } = dl
+
+  eq("a URL is remote", classifySkillSource("https://x.com/a.md").kind, "url")
+  eq("a bare host is a URL with the scheme omitted", classifySkillSource("example.com/s.md").url, "https://example.com/s.md")
+  eq("an empty source is honest", classifySkillSource("").error, "missing source")
+  ok("a path-shaped but ABSENT source says NOT FOUND, not 'not a URL'",
+    /^not found: /.test(classifySkillSource("/nope/missing.zip").error), classifySkillSource("/nope/missing.zip").error)
+  ok("a bare nonsense token is neither", /not a file on disk and not a URL/.test(classifySkillSource("???").error))
+
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-zip-"))
+  const zpath = path.join(work, "pack.zip")
+  fs.writeFileSync(zpath, zi.makeStoreZip({
+    "demo/SKILL.md": "---\nname: zip-demo\ndescription: a demo skill delivered as a zip\n---\n# Demo\nDo the thing.\n",
+    "demo/scripts/run.sh": "#!/bin/sh\necho hi\n",
+  }))
+  eq("an existing zip classifies as local", classifySkillSource(zpath).kind, "local")
+  eq("file:// is a local path spelled as a URL", classifySkillSource(`file://${zpath}`).kind, "local")
+
+  const prevHome = process.env.FORGE_HOME
+  process.env.FORGE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-ziphome-"))
+  const [r] = await acquireSkills([zpath])
+  ok("a LOCAL zip is accepted (this is the reported bug)", r.ok === true, JSON.stringify(r).slice(0, 200))
+  eq("and was routed to ingest, not download", r.via, "ingest")
+  eq("the skill name comes out of the zip", r.record?.skillName, "zip-demo")
+  ok("support files inside the zip are unpacked", (r.record?.unpacked ?? []).includes("scripts/run.sh"), JSON.stringify(r.record?.unpacked))
+
+  const [r2] = await acquireSkills(["/nope/missing.zip"])
+  ok("a missing zip fails with a clear reason", r2.ok === false && /not found/.test(r2.error), r2.error)
+  eq("and is attributed to no route", r2.via, "none")
+
+  const [r3] = await acquireSkills([`file://${zpath}`])
+  ok("a file:// zip is accepted too", r3.ok === true, JSON.stringify(r3).slice(0, 160))
+
+  ok("an empty list is not an error", (await acquireSkills([])).length === 0)
+  ok("the report names the NEXT command instead of dead-ending",
+    /Next:\s+forge skill verify /.test(dl.formatDownloadReport(r)), dl.formatDownloadReport(r).slice(-160))
+  ok("and still says downloads are untrusted", /DOWNLOAD ≠ VERIFY/.test(dl.formatDownloadReport(r)))
+  process.env.FORGE_HOME = prevHome
+}
+
+console.log("== 32. both verbs route by source, in chat and the CLI ==")
+{
+  const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
+  const cli = fs.readFileSync(new URL("../forge.js", import.meta.url), "utf8")
+  ok("/skill download accepts a local path", /acquireSkills: downloadSkills/.test(chat))
+  ok("/skill ingest accepts a URL", /const \[r\] = await acquireSkills\(\[src\]\)/.test(chat))
+  ok("the CLI skill download routes by source", /download: isSkill \? mod\.acquireSkills/.test(cli))
+  ok("the CLI skill ingest routes by source", /const \[r\] = await acquireSkills\(\[src\]\)/.test(cli))
+  ok("tool downloads are UNCHANGED (still URL-only)", /mod\.downloadTools/.test(cli))
+  ok("usage text tells the truth about what is accepted",
+    /local zip\/folder\/SKILL\.md/.test(chat) && /local zip\/folder\/SKILL\.md/.test(cli))
 }
 
 console.log(`\n== v100 fabricwise suite: ${PASS} passed, ${FAIL} failed ==`)

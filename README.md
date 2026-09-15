@@ -380,8 +380,8 @@ logs and `/status` — the verdict is just always *run*.
 ```
 forge/                 the npm package (CLI + tests + bundled skills)
   forge.js             CLI entry
-  skills/              102 bundled skills
-  tests/               160 suites (npm test, zero network)
+  skills/              106 bundled skills
+  tests/               169 suites (npm test, zero network)
 LICENSE                MIT
 PACKAGE_INFO.txt       capability summary
 FORGE-AUDIT-REPORT*.md engineering reports (history)

@@ -98,11 +98,19 @@ export function evaluateSkills(task, skills = [], opts = {}) {
     if (bad.has(s.name)) continue
     const explicit = namedIn(q, s.name)
     if (micro && !explicit) continue
-    const score = scoreAgainst(q, s.name, s.desc || "")
-    if (explicit || score >= min) scored.push({
+    const raw = scoreAgainst(q, s.name, s.desc || "")
+    // A STALE skill was verified against files that have since changed. It may
+    // still be right, so it is DEMOTED rather than hidden — losing the
+    // capability would be worse — but it can never outrank an equally relevant
+    // fresh match, and formatSkillPicks labels it so the model is never told it
+    // is current. The relevance GATE uses the raw score (demoting must not
+    // silently drop it); the penalty only changes where it ranks.
+    const score = s.stale === true ? raw * 0.25 : raw
+    if (explicit || raw >= min) scored.push({
       name: s.name,
       desc: String(s.desc ?? "").slice(0, 160),
       score,
+      ...(s.stale === true ? { stale: true } : {}),
       ...(s.learned === true ? { learned: true } : {}),
       ...(s.downloaded === true ? { downloaded: true, path: s.path ? String(s.path).slice(0, 400) : undefined } : {}),
       ...(s.extracted === true ? { extracted: true } : {}),
@@ -117,7 +125,8 @@ export function formatSkillPicks(picks = []) {
   if (!Array.isArray(picks) || !picks.length) return ""
   const lines = [`SKILLS FOR THIS TASK (${picks.length}) — call load_skill(name) before using one:`]
   for (const s of picks) {
-    const tag = s.lifecycle === "CANDIDATE" ? " (candidate)"
+    const tag = s.stale ? " (STALE — verified before related files changed; re-verify before trusting)"
+      : s.lifecycle === "CANDIDATE" ? " (candidate)"
       : s.extracted ? " (learned)"
       : s.downloaded ? " (verified download)"
       : ""

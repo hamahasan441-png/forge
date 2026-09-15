@@ -160,7 +160,10 @@ export function snapshotBefore(files, cwd, created = [], runId = null) {
 export function boundaryCheckpoint(cwd = process.cwd(), { runId = null, label = null, objective = null } = {}) {
   try {
     let head = null
-    try { head = execFileSync("git", ["-C", path.resolve(cwd), "rev-parse", "HEAD"], { encoding: "utf8" }).trim() } catch { }
+    // stderr IGNORED, not inherited: outside a repo git prints "fatal: not a
+    // git repository" straight to the user's terminal, and the caller has
+    // already decided that a missing HEAD is fine (hence the empty catch).
+    try { head = execFileSync("git", ["-C", path.resolve(cwd), "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() } catch { }
     const id = new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(36).slice(2, 6)
     const dir = path.join(CHECKPOINTS_DIR, id)
     fs.mkdirSync(dir, { recursive: true })

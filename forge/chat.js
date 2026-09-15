@@ -2162,8 +2162,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         const sub = (parts[0] || "").toLowerCase()
         if (sub === "download") {
           const urls = parts.slice(1)
-          if (!urls.length) { err("usage: /skill download <https-url> [<url>…]"); break }
-          const { downloadSkills, formatDownloadReport } = await import("./skilldl.js")
+          if (!urls.length) { err("usage: /skill download <https-url | local zip/folder/SKILL.md> [more…]"); break }
+          // v100: the source decides the route, not the verb the user typed —
+          // a local .zip here used to fail with a bare "invalid URL".
+          const { acquireSkills: downloadSkills, formatDownloadReport } = await import("./skilldl.js")
           info("download started")
           const results = await downloadSkills(urls, {
             onProgress: (p) => {
@@ -2216,11 +2218,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
         if (sub === "ingest") {
           const src = parts.slice(1).join(" ")
-          if (!src) { err("usage: /skill ingest <zip|folder|SKILL.md>"); break }
-          const { ingestLocal, formatDownloadReport } = await import("./skilldl.js")
-          const r = ingestLocal(src)
-          if (r.ok) console.log(formatDownloadReport(r))
-          else err(r.error)
+          if (!src) { err("usage: /skill ingest <zip|folder|SKILL.md | https-url>"); break }
+          const { acquireSkills, formatDownloadReport } = await import("./skilldl.js")
+          const [r] = await acquireSkills([src])
+          if (r?.ok) console.log(formatDownloadReport(r))
+          else err(r?.error || "could not acquire that skill")
           break
         }
         if (sub === "evidence") {
@@ -2262,7 +2264,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
             : `rolled back ${r.name} → SUPERSEDED, restored ${r.restored}`)
           break
         }
-        err(`unknown: /skill ${sub} — use: /skill download <https-url> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>] | /skill promote <name> | /skill rollback <name> | /skill ingest <zip|folder> | /skill evidence <name> | /skill benchmark <name>`)
+        err(`unknown: /skill ${sub} — use: /skill download <https-url | local zip/folder/SKILL.md> | /skill verify <name|all> | /skill learn <name> | /skill ttl <name> [<ms>] | /skill promote <name> | /skill rollback <name> | /skill ingest <zip|folder|SKILL.md|url> | /skill evidence <name> | /skill benchmark <name>`)
         break
       }
       case "claims": {

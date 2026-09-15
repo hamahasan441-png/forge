@@ -214,7 +214,55 @@ export function clearPerformance() {
  * Rates are shrunk toward the prior by PRIOR_WEIGHT pseudo-observations so a
  * single failure (or a single lucky success) cannot flip routing.
  */
-export function effectiveStats(model, provider = null) {
+/**
+ * v101 P3: per-CLASS success, shrunk toward the model's own global rate.
+ *
+ * recordOutcome has always written `byClass` (debugging / planning / coding /
+ * review each counted separately) and NOTHING ever read it back: routing used
+ * one blended number, so a model that is excellent at debugging and poor at
+ * planning looked merely average at both.
+ *
+ * The prior here is deliberately the model's GLOBAL rate rather than its tier
+ * default — "how this model usually does" is a far better guess for "how it
+ * does at debugging" than "how models of this tier usually do". With no
+ * class-specific samples the result equals the global rate exactly, so routing
+ * is unchanged until real class evidence exists.
+ */
+function classSuccessRate(rec, taskClass, globalRate) {
+  if (!taskClass || !rec?.byClass) return null
+  const c = rec.byClass[String(taskClass)]
+  const n = Number(c?.samples) || 0
+  if (n <= 0) return null
+  const ok = Number(c?.successes) || 0
+  return {
+    rate: (ok + CLASS_PRIOR_WEIGHT * globalRate) / (n + CLASS_PRIOR_WEIGHT),
+    samples: n,
+  }
+}
+
+/**
+ * The KIND of work, from the task text. Deliberately coarse and deterministic —
+ * these are the classes recordOutcome already writes, and a wrong guess costs
+ * only the class-specific evidence (routing falls back to the global rate).
+ */
+export function deriveTaskClass(task = "") {
+  const t = String(task ?? "").toLowerCase()
+  if (!t.trim()) return null
+  if (/\b(debug|why|fail(ing|ed|s)?|error|crash|broken|bug|stack trace|root cause)\b/.test(t)) return "debugging"
+  if (/\b(plan|design|architect|approach|strategy|propose|rfc)\b/.test(t)) return "planning"
+  if (/\b(review|audit|inspect|critique|check over)\b/.test(t)) return "review"
+  if (/\b(test|spec|coverage|assert)\b/.test(t)) return "testing"
+  if (/\b(refactor|rename|move|extract|clean ?up)\b/.test(t)) return "refactor"
+  if (/\b(add|implement|create|build|write|fix|support)\b/.test(t)) return "coding"
+  return null
+}
+
+/** Shrinkage weight for class-specific evidence. Lower than PRIOR_WEIGHT: the
+ *  global rate is a strong, same-model prior, so class evidence earns its way
+ *  in faster than tier defaults would. */
+const CLASS_PRIOR_WEIGHT = 3
+
+export function effectiveStats(model, provider = null, { taskClass = null } = {}) {
   const reg = lookupRegistry(model)
   const prior = PRIOR_RATES[reg?.tier] ?? PRIOR_RATES.unknown
   const rec = loadPerformance()[modelKey(model, provider)]
@@ -225,7 +273,9 @@ export function effectiveStats(model, provider = null) {
     const den = (observedDenominator ?? 0) + PRIOR_WEIGHT
     return den > 0 ? num / den : priorRate
   }
-  const successRate = shrink(rec?.successes, n, prior.successRate)
+  const globalSuccess = shrink(rec?.successes, n, prior.successRate)
+  const cls = classSuccessRate(rec, taskClass, globalSuccess)
+  const successRate = cls ? cls.rate : globalSuccess
   const repairRate = shrink(rec?.repairs, Math.max(1, n), prior.repairRate)
   const verificationPassRate = shrink(rec?.verificationPassed, rec?.verificationTotal, prior.verificationPassRate)
   const reliability = shrink(Math.max(0, (rec?.samples ?? 0) - (rec?.crashes ?? 0)), n, prior.reliability)
@@ -240,6 +290,12 @@ export function effectiveStats(model, provider = null) {
     latencyP50: percentile(lat, 50),
     latencyP95: percentile(lat, 95),
     successRate: round4(successRate),
+    // what the number above is actually based on — routing that cannot say
+    // WHY it preferred a model is not measured routing, it is a hunch
+    globalSuccessRate: round4(globalSuccess),
+    taskClass: taskClass ? String(taskClass) : null,
+    classSamples: cls?.samples ?? 0,
+    fromClassHistory: Boolean(cls),
     // mean repairs per run, clamped to a 0..1 rate for routing comparisons
     repairRate: Math.min(1, round4(repairRate)),
     verificationPassRate: round4(verificationPassRate),
@@ -252,7 +308,7 @@ export function effectiveStats(model, provider = null) {
 
 function round4(x) { return Math.round(Number(x) * 10000) / 10000 }
 
-function scoreModel({ model, provider, caps, limits, catalogWindow }) {
+function scoreModel({ model, provider, caps, limits, catalogWindow, taskClass = null }) {
   const reg = lookupRegistry(model)
   const tags = reg ? new Set(reg.tags) : profileFor(model)
   let score = 0
@@ -284,7 +340,7 @@ function scoreModel({ model, provider, caps, limits, catalogWindow }) {
 
   // P1: routing on MEASURED performance, not only on the model's name.
   // Damped (see effectiveStats) so one failure cannot blacklist a model.
-  const perf = effectiveStats(model, provider?.name ?? null)
+  const perf = effectiveStats(model, provider?.name ?? null, { taskClass })
   if (perf.fromHistory) {
     const delta =
       (perf.successRate - 0.7) * 10 +
@@ -293,8 +349,9 @@ function scoreModel({ model, provider, caps, limits, catalogWindow }) {
       (perf.reliability - 0.8) * 4
     score += Math.max(-8, Math.min(8, delta))
     const pct = (x) => `${Math.round((x ?? 0) * 100)}%`
-    if (delta >= 1) reasons.push(`measured: ${pct(perf.successRate)} success, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s)`)
-    else if (delta <= -1) reasons.push(`measured: only ${pct(perf.successRate)} success, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s) — history says avoid`)
+    const scope = perf.fromClassHistory ? ` at ${perf.taskClass} (${perf.classSamples} run(s))` : ""
+    if (delta >= 1) reasons.push(`measured: ${pct(perf.successRate)} success${scope}, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s)`)
+    else if (delta <= -1) reasons.push(`measured: only ${pct(perf.successRate)} success${scope}, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s) — history says avoid`)
   }
 
   return { score, reasons, window, tags: [...tags], registryEntry: reg, recognized: !!reg, performance: perf }
@@ -306,6 +363,10 @@ export function selectModel(config, opts = {}) {
     contextTokens = 0, latencyBudgetMs = null, preferredClass = null,
     excludeModel = null,
   } = opts
+  // v101 P3: which KIND of work this is. Callers that know it pass it; when
+  // absent it is derived from the task text, so class-aware routing works
+  // without every call site being updated. `null` keeps the old global scoring.
+  const taskClass = opts.taskClass ?? deriveTaskClass(task)
 
   const caps = requiredCapabilities(task, { risk, files, contextTokens })
   if (preferredClass) caps.unshift({ class: preferredClass, weight: 4 })
@@ -324,7 +385,7 @@ export function selectModel(config, opts = {}) {
     const models = [...new Set([p.model, ...remembered, ...(cat?.models ?? [])].filter(Boolean))]
     for (const model of models.slice(0, 6)) {
       if (excludeModel && model === excludeModel && name === active?.name) continue
-      const { score, reasons, window, tags, recognized, performance: performance_ } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow })
+      const { score, reasons, window, tags, recognized, performance: performance_ } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow, taskClass })
       const isActive = active?.name === name && active?.model === model
       candidates.push({
         provider: name, model, score, reasons, window, tags,

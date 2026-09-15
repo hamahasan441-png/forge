@@ -129,11 +129,13 @@ async function runDownloads(kind, urls) {
   const { SKILL_LIFE } = await import("./evolve.js")
   const isSkill = kind === "skill"
   const api = {
-    download: isSkill ? mod.downloadSkills : mod.downloadTools,
+    // v100: skills route by SOURCE (local zip/folder/SKILL.md or URL), so
+    // `forge skill download ./pack.zip` works instead of "invalid URL".
+    download: isSkill ? mod.acquireSkills : mod.downloadTools,
     list: isSkill ? mod.listDownloads : mod.listToolDownloads,
     dir: isSkill ? mod.skillDownloadsDir : mod.toolDownloadsDir,
     header: isSkill ? "skill downloads" : "tool downloads",
-    hint: `forge ${kind} download <https-url>`,
+    hint: isSkill ? `forge skill download <https-url | local zip/folder/SKILL.md>` : `forge ${kind} download <https-url>`,
     note: isSkill ? "DOWNLOAD ≠ VERIFY. Candidates are not trusted." : "DOWNLOAD ≠ VERIFY. Candidates are not live tools.",
   }
   const list = (urls || []).map((u) => String(u || "").trim()).filter(Boolean)
@@ -575,6 +577,13 @@ async function main() {
         // status from the ONE completion contract — budget exhaustion is
         // INCOMPLETE, checkpointed and resumable, never "completed".
         if (res.status && res.status !== "COMPLETED") console.log(yellow(`  status: ${res.status}${res.reason ? ` (${res.reason})` : ""}${res.resume ? ` — checkpoint ${res.resume.checkpointId} saved; the task can resume` : ""}`))
+        // v101 P4: a change nobody checked is the shape a false completion
+        // takes. Say it on the run that produced it, not in a log.
+        if (res.verification?.unverified?.length) {
+          const names = res.verification.unverified.slice(0, 3).map((f) => path.relative(process.cwd(), f) || f).join(", ")
+          console.log(yellow(`  unverified: ${res.verification.unverified.length} changed file(s) — no passing test/build check covers them — ${names}${res.verification.unverified.length > 3 ? ` (+${res.verification.unverified.length - 3} more)` : ""}`) + dim("  (the per-edit ✓ above is syntax, not a test)"))
+        } else if (res.verification?.checksPassing) console.log(dim(`  verified: ${res.verification.checksPassing} passing check(s) cover ${res.verification.wrote.length} changed file(s)`))
+        else if (res.verification?.checksRun) console.log(yellow(`  checks ran but none passed (${res.verification.checksRun})`))
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       }
       debugRunSummary(res)
@@ -1151,9 +1160,9 @@ async function main() {
       }
       if (sub === "ingest") {
         const src = positional[2]
-        if (!src) { err("usage: forge skill ingest <zip|folder|SKILL.md>"); process.exit(1); return }
-        const { ingestLocal, formatDownloadReport } = await import("./skilldl.js")
-        const r = ingestLocal(src)
+        if (!src) { err("usage: forge skill ingest <zip|folder|SKILL.md | https-url>"); process.exit(1); return }
+        const { acquireSkills, formatDownloadReport } = await import("./skilldl.js")
+        const [r] = await acquireSkills([src])
         if (JSON_OUT) { emitJson(r); if (!r.ok) process.exit(1); return }
         if (!r.ok) { err(r.error); process.exit(1); return }
         console.log(formatDownloadReport(r))
@@ -1202,7 +1211,7 @@ async function main() {
         ok(`variant ${r.name}  ${r.strategy} v${r.version}  ${r.lifecycle}${r.reused ? " (reused)" : ""}`)
         return
       }
-      err(`unknown: forge skill ${sub} — use: forge skill download <https-url> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder> | forge skill evidence <name> | forge skill benchmark <name> | forge skill variant <name> <strategy> | forge skill autopromote <name> | forge skill caps <name>`)
+      err(`unknown: forge skill ${sub} — use: forge skill download <https-url | local zip/folder/SKILL.md> | forge skill verify <name|all> | forge skill learn <name> | forge skill ttl <name> [<ms>] | forge skill promote <name> | forge skill rollback <name> | forge skill ingest <zip|folder|SKILL.md|url> | forge skill evidence <name> | forge skill benchmark <name> | forge skill variant <name> <strategy> | forge skill autopromote <name> | forge skill caps <name>`)
       process.exit(1)
       return
     }
@@ -1927,6 +1936,44 @@ async function main() {
       process.exit(summary.failed ? 1 : 0)
       return
     }
+    // v101 P0c: the eval bench.js could never be. bench.js runs the kernel with
+    // NO live model; this runs the REAL agent against real broken repos and
+    // scores it by a hidden test the agent never sees. The headline number is
+    // FALSE COMPLETIONS — claimed done, test fails.
+    case "eval": {
+      const { EVAL_TASKS, runEval, formatEvalReport } = await import("./evalbench.js")
+      if (flags.list === true || positional[1] === "list") {
+        if (JSON_OUT) { emitJson({ version: VERSION, tasks: EVAL_TASKS.map((t) => ({ id: t.id, prompt: t.prompt })) }); return }
+        console.log(bold(`FORGE EVAL v${VERSION}`) + dim(`  ${EVAL_TASKS.length} task(s), live model, hidden tests`))
+        for (const t of EVAL_TASKS) console.log(`  ${cyan(t.id.padEnd(18))} ${dim(t.prompt.slice(0, 90))}`)
+        return
+      }
+      const p = resolveProvider(config)
+      if (!p || (!p.apiKey && p.name !== "ollama")) {
+        err("forge eval needs a live model — this is the whole point of it (bench.js is the no-model one)")
+        err(`set one up first: ${cyan("forge use <provider> --model <id>")} and ${cyan("forge config set providers.<name>.apiKey <KEY>")}`)
+        process.exit(1); return
+      }
+      const only = typeof flags.task === "string" ? flags.task.trim() : ""
+      const tasks = only ? EVAL_TASKS.filter((t) => t.id === only) : EVAL_TASKS
+      if (!tasks.length) { err(`no eval task named ${only} (try: forge eval list)`); process.exit(1); return }
+      const { runAgent } = await import("./agent.js")
+      if (!JSON_OUT) console.log(bold(`FORGE EVAL`) + dim(`  ${tasks.length} task(s) · ${p.name}/${p.model} · hidden tests written after each run`))
+      const summary = await runEval({
+        tasks, runAgent, provider: p, config,
+        timeoutMs: Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : undefined,
+        onTask: JSON_OUT ? null : (r) => console.log(`  ${r.falseCompletion ? red("LIE ") : r.solved ? green("PASS") : r.errored ? yellow("ERR ") : red("FAIL")}  ${r.id}`),
+      })
+      if (JSON_OUT) { emitJson(summary); process.exit(summary.falseCompletions || summary.errored ? 1 : 0); return }
+      console.log("")
+      console.log(formatEvalReport(summary))
+      // a false completion fails the command: an agent that lies about its work
+      // is a worse outcome than one that honestly fails. A run that never
+      // reached the model fails it too — that number measures the setup, not
+      // the agent, and it must not exit 0 as if it had been a real result.
+      process.exit(summary.falseCompletions || summary.errored ? 1 : 0)
+      return
+    }
     case "claims": {
       const { listClaims, getClaim, formatClaims, claimsPath } = await import("./claims.js")
       const cwd = process.cwd()
@@ -2187,6 +2234,8 @@ ${bold("usage")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 20 deterministic eval cases, no live model ${dim("(--list, --json)")}
+  ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
+                                 ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

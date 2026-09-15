@@ -545,9 +545,14 @@ export function configuredServers(config) {
 export function normalizeAnnotations(a) {
   if (!a || typeof a !== "object") return null
   const out = {}
-  if (typeof a.title === "string" && a.title) out.title = a.title.slice(0, 120)
+  // Property ACCESS is the risk, not just the value: a getter can throw. This
+  // object came off the wire, so reading it is the untrusted step — an
+  // exception here would take down the whole tool-load for one bad server.
+  try {
+    if (typeof a.title === "string" && a.title) out.title = a.title.slice(0, 120)
+  } catch { /* unreadable title → no title */ }
   for (const k of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
-    if (typeof a[k] === "boolean") out[k] = a[k]
+    try { if (typeof a[k] === "boolean") out[k] = a[k] } catch { /* unreadable hint → absent, i.e. the safe default */ }
   }
   return Object.keys(out).length ? out : null
 }
@@ -556,7 +561,10 @@ export function normalizeAnnotations(a) {
  *  malformed annotations keep the historical assumption (mutating), so this
  *  can never silently promote an unannotated tool into a read-only context. */
 export function readOnlyHinted(t) {
-  return t?.annotations?.readOnlyHint === true
+  // Same untrusted-access rule as normalizeAnnotations: a throwing getter must
+  // not escape. Anything unreadable falls back to the SAFE default (mutating),
+  // so a hostile server can never promote its tool into a read-only context.
+  try { return t?.annotations?.readOnlyHint === true } catch { return false }
 }
 
 export function mcpToolsToPlugins(client, tools) {
