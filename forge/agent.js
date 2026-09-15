@@ -62,6 +62,7 @@ import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
 import { canCompleteFastPath, unverifiedWrites } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
+import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
@@ -79,7 +80,7 @@ const ROLE_DIRECTIVES = {
   integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -103,6 +104,16 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "- Facts worth remembering later: `memory` append (scope=project for repo conventions, global for user preferences).",
   ]
   const klass = task ? (() => { try { return classifyTask(task).class } catch { return null } })() : null
+  // v103 §2 — WHERE am I doing this? Nothing in forge knew the difference
+  // between its own source tree and the user's project, so a task about
+  // someone else's project, run from forge's checkout, wrote into forge.
+  // The model is told, before anything else, when that is the situation.
+  // Resolved ONCE per run by the caller and handed here, so the line the model
+  // reads and the check the result reports can never be two different answers.
+  try {
+    const wsLine = formatWorkspace(workspace ?? resolveWorkspace({ cwd, task }))
+    if (wsLine) lines.push("", wsLine)
+  } catch (e) { swallowed("agent", "format workspace", e) }
   let composed = null
   if (task) {
     try {
@@ -441,6 +452,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // would also permit outside-project rm, sudo, metadata, apt-get, npm publish.
   const autonomous = !readonly && config.agent?.autonomous !== false
   const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
+  // v103 §2/§3: WHERE this run is allowed to be. Resolved once, here, and used
+  // by both the system prompt and the completion review.
+  const runWorkspace = (() => {
+    try { return resolveWorkspace({ cwd: process.cwd(), task }) }
+    catch (e) { swallowed("agent", "resolve workspace", e); return null }
+  })()
   const pickedPlugins = selectPlugins(task || "", plugins, { klass })
   const tools = makeToolContext({
     plugins: pickedPlugins,
@@ -456,6 +473,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     readOnly: readonly || verifier,
     mode: verifier ? "verifier" : "default",
     allowOutsideProject: unrestricted || config.tools?.allowOutsideProject === true,
+    // v104 §5: EXPLICIT only — `unrestricted` ships true and must not silently
+    // grant a filesystem-wide scan the user never asked for.
+    allowOutsideTraversal: config.tools?.allowOutsideProject === true,
     allowSudo: unrestricted || config.tools?.allowSudo === true,
     allowNetworkUpload: unrestricted || config.tools?.allowNetworkUpload === true,
     allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true || autonomous,
@@ -554,7 +574,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // independent retrievals, one after another, on the event loop.
   const endContext = tracer.span(PHASE.CONTEXT)
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
   endContext()
@@ -599,6 +619,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // agent edited src/x.js" apart from "edited, then tests passed". The former
   // is stale evidence for src/x.js and must not verify it.
   const writesSoFar = []
+  const createdFiles = []   // v103 §2 — a subset of writesSoFar: brand-new files
+  const outsideWrites = [] // v104 §4 — writes that landed outside the workspace
   // v99 loopwise extension evidence: step-numbered writes, bounded tool
   // signature counts (loop detection, execcontroller §10 rule), and the
   // extension bookkeeping itself.
@@ -817,7 +839,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             const r = String(result)
             const okRes = !(r.startsWith("ERROR") || r.startsWith("BLOCKED"))
             if (okRes && WRITE_TOOLS.has(tc.name) && tc.name !== "bash") {
-              for (const [fp, action] of journalFiles(tc.name, tc.args, r)) { writesSoFar.push(fp); writeSteps.push(steps); if (log) log.touched(fp, action) }
+              for (const [fp, action] of journalFiles(tc.name, tc.args, r)) {
+                writesSoFar.push(fp); writeSteps.push(steps)
+                // v103 §2: files CREATED are the signature of "a new project is
+                // being built here" — editing an existing file in forge's tree
+                // while developing forge is ordinary and must not be flagged.
+                if (action === "created") createdFiles.push(fp)
+                // v104 §4: a write that lands OUTSIDE the resolved workspace.
+                // v88 removed the write boundary on purpose, so this does not
+                // block the write — but a task that edits a tree it was never
+                // pointed at is exactly what the completion report exists for.
+                if (outsideWorkspace(runWorkspace, fp)) outsideWrites.push(fp)
+                if (log) log.touched(fp, action)
+              }
             } else if (okRes && tc.name === "bash" && hasWriteRedirection(String(safeJson(tc.args)?.command ?? ""))) {
               writesSoFar.push("(shell write)") // unknown target: conservatively counts as a write after any earlier check
               writeSteps.push(steps)
@@ -971,6 +1005,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       try {
         return reviewRun({
           klass, objective: task, records: intel.records(),
+          workspace: runWorkspace, created: createdFiles, outside: outsideWrites,
           // P4's gap is the review's verification evidence: files changed with
           // no passing check covering them is exactly "verification not satisfied"
           verificationOk: writesSoFar.length === 0 ? true : verificationGap.unverified.length === 0,
@@ -1005,7 +1040,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
     endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

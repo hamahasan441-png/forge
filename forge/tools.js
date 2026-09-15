@@ -760,6 +760,19 @@ export function makeToolContext(opts = {}) {
     readOnly = false,
     root,
     allowOutsideProject = false,
+    /**
+     * v104 §5 — the SCOPE grant, deliberately separate from `unrestricted`.
+     *
+     * `unrestricted` is the machine owner's master switch for RISK: sudo,
+     * interpreter eval, network upload. It ships true, which meant
+     * `allowOutsideProject` was effectively always granted and the user's own
+     * `allowOutsideProject: false` never took effect.
+     *
+     * Scanning the home directory is not a risk question, it is a scope,
+     * determinism, privacy and battery question — §5's own list — so it gets
+     * its own grant, read ONLY from an explicit setting.
+     */
+    allowOutsideTraversal = false,
     allowGeneratedWrites = false,
     allowSudo = false,
     assumeYes = false,
@@ -795,7 +808,7 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     mode,
-    allowOutsideProject, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
+    allowOutsideProject, allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,
@@ -1306,9 +1319,47 @@ function skipSetFor(root) {
   return gi.size ? new Set([...DEFAULT_SKIP, ...gi]) : DEFAULT_SKIP
 }
 
+
+/**
+ * v104 §4/§5 — the workspace boundary for TRAVERSAL, enforced in code.
+ *
+ * `grep_files`, `glob_files` and `list_dir` walk a directory tree. Pointed
+ * outside the resolved workspace they become exactly what §5 forbids: a blind
+ * recursive scan of the home directory or the filesystem root. Measured before
+ * this guard existed: `grep_files` over $HOME took 8.65 SECONDS and read every
+ * file it could open, and `list_dir "/"` walked bin/, boot/, dev/ and the rest.
+ * That is a correctness, privacy, determinism and battery problem all at once,
+ * and on a phone it is the difference between a run and a dead session.
+ *
+ * `ctx.allowOutsideProject` has existed since v21 — plumbed from config through
+ * agent.js and chat.js into every tool context, and READ BY NOTHING. The flag
+ * promised a boundary that was never implemented. This is that boundary, so
+ * the grant finally means what its name says.
+ *
+ * Deliberately narrow:
+ *   - TRAVERSAL only. A targeted read of a path the model named outright is
+ *     bounded and cheap; v88 unrestricted reads on purpose and this does not
+ *     quietly reverse that decision.
+ *   - The workspace root, not the cwd. A subdirectory of the project is fine.
+ *   - Refusal names the boundary and the exact grant that lifts it, so the
+ *     model can act on it instead of guessing.
+ */
+export function traversalBoundary(ctx, target) {
+  if (ctx?.allowOutsideTraversal === true) return null
+  const root = ctx?.root ?? ctx?.cwd
+  if (!root || !target) return null
+  const real = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+  const r = real(root)
+  const t = real(target)
+  if (t === r || t.startsWith(r + path.sep)) return null
+  return `BLOCKED: ${t} is outside the workspace (${r}). Searching there would scan a tree this task has no target in — say which path inside the workspace to search, or the user can allow it with: forge config set tools.allowOutsideProject true`
+}
+
 function list_dir(ctx, args) {
   const sp = safePath(ctx, args.path || ".")
   if (!sp.ok) return sp.error
+  const outside = traversalBoundary(ctx, sp.abs)
+  if (outside) return outside
   const root = sp.abs
   if (!fs.existsSync(root)) return `ERROR: not found: ${root}`
   const SKIP = skipSetFor(root)
@@ -1343,6 +1394,8 @@ function list_dir(ctx, args) {
 function grep_files(ctx, args) {
   const sp = safePath(ctx, args.path || ".")
   if (!sp.ok) return sp.error
+  const outside = traversalBoundary(ctx, sp.abs)
+  if (outside) return outside
   const root = sp.abs
   let re
   try {
@@ -1506,6 +1559,8 @@ function globToRegex(pattern) {
 function glob_files(ctx, args) {
   const sp = safePath(ctx, args.path || ".")
   if (!sp.ok) return sp.error
+  const outside = traversalBoundary(ctx, sp.abs)
+  if (outside) return outside
   const root = sp.abs
   if (!fs.existsSync(root)) return `ERROR: not found: ${root}`
   let re

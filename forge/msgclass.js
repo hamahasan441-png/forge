@@ -43,7 +43,13 @@ const RULES = [
   },
   {
     cls: "goal",
-    re: /\b(?:the (?:goal|objective|aim) (?:is|should be)|I (?:want|need) (?:you )?to|please (?:implement|build|create|fix|refactor|add|remove|write|make)|our goal|target is)\b/i,
+    // v103: a BARE IMPERATIVE is how most people state a goal — "Create a
+    // paper-trading Android app.", "Build a REST API for the project." Before
+    // this the rule needed a polite prefix ("please build", "I want you to"),
+    // so the single most consequential turn in a conversation classified as
+    // nothing at all and never reached engineering memory.
+    // Anchored to the start so "you could build X" mid-sentence is not a goal.
+    re: /\b(?:the (?:goal|objective|aim) (?:is|should be)|I (?:want|need) (?:you )?to|please (?:implement|build|create|fix|refactor|add|remove|write|make)|our goal|target is)\b|^(?:build|create|implement|write|make|design|develop|set up|scaffold)\s+(?:me\s+)?(?:a|an|the|some)?\s*\S/i,
   },
   {
     cls: "requirement",
@@ -67,7 +73,11 @@ const RULES = [
   },
   {
     cls: "scope_change",
-    re: /\b(?:also|additionally|instead[ ,]|new requirement|change of plans|scratch that|expand (?:the )?scope|also (?:add|do|handle)|one more thing|on top of that)\b/i,
+    // v103: a retarget and a removal are both scope changes and neither
+    // matched. "Change the target from Android to Flutter" and "Drop the dark
+    // theme requirement" classified as nothing, so the turn that invalidates
+    // half a plan was invisible to every downstream consumer.
+    re: /\b(?:also|additionally|instead[ ,]|new requirement|change of plans|scratch that|expand (?:the )?scope|also (?:add|do|handle)|one more thing|on top of that)\b|\b(?:change|switch|move|migrate|port)\b[^.\n]{0,40}?\b(?:to|from)\s+\S+|\buse\s+\S+\s+instead of\b|\b(?:drop|remove|delete|scrap|cut)\b[^.\n]{0,30}\b(?:requirement|feature|support|screen|endpoint|module|part)\b|\bno longer (?:need|needs|required|necessary)\b/i,
   },
   {
     cls: "clarification",

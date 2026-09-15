@@ -219,6 +219,10 @@ const suites = [
   ["v101", "node", ["test-v101.mjs"]],
   // ---- v102 reviewwise: the adversarial review reaches agent.js ------------
   ["v102", "node", ["test-v102.mjs"]],
+  // ---- v103 taskintel: workspace identity + requirement evolution ---------
+  ["v103", "node", ["test-v103.mjs"]],
+  // ---- v104 boundwise: the workspace boundary enforced in code -----------
+  ["v104", "node", ["test-v104.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

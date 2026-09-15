@@ -20,6 +20,11 @@ export const REVIEW_CHECK = {
   VERIFICATION_PRESENT: "verification_present",
   UNKNOWN_IMPACT: "unknown_impact",
   ROLLBACK_POSSIBLE: "rollback_possible",
+  // v103 §2 — new project files created inside forge's own source tree while
+  // the task never said it was about forge.
+  WORKSPACE_MATCHES_TASK: "workspace_matches_task",
+  // v104 §4 — files written outside the resolved workspace entirely.
+  WRITES_STAY_IN_WORKSPACE: "writes_stay_in_workspace",
 }
 
 const SECRET_HINT = /(?:^|[\\/])(\.env(?:\..+)?|credentials|\.pem|\.p12|id_rsa|id_ed25519|\.netrc|\.npmrc)$/i
@@ -120,6 +125,34 @@ export function adversarialReview(input = {}) {
     detail: impact.unknown ? "impact walk was UNKNOWN — do not treat 'no dependents' as proof" : "impact walk completed",
   })
 
+  // The workspace check is only asked when the caller resolved a workspace; a
+  // review with no workspace evidence says so rather than passing silently.
+  const ws = input.workspace ?? null
+  const created = (input.created ?? []).map(String)
+  if (ws) {
+    const strayed = ws.conflict ? created : []
+    note(REVIEW_CHECK.WORKSPACE_MATCHES_TASK, {
+      ok: strayed.length === 0,
+      blocker: strayed.length > 0,
+      detail: strayed.length
+        ? `created ${strayed.length} new file(s) inside forge's own source tree for a task that never named forge: ${strayed.slice(0, 3).map((f) => f.split("/").pop()).join(", ")}`
+        : ws.conflict
+          ? "working directory is forge's own tree, but nothing new was created there"
+          : `target workspace ${ws.targetWorkspace} (${ws.resolutionSource})`,
+    })
+  }
+
+  const outside = (input.outside ?? []).map(String)
+  if (ws) {
+    note(REVIEW_CHECK.WRITES_STAY_IN_WORKSPACE, {
+      ok: outside.length === 0,
+      blocker: outside.length > 0,
+      detail: outside.length
+        ? `${outside.length} file(s) written outside the workspace (${ws.targetWorkspace}): ${outside.slice(0, 3).join(", ")}`
+        : "every write landed inside the workspace",
+    })
+  }
+
   note(REVIEW_CHECK.ROLLBACK_POSSIBLE, {
     ok: true,
     detail: input.checkpoint ? `checkpoint ${String(input.checkpoint).slice(0, 40)}` : "no checkpoint recorded (advisory)",
@@ -195,11 +228,15 @@ export function changeSetOf(records = []) {
  *
  * @returns the adversarialReview result plus { escalated, escalatedFrom, files, impact }
  */
-export function reviewRun({ klass = null, objective = "", records = [], verificationOk = null, checkpoint = null, escalate = true } = {}) {
+export function reviewRun({ klass = null, objective = "", records = [], verificationOk = null, checkpoint = null, escalate = true, workspace = null, created = [], outside = [] } = {}) {
   const { files, impact } = changeSetOf(records)
   const wide = files.length >= ESCALATE_FILES || impact.radius >= ESCALATE_RADIUS
-  const escalated = escalate && !needsReview(klass) && wide
+  // v103 §2: writing a NEW file into forge's own tree for a task that never
+  // named forge is reviewable on its own, whatever the task was called — the
+  // reproduction was a single write_file that classified as a small task.
+  const strayed = Boolean(workspace?.conflict) && created.length > 0
+  const escalated = escalate && !needsReview(klass) && (wide || strayed || outside.length > 0)
   const effective = escalated ? TASK_CLASS.LARGE : klass
-  const rev = adversarialReview({ klass: effective, objective, files, impact, verificationOk, checkpoint })
+  const rev = adversarialReview({ klass: effective, objective, files, impact, verificationOk, checkpoint, workspace, created, outside })
   return { ...rev, escalated, escalatedFrom: escalated ? (klass ?? null) : null, files, impact }
 }
