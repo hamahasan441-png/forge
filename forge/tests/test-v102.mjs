@@ -180,5 +180,65 @@ console.log("== 4. it runs on the REAL agent path, end to end ==")
     q.review === null || q.review.required === false)
 }
 
+console.log("== 5. the review's evidence STEERS the run, it is not just reported ==")
+{
+  // A finding nothing consumes is the island this whole audit was hunting.
+  // The blast radius the review reads is now also what the verification nudge
+  // says — inside the same run, with no extra model call.
+  const { runAgent } = await import("../agent.js")
+  function mkModel(script) {
+    let calls = 0
+    const seen = []
+    const server = http.createServer((req, res) => {
+      if (!req.url.includes("chat/completions")) { res.writeHead(404).end(); return }
+      let b = ""
+      req.on("data", (c) => { b += c })
+      req.on("end", () => {
+        seen.push(b)
+        const message = script(++calls)
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", object: "chat.completion", created: Date.now(), model: "mock-1",
+          choices: [{ index: 0, message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 5, completion_tokens: 5 } }))
+      })
+    })
+    return { server, seen }
+  }
+  const call = (id, name, args) => ({ role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] })
+
+  /** `hub.js` is imported by ten modules; `lonely.js` by none. */
+  async function run(target, importerCount) {
+    const m = mkModel((n) => n === 1
+      ? call("w1", "write_file", { path: target, content: "export const v = 2\n" })
+      : { role: "assistant", content: "Changed it. Complete." })
+    await new Promise((r) => m.server.listen(0, "127.0.0.1", r))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v102-blast-"))
+    fs.writeFileSync(path.join(dir, target), "export const v = 1\n")
+    const importLine = `import { v } from ${JSON.stringify(`./${target}`)}\n`
+    for (let i = 0; i < importerCount; i++) fs.writeFileSync(path.join(dir, `imp${i}.js`), importLine + `export const u = v\n`)
+    const prev = process.cwd()
+    try {
+      process.chdir(dir)
+      const res = await runAgent({
+        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 8 } },
+        provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${m.server.address().port}`, apiKey: "k", model: "mock-1" },
+        task: "change the exported value", journal: false,
+      })
+      const nudge = m.seen.map((b) => { try { return JSON.parse(b).messages.map((x) => String(x.content ?? "")).join("\n") } catch { return b } })
+        .find((t) => t.includes("you changed files but never ran a check")) ?? ""
+      return { res, nudge }
+    } finally { process.chdir(prev); m.server.close() }
+  }
+
+  const wide = await run("hub.js", 10)
+  ok("the run was nudged", wide.nudge.length > 0)
+  ok("and the nudge NAMES the reach the review measured", /import what you changed/.test(wide.nudge), wide.nudge.slice(0, 300))
+  ok("and says a focused test is not enough evidence", /regression suite/.test(wide.nudge))
+  ok("the review saw the same radius the nudge quoted", (wide.res.review?.impact?.radius ?? 0) >= 8, JSON.stringify(wide.res.review?.impact))
+
+  const narrow = await run("lonely.js", 0)
+  ok("a leaf change is still nudged to check", narrow.nudge.length > 0)
+  ok("but is NOT told to run a regression suite it does not need", !/regression suite/.test(narrow.nudge))
+}
+
 console.log(`\n== v102 reviewwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

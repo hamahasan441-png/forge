@@ -61,7 +61,7 @@ import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
 import { canCompleteFastPath, unverifiedWrites } from "./completion.js"
-import { reviewRun, formatReview } from "./review.js"
+import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
@@ -914,9 +914,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             // recommendedVerify NEVER invents a command; an empty one stays empty
             if (fv?.command) hint = ` The project's own check is: ${fv.command}${fv.tests?.length ? ` (tests connected to your changes: ${fv.tests.slice(0, 4).join(", ")})` : ""}.`
           } catch { /* a missing hint must never cost the nudge itself */ }
+          // v102: the review's evidence steers the nudge instead of being
+          // reported after the fact. The blast radius is already on the tool
+          // records, so "run a check" becomes "a focused test is not enough
+          // here, and here is why" — at no extra cost and no extra model call.
+          let reach = ""
+          try {
+            const { impact } = changeSetOf(intel.records())
+            if (impact.unknown) reach = ` The impact walk came back UNKNOWN for these files — "no importers found" is not proof that nothing depends on them, so check the callers you can find by hand.`
+            else if (impact.radius >= ESCALATE_RADIUS) reach = ` ${impact.radius} module(s) import what you changed${impact.importers.length ? ` (${impact.importers.slice(0, 4).join(", ")})` : ""} — a focused test on one file is not enough evidence here; run the regression suite if this project has one.`
+          } catch (e) { swallowed("agent", "nudge blast reach", e) }
           const names = gap.unverified.slice(0, 6).map((f) => path.relative(process.cwd(), f) || f).join(", ")
           onEvent?.({ type: "verify_nudge", files: gap.unverified.length, names, step: steps, ...identityMeta() })
-          messages.push({ role: "user", content: `${VERIFY_NUDGE_PREFIX}: ${names}${gap.unverified.length > 6 ? ` (+${gap.unverified.length - 6} more)` : ""}.${hint} Run a real check that covers those changes now and report what it printed. If this repository genuinely has no way to check them, say so explicitly in your final answer instead — do not claim the work is verified.` })
+          messages.push({ role: "user", content: `${VERIFY_NUDGE_PREFIX}: ${names}${gap.unverified.length > 6 ? ` (+${gap.unverified.length - 6} more)` : ""}.${hint}${reach} Run a real check that covers those changes now and report what it printed. If this repository genuinely has no way to check them, say so explicitly in your final answer instead — do not claim the work is verified.` })
           continue
         }
       }
