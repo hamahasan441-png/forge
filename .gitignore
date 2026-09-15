@@ -1,0 +1,4 @@
+# Forge writes its own run artifacts (plans, journals, checkpoints) into .forge/
+# when you run it inside this repo. They are per-run state, never source.
+.forge/
+node_modules/
