@@ -57,6 +57,7 @@
     "engmemory.js",
     "envfingerprint.js",
     "episodes.js",
+    "evalbench.js",
     "evaluate.js",
     "evidence.js",
     "evolve.js",
