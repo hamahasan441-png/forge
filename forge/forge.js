@@ -1996,6 +1996,29 @@ async function main() {
       process.exit(summary.falseCompletions || summary.errored ? 1 : 0)
       return
     }
+    // v105: the question that produced every v100–v104 improvement, mechanized.
+    // Static, so it finds DISCONNECTION (provable) not incorrectness. Runs on
+    // the resolved workspace — forge's own tree only when that is the target.
+    case "selfaudit": {
+      const { analyzeModules, formatAudit } = await import("./selfaudit.js")
+      const { resolveWorkspace } = await import("./workspace.js")
+      const target = positional[1] ? path.resolve(String(positional[1])) : resolveWorkspace({ cwd: process.cwd(), task: "" }).targetWorkspace
+      if (!fs.existsSync(target)) { err(`no such directory: ${target}`); process.exit(1); return }
+      // forge auditing itself knows its own shape: the CLI and the worker have
+      // no importer by design, and bundled skill scripts are not modules.
+      const isSelf = (() => { try { return resolveWorkspace({ cwd: target, task: "forge itself" }).targetIsForge } catch { return false } })()
+      const testDir = ["tests", "test", "__tests__"].map((d) => path.join(target, d)).find((d) => { try { return fs.statSync(d).isDirectory() } catch { return false } }) ?? null
+      const report = analyzeModules({
+        dir: target, testDir,
+        entryPoints: isSelf ? ["forge.js", "plugin-host.js", "selfaudit.js"] : [],
+        skipDirs: isSelf ? ["skills"] : [],
+      })
+      if (JSON_OUT) { emitJson({ target, testDir, ...report }); return }
+      console.log(bold(`forge selfaudit`) + dim(`  ${target}${testDir ? ` (tests: ${path.relative(target, testDir)})` : " (no test directory found)"}`))
+      console.log(formatAudit(report, { limit: Number(flags.limit) > 0 ? Number(flags.limit) : 20 }))
+      console.log(dim("\n  static analysis: it proves disconnection, never correctness — confirm each lead by reading the code"))
+      return
+    }
     case "claims": {
       const { listClaims, getClaim, formatClaims, claimsPath } = await import("./claims.js")
       const cwd = process.cwd()
@@ -2256,6 +2279,7 @@ ${bold("usage")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
   ${cyan("forge bench")}                  FORGE-BENCH — 20 deterministic eval cases, no live model ${dim("(--list, --json)")}
+  ${cyan("forge selfaudit [dir]")}        capability that exists but nothing calls ${dim("(--limit N, --json)  the analysis that produced v100–v104, mechanized")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
                                  ${dim("every run is reviewed (secrets touched, blast radius vs tests, unknown impact) — agent.review: report (default) | enforce (blockers → INCOMPLETE) | off")}
