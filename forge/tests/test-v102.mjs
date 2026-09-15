@@ -240,5 +240,53 @@ console.log("== 5. the review's evidence STEERS the run, it is not just reported
   ok("but is NOT told to run a regression suite it does not need", !/regression suite/.test(narrow.nudge))
 }
 
+console.log("== 6. compaction now checks its own work ==")
+{
+  // historyIsWellFormed() has been exported and tested since compaction was
+  // rewritten, and nothing ever called it — while the defect it detects is
+  // the one named at the top of compaction.js: a history whose tool results
+  // are split from the assistant turn that requested them, which every
+  // provider rejects. That kills a long run at the moment compaction was
+  // supposed to save it.
+  const { guardCompaction, historyIsWellFormed, compactHistory } = await import("../compaction.js")
+
+  const good = [
+    { role: "user", content: "go" },
+    { role: "assistant", content: "", tool_calls: [{ id: "a", type: "function", function: { name: "read_file", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "a", content: "result" },
+  ]
+  const orphanCall = good.slice(0, 2)                                   // tool_calls with no answer
+  const orphanResult = [{ role: "user", content: "go" }, { role: "tool", tool_call_id: "zz", content: "r" }]
+
+  ok("a paired history is well formed", historyIsWellFormed(good) === true)
+  ok("an unanswered tool call is not", historyIsWellFormed(orphanCall) === false)
+  ok("a result answering nothing is not", historyIsWellFormed(orphanResult) === false)
+
+  const broke = guardCompaction(good, orphanCall)
+  ok("breaking a good history is REFUSED", broke.refused === true)
+  eq("and the original is what comes back", broke.messages, good)
+  ok("with a reason that names the defect", /unanswered tool calls/.test(broke.reason))
+
+  ok("a compaction that keeps it well formed passes through", guardCompaction(good, good).refused === false)
+  ok("an already-broken input is not blamed on compaction",
+    guardCompaction(orphanCall, orphanCall).refused === false)
+  ok("...and that case is stated rather than silently allowed",
+    /already malformed/.test(guardCompaction(orphanCall, orphanCall).reason))
+
+  // The guard is worthless if it refuses healthy compactions. This is the
+  // real module compacting a real oversized history, with no model available
+  // for the summary step (summarize omitted → the deterministic ledger path).
+  const big = [{ role: "system", content: "sys" }, { role: "user", content: "audit everything" }]
+  for (let i = 0; i < 60; i++) {
+    big.push({ role: "assistant", content: "", tool_calls: [{ id: `t${i}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: `echo ${i}` }) } }] })
+    big.push({ role: "tool", tool_call_id: `t${i}`, content: "out ".repeat(3000) })
+  }
+  ok("the oversized history starts well formed", historyIsWellFormed(big))
+  const r = await compactHistory(big, { window: 16000, force: true })
+  ok("it really compacted", r.changed === true && r.messages.length < big.length, `stage=${r.stats.stage} ${big.length}→${r.messages.length}`)
+  ok("the compaction was NOT refused", r.stats.stage !== "refused", JSON.stringify(r.stats))
+  ok("and the result is well formed", historyIsWellFormed(r.messages) === true)
+}
+
 console.log(`\n== v102 reviewwise suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
