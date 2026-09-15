@@ -36,6 +36,7 @@ import {
 import { binaryOnPath } from "./langengine.js"
 import { semanticsFor } from "./langreason.js"
 import { serverForFile, connectServer, pathToUri, languageIdForFile } from "./lsp.js"
+import { extractViaTreeSitter } from "./treesitter.js"
 
 /** §7 — capabilities an adapter MAY provide. Absent capability = honest null. */
 export const ADAPTER_CAPABILITIES = [
@@ -297,30 +298,49 @@ export async function extractStructured(file, src = "", { config = null, cwd = p
       }
       // a server that returns zero symbols is not structured extraction —
       // fall through honestly rather than fabricating an empty success
-      return {
+      return treeSitterOr(rel, src, cwd, {
         symbols: extractSymbols(rel, src ?? ""),
         structured: null,
         provenance: { layer: 8, source: "lexical (lang.js)" },
         fallback: "lsp-returned-no-symbols",
-      }
+      })
     } catch (e) {
-      return {
+      return treeSitterOr(rel, src, cwd, {
         symbols: extractSymbols(rel, src ?? ""),
         structured: null,
         provenance: { layer: 8, source: "lexical (lang.js)" },
         fallback: `lsp-failed: ${String(e?.message ?? e).slice(0, 160)}`,
-      }
+      })
     } finally {
       try { client?.close() } catch { }
     }
   }
-  // no server configured — the honest default, explicitly not structured
-  return {
+  // no server configured — try layer 2 before conceding to the regex fallback
+  return treeSitterOr(rel, src, cwd, {
     symbols: extractSymbols(rel, src ?? ""),
     structured: null,
     provenance: { layer: 8, source: "lexical (lang.js)" },
     fallback: "lsp-not-configured",
-  }
+  })
+}
+
+/**
+ * v101 P1: layer 2, finally consumed. Before this, langadapter PROBED for the
+ * tree-sitter binary, advertised it in the ladder, and never called it — a file
+ * with no language server fell straight from layer 3 to the layer-8 regex.
+ *
+ * Tried only AFTER the LSP path has produced nothing, so a working language
+ * server is never displaced: this strictly ADDS structured extraction to files
+ * that would otherwise get lexical-only. When tree-sitter is absent, fails, or
+ * finds no declarations, the caller's prepared lexical result is returned
+ * unchanged — including its honest `fallback` reason.
+ */
+function treeSitterOr(rel, src, cwd, lexicalResult) {
+  try {
+    const ts = extractViaTreeSitter(rel, src ?? "", { cwd })
+    if (ts) return ts
+  } catch { /* layer 2 is additive; it must never break extraction */ }
+  return lexicalResult
 }
 
 /**

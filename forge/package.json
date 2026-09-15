@@ -148,6 +148,7 @@
     "toolcreate.js",
     "toolintel.js",
     "tracer.js",
+    "treesitter.js",
     "tools.js",
     "ui.js",
     "uistate.js",

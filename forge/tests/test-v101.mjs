@@ -335,5 +335,94 @@ console.log("== 14. P2: context assembly is traced, and already cached ==")
   ok("repeated builds never grow more expensive", warmOther <= cold + 25, `cold=${cold}ms warmOther=${warmOther}ms`)
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 15. P1: layer 2 is finally CONSUMED, not just probed ==")
+{
+  const ts = await import("../treesitter.js")
+  const SRC = "function greeter(a) {\n  return a\n}\nclass Machine {\n  run() {}\n}\n"
+  // real tree-sitter output: positions only, no identifier text, end EXCLUSIVE
+  const TREE = `(program [0, 0] - [6, 0]
+  (function_declaration [0, 0] - [2, 1]
+    name: (identifier [0, 9] - [0, 16])
+    body: (statement_block [0, 20] - [2, 1]))
+  (class_declaration [3, 0] - [5, 1]
+    name: (identifier [3, 6] - [3, 13])
+    body: (class_body [3, 14] - [5, 1]
+      (method_definition [4, 2] - [4, 10]
+        name: (property_identifier [4, 2] - [4, 5])))))`
+
+  const tree = ts.parseSExpression(TREE)
+  eq("the root node is parsed", tree.type, "program")
+  eq("top-level declarations are found", tree.children.length, 2)
+  eq("field labels are kept (the name lives behind one)", tree.children[0].children[0].field, "name")
+  eq("ranges are parsed", tree.children[0].start, [0, 0])
+
+  // The tree carries NO identifier text — names come from slicing the source.
+  const syms = ts.symbolsFromTree(tree, SRC)
+  eq("names are resolved from the SOURCE, not the tree", syms.map((x) => x.name), ["greeter", "Machine", "run"])
+  eq("kinds map to the same vocabulary the LSP path uses", syms.map((x) => x.kind), ["function", "class", "method"])
+  eq("nested declarations are reached", syms.find((x) => x.name === "run").line, 5)
+  eq("lines are 1-based like every other tool", syms[0].line, 1)
+
+  eq("garbage input yields null, never a throw", ts.parseSExpression("not a tree"), null)
+  eq("empty input yields null", ts.parseSExpression(""), null)
+  eq("a null tree yields no symbols", ts.symbolsFromTree(null, SRC), [])
+  eq("multi-line slicing works", ts.sliceRange(["ab", "cd"], [0, 1], [1, 1]), "b\nc")
+  eq("a slice with no lines is empty, not a throw", ts.sliceRange(null, [0, 0], [0, 1]), "")
+  // a declaration with no `name:` child is ANONYMOUS and must not be invented
+  const anon = ts.parseSExpression("(program [0,0] - [1,0] (function_declaration [0,0] - [0,5]))")
+  eq("an anonymous declaration is skipped, not named", ts.symbolsFromTree(anon, "x"), [])
+  // parse state must not leak between calls
+  ts.parseSExpression("(a [0,0] - [0,1] name: (b [0,0] - [0,1]))")
+  eq("no field leaks into the next parse", ts.parseSExpression("(c [0,0] - [0,1])").field, null)
+}
+
+console.log("== 16. tree-sitter is wired as a pure ADDITION ==")
+{
+  const src = fs.readFileSync(new URL("../langadapter.js", import.meta.url), "utf8")
+  ok("extractStructured can reach layer 2", /import \{ extractViaTreeSitter \} from "\.\/treesitter\.js"/.test(src))
+  ok("it is tried where lexical would otherwise win", /return treeSitterOr\(rel, src, cwd, \{/.test(src))
+  ok("all three lexical exits go through it",
+    (src.match(/return treeSitterOr\(rel, src, cwd, \{/g) || []).length === 3)
+  ok("a failure there can never break extraction", /catch \{ \/\* layer 2 is additive/.test(src))
+  ok("the caller's lexical result is returned unchanged when layer 2 finds nothing", /return lexicalResult/.test(src))
+
+  // END TO END against a stub binary that emits real tree-sitter output —
+  // the same technique the repo already uses to test LSP.
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v101-ts-"))
+  const SRC = "function greeter(a) {\n  return a\n}\nclass Machine {\n  run() {}\n}\n"
+  fs.writeFileSync(path.join(work, "app.js"), SRC)
+  const stub = path.join(work, "tree-sitter")
+  fs.writeFileSync(stub, [
+    "#!/bin/sh", "cat <<'TREE'",
+    "(program [0, 0] - [6, 0]",
+    "  (function_declaration [0, 0] - [2, 1]",
+    "    name: (identifier [0, 9] - [0, 16])",
+    "    body: (statement_block [0, 20] - [2, 1]))",
+    "  (class_declaration [3, 0] - [5, 1]",
+    "    name: (identifier [3, 6] - [3, 13])",
+    "    body: (class_body [3, 14] - [5, 1])))",
+    "TREE", "",
+  ].join("\n"))
+  fs.chmodSync(stub, 0o755)
+
+  const prevPath = process.env.PATH
+  process.env.PATH = `${work}${path.delimiter}${prevPath}`
+  const { extractStructured } = await import("../langadapter.js")
+  const { treeSitterAvailable } = await import("../treesitter.js")
+  ok("the stub is discoverable on PATH", treeSitterAvailable())
+  const r = await extractStructured("app.js", SRC, { config: {}, cwd: work })
+  eq("extraction now reports LAYER 2, not the layer-8 regex", r.provenance.layer, 2)
+  eq("and names the source honestly", r.provenance.source, "tree-sitter")
+  eq("a real structured result has no fallback reason", r.fallback, null)
+  eq("the symbols are real", r.symbols, ["greeter", "Machine"])
+
+  // with the binary gone, the honest lexical fallback returns — unchanged
+  process.env.PATH = prevPath
+  const r2 = await extractStructured("app.js", SRC, { config: {}, cwd: work })
+  eq("no tree-sitter → back to layer 8", r2.provenance.layer, 8)
+  eq("with the original honest reason preserved", r2.fallback, "lsp-not-configured")
+}
+
 console.log(`\n== v101 instrument suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
