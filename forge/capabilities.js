@@ -241,6 +241,18 @@ export const BUILTIN_CAPABILITIES = [
     mutates: [],
   },
   {
+    name: "github",
+    description: "READ-ONLY GitHub evidence via the user's gh CLI (issues, PRs, checks, runs, repo). Writes stay in gitship.",
+    capabilities: [CAPABILITY.VCS_INSPECTION],
+    klass: CLASS.READ, classes: [CLASS.READ, CLASS.NETWORK],
+    risk: RISK.LOW, read_only: true, reversible: true, parallel_safe: true,
+    requires_confirmation: false, requires_network: true, requires_filesystem: false,
+    timeout: 25, cost: C(200, 800, 8000), verification_required: false, idempotent: true,
+    preferred_for: ["inspect a PR, issue, or GitHub Action before patching", "CI evidence instead of guessing"],
+    avoid_when: ["the task is local-only", "gh is not installed or not authenticated"],
+    mutates: [],
+  },
+  {
     name: "think",
     description: "Record a reasoning step (no side effects).",
     capabilities: [CAPABILITY.REASONING],
@@ -867,6 +879,8 @@ export function operationRisk(name, args = {}, ctx = {}) {
     }
     case "delegate":
       return { risk: RISK.MEDIUM, reasons: ["spawns a read-only sub-agent (model cost, latency)"], klass: CLASS.READ, network: true, mutation: false }
+    case "github":
+      return { risk: RISK.LOW, reasons: ["read-only GitHub inspect via gh (user auth, not a forge-held token)"], klass: CLASS.READ, network: true, mutation: false }
     case "read_file":
     case "read_image":
     case "grep_files":

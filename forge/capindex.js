@@ -28,8 +28,10 @@
  * This module RANKS and REPORTS. It executes nothing and mutates nothing.
  * Zero dependencies.
  */
-import { scoreAgainst } from "./evaluate.js"
+import { scoreAgainst, namedIn } from "./evaluate.js"
 import { reliabilityOf, latencyFactorOf, isExternal, bareToolName, selectCapabilities } from "./capfabric.js"
+import { applyRoutePolicy, budgetFor } from "./caproute.js"
+import { loadCapLearn, shouldWithhold } from "./caplearn.js"
 
 export const CAP_SOURCE = Object.freeze({
   NATIVE: "native",
@@ -236,6 +238,9 @@ export function selectForTurn({
   stats = null,
   mcpOptions = {},
   contextBudget = 0,
+  klass = "",
+  action = "EXECUTE",
+  cwd = "",
 } = {}) {
   const mcp = selectCapabilities({
     task, plugins: mcpPlugins, nativeNames, stats, ...mcpOptions,
@@ -249,12 +254,37 @@ export function selectForTurn({
     nativeDefs, mcpPlugins: mcp.kept, skills, createdTools, stats,
   })
 
-  // Shared ceiling: when the combined offer exceeds the budget, the LOWEST
-  // ranked capabilities are trimmed regardless of which registry they came
-  // from — the whole point of one scale. Native tools are never trimmed: they
-  // are the core the loop and its tests depend on.
-  const trimmed = []
-  const limit = Number(contextBudget) > 0 ? Math.floor(contextBudget) : 0
+  const klassNow = klass || skillOptions.klass || "MEDIUM"
+  const store = cwd ? (() => { try { return loadCapLearn(cwd) } catch { return null } })() : null
+  const routed = applyRoutePolicy({
+    task,
+    klass: klassNow,
+    action,
+    skills,
+    mcpKept: mcp.kept,
+    mcpDropped: mcp.dropped,
+    nativeNames,
+    store,
+  })
+  mcp.kept = routed.mcpKept
+  mcp.dropped = routed.mcpDropped
+  skills = routed.skills
+
+  let created = (createdTools || []).filter((t) => t && t.name && (t.lifecycle === "ACTIVE" || t.verified === true))
+  for (const t of created.slice()) {
+    const named = namedIn(task, t.name)
+    if (store && shouldWithhold(store, { name: t.name, kind: "created", klass: klassNow, named })) {
+      routed.trimmed.push({ name: t.name, kind: "created", reason: `measured ${klassNow} health is UNRELIABLE/BROKEN — withheld` })
+      created = created.filter((c) => c.name !== t.name)
+    }
+  }
+
+  // Shared ceiling: klass budget is the default; an explicit contextBudget
+  // can tighten further. Native tools are never trimmed.
+  const trimmed = routed.trimmed.slice()
+  const policy = budgetFor(klass || skillOptions.klass || "MEDIUM")
+  const derived = (policy.skills + policy.mcp) || 0
+  const limit = Number(contextBudget) > 0 ? Math.floor(contextBudget) : derived
   if (limit > 0) {
     const offered = [...mcp.kept.map((p) => ({ kind: "mcp", name: p.name, ref: p })),
       ...skills.map((s) => ({ kind: "skill", name: s.name, ref: s }))]
@@ -272,7 +302,7 @@ export function selectForTurn({
     }
   }
 
-  return { mcp, skills, skillIndex, index, trimmed }
+  return { mcp, skills, skillIndex, index, trimmed, created }
 }
 
 /** Counts per source — the one-line answer to "what does forge have?". */

@@ -124,3 +124,24 @@ export function preMutationCritique({ tool, args, cwd, mutationCounts = null } =
   const line = concerns.length ? `[forge] critique: ${concerns.slice(0, MAX_CONCERNS).join("; ").slice(0, 480)}` : ""
   return { concerns: concerns.slice(0, MAX_CONCERNS), line }
 }
+
+/**
+ * v112: the checklist is no longer advisory-only on the default path.
+ * MICRO stays one-shot (advisory). Named/explicit writes still execute if
+ * the caller passes `force: true` (not used by the default loop).
+ */
+export function critiqueVerdict(critique = {}, { klass = "SMALL" } = {}) {
+  const concerns = Array.isArray(critique.concerns) ? critique.concerns : []
+  const why = concerns.join("; ").slice(0, 400)
+  if (!concerns.length) return { ok: true, action: "allow", why: "" }
+  const k = String(klass || "SMALL")
+  if (k === "MICRO" || k === "trivial") {
+    return { ok: true, action: "advisory", why: why || "MICRO does not enforce critique" }
+  }
+  const text = why
+  if (/secret-bearing/.test(text)) return { ok: false, action: "ASK", block: true, ask: true, why: text }
+  if (/already mutated/.test(text)) return { ok: false, action: "REPLAN", block: true, replan: true, why: text }
+  if (/does not exist/.test(text)) return { ok: false, action: "BLOCK", block: true, why: text }
+  if (/hub file/.test(text)) return { ok: true, action: "VERIFY", verify: true, why: text }
+  return { ok: true, action: "advisory", why: text }
+}

@@ -98,6 +98,8 @@ export function evaluateSkills(task, skills = [], opts = {}) {
     if (bad.has(s.name)) continue
     const explicit = namedIn(q, s.name)
     if (micro && !explicit) continue
+    const life = String(s.lifecycle || "").toUpperCase()
+    if (!explicit && (life === "CANDIDATE" || life === "DEPRECATED" || life === "SUPERSEDED")) continue
     const raw = scoreAgainst(q, s.name, s.desc || "")
     // A STALE skill was verified against files that have since changed. It may
     // still be right, so it is DEMOTED rather than hidden — losing the

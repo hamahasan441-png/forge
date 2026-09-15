@@ -21,7 +21,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { buildProvider, fallbackChain, getCatalog } from "./providers.js"
-import { classifyTaskComplexity } from "./agent.js"
+import { classifyTaskComplexity } from "./classify.js"
 
 export const CAPABILITY_CLASS = {
   FAST_REASONING: "fast_reasoning",
@@ -403,8 +403,9 @@ export function selectModel(config, opts = {}) {
   const SWITCH_MARGIN = 3
   if (activeCandidate && best && best !== activeCandidate) {
     const margin = best.score - activeCandidate.score
-    const activeUnrecognized = !activeCandidate.recognized
-    if (margin < SWITCH_MARGIN || activeUnrecognized) best = activeCandidate
+    // Unrecognized custom ids used to pin the caller forever (`|| activeUnrecognized`),
+    // so measured-better models never ran. Keep the caller only when the margin is small.
+    if (margin < SWITCH_MARGIN) best = activeCandidate
   }
   if (!best && activeCandidate) best = activeCandidate
 
@@ -447,6 +448,35 @@ export function selectModel(config, opts = {}) {
       reasons: c.reasons ?? [],
       performance: c.performance ?? null,
     })),
+  }
+}
+
+/**
+ * Live-path hook. MICRO never switches (a typo is not a bake-off).
+ * Low-confidence decisions keep the caller's model. Lock skips selection.
+ */
+export function applyModelChoice({ config, provider, task = "", klass = "", lock = false } = {}) {
+  if (lock) return { provider, switched: false, why: "model locked by the user" }
+  const k = String(klass || "")
+  if (k === "MICRO" || k === "trivial") {
+    return { provider, switched: false, why: "MICRO keeps the caller's model" }
+  }
+  const sel = selectModel(config, { task, provider, taskClass: deriveTaskClass(task) })
+  const d = sel?.decision
+  if (!d) return { provider, switched: false, why: sel?.reason || "no decision", selection: sel }
+  if (d.provider === provider?.name && d.model === provider?.model) {
+    return { provider, switched: false, why: d.reason || "already the measured-best model", selection: sel }
+  }
+  if (d.confidence === "low") {
+    return { provider, switched: false, why: "margin too small to steal the caller's model", selection: sel }
+  }
+  const built = buildProvider(config, d.provider)
+  if (!built) return { provider, switched: false, why: `provider ${d.provider} unavailable`, selection: sel }
+  return {
+    provider: { ...built, model: d.model },
+    switched: true,
+    why: d.reason,
+    selection: sel,
   }
 }
 

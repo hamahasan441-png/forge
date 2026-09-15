@@ -251,7 +251,7 @@ function resolveProvider(config) {
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
  *  — which working model to use (Enter = default, type any id to switch, ✓
  *  badges from the health cache, FREE badges from the model cache) — then
- *  drops into chat with all 29 tools (v94c toolwise) + skills ON. Non-TTY never prompts. */
+ *  drops into chat with all 30 tools (v94c toolwise) + skills ON. Non-TTY never prompts. */
 async function smartStart(cfg, p) {
   if (!process.stdin.isTTY) return p
   const conf = cfg.providers?.[p.name] ?? {}
@@ -454,6 +454,50 @@ async function main() {
       ok(`resolved source: ${r.resolution.sourceType}`)
       console.log(dim(formatSource(r.resolution)))
       if (r.localPath) console.log(dim(`  local project: ${r.localPath}`))
+      return
+    }
+    case "cognition": {
+      const { createCognition, loadCognition, cognitionPath } = await import("./cognition.js")
+      const sub = (positional[1] || "show").toLowerCase()
+      const obj = positional.slice(sub === "show" || sub === "status" || sub === "path" ? 2 : 1).join(" ")
+      if (sub === "path") {
+        console.log(cognitionPath(process.cwd()))
+        return
+      }
+      const existing = loadCognition(process.cwd())
+      const cog = obj ? createCognition({ cwd: process.cwd(), objective: obj }) : (existing || createCognition({ cwd: process.cwd() }))
+      if (obj) cog.persist()
+      const snap = cog.snapshot()
+      if (JSON_OUT) { emitJson({ brief: cog.brief(), contract: snap.contract, user: snap.user, lastAction: snap.lastAction, events: snap.events }); return }
+      const b = cog.brief()
+      ok(`cognition v${snap.cognitionVersion}  schema ${snap.stateSchema}`)
+      console.log(dim(`  klass: ${b.klass || "—"} • authority: ${b.authority || "—"} • intent hypotheses: ${b.intentHypotheses}`))
+      if (b.intent) console.log(dim(`  intent v1: ${b.intent}`))
+      if (b.lastAction) console.log(dim(`  governor: ${b.lastAction}${b.enforce ? " [enforced]" : ""}${b.halt ? " [halt]" : ""}`))
+      const u = snap.user?.understanding
+      if (u?.intentHypotheses?.length) {
+        console.log(dim("  competing interpretations:"))
+        for (const h of u.intentHypotheses) console.log(dim(`    ${h.id} ${h.confidence.toFixed(2)}  ${h.meaning}`))
+      }
+      if (u?.ambiguities?.length) console.log(dim(`  ambiguities: ${u.ambiguities.join("; ")}`))
+      const cl = snap.contract?.closure
+      if (cl) console.log(dim(`  closure: ${cl.ok ? "closable" : "open"}  verify=${cl.verification}`))
+      const gov = cog.next({ steps: 0, writes: 0, unverified: [], inspected: false, hasPlan: false })
+      const auth = cog.enforce(gov)
+      console.log(dim(`  next: ${gov.action} — ${gov.why}`))
+      console.log(dim(`  authority: enforce=${auth.enforce} halt=${auth.halt} hideWrites=${auth.hideWrites}`))
+      if (b.drift) console.log(dim(`  last drift: ${b.drift}`))
+      try {
+        const self = cog.self?.snapshot?.() || {}
+        console.log(dim(`  self: calibrated=${!!self.calibrated} n=${self.samples ?? 0}${self.note ? ` (${self.note})` : ""}`))
+        if (self.weaknesses?.length) console.log(dim(`  self fails: ${self.weaknesses[0]}`))
+      } catch { /* self-model is a view */ }
+      try {
+        const { filesMentionedIn } = await import("./prediction.js")
+        const mentioned = filesMentionedIn(obj || b.intent || "")
+        if (mentioned.length) console.log(dim(`  predicted files (from intent): ${mentioned.slice(0, 6).join(", ")}`))
+      } catch { /* prediction view */ }
+      console.log(dim(`  store: ${cognitionPath(process.cwd())}`))
       return
     }
     case "resume": {
@@ -2279,6 +2323,7 @@ ${bold("usage")}
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
   ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
   ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
+  ${cyan("forge cognition [show|path] [\"intent\"]")}  unified cognitive core ${dim("user model + contract + governor; original intent is frozen")}
   ${cyan("forge decisions [add]")}        architecture decision log  ${dim("~/.forge/projects/<hash>/decisions.json")}
   ${cyan("forge knowledge")}              knowledge pane             ${dim("claims + decisions + gaps + downloads")}
   ${cyan("forge skill ingest <path>")}     ZIP / folder / SKILL.md → CANDIDATE ${dim("(extracts SKILL.md only; DOWNLOAD ≠ TRUST)")}

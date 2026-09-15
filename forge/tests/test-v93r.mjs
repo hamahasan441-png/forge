@@ -13,7 +13,7 @@
  *  5. Crash reconcile: dead pid → reported; live owned → orphan; pid-reuse
  *     (starttime mismatch) → NOT ours, never touched; unrelated processes
  *     never appear because we only act on ledger entries.
- *  6. Tool wiring: 29 tools (v94c toolwise), verifier gating (discover/status/health/claim/
+ *  6. Tool wiring: 30 tools (v94c toolwise), verifier gating (discover/status/health/claim/
  *     reconcile allowed; launch/stop blocked), read-only gating.
  */
 import fs from "node:fs"

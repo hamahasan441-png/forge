@@ -305,13 +305,13 @@ console.log("== fastwise: DEDUP AUDIT — zero duplicate skills, tools, aliases 
 
   // — tools: one registry, no duplicates —
   const toolNames = tools.TOOL_DEFS.map((t) => t.function.name)
-  eq("29 tools registered", toolNames.length, 29)
+  eq("30 tools registered", toolNames.length, 30)
   eq("tool names unique", new Set(toolNames).size, toolNames.length)
   const capNames = caps.BUILTIN_CAPABILITIES.map((c) => c.name)
   eq("capabilities registry 1:1 with the wire (count)", capNames.length, toolNames.length)
   ok("capabilities ↔ tools names identical (both directions)",
     toolNames.every((n) => capNames.includes(n)) && capNames.every((n) => toolNames.includes(n)))
-  eq("toolCount() agrees", tools.toolCount(), 29)
+  eq("toolCount() agrees", tools.toolCount(), 30)
 
   // — first-party catalog: names AND aliases may not collide —
   const FP = skillforge.FIRST_PARTY

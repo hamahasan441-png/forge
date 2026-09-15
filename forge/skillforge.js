@@ -61,6 +61,10 @@ export const FIRST_PARTY = [
   { name: "using-superpowers", tags: ["skills", "meta", "discipline", "process", "skill-routing"], aliases: ["superpowers", "skill-discipline"], desc: "Check for a relevant skill BEFORE any response; process skills before implementation skills" },
   { name: "verification-before-completion", tags: ["verification", "evidence", "completion", "claims", "honesty"], aliases: ["verify-before-done", "evidence-first"], desc: "Run verification commands and confirm output BEFORE claiming any work is done" },
   { name: "writing-skills", tags: ["skill-creation", "authoring", "skill-design", "testing-skills"], aliases: ["create-skill", "skill-authoring"], desc: "Create, edit, and test agent skills with rigorous quality gates" },
+  { name: "api-design", tags: ["api", "rest", "openapi", "endpoint", "contract"], aliases: ["api-design", "http-api"], desc: "Design HTTP APIs with validation, errors, and tests" },
+  { name: "data-migration", tags: ["migration", "schema", "etl", "backfill", "database"], aliases: ["migrate-data"], desc: "Plan and verify a data or schema migration with rollback" },
+  { name: "code-reviewer", tags: ["review", "pr", "diff", "nits", "security"], aliases: ["reviewer"], desc: "Review a change: correctness, security, blast radius, tests" },
+  { name: "experiment-suite", tags: ["experiment", "ablation", "eval", "benchmark"], aliases: ["experiments"], desc: "Design a focused experiment with a discriminating metric" },
 ]
 
 const BY_NAME = new Map(FIRST_PARTY.map((s) => [s.name, s]))

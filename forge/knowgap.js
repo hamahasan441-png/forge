@@ -33,6 +33,7 @@ import { projectDir, projectHash } from "./memory.js"
 import { DEFAULT_DIR } from "./config.js"
 import { TASK_CLASS } from "./classify.js"
 import { namedIn, scoreAgainst } from "./evaluate.js"
+import { githubImpliedByTask, actionForTask, ghInspect } from "./github.js"
 
 export const GAP_FILE = "knowgap.json"
 export const GAP_SCHEMA = 1
@@ -64,6 +65,7 @@ export const METHOD = {
   SKILL: "skill",
   REPO: "repo",
   DOCS: "docs",
+  GITHUB: "github",
   WEB: "web",
   VERIFY: "verify",
 }
@@ -75,6 +77,7 @@ const ACQUIRE_TOOLS = {
   read_file: METHOD.REPO,
   web_search: METHOD.WEB,
   fetch_url: METHOD.WEB,
+  github: METHOD.GITHUB,
 }
 
 const SKILL_FOR = {
@@ -95,9 +98,9 @@ const SKILL_FOR = {
 const IMPACT_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }
 const STATUS_RANK = { CONTRADICTED: 5, UNKNOWN: 4, UNCERTAIN: 3, PROBABLE: 2, KNOWN: 1, SKIPPABLE: 0 }
 const UNCERTAINTY_RANK = { CONTRADICTED: 5, UNKNOWN: 4, UNCERTAIN: 2, PROBABLE: 1, KNOWN: 0, SKIPPABLE: 0 }
-const METHOD_COST = { skill: 1, repo: 1, docs: 2, web: 4, verify: 3 }
-const METHOD_RISK = { skill: 1, repo: 1, docs: 1, web: 4, verify: 2 }
-const METHOD_TIME = { skill: 1, repo: 1, docs: 1, web: 3, verify: 2 }
+const METHOD_COST = { skill: 1, repo: 1, docs: 2, github: 2, web: 4, verify: 3 }
+const METHOD_RISK = { skill: 1, repo: 1, docs: 1, github: 2, web: 4, verify: 2 }
+const METHOD_TIME = { skill: 1, repo: 1, docs: 1, github: 2, web: 3, verify: 2 }
 const MAX_DOMAINS = 24
 const MAX_GAPS = 4
 const MAX_SKIP = 2
@@ -121,6 +124,7 @@ export const DOMAINS = [
   { id: "architecture", impact: "HIGH", tags: ["architecture", "architect", "redesign", "subsystem", "module"] },
   { id: "ui", impact: "LOW", tags: ["css", "animation", "stylesheet", "layout", "frontend"] },
   { id: "types", impact: "LOW", tags: ["typescript", "typecheck", "typedef"] },
+  { id: "github", impact: "MEDIUM", tags: ["github", "pull request", "pull-request", "gh-pages", "workflow", "github action", "dependabot"] },
   { id: "dependency", impact: "MEDIUM", tags: ["dependency", "dependencies", "package", "npm", "cargo", "pip"] },
 ]
 
@@ -295,6 +299,19 @@ export function planAcquire(gap, opts = {}) {
       why: "graph maps tests — run them, do not re-search",
     }
   }
+  if (!tried.has(METHOD.GITHUB) && githubImpliedByTask(`${opts.task || ""} ${gap.id || ""} ${gap.query || ""}`)) {
+    const pick = actionForTask(`${opts.task || ""} ${gap.id || ""}`)
+    return {
+      id: gap.id,
+      method: METHOD.GITHUB,
+      tool: "github",
+      query: pick.id ? `${pick.action}:${pick.id}` : pick.action,
+      cost: 2,
+      action: pick.action,
+      ghId: pick.id,
+      why: "GitHub evidence (gh CLI) before the web",
+    }
+  }
   if (!tried.has(METHOD.WEB)) {
     return {
       id: gap.id,
@@ -313,6 +330,117 @@ export function planAcquire(gap, opts = {}) {
     cost: 3,
     why: "already acquired — verify, do not dump",
   }
+}
+
+const ACQUIRE_SKIP = new Set([
+  "node_modules", ".git", ".hg", ".svn", ".next", ".nuxt", ".svelte-kit",
+  "dist", "build", "coverage", "__pycache__", ".turbo", ".cache",
+  ".venv", "venv", ".forge",
+])
+
+function acquireWalk(cwd, query, { glob = false, maxHits = 12 } = {}) {
+  const needle = String(query || "").toLowerCase().replace(/\*/g, "").trim()
+  if (!needle) return []
+  const hits = []
+  const walk = (dir, depth) => {
+    if (depth > 6 || hits.length >= maxHits) return
+    let ents
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of ents) {
+      if (hits.length >= maxHits) return
+      if (ACQUIRE_SKIP.has(e.name) || (e.name.startsWith(".") && e.name !== ".env.example")) continue
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) { walk(p, depth + 1); continue }
+      if (!e.isFile()) continue
+      const rel = path.relative(cwd, p).replace(/\\/g, "/")
+      if (glob) {
+        if (rel.toLowerCase().includes(needle) || e.name.toLowerCase().includes(needle)) hits.push(rel)
+        continue
+      }
+      let txt = ""
+      try {
+        const st = fs.statSync(p)
+        if (!st.isFile() || st.size > 200000) continue
+        txt = fs.readFileSync(p, "utf8")
+      } catch { continue }
+      const i = txt.toLowerCase().indexOf(needle)
+      if (i < 0) continue
+      const line = txt.slice(Math.max(0, i - 40), i + needle.length + 80).replace(/\s+/g, " ")
+      hits.push(`${rel}: ${line.slice(0, 140)}`)
+    }
+  }
+  walk(cwd, 0)
+  return hits
+}
+
+function acquireSkillText(cwd, name) {
+  const id = String(name || "").replace(/[^a-z0-9._-]/gi, "")
+  if (!id) return null
+  const roots = [
+    path.join(cwd, ".forge", "skills", id, "SKILL.md"),
+    path.join(cwd, "skills", id, "SKILL.md"),
+    path.join(cwd, ".agents", "skills", id, "SKILL.md"),
+  ]
+  for (const f of roots) {
+    try { return fs.readFileSync(f, "utf8").slice(0, 2500) } catch { /* next */ }
+  }
+  return null
+}
+
+/**
+ * Execute the cheapest acquire. Local only. Never fetches the web.
+ * SEARCH is this function, not a prompt.
+ */
+export function runAcquire(plan, { cwd = process.cwd(), maxHits = 12 } = {}) {
+  if (!plan || !plan.tool) return { ok: false, skipped: "no acquire plan" }
+  const tool = String(plan.tool)
+  const query = String(plan.query || "").slice(0, 200)
+  const method = String(plan.method || "")
+  const base = { tool, query, method, id: plan.id || "", why: plan.why || "" }
+  if (tool === "web_search" || method === METHOD.WEB) {
+    return { ...base, ok: false, skipped: "web last — not automatic", preview: "" }
+  }
+  if (tool === "bash" || tool === "todo") {
+    return { ...base, ok: false, skipped: "acquire is read-only (no bash, no mutate)", preview: "" }
+  }
+  try {
+    if (tool === "load_skill") {
+      const text = acquireSkillText(cwd, query)
+      if (!text) return { ...base, ok: false, skipped: `skill not on disk: ${query}`, preview: "" }
+      return { ...base, ok: true, preview: text.slice(0, 1800), hits: 1 }
+    }
+    if (tool === "read_file") {
+      const abs = path.resolve(cwd, query)
+      if (!abs.startsWith(path.resolve(cwd))) return { ...base, ok: false, skipped: "path escapes cwd", preview: "" }
+      const text = fs.readFileSync(abs, "utf8")
+      return { ...base, ok: true, preview: text.slice(0, 1800), hits: 1 }
+    }
+    if (tool === "grep_files" || tool === "grep") {
+      const hits = acquireWalk(cwd, query, { glob: false, maxHits })
+      return { ...base, ok: true, preview: hits.length ? hits.join("\n") : `0 local hits for ${query}`, hits: hits.length }
+    }
+    if (tool === "glob_files" || tool === "glob") {
+      const hits = acquireWalk(cwd, query, { glob: true, maxHits })
+      return { ...base, ok: true, preview: hits.length ? hits.join("\n") : `0 files matching ${query}`, hits: hits.length }
+    }
+    if (tool === "github" || method === METHOD.GITHUB) {
+      const pick = query.includes(":")
+        ? { action: query.split(":")[0], id: query.split(":").slice(1).join(":") }
+        : { action: query || "repo", id: plan.ghId || "" }
+      const inspect = ghInspect({ action: pick.action, id: pick.id, cwd })
+      return {
+        ...base,
+        ok: inspect.ok === true,
+        preview: inspect.preview || "",
+        hits: inspect.ok ? 1 : 0,
+        facts: inspect.facts || [],
+        skipped: inspect.ok ? undefined : (inspect.preview || "gh unavailable"),
+      }
+    }
+  } catch (e) {
+    return { ...base, ok: false, skipped: String(e?.message || e).slice(0, 120), preview: "" }
+  }
+  return { ...base, ok: false, skipped: `unknown acquire tool ${tool}`, preview: "" }
 }
 
 /**
@@ -494,7 +622,7 @@ export function detectGaps(task = "", opts = {}) {
     const canLearn = blocking && ev.status !== STATUS.KNOWN && ev.status !== STATUS.PROBABLE
     const rowOut = { ...row, learn: false }
     if (canLearn) {
-      const plan = planAcquire({ ...rowOut, learn: true }, { ...opts, tried: row.tried })
+      const plan = planAcquire({ ...rowOut, learn: true }, { ...opts, task: q, tried: row.tried })
       if (plan) {
         rowOut.acquire = plan
         rowOut.learn = true

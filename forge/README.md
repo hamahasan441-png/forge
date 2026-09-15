@@ -242,7 +242,7 @@ onboard — the graph feeds project memory retrieval on later tasks). **toolwise
 follow-on: three new read-only, deterministic tools — `kg_query` (project
 knowledge graph: dependents, blast radius, tests, .ua graph), `plan_whatif`
 (simulate plan changes through the predictive risk engine before committing),
-`code_context` (semantic hits + structural wiring in one call). 29 tools,
+`code_context` (semantic hits + structural wiring in one call). 30 tools,
 89 bundled skills at that point, 155/155 suites green. **skillwise**
 follow-on: the **obra/superpowers** engineering-process pack bundled as
 first-party skills (MIT, github.com/obra/superpowers) — brainstorming,

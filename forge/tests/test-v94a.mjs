@@ -188,7 +188,7 @@ console.log("== H. orphan processes + resource bounds ==")
 console.log("== I. package + documentation truth ==")
 {
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", here), "utf8"))
-  eqv("ADV: package version is 99.0.0", pkg.version, "99.0.0")
+  eqv("ADV: package version is 113.0.0", pkg.version, "113.0.0")
   for (const m of ["runtimesession.js", "toolcreate.js", "runtime.js", "repl.js", "codesearch.js", "worldmodel.js", "completion.js", "bus.js", "core.js"]) {
     ok(`ADV: ${m} shipped in files[]`, pkg.files.includes(m))
   }
@@ -197,17 +197,17 @@ console.log("== I. package + documentation truth ==")
   // v94c "toolwise": 26 -> 29 — the 3 new read-only tools (kg_query,
   // plan_whatif, code_context) are proven by tests/test-toolwise.mjs; the
   // exact-count lock stays, only the truth it locks onto moved.
-  eqv("ADV: 29 tools on the wire", toolCount(), 29)
+  eqv("ADV: 30 tools on the wire", toolCount(), 30)
   eqv("ADV: registry 1:1 with the wire", BUILTIN_CAPABILITIES.length, TOOL_DEFS.length)
   const forgeSrc = fs.readFileSync(new URL("../forge.js", here), "utf8")
-  ok("ADV: no stale tool-count claims in source comments", !/all 2[0-9] tools/.test(forgeSrc) || /all 29 tools/.test(forgeSrc))
+  ok("ADV: no stale tool-count claims in source comments", !/all 2[0-9] tools/.test(forgeSrc) || /all 30 tools/.test(forgeSrc))
   const chatSrc = fs.readFileSync(new URL("../chat.js", here), "utf8")
   ok("ADV: /tools is dynamic (no hardcoded count)", /toolCount\(\)/.test(chatSrc))
   const read = (p) => fs.readFileSync(new URL(p, here), "utf8")
   ok("ADV: inner README claims v94", /v94/.test(read("../README.md")))
-  // v96 unifywise: the metadata claims track the CURRENT version (99.0.0)
-  ok("ADV: PACKAGE_INFO claims v99.0.0", /v99\.0\.0/.test(read("../../PACKAGE_INFO.txt")))
-  ok("ADV: root README claims 99.0.0 + 29 tools", /99\.0\.0/.test(read("../../README.md")) && /29 tools/.test(read("../../README.md")))
+  // v96 unifywise: the metadata claims track the CURRENT version (113.0.0)
+  ok("ADV: PACKAGE_INFO claims v113.0.0", /v102\.0\.0/.test(read("../../PACKAGE_INFO.txt")))
+  ok("ADV: root README claims 113.0.0 + 30 tools", /113\.0\.0/.test(read("../../README.md")) && /30 tools/.test(read("../../README.md")))
 }
 function eqv(name, got, want) { ok(`${name} (got ${JSON.stringify(got)})`, got === want) }
 

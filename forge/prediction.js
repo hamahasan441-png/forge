@@ -261,3 +261,93 @@ export function formatSettlement(s) {
   if (s.outcomeCorrect != null) parts.push(s.outcomeCorrect ? "outcome as predicted" : "outcome MIS-PREDICTED")
   return `${s.id}: ${parts.join(", ")}`
 }
+
+/**
+ * v102 intelwise — the default agent has no DAG node. Predict from
+ * deterministic context (files named in the objective, files already read,
+ * declared scope). Never from the model's self-reported confidence.
+ */
+export function filesMentionedIn(text) {
+  const t = String(text || "")
+  const out = []
+  const re = /(?<![A-Za-z0-9_/])((?:[\w.-]+\/)*[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,7})\b/g
+  let m
+  while ((m = re.exec(t))) {
+    const f = m[1]
+    if (!f || f.startsWith("http") || /^\d+\.\d+/.test(f)) continue
+    if (!out.includes(f)) out.push(f)
+  }
+  return out.slice(0, MAX_PREDICTION_FILES)
+}
+
+export function expectedFilesFromContext({ objective = "", reads = [], writes = [], scope = [] } = {}) {
+  const seen = new Set()
+  const out = []
+  const push = (f) => {
+    const s = rel(String(f || "")).replace(/\\/g, "/").replace(/^\.\//, "")
+    if (!s || s === "(shell write)" || seen.has(s)) return
+    seen.add(s)
+    out.push(s)
+  }
+  for (const f of filesMentionedIn(objective)) push(f)
+  for (const f of Array.isArray(scope) ? scope : []) push(f)
+  for (const f of Array.isArray(reads) ? reads : []) push(f)
+  for (const f of Array.isArray(writes) ? writes : []) push(f)
+  return out.slice(0, MAX_PREDICTION_FILES)
+}
+
+export function predictForAction({
+  action = "EXECUTE",
+  objective = "",
+  expectedFiles = [],
+  expectedRisk = null,
+  expectedOutcome = "advance",
+  expectedSteps = 1,
+  taskId = null,
+  reads = [],
+  writes = [],
+  scope = [],
+} = {}) {
+  const files = (Array.isArray(expectedFiles) && expectedFiles.length)
+    ? expectedFiles.map(rel).filter(Boolean).slice(0, MAX_PREDICTION_FILES)
+    : expectedFilesFromContext({ objective, reads, writes, scope })
+  const pred = predictForNode({
+    node: { id: `act-${String(action).slice(0, 24)}`, targetFiles: files, risk: expectedRisk },
+    objective,
+    expectedSteps,
+    taskId,
+  })
+  pred.action = String(action).slice(0, 24)
+  pred.expectedOutcome = PREDICTION_OUTCOMES.includes(expectedOutcome) ? expectedOutcome : "advance"
+  pred.derived = files.length ? "targets" : "objective-only"
+  return pred
+}
+
+export const DRIFT = {
+  MATCH: "MATCH",
+  SCOPE: "SCOPE",
+  MISS: "MISS",
+  UNSCORED: "UNSCORED",
+}
+
+/** How the governor should react to a settled prediction. Objective-only
+ *  predictions cannot score file drift (that would treat "I named no files"
+ *  as "I predicted zero files"). */
+export function driftVerdict(settled) {
+  if (!settled || settled.settledAt == null) {
+    return { level: DRIFT.UNSCORED, action: null, why: "no settled prediction", driftScore: null }
+  }
+  if (settled.derived !== "targets") {
+    return { level: DRIFT.UNSCORED, action: null, why: "objective-only prediction cannot score file drift", driftScore: settled.driftScore ?? null }
+  }
+  const d = Number(settled.driftScore)
+  const score = Number.isFinite(d) ? d : 0
+  if (score >= 0.75) {
+    return { level: DRIFT.MISS, action: "REPLAN", why: "prediction missed reality — change hypothesis before another mutation", driftScore: score, extra: settled.filesExtra, missed: settled.filesMissed }
+  }
+  if (score >= 0.5) {
+    return { level: DRIFT.SCOPE, action: "VERIFY", why: "scope drifted from the prediction — verify before more writes", driftScore: score, extra: settled.filesExtra, missed: settled.filesMissed }
+  }
+  return { level: DRIFT.MATCH, action: null, why: "prediction matched reality", driftScore: score }
+}
+
