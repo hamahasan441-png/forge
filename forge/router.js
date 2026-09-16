@@ -608,12 +608,149 @@ function fileSize(p, cwd) {
   try { return fs.statSync(path.resolve(cwd || process.cwd(), String(p))).size } catch { return 0 }
 }
 
+// ---------------------------------------------------------------------------
+// 5b. search intent (v117) — WHAT KIND of question a search is asking
+// ---------------------------------------------------------------------------
+
+/**
+ * analyzeTask() already classifies the TASK ("discover", "modify", …). That is
+ * the right granularity for picking a capability and the wrong one for picking
+ * a search: "where is parseConfig", "what calls parseConfig" and "how does
+ * config loading work" are all DISCOVER, and they want three different tools.
+ *
+ * This classifies the QUERY — the pattern or question actually passed to the
+ * search tool, which is what exists at call time. Deterministic, no model.
+ */
+export const SEARCH_INTENT = {
+  SYMBOL: "symbol",             // where is <identifier> defined
+  REFERENCE: "reference",       // what calls / uses <identifier>
+  IMPORT: "import",             // who imports / depends on <module>
+  FILENAME: "filename",         // a file by name or glob
+  ERROR: "error",               // where does this message/exception come from
+  CONFIG: "config",             // a setting, env var, config key
+  TEST: "test",                 // the test covering something
+  TEXT: "text",                 // a literal string, as typed
+  SEMANTIC: "semantic",         // a natural-language question about behaviour
+  ARCHITECTURE: "architecture", // how a subsystem fits together
+}
+
+/** Ordered: the first match wins, so the most specific phrasings come first. */
+const SEARCH_SIGNALS = [
+  [SEARCH_INTENT.REFERENCE, /\b(who|what)\s+(calls?|uses?|invokes?|references?)\b|\b(callers?|usages?|references?|call ?sites?)\s+(of|to|for)\b|\bwhere\s+is\s+\S+\s+(used|called|referenced)\b/i],
+  [SEARCH_INTENT.IMPORT, /\b(imports?|imported by|requires?|depends? on|dependents?|dependency|dependencies)\b/i],
+  [SEARCH_INTENT.ARCHITECTURE, /\b(architecture|overview|design of|structure of|walk me through|end to end|pipeline)\b|\bhow (does|do|is) .+ (work|flow|fit|wired|structured)/i],
+  [SEARCH_INTENT.ERROR, /\b(error|exception|stack ?trace|traceback|throws?|thrown|typeerror|referenceerror|syntaxerror|enoent|econnrefused|segfault|panic)\b|\bcannot read (property|properties)\b|\bis not a function\b|\bundefined is not\b/i],
+  [SEARCH_INTENT.TEST, /\b(tests?|spec|__tests__|test case|covered by)\b|\.(test|spec)\./i],
+  [SEARCH_INTENT.CONFIG, /\b(config(uration)?|settings?|env(ironment)? var|options?|defaults?|package\.json|tsconfig|yaml|toml|ini)\b|(^|\s)\.env\b/i],
+  [SEARCH_INTENT.FILENAME, /\bfiles? named\b|\bfind the file\b|[*?]|\.[a-z]{1,5}$/i],
+  [SEARCH_INTENT.SYMBOL, /\b(where is|find|locate|definition of|defined|declaration|declared|implementation of)\b/i],
+]
+
+/**
+ * @returns {{intent: string, why: string, exact: boolean}}
+ *  `exact` means a STRUCTURAL search can answer it — an identifier, a path, a
+ *  literal. That is the property that matters: an exact need does not require
+ *  the most expensive tool, and a non-exact one is not made cheaper by
+ *  pretending that it is.
+ */
+export function classifySearch(query, { tool = null } = {}) {
+  const q = String(query ?? "").trim()
+  if (!q) return { intent: SEARCH_INTENT.TEXT, why: "empty query", exact: true }
+  // glob_files only ever asks one kind of question, whatever the pattern says
+  if (tool === "glob_files") return { intent: SEARCH_INTENT.FILENAME, why: "glob_files matches paths, not content", exact: true }
+  for (const [intent, re] of SEARCH_SIGNALS) {
+    if (re.test(q)) return { intent, why: `query shape: ${intent}`, exact: intent !== SEARCH_INTENT.ARCHITECTURE }
+  }
+  // No signal fired. A bare identifier is a symbol; a sentence is a question.
+  const words = q.split(/\s+/).filter(Boolean)
+  if (words.length <= 2 && /^[\w$./-]+$/.test(q)) {
+    return { intent: SEARCH_INTENT.SYMBOL, why: "a bare identifier, not a question", exact: true }
+  }
+  if (words.length >= 5) return { intent: SEARCH_INTENT.SEMANTIC, why: "a natural-language question about behaviour", exact: false }
+  return { intent: SEARCH_INTENT.TEXT, why: "a literal string to match", exact: true }
+}
+
+/**
+ * The cascade (§7), cheapest first, per intent — only tools forge actually has.
+ * It is an ORDER, not a promise: the caller still decides whether the cheaper
+ * layer is sufficient, and a non-exact intent legitimately starts expensive.
+ */
+export const SEARCH_CASCADE = Object.freeze({
+  [SEARCH_INTENT.SYMBOL]: ["grep_files", "code_context", "semantic_search"],
+  [SEARCH_INTENT.REFERENCE]: ["grep_files", "kg_query", "code_context", "semantic_search"],
+  [SEARCH_INTENT.IMPORT]: ["grep_files", "kg_query", "semantic_search"],
+  [SEARCH_INTENT.FILENAME]: ["glob_files", "list_dir", "grep_files"],
+  [SEARCH_INTENT.ERROR]: ["grep_files", "code_context", "semantic_search"],
+  [SEARCH_INTENT.CONFIG]: ["grep_files", "glob_files", "semantic_search"],
+  [SEARCH_INTENT.TEST]: ["glob_files", "grep_files", "semantic_search"],
+  [SEARCH_INTENT.TEXT]: ["grep_files", "semantic_search"],
+  // These two are what semantic search is FOR. Suggesting grep here would be
+  // telling the model to answer "how does this work" with a regex — cheaper,
+  // and wrong, which is the trade this project does not make.
+  [SEARCH_INTENT.SEMANTIC]: ["semantic_search", "code_context", "grep_files"],
+  [SEARCH_INTENT.ARCHITECTURE]: ["semantic_search", "kg_query", "code_context"],
+})
+
+export function cheapestFor(intent) {
+  return SEARCH_CASCADE[intent] ?? SEARCH_CASCADE[SEARCH_INTENT.TEXT]
+}
+
+/** The tools whose job is to FIND something (toolintel names the same set). */
+const SEARCHERS = new Set(["grep_files", "glob_files", "list_dir", "semantic_search", "code_context"])
+
 /**
  * "Do not read 5,000 lines if symbol search can locate the function first."
  * Advisory only — the router never silently swaps the model's tool; it returns
  * a hint the executor surfaces (TOOL_FALLBACK) so the next call is cheaper.
  */
-export function cheaperAlternative(name, args = {}, { registry, ctx = {}, context = {} } = {}) {
+export function cheaperAlternative(name, args = {}, { registry, ctx = {}, context = {}, searchEvidence = null } = {}) {
+  // v117 — DO NOT PAY FOR SEMANTIC SEARCH TO ANSWER AN EXACT QUESTION.
+  //
+  // Measured on this repo with `forge perf`: a warm semantic_search costs
+  // ~128ms and a grep_files ~2.6ms. For "where is parseConfig" the grep is not
+  // just cheaper, it is the RIGHT tool — an exact identifier is what a
+  // structural search exists for. For "how does config loading work" the grep
+  // is cheaper and WRONG, so no hint is given there. That asymmetry is the
+  // whole rule: cheaper only when cheaper still answers the question.
+  //
+  // Advisory, like every other branch here — the router never swaps the
+  // model's tool, it appends a note the model can act on next time.
+  if (SEARCHERS.has(name)) {
+    const cls = classifySearch(args?.query ?? args?.pattern ?? "", { tool: name })
+    // EVIDENCE FIRST. When this project has measured that THIS tool does not
+    // reach the answer for THIS kind of question, and measured another that
+    // does, the measurement outranks the static rule below — including for
+    // grep_files, which the rule would otherwise never question.
+    const verdict = searchEvidence?.[cls.intent] ?? null
+    const best = verdict?.prefer?.find((p) => p.tool !== name) ?? null
+    if (best && verdict?.avoid?.includes(name)) {
+      return {
+        tool: best.tool,
+        why: `measured in this project: ${best.tool} reached the answer for ${cls.intent} lookups ${Math.round(best.rate * 100)}% of ${best.samples} time(s), ${name} did not`,
+        saves: "latency+tokens",
+        intent: cls.intent,
+        learned: true,
+      }
+    }
+    if (name !== "semantic_search" && name !== "code_context") return null
+    if (cls.exact && cls.intent !== SEARCH_INTENT.SEMANTIC) {
+      const cheaper = cheapestFor(cls.intent).find((t) => t !== name && t !== "kg_query")
+      // ...unless THIS project's own measurements say that cheaper tool does
+      // not actually reach the answer for this kind of question. Evidence
+      // outranks the rule: a hint that has been observed to fail is noise.
+      const verdict = searchEvidence?.[cls.intent] ?? null
+      const discouraged = verdict?.avoid?.includes(cheaper)
+      if (cheaper && !discouraged) {
+        return {
+          tool: cheaper,
+          why: `this reads as a ${cls.intent} lookup — ${cheaper} answers it structurally and costs a fraction of a ${name} scan`,
+          saves: "latency+tokens",
+          intent: cls.intent,
+        }
+      }
+    }
+  }
+
   if (name === "read_file") {
     const size = fileSize(args?.path, ctx.cwd)
     const bounded = Number(args?.limit) > 0 || Number(args?.offset) > 0

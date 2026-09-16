@@ -58,7 +58,7 @@ import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir, parseSkillPlaybook } from "./skills.js"
 import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
 import { relevantLessons } from "./lessons.js"
-import { relevantTools, formatToolMem, emptyTools } from "./toolintel.js"
+import { relevantTools, formatToolMem, emptyTools, formatSearchStrategy } from "./toolintel.js"
 import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
 import { listClaims, pickClaims, formatClaimLines } from "./claims.js"
 import { listDecisions, pickDecisions, formatDecisionLines } from "./decisions.js"
@@ -324,6 +324,7 @@ export function emptyCompose(klass = null) {
     know: [],
     verify: { command: "", tests: [] },
     tools: emptyTools(),
+    search: "",
     gaps: emptyGaps(),
     blast: emptyBlast(),
     claims: [],
@@ -442,6 +443,11 @@ export function compose(task = "", opts = {}) {
   }
   if (opts.includeTools !== false) {
     try { out.tools = relevantTools(q, { cwd, klass, limit: 4 }) } catch { out.tools = emptyTools() }
+    // v117: which TOOL works is already fed back to the model here. Which tool
+    // works for which KIND OF SEARCH was measured from v117 on and would
+    // otherwise have been computed and rendered into no prompt at all — the
+    // exact defect the strategyJustified block below was added to fix.
+    try { out.search = formatSearchStrategy(cwd, klass) } catch { out.search = "" }
   }
   if (opts.includePlaybooks !== false) {
     try {
@@ -644,6 +650,7 @@ export function formatCompose(c) {
   }
   const toolsLine = formatToolMem(c.tools)
   if (toolsLine) lines.push(toolsLine)
+  if (c.search && typeof c.search === "string" && c.search.trim()) lines.push(c.search.slice(0, 400))
   const mcpNames = (c.mcp || []).map((m) => m && m.name).filter(Boolean).slice(0, 4)
   if (mcpNames.length) lines.push(`[mcp] ${mcpNames.join(", ")}`)
   const blastLine = formatBlast(c.blast)

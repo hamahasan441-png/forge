@@ -239,6 +239,9 @@ const suites = [
   // ---- v116 measurewise-2: forge measures itself, and stops re-writing -----
   // ---- an index that never changed ---------------------------------------
   ["v116", "node", ["test-v116.mjs"]],
+  // ---- v117 searchwise: search knows what kind of question it is, and -----
+  // ---- learns which tool actually reached the answer ----------------------
+  ["v117", "node", ["test-v117.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

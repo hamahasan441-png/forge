@@ -186,6 +186,13 @@ export const PERF_CASES = [
     run: (ctx) => { ctx.router.route({ task: TASK, registry: ctx.registry, context: { cwd: ctx.cwd } }) },
   },
   {
+    id: "classify-search", group: "decide", label: "search intent classification",
+    reps: 200, warmup: 20,
+    // v117 runs this before every search hint, so it has to be free. If it is
+    // not, the thing meant to remove wasted work becomes wasted work.
+    run: (ctx) => { ctx.router.classifySearch("what calls parseConfig in the loader") },
+  },
+  {
     id: "gate-fastpath", group: "decide", label: "completion gate (fast path)",
     reps: 200, warmup: 20,
     run: (ctx) => { ctx.completion.canCompleteFastPath({ finalText: "fixed and tested", toolLog: TOOL_LOG, commandChecks: [] }) },
