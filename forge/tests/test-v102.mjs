@@ -156,16 +156,26 @@ console.log("== 4. it runs on the REAL agent path, end to end ==")
     ? call("w1", "write_file", { path: ".env", content: "API_KEY=sk-live-0000\n" })
     : { role: "assistant", content: "Added the key. Complete." }
 
-  const b = await run("fix the failing auth test", secretScript)
-  ok("writing .env is caught on the direct path, which never reviewed before",
-    b.review.blockers.some((x) => x.id === "secrets_untouched"), JSON.stringify(b.review?.blockers))
-  eq("REPORT is the default: the verdict is unchanged", b.status, "COMPLETED")
-  ok("the gate does not silently acquire a new check in report mode",
-    b.completionGate.checks.reviewClean === undefined)
-
-  const c = await run("fix the failing auth test", secretScript, { review: "enforce" })
-  eq("ENFORCE turns a blocker into an honest INCOMPLETE", c.status, "INCOMPLETE")
-  ok("and the gate names the blocker", c.completionGate.reasons.some((r) => /secrets_untouched/.test(r)), JSON.stringify(c.completionGate.reasons))
+  // v113 audit — THE SECRET IS NOW STOPPED EARLIER, SO THE REVIEW NEVER SEES IT.
+  //
+  // v102 asserted that writing .env LANDS and the post-hoc review blocks it.
+  // v112 criticwise made that unreachable: the critic refuses a secret-bearing
+  // path before the write, so `.env` is never created and the review's change
+  // set is legitimately empty. Reproduced both ways:
+  //
+  //   cognition on  → "BLOCKED: governor SEARCH forbids write_file"
+  //   cognition off → "BLOCKED: (critique) ASK — .env is a secret-bearing path"
+  //                   and the run ends WAITING_FOR_USER, not COMPLETED
+  //
+  // The invariant "a secret must not be committed" is now enforced harder, not
+  // weaker, so the assertion moves to where the enforcement actually is. The
+  // review's own secret rule still has direct coverage at line 81 above.
+  const b = await run("fix the failing auth test", secretScript, { cognition: false })
+  ok("writing .env is REFUSED before it lands, not caught afterwards",
+    (b.toolLog ?? []).some((t) => /BLOCKED/.test(String(t.result ?? "")) && /secret/i.test(String(t.result ?? ""))),
+    JSON.stringify((b.toolLog ?? []).map((t) => String(t.result ?? "").slice(0, 80))))
+  ok("and the secret never reaches the change set", (b.review?.files ?? []).length === 0)
+  eq("a refused secret write does not become a COMPLETED run", b.status, "WAITING_FOR_USER")
 
   const d = await run("fix the failing auth test", secretScript, { review: "off" })
   eq("OFF means not run at all, not run-and-hidden", d.review, null)
