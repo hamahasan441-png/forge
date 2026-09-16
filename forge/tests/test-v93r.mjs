@@ -199,8 +199,8 @@ function procStarttime(pid) {
 // ---------------------------------------------------------------------------
 console.log("== 5. tool wiring — registry, verifier + read-only gating ==")
 {
-  eq("tool count is 29 (runtime + v94c toolwise added)", toolCount(), 29)
-  eq("TOOL_DEFS length 29", TOOL_DEFS.length, 29)
+  eq("tool count is 30 (runtime + v94c toolwise + v113 github)", toolCount(), 30)
+  eq("TOOL_DEFS length 30", TOOL_DEFS.length, 30)
   ok("runtime def registered", TOOL_DEFS.some((t) => t.function.name === "runtime"))
   eq("capabilities registry 1:1 with the wire (26)", BUILTIN_CAPABILITIES.length, TOOL_DEFS.length)
   eq("checkWriteClassification: no disagreement", checkWriteClassification(defaultRegistry({})).length, 0)

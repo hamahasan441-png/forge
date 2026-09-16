@@ -229,7 +229,7 @@ console.log("== 6. /tools help: honest dynamic tool count ==")
   ok("chat.js no longer hardcodes 18 tools", !/the 18 agent tools/.test(src))
   ok("chat.js interpolates the real count (template literal)", new RegExp(`list the \\$\\{toolCount\\(\\)\\} agent tools`).test(src))
   // v94c: 26 -> 29 (toolwise), lock stays exact
-  ok("the real count is 29", toolCount() === 29)
+  ok("the real count is 30", toolCount() === 30)
 }
 
 console.log(`\n== v92 part 1: ${PASS} passed, ${FAIL} failed ==`)

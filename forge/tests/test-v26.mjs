@@ -123,8 +123,8 @@ console.log("== meta filter still refuses a coder worker (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 113.0.0", VERSION, "100.0.0")
-  eq("package.json is 113.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "100.0.0")
+  eq("VERSION matches package.json", VERSION, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version)
+  eq("package.json version is what version.js serves", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, VERSION)
 }
 
 console.log(`\n== v26 suite: ${PASS} passed, ${FAIL} failed ==`)
