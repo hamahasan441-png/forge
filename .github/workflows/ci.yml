@@ -1,0 +1,82 @@
+# forge — CI
+#
+# This file existed once (added in 0e3c0b2, v57) and was deleted in fadb6c6
+# ("Unzip forge-v94-deepwise and delete superseded files"). It was written for
+# the old agentv19/forge layout, so the v66 flatten took it with the rest —
+# collateral damage, not a decision. Everything it verified stopped being
+# verified on GitHub at that moment.
+#
+# tests/run-all.mjs never stopped expecting it: annotate() at run-all.mjs:291
+# still emits `::error title=suite "<label>" failed::` on every failing suite —
+# GitHub Actions annotations addressed to a workflow that was not there. This
+# restores the reader.
+#
+# Zero dependencies, so there is no install step and nothing to cache.
+# run-all.mjs spawns each suite with cwd set to tests/ itself, which is why
+# `node tests/run-all.mjs` works from the package directory.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Fast lane: the offline node suites, on both Node versions that
+  # package.json's `engines: { node: ">=20" }` claims to support.
+  node-suites:
+    name: node suites (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Run node suites (FORGE_FAST=1 — skips the two bash suites)
+        working-directory: forge
+        run: FORGE_FAST=1 node tests/run-all.mjs
+
+  # Full lane: everything. The e2e and cleanroom bash suites each start and
+  # stop their own mock provider on 127.0.0.1:8787 and stay sequential, and
+  # cleanroom does a real `npm i -g --prefix <temp>` of the package.
+  full-suite:
+    name: full suite (e2e + cleanroom)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run all suites
+        working-directory: forge
+        run: npm test
+
+  # Informational only — reports how many exported symbols a test names.
+  # It never fails the build; that is deliberate, not an oversight.
+  coverage:
+    name: export coverage (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Export coverage report
+        working-directory: forge
+        run: npm run coverage
