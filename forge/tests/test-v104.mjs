@@ -195,7 +195,16 @@ console.log("== 5. the REAL agent, run from an EXTERNAL workspace ==")
     process.chdir(work)
     res = await runAgent({
       // the shipped defaults: unrestricted true, allowOutsideProject false
-      config: { providers: {}, tools: { unrestricted: true, assumeYes: true }, agent: { autonomous: false, maxSteps: 12, verifyNudge: false } },
+      //
+      // v113 audit — cognition off here, deliberately. This section exercises
+      // the TRAVERSAL BOUNDARY: the script drives grep/bash/read at paths
+      // outside the workspace and counts the boundary's refusals. The governor
+      // (v101) refuses those same calls first, for its own inspect-first
+      // reasons, so the boundary was never reached and its three expected
+      // refusals came back as zero — the layer under test stopped being
+      // tested at all. Governor authority keeps its own coverage in
+      // test-authority.mjs; the boundary needs the calls to actually arrive.
+      config: { providers: {}, tools: { unrestricted: true, assumeYes: true }, agent: { autonomous: false, maxSteps: 12, verifyNudge: false, cognition: false } },
       provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "k", model: "mock-1" },
       task: "bump the handler version", journal: false,
     })
