@@ -39,7 +39,7 @@ import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./content
 import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
 import { createTracer, PHASE } from "./tracer.js"
 import { swallowed, snapshot as softfailSnapshot } from "./softfail.js"
-import { toolGuidance } from "./router.js"
+import { toolGuidance, analyzeTask } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
 import { formatSkillPicks, selectPlugins, formatSteer, namedIn } from "./evaluate.js"
@@ -62,7 +62,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -84,6 +84,14 @@ export { classifyTaskComplexity, resolveEffort }
  * cannot be anything but a loop.
  */
 const LOOP_HALT_REPEATS = 3
+
+/**
+ * v118 — how many times the SAME completion blocker may refuse a governor
+ * STOP before the run admits it cannot clear it. Three, matching the loop
+ * halt: the first refusal is information, the second is a retry, the third is
+ * a blocker the run does not know how to move.
+ */
+const COMPLETION_BLOCKER_REPEATS = 3
 
 const ROLE_DIRECTIVES = {
   researcher: "You are a RESEARCH sub-agent: investigate quickly, read code/docs, and report findings. Zero writes. Keep the report dense and under 400 words.",
@@ -827,6 +835,15 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // ran it 40/40 steps, 1 distinct signature, and forge paid for every round
   // trip. Consecutive identical call AND identical result is not a heuristic:
   // no new information is arriving, so another turn cannot help.
+  // v118: a governor STOP is a CANDIDATE. These track how often the candidate
+  // was refused and why, so a blocker that never clears cannot spin forever.
+  let completionCandidates = 0
+  let completionAbandoned = false
+  let completionBlockedThisTurn = false
+  let lastCompletionBlocker = null
+  let sameBlockerRun = 0
+  let completionVerdict = null
+  let governorNote = null
   let lastSigResult = null
   let sameSigResultRun = 0
   let loopHalt = null
@@ -907,7 +924,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       onEvent?.({ type: "step", step: steps, ...identityMeta() })
       if (cognition && !readonly) {
         try {
-          const gov = cognition.next({
+          completionBlockedThisTurn = false
+          let gov = cognition.next({
             steps,
             writes: writesSoFar.length,
             unverified: unverifiedWrites({ writesSoFar, commandChecks }).unverified,
@@ -961,14 +979,90 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             }
           }
           if (lastAuth.halt && gov.action === "STOP") {
-            governorHalt = true
-            onEvent?.({ type: "GOVERNOR_STOP", why: gov.why, ...identityMeta() })
-            if (!finalText) finalText = `Governor stopped: ${gov.why}`
-            try { cognition.persist() } catch { }
-            break
+            // v118 — STOP IS A CANDIDATE, NOT A VERDICT.
+            //
+            // It used to halt here and, because the halt wrote its own reason
+            // into finalText, the completion gate downstream then read that
+            // sentence as the model's answer and returned COMPLETED.
+            // Reproduced: "create one.js and two.js" wrote one.js, never wrote
+            // two.js, never answered — and reported COMPLETED, reason
+            // GOVERNOR_STOP, with the governor quoting itself as the answer.
+            //
+            // The contract cannot catch this: its own verdict is "goal
+            // satisfied OR no open requirements", so an EMPTY contract is a
+            // closed one. So the candidate is now asked the question the
+            // contract cannot ask — is the outcome true on disk?
+            completionCandidates++
+            const cov = unverifiedWrites({ writesSoFar, commandChecks })
+            const named = (() => { try { return analyzeTask(task || "").files ?? [] } catch { return [] } })()
+            const mutating = (() => { try { return Boolean(analyzeTask(task || "").mutating) } catch { return false } })()
+            completionVerdict = evaluateCompletion({
+              task, namedFiles: named, cwd: process.cwd(),
+              wrote: writesSoFar.length > 0, mutating,
+              // the governor's note is explicitly NOT an answer
+              modelAnswered: String(finalText ?? "").trim().length > 0,
+              unverified: cov.unverified, commandChecks,
+              requireVerification: config.agent?.requireVerification === true,
+              klass: turnKlass ?? klass ?? "SMALL",
+            })
+            onEvent?.({
+              type: "COMPLETION_CANDIDATE", why: gov.why, attempt: completionCandidates,
+              ok: completionVerdict.ok, evidence: completionVerdict.evidence.positive.slice(0, 4),
+              ...identityMeta(),
+            })
+            if (completionVerdict.ok) {
+              governorHalt = true
+              onEvent?.({ type: "GOVERNOR_STOP", why: gov.why, ...identityMeta() })
+              // Kept OUT of finalText: a note about stopping is not an answer,
+              // and the gate must not be able to mistake one for the other.
+              governorNote = `Governor stopped: ${gov.why}`
+              try { cognition.persist() } catch { }
+              break
+            }
+            const code = completionVerdict.blockers[0].code
+            if (code === lastCompletionBlocker) sameBlockerRun++
+            else { lastCompletionBlocker = code; sameBlockerRun = 1 }
+            onEvent?.({
+              type: "COMPLETION_BLOCKED", attempt: completionCandidates, blocker: code,
+              why: completionVerdict.blockers[0].why, next: completionVerdict.next,
+              repeats: sameBlockerRun, ...identityMeta(),
+            })
+            // §18: continuing forever on a blocker that never clears is the
+            // other way to be wrong. Three refusals of the SAME blocker means
+            // the run cannot clear it by itself — end INCOMPLETE and say which
+            // blocker won, never COMPLETED.
+            if (sameBlockerRun >= COMPLETION_BLOCKER_REPEATS) {
+              governorHalt = true
+              onEvent?.({ type: "COMPLETION_ABANDONED", blocker: code, repeats: sameBlockerRun, ...identityMeta() })
+              completionAbandoned = true
+              governorNote = `stopped BLOCKED: ${completionVerdict.blockers[0].why} — ${sameBlockerRun} completion attempts did not clear it`
+              try { cognition.persist() } catch { }
+              break
+            }
+            // §48/§49: the model is told the real reason, not "continue" — and
+            // then execution falls THROUGH to the model call below. Restarting
+            // the loop here would re-ask the governor before the model ever got
+            // the chance to clear the blocker, which is its own kind of spin.
+            //
+            // And the authority has to move with the decision. authorityFor(STOP)
+            // forbids every write tool, which is correct for a STOP and absurd
+            // for a REFUSED one: the model would be told "next required action:
+            // EXECUTE — create two.js" on a turn where write_file is masked out
+            // of its tool list. The governing action is now the blocker's, so
+            // the authority is re-derived from it.
+            completionBlockedThisTurn = true
+            lastGov = { ...gov, action: completionVerdict.next, why: completionVerdict.blockers[0].why, stop: false }
+            lastAuth = cognition.enforce(lastGov)
+            gov = lastGov
           }
           if (!noTools) {
-            upsertGovernorMessage(messages, cognition.stepDirective(gov, lastAuth))
+            // v118: a refused completion candidate replaces the generic step
+            // directive with the actual blocker — the model is told what is
+            // missing, not merely told to keep going.
+            const blocked = completionBlockedThisTurn && completionVerdict && !completionVerdict.ok
+            upsertGovernorMessage(messages, blocked
+              ? `${GOV_PREFIX} ${formatCompletionBlock(completionVerdict)}`
+              : cognition.stepDirective(gov, lastAuth))
           }
           if (gov.action === "SEARCH" && !cognition.lastAcquire) {
             try {
@@ -1445,6 +1539,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       // silently reversing that decision is not this change's call to make.
       reviewBlockers: reviewMode === "enforce" ? (runReview?.blockers ?? []).map((b) => b.id) : [],
     })
+    // v118: the governor's note is reportable but is NOT an answer — it is
+    // attached only AFTER the gate has judged the run, so it can never be
+    // mistaken for the model having said something (which is how a governor
+    // STOP used to launder itself into COMPLETED).
+    if (governorHalt && !answerPresent && governorNote) finalText = governorNote
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
     runOk = resStatus === "COMPLETED" && !waitingForUser && !governorHalt
     if (waitingForUser) {
@@ -1522,8 +1621,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       : loopHalt ? "LOOP_DETECTED"
       : refusedOnly ? "MUTATIONS_REFUSED"
       : "RESOURCE_LIMIT"
-    const govReason = waitingForUser ? "GOVERNOR_ASK" : (governorHalt ? "GOVERNOR_STOP" : stopReason)
-    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    // v118: a COMPLETED run carries no reason (v115's rule) — a verdict and an
+    // excuse together is the shape the old GOVERNOR_STOP bug had. And a halt
+    // that gave up on a blocker is COMPLETION_BLOCKED, not a clean stop.
+    const govReason = waitingForUser
+      ? "GOVERNOR_ASK"
+      : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
+    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

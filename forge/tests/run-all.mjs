@@ -242,6 +242,8 @@ const suites = [
   // ---- v117 searchwise: search knows what kind of question it is, and -----
   // ---- learns which tool actually reached the answer ----------------------
   ["v117", "node", ["test-v117.mjs"]],
+  // ---- v118 completionwise: a governor STOP is a candidate, not a verdict --
+  ["v118", "node", ["test-v118.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],
