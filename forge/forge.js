@@ -2018,6 +2018,46 @@ async function main() {
       process.exit(summary.failed ? 1 : 0)
       return
     }
+    // v116: bench.js scores decision QUALITY, evalbench.js scores whether the
+    // task was SOLVED. Neither reports a millisecond, and nothing else in the
+    // tree did either — so no optimization could ever prove itself. This does.
+    case "perf": {
+      const { PERF_CASES, runPerf, formatPerfReport, comparePerf, formatComparison, savePerfBaseline, loadPerfBaseline, perfBaselinePath } = await import("./perfbench.js")
+      if (flags.list === true || positional[1] === "list") {
+        if (JSON_OUT) { emitJson({ version: VERSION, cases: PERF_CASES.map((c) => ({ id: c.id, group: c.group, label: c.label, reps: c.reps })) }); return }
+        console.log(bold(`FORGE-PERF v${VERSION}`) + dim(`  ${PERF_CASES.length} case(s), no model, no network`))
+        let g = null
+        for (const c of PERF_CASES) {
+          if (c.group !== g) { g = c.group; console.log(dim(`  ${g}:`)) }
+          console.log(`    ${cyan(c.id.padEnd(20))} ${c.label} ${dim(`(${c.reps} rep${c.reps === 1 ? "" : "s"})`)}`)
+        }
+        return
+      }
+      const only = typeof flags.only === "string" ? flags.only : (typeof flags.group === "string" ? flags.group : null)
+      if (!JSON_OUT) console.log(dim("measuring — no model, no network; forge's own caches are written exactly as a normal run writes them"))
+      const run = await runPerf({ cwd: process.cwd(), only })
+      if (flags.compare === true) {
+        const base = loadPerfBaseline(process.cwd())
+        if (!base) {
+          err(`no baseline for this project — run: forge perf --save (stores ${perfBaselinePath(process.cwd())})`)
+          process.exit(1)
+          return
+        }
+        const cmp = comparePerf(base, run)
+        if (JSON_OUT) { emitJson(cmp); process.exit(cmp.regressed ? 1 : 0); return }
+        console.log(formatComparison(cmp))
+        process.exit(cmp.regressed ? 1 : 0)
+        return
+      }
+      if (flags.save === true) {
+        const at = savePerfBaseline(process.cwd(), run)
+        if (!JSON_OUT) console.log(at ? ok(`baseline saved: ${at}`) ?? "" : "")
+        if (!at && !JSON_OUT) warn("baseline could not be written — the measurement above still stands")
+      }
+      if (JSON_OUT) { emitJson(run); return }
+      console.log(formatPerfReport(run))
+      return
+    }
     // v101 P0c: the eval bench.js could never be. bench.js runs the kernel with
     // NO live model; this runs the REAL agent against real broken repos and
     // scores it by a hidden test the agent never sees. The headline number is

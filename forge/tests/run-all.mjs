@@ -236,6 +236,9 @@ const suites = [
   // ---- v115 honestwise: loops halt, refused runs are not COMPLETED, a -----
   // ---- cancel is CANCELLED at the node level ------------------------------
   ["v115", "node", ["test-v115.mjs"]],
+  // ---- v116 measurewise-2: forge measures itself, and stops re-writing -----
+  // ---- an index that never changed ---------------------------------------
+  ["v116", "node", ["test-v116.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

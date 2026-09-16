@@ -46,6 +46,12 @@ import { listCheckpoints } from "./checkpoint.js"
 import { writeStateFile } from "./securefs.js"
 import { projectDir } from "./memory.js"
 import { TASK_CLASS } from "./classify.js"
+// v116: the read-only worker ceiling and the live memory check already exist —
+// resources.workerCeiling() is documented as "the machine/config cap the
+// scheduler cannot exceed" and meta already uses it for sub-agent fan-out.
+// The in-run tool batch was the one fan-out that ignored both.
+import { workerCeiling } from "./resources.js"
+import { resourceProfile, memoryHeadroomOk } from "./profile.js"
 
 /** Structured events (§16) — the UI renders them, the tests assert them. */
 export const TOOL_EVENTS = [
@@ -53,7 +59,16 @@ export const TOOL_EVENTS = [
   "TOOL_RETRY", "TOOL_FALLBACK", "TOOL_BLOCKED", "TOOL_VERIFIED", "TOOL_CACHED",
   "TOOL_ESCALATION", "TOOL_BLAST", // v94 knowwise: bounded blast-radius prediction after a successful mutation
   "TOOL_CRITIQUE", // v94 deepwise: deterministic pre-mutation self-critique (advisory, never blocks)
+  "TOOL_THROTTLED", // v116: a parallel batch wider than this machine's read-only worker ceiling
 ]
+
+/**
+ * v116 — what one in-flight read-only tool call is assumed to cost in RAM.
+ * Far below profile.js's 220MB child-process figure on purpose: these calls
+ * run INSIDE this process (a bounded read, a grep window, a chunk scan), so
+ * the per-call footprint is smaller and the memory is our own.
+ */
+const TOOL_CALL_MB = 64
 
 const CACHE_MAX_BYTES = 256 * 1024
 const CACHE_MAX_ENTRIES = 64
@@ -542,14 +557,72 @@ export function createToolIntel({
     return runPlan(plan, list, out, step)
   }
 
+  /**
+   * v116 — HOW MANY READ-ONLY CALLS MAY RUN AT ONCE.
+   *
+   * The router decides WHICH calls are parallel-safe; nothing decided HOW
+   * MANY may be in flight. A model that emits twelve reads got twelve
+   * concurrent executions on any machine, including the 12GB/8-core phone
+   * this project is developed on — `Promise.all` over whatever arrived.
+   *
+   * The ceiling is not a new policy: resources.workerCeiling() already exists
+   * for exactly this ("read-only worker ceiling ... the machine/config cap the
+   * scheduler cannot exceed. Mutators still serialize") and meta already uses
+   * it for sub-agent fan-out. This is the same cap applied to the one fan-out
+   * that was unbounded.
+   *
+   * `tools.maxParallel` overrides it explicitly, because a user who knows
+   * their machine outranks a heuristic about it.
+   */
+  let ceilingMemo = null
+  function parallelCeiling() {
+    if (ceilingMemo != null) return ceilingMemo
+    const explicit = Number(cfg.maxParallel)
+    if (Number.isFinite(explicit) && explicit > 0) { ceilingMemo = Math.max(1, Math.floor(explicit)); return ceilingMemo }
+    let tier = "normal"
+    try { tier = resourceProfile().tier } catch { /* an unreadable /proc is not a reason to fan out blindly */ }
+    try { ceilingMemo = Math.max(1, workerCeiling(config, tier)) } catch { ceilingMemo = 2 }
+    return ceilingMemo
+  }
+
+  /**
+   * Run `items` with at most `limit` in flight. Not a scheduler and not a
+   * queue: a fixed number of workers pulling from one cursor, so the first
+   * call starts immediately and nothing is buffered.
+   *
+   * §77 backpressure: between units of work the worker re-checks free memory
+   * (profile.memoryHeadroomOk — written for this, previously uncalled). When
+   * headroom is gone the extra workers retire and the batch finishes on one,
+   * which is slower and still finishes — the alternative on a phone is the
+   * OOM killer taking the whole session.
+   */
+  async function runBounded(items, limit, fn) {
+    let cursor = 0
+    let workers = Math.min(limit, items.length)
+    const worker = async (id) => {
+      while (cursor < items.length) {
+        if (id > 0 && id >= workers) return
+        const item = items[cursor++]
+        await fn(item)
+        if (id > 0 && workers > 1 && !memoryHeadroomOk({ perChildMB: TOOL_CALL_MB })) workers = 1
+      }
+    }
+    await Promise.all(Array.from({ length: Math.max(1, workers) }, (_, i) => worker(i)))
+  }
+
   async function runPlan(plan, list, out, step) {
     for (const batch of plan.batches) {
       if (batch.mode === "parallel" && batch.calls.length > 1) {
-        await Promise.all(
-          batch.calls.map(async (item) => {
-            out[item.index] = await runCall(list[item.index], { step, mode: "parallel", reason: "read-only, parallel-safe, no target conflict" })
+        const limit = parallelCeiling()
+        if (batch.calls.length > limit) {
+          emit({
+            type: "TOOL_THROTTLED", step, requested: batch.calls.length, limit,
+            reason: `${batch.calls.length} parallel-safe calls, ${limit} may run at once on this machine — the rest follow in waves (tools.maxParallel overrides)`,
           })
-        )
+        }
+        await runBounded(batch.calls, limit, async (item) => {
+          out[item.index] = await runCall(list[item.index], { step, mode: "parallel", reason: "read-only, parallel-safe, no target conflict" })
+        })
       } else {
         for (const item of batch.calls) {
           out[item.index] = await runCall(list[item.index], {

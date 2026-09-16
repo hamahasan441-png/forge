@@ -165,7 +165,7 @@ function chunksForFile(f) {
 const SEMANTIC_INDEX_VERSION = 1
 const MIN_PERSIST_DOCS = 64      // small corpora rebuild in <100 ms — persisting would be waste
 const MAX_PERSIST_CHUNKS = 5000  // hard bound on the persisted doc count (same cap as a search)
-const persistentIndexStats = { loaded: 0, adopted: 0, rechunked: 0, saved: 0, dropped: 0 }
+const persistentIndexStats = { loaded: 0, adopted: 0, rechunked: 0, saved: 0, dropped: 0, skippedSaves: 0 }
 
 function semanticIndexPath(root) {
   return path.join(projectDir(root), "semantic-index.json")
@@ -195,6 +195,9 @@ function loadPersistentIndex(root, files) {
     persistentIndexStats.adopted += entry.docs.length
   }
   persistentIndexStats.dropped += dropped
+  // v116: the caller needs to know whether the file on disk is still an exact
+  // description of what it holds. `dropped` says entries in it are stale.
+  adopted.droppedEntries = dropped
   return adopted
 }
 
@@ -252,6 +255,7 @@ export async function semanticSearch(root, query, {
 
   const docs = []
   let chunksTruncated = false
+  let rechunkedHere = 0
   for (const f of files) {
     if (docs.length >= MAX_CHUNKS) { chunksTruncated = true; break }
     const pre = persisted?.get(f.full)
@@ -274,6 +278,7 @@ export async function semanticSearch(root, query, {
       continue
     }
     persistentIndexStats.rechunked++
+    rechunkedHere++
     for (const d of chunksForFile(f)) {
       if (docs.length >= MAX_CHUNKS) { chunksTruncated = true; break }
       docs.push(d)
@@ -283,7 +288,23 @@ export async function semanticSearch(root, query, {
 
   // v94 todowise: persist the (now warm) corpus for the NEXT process —
   // best-effort, bounded, only when big enough to pay for the write.
-  savePersistentIndex(base, files)
+  //
+  // v116, measured: this ran on EVERY search, including the overwhelmingly
+  // common one where nothing changed. On this repo that was a 3.2MB
+  // JSON.stringify (~17ms) plus the write plus a second statSync of every
+  // file, to reproduce a file that already held exactly those bytes — roughly
+  // a quarter of a warm semantic_search, spent proving nothing had changed.
+  //
+  // The index is already current when every chunk came out of it (nothing
+  // re-chunked), nothing in it went stale (nothing dropped), and every file we
+  // would persist is already in it. Any of those failing still writes: a
+  // drifted file re-chunks, a deleted file leaves a stale entry to prune, a
+  // new file is missing. The search result is identical either way — this
+  // removes a write, not an answer.
+  const indexIsCurrent = persisted != null && rechunkedHere === 0 && !persisted.droppedEntries &&
+    files.every((f) => persisted.has(f.full) || !chunkCache.get(f.full)?.docs?.length)
+  if (indexIsCurrent) persistentIndexStats.skippedSaves++
+  else savePersistentIndex(base, files)
 
   // BM25 orders EVERYTHING (offline, cheap). Embeddings only RERANK the
   // shortlist — they never widen it (the repomap contract), so the embed call
