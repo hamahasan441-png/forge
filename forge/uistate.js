@@ -735,6 +735,12 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
     case "TOOL_FALLBACK":
       emit({ type: "NOTICE", level: "info", text: `${ev.tool}${ev.alternative ? ` → ${ev.alternative}` : ""}: ${String(ev.reason ?? "").slice(0, 140)}` })
       break
+    // v116: the batch was wider than this machine's read-only worker ceiling.
+    // Nothing was refused and nothing was lost — the extra calls run in the
+    // next wave — but the user should see why twelve reads took two rounds.
+    case "TOOL_THROTTLED":
+      emit({ type: "NOTICE", level: "info", text: `${ev.requested} parallel calls → ${ev.limit} at a time: ${String(ev.reason ?? "").slice(0, 160)}` })
+      break
     case "TOOL_CACHED":
       emit({ type: "NOTICE", level: "info", text: `${ev.tool}: ${String(ev.reason ?? "cached").slice(0, 120)}` })
       break
