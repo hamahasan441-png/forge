@@ -36,7 +36,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { createRegistry, registerPlugins, operationRisk, classifyCall, RISK, STATUS, riskRank, maxRisk } from "./capabilities.js"
-import { planExecution, cheaperAlternative, nextAction, targetsOf, repeatedFailures, route } from "./router.js"
+import { planExecution, cheaperAlternative, nextAction, targetsOf, repeatedFailures, route, classifySearch, SEARCH_INTENT } from "./router.js"
 import { classifyFailure, recoveryPlan, formatDiagnosis, shouldEscalate, FAILURE } from "./diagnose.js"
 import { predictBlastRadius } from "./impact.js" // v94 knowwise: blast-radius prediction before/after mutations
 import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique, critiqueVerdict } from "./critique.js" // v94 advisory; v112 enforces BLOCK/ASK/REPLAN
@@ -69,6 +69,9 @@ export const TOOL_EVENTS = [
  * the per-call footprint is smaller and the memory is our own.
  */
 const TOOL_CALL_MB = 64
+
+/** v117: every tool whose job is to FIND something. */
+export const SEARCH_TOOLS = new Set(["grep_files", "glob_files", "list_dir", "semantic_search", "code_context"])
 
 const CACHE_MAX_BYTES = 256 * 1024
 const CACHE_MAX_ENTRIES = 64
@@ -399,8 +402,12 @@ export function createToolIntel({
 
     // ---- state update -----------------------------------------------------
     // what a discovery tool FOUND is context for the next routing decision
-    if (!d.failed && (name === "grep_files" || name === "glob_files" || name === "list_dir")) {
+    if (!d.failed && SEARCH_TOOLS.has(name)) {
+      // v117: semantic_search and code_context were excluded, so the two most
+      // expensive searches were the two whose usefulness could never be
+      // measured — exactly backwards.
       record.discovered = discoveredPaths(result)
+      record.search_intent = classifySearch(args?.query ?? args?.pattern ?? "", { tool: name }).intent
     }
     if (!d.failed && !meta.read_only) {
       mutationHappened(name)
@@ -495,7 +502,11 @@ export function createToolIntel({
         result += `\n[forge] next: ${alt.tool} — ${alt.why}`
       }
     } else if (enabled) {
-      const cheaper = cheaperAlternative(name, args, { registry: reg, ctx: { cwd } })
+      // v117: the hint is gated on what THIS project measured, not on the rule
+      // alone — see searchStrategyFor(). Loaded lazily and only for the tools
+      // the hint can apply to, so an ordinary read_file pays nothing.
+      const searchEvidence = SEARCH_TOOLS.has(name) ? loadSearchEvidence() : null
+      const cheaper = cheaperAlternative(name, args, { registry: reg, ctx: { cwd }, searchEvidence })
       if (cheaper) {
         emit({ type: "TOOL_FALLBACK", tool: name, callId, step, alternative: cheaper.tool, reason: cheaper.why })
         result += `\n[forge] cheaper next time: ${cheaper.tool} — ${cheaper.why}`
@@ -574,6 +585,15 @@ export function createToolIntel({
    * `tools.maxParallel` overrides it explicitly, because a user who knows
    * their machine outranks a heuristic about it.
    */
+  // v117: the per-intent search evidence for THIS project, read once per run.
+  // A hint is advisory and must never cost a disk read per call.
+  let searchEvidenceMemo = null
+  function loadSearchEvidence() {
+    if (searchEvidenceMemo !== null) return searchEvidenceMemo
+    try { searchEvidenceMemo = searchStrategyAll(cwd, klass) } catch { searchEvidenceMemo = {} }
+    return searchEvidenceMemo
+  }
+
   let ceilingMemo = null
   function parallelCeiling() {
     if (ceilingMemo != null) return ceilingMemo
@@ -817,9 +837,12 @@ export function loadToolStats(cwd) {
     const j = JSON.parse(fs.readFileSync(toolStatsPath(cwd), "utf8"))
     if (!j || typeof j !== "object" || Array.isArray(j)) return { v: 1, tools: {} }
     const tools = j.tools && typeof j.tools === "object" && !Array.isArray(j.tools) ? j.tools : {}
-    return { v: 1, tools, updated: j.updated ?? null }
+    // v117: this normalizer dropped every key it did not name, so the search
+    // strategy store was written and then silently discarded on the next read.
+    const search = j.search && typeof j.search === "object" && !Array.isArray(j.search) ? j.search : {}
+    return { v: 1, tools, search, updated: j.updated ?? null }
   } catch {
-    return { v: 1, tools: {} }
+    return { v: 1, tools: {}, search: {} }
   }
 }
 
@@ -912,7 +935,8 @@ export function recordToolRun({ cwd, task = "", klass = null, records = [] } = {
     tools[name] = rec
     added++
   }
-  if (!added) return all
+  const searchAdded = recordSearchOutcomes(all, records, cls)
+  if (!added && !searchAdded) return all
   const names = Object.keys(tools)
   if (names.length > MAX_TOOLS_TRACKED) {
     names.sort((a, b) => (tools[b].samples ?? 0) - (tools[a].samples ?? 0) || (tools[b].lastUsed ?? 0) - (tools[a].lastUsed ?? 0))
@@ -921,8 +945,134 @@ export function recordToolRun({ cwd, task = "", klass = null, records = [] } = {
   all.v = 1
   all.updated = Date.now()
   all.tools = tools
+  if (!all.search || typeof all.search !== "object") all.search = {}
   saveToolStats(cwd, all)
   return all
+}
+
+// ---------------------------------------------------------------------------
+// v117 — SEARCH STRATEGY LEARNING
+//
+// toolstats.json already records what each tool DID, per task class, and
+// compose already feeds that back to the model. What it could not answer is
+// the question that actually decides a search: for THIS KIND of question, in
+// THIS project, which search tool reached the answer?
+//
+// "Reached the answer" is not "returned 200 hits". A search is USEFUL when
+// something it discovered was then read or changed — the run acted on it.
+// A search that returns everything and is ignored has taught nothing, and a
+// search returning nothing has taught something real: not this tool, not here.
+// ---------------------------------------------------------------------------
+
+export const SEARCH_MIN_SAMPLES = 3
+export const SEARCH_USEFUL_FLOOR = 0.34
+
+/**
+ * Did this search reach the work? Looks only at what happened AFTER it in the
+ * same run, so a file that was already open does not credit a later search.
+ */
+export function searchWasUseful(record, later = []) {
+  const found = new Set((record?.discovered ?? []).map(String))
+  if (!found.size) return false
+  for (const r of later) {
+    const touched = [
+      ...(r?.files_changed ?? []),
+      ...(r?.tool === "read_file" || r?.tool === "code_context" ? [r?.arguments_summary ?? ""] : []),
+    ].map(String)
+    for (const t of touched) {
+      if (!t) continue
+      for (const f of found) if (t === f || t.endsWith(`/${f}`) || f.endsWith(`/${t}`)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Fold this run's searches into the project's persistent store. Called from
+ * recordToolRun, which agent.js already invokes in its `finally` — no second
+ * persistence path, no second call site.
+ */
+function recordSearchOutcomes(all, records, cls) {
+  const search = all.search && typeof all.search === "object" ? all.search : (all.search = {})
+  let added = 0
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i]
+    if (!r || !SEARCH_TOOLS.has(String(r.tool || ""))) continue
+    const intent = String(r.search_intent || "")
+    if (!intent) continue
+    const perIntent = search[intent] && typeof search[intent] === "object" ? search[intent] : (search[intent] = {})
+    const key = String(r.tool)
+    const rec = perIntent[key] && typeof perIntent[key] === "object"
+      ? perIntent[key]
+      : (perIntent[key] = { samples: 0, useful: 0, empty: 0, ms: 0, byClass: {}, lastUsed: 0 })
+    rec.samples++
+    rec.ms += Number(r.duration_ms ?? 0) || 0
+    if (!(r.discovered ?? []).length) rec.empty++
+    else if (searchWasUseful(r, records.slice(i + 1))) rec.useful++
+    rec.byClass[cls] = rec.byClass[cls] ?? { samples: 0, useful: 0 }
+    rec.byClass[cls].samples++
+    if (searchWasUseful(r, records.slice(i + 1))) rec.byClass[cls].useful++
+    rec.lastUsed = Date.now()
+    added++
+  }
+  return added
+}
+
+/**
+ * What this project learned about one kind of search.
+ *
+ * Damped the same way relevantTools is: below SEARCH_MIN_SAMPLES nothing is
+ * claimed, because two observations are an anecdote and forge already has a
+ * rule to fall back on. `avoid` is the part that changes behaviour — it
+ * suppresses the routing hint for a tool measured not to reach the answer.
+ */
+export function searchStrategyFor(intent, { cwd, klass = null, stats = null } = {}) {
+  const empty = { intent, prefer: [], avoid: [], samples: 0 }
+  if (!intent || (!cwd && !stats)) return empty
+  // `stats` lets a caller that already read the file pass it in. Without it
+  // searchStrategyAll re-read toolstats.json once PER INTENT — a fan-out of
+  // disk reads hidden behind a function that reads like a lookup.
+  let all = stats
+  if (!all) { try { all = loadToolStats(cwd) } catch { return empty } }
+  const perIntent = all?.search?.[intent]
+  if (!perIntent || typeof perIntent !== "object") return empty
+  const prefer = [], avoid = []
+  let samples = 0
+  for (const [tool, rec] of Object.entries(perIntent)) {
+    if (!rec || typeof rec !== "object") continue
+    const slice = klass && rec.byClass?.[klass]?.samples >= SEARCH_MIN_SAMPLES ? rec.byClass[klass] : rec
+    const n = Number(slice.samples ?? 0) || 0
+    if (n < SEARCH_MIN_SAMPLES) continue
+    samples += n
+    const rate = (Number(slice.useful ?? 0) || 0) / n
+    if (rate >= 0.6) prefer.push({ tool, rate: Math.round(rate * 100) / 100, samples: n })
+    else if (rate < SEARCH_USEFUL_FLOOR) avoid.push(tool)
+  }
+  prefer.sort((a, b) => b.rate - a.rate || b.samples - a.samples)
+  return { intent, prefer, avoid, samples }
+}
+
+/** Every intent at once — one read, for the per-run memo. */
+export function searchStrategyAll(cwd, klass = null) {
+  const out = {}
+  let all
+  try { all = loadToolStats(cwd) } catch { return out }
+  for (const intent of Object.keys(all?.search ?? {})) out[intent] = searchStrategyFor(intent, { cwd, klass, stats: all })
+  return out
+}
+
+/** Human-readable, for `forge cognition` / compose. Empty when nothing is known. */
+export function formatSearchStrategy(cwd, klass = null) {
+  const all = searchStrategyAll(cwd, klass)
+  const lines = []
+  for (const [intent, v] of Object.entries(all)) {
+    if (!v.prefer.length && !v.avoid.length) continue
+    const bits = []
+    if (v.prefer.length) bits.push(`prefer ${v.prefer.map((p) => `${p.tool} (${Math.round(p.rate * 100)}% of ${p.samples})`).join(", ")}`)
+    if (v.avoid.length) bits.push(`avoid ${v.avoid.join(", ")}`)
+    lines.push(`  ${intent}: ${bits.join(" • ")}`)
+  }
+  return lines.length ? `SEARCH (measured in this project)\n${lines.join("\n")}` : ""
 }
 
 /**
