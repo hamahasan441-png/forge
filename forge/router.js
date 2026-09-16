@@ -66,6 +66,61 @@ const SIGNALS = [
   [INTENT.REMEMBER, /\b(remember|note that|from now on|convention|preference)\b/],
 ]
 
+/**
+ * v120 — NEGATION, AND TASKS THAT SAY THEY WANT NOTHING WRITTEN.
+ *
+ * SIGNALS matches verbs anywhere in the text with no notion of negation, so
+ * "Do not implement anything" scored exactly like "implement the retry":
+ * intent=modify, mutating=true, LARGE. A real run of a read-only analysis
+ * request was therefore planned as `grep_files → read_file → edit_file → bash`
+ * on the deep path, and took six and a half minutes.
+ *
+ * It compounds, because an analysis task ABOUT a change is full of change
+ * vocabulary — "smallest code change", "minimal change required", "what will
+ * change" — and one such verb outvoted every analysis word in the request.
+ *
+ * Two narrow additions, both deliberately conservative: a verb preceded by a
+ * negation does not count, and a task that says outright that it wants no
+ * changes is read-only unless some OTHER un-negated mutation verb survives.
+ */
+const NEGATION = /\b(?:do\s+not|don'?t|never|without|no\s+need\s+to|avoid|refrain\s+from|must\s+not|should\s+not|cannot|can'?t)\b/gi
+/** How far after a negation a verb is still considered negated. */
+const NEGATION_WINDOW = 40
+/**
+ * A GLOBAL prohibition — the task telling the agent to change nothing at all.
+ * Deliberately narrow: "do not change THE TESTS" is a scoped caveat inside a
+ * real mutation task and must NOT match, while "Do not implement anything" is
+ * an instruction about the whole run and must. The difference is the object:
+ * a global one (anything / any file / nothing), or a bare standalone sentence.
+ */
+const READ_ONLY_REQUEST = new RegExp([
+  "\\b(?:do\\s+not|don'?t|never)\\s+(?:implement|change|modify|write|edit|create|touch)\\s+(?:anything|any\\s+\\w+|nothing)\\b",
+  "\\b(?:do\\s+not|don'?t)\\s+(?:implement|code)\\s*[.!\\n]",
+  "\\banalysis\\s+only\\b",
+  "\\bread[-\\s]only\\b",
+  "\\bno\\s+code\\s+changes?\\b",
+  "\\bwithout\\s+(?:implementing|changing|modifying|writing)\\s+(?:anything|any\\s+\\w+)\\b",
+].join("|"), "i")
+
+/** Spans of text covered by a negation, so a verb inside one can be ignored. */
+function negatedSpans(text) {
+  const spans = []
+  NEGATION.lastIndex = 0
+  let m
+  while ((m = NEGATION.exec(text))) spans.push([m.index, m.index + m[0].length + NEGATION_WINDOW])
+  return spans
+}
+
+/** Does this signal match OUTSIDE every negated span? */
+function matchesUnnegated(re, text, spans) {
+  const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`)
+  let m
+  while ((m = g.exec(text))) {
+    if (!spans.some(([a, b]) => m.index >= a && m.index < b)) return true
+  }
+  return false
+}
+
 const FILE_RE = /(?:^|[\s"'`(=])((?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*\.[A-Za-z][\w]{0,7})\b/g
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
 function isImagePath(p) { return IMAGE_EXT.test(String(p ?? "")) }
@@ -82,8 +137,27 @@ const STOP_SYMBOLS = new Set(["README", "TODO", "JSON", "HTTP", "HTTPS", "API", 
 export function analyzeTask(task, context = {}) {
   const text = String(task ?? "")
   const t = text.toLowerCase()
+  const spans = negatedSpans(t)
   const intents = []
-  for (const [intent, re] of SIGNALS) if (re.test(t)) intents.push(intent)
+  for (const [intent, re] of SIGNALS) {
+    // v120: a mutation/execution verb inside a negation ("do not implement")
+    // is not a request to do it. Other intents are unaffected — negating
+    // "explain" does not make a task less of an inspection.
+    const negatable = intent === INTENT.MODIFY || intent === INTENT.EXECUTE || intent === INTENT.RECOVER
+    if (negatable ? matchesUnnegated(re, t, spans) : re.test(t)) intents.push(intent)
+  }
+  // A GLOBAL prohibition is an instruction about the whole run, so it outranks
+  // change-vocabulary that merely appears elsewhere in the text. An analysis
+  // request about a change is full of the word "change" — that is a subject,
+  // not an instruction, and it must not buy the mutation pipeline.
+  const readOnlyRequest = READ_ONLY_REQUEST.test(t)
+  if (readOnlyRequest) {
+    for (const gone of [INTENT.MODIFY, INTENT.RECOVER, INTENT.EXECUTE]) {
+      const i = intents.indexOf(gone)
+      if (i >= 0) intents.splice(i, 1)
+    }
+    if (!intents.includes(INTENT.INSPECT)) intents.push(INTENT.INSPECT)
+  }
 
   const files = []
   let m
@@ -97,7 +171,9 @@ export function analyzeTask(task, context = {}) {
 
   // primary intent: recovery beats modification beats discovery beats reading
   const order = [INTENT.RECOVER, INTENT.MODIFY, INTENT.DISCOVER, INTENT.RESEARCH, INTENT.BROWSE, INTENT.VERIFY, INTENT.EXECUTE, INTENT.EXPLAIN, INTENT.INSPECT, INTENT.REMEMBER]
-  const primary = order.find((i) => intents.includes(i)) ?? INTENT.INSPECT
+  const primary = readOnlyRequest
+    ? (intents.find((i) => i === INTENT.EXPLAIN || i === INTENT.DISCOVER) ?? INTENT.INSPECT)
+    : (order.find((i) => intents.includes(i)) ?? INTENT.INSPECT)
 
   const words = t.split(/\s+/).filter(Boolean).length
   const complexity = intents.includes(INTENT.RECOVER) || (intents.includes(INTENT.MODIFY) && words > 12) ? "complex" : words <= 6 && files.length <= 1 ? "simple" : "moderate"

@@ -247,6 +247,9 @@ const suites = [
   // ---- v119 calibratewise: the completion gate learns how many attempts a --
   // ---- blocker deserves, and cannot learn its way into a false completion --
   ["v119", "node", ["test-v119.mjs"]],
+  // ---- v120 honestcheck: a grep is not a test, "do not implement" is not ---
+  // ---- an instruction to implement ----------------------------------------
+  ["v120", "node", ["test-v120.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],
