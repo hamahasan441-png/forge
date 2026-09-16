@@ -254,6 +254,9 @@ const suites = [
   // ---- a task class is not a strategy, a learning key must identify what --
   // ---- was learned --------------------------------------------------------
   ["v121", "node", ["test-v121.mjs"]],
+  // ---- v122 costwise: the A/B called "no measurable difference" on tied ----
+  // ---- outcomes without ever reading the cost it had just printed ---------
+  ["v122", "node", ["test-v122.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],
