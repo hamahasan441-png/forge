@@ -72,6 +72,19 @@ import { execFileSync } from "node:child_process"
 
 export { classifyTaskComplexity, resolveEffort }
 
+/**
+ * v115 — how many CONSECUTIVE identical tool call + identical result it takes
+ * before a run is provably going nowhere.
+ *
+ * Three, not four. The existing extension guard already calls four occurrences
+ * of one signature "a spin" (agent.js: `if (n >= 4) return null`), but that
+ * counts a signature anywhere in the run and only withholds extra budget.
+ * Three IN A ROW, with the same result each time, is a stronger claim and a
+ * cheaper one to act on: the second repeat could still be a retry, the third
+ * cannot be anything but a loop.
+ */
+const LOOP_HALT_REPEATS = 3
+
 const ROLE_DIRECTIVES = {
   researcher: "You are a RESEARCH sub-agent: investigate quickly, read code/docs, and report findings. Zero writes. Keep the report dense and under 400 words.",
   reviewer: "You are a CODE REVIEW sub-agent: inspect the relevant files for bugs, edge cases, and quality issues. Report concrete findings with file:line references. Zero writes.",
@@ -807,6 +820,16 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // extension bookkeeping itself.
   const writeSteps = []
   const toolSigCounts = new Map()
+  // v115: the SAME call producing the SAME result, back to back. toolSigCounts
+  // already existed and already encoded the judgement that a repeated
+  // signature is a spin — but it was only ever consulted to withhold extra
+  // budget, never to stop. Reproduced: a model that re-issued one bash call
+  // ran it 40/40 steps, 1 distinct signature, and forge paid for every round
+  // trip. Consecutive identical call AND identical result is not a heuristic:
+  // no new information is arriving, so another turn cannot help.
+  let lastSigResult = null
+  let sameSigResultRun = 0
+  let loopHalt = null
   let stepExtensions = 0
   let lastExtensionEvidence = null
   const repoState = (() => {
@@ -862,6 +885,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       return { wroteRecently, verifiedRecently, diverse, distinctRecent: recentSigs.size }
     }
     while (true) {
+      // v115: a run that is provably repeating itself stops here. Detected at
+      // the tool-result site below (same call, same result, LOOP_HALT_REPEATS
+      // times in a row) and acted on at the top of the next turn, so the loop
+      // never pays for another model round trip to learn nothing.
+      if (loopHalt) break
       if (steps >= maxSteps) {
         const evidence = productiveExtension()
         if (!evidence) break
@@ -1119,6 +1147,14 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             const sig = `${tc.name}:${argsKey}`
             toolSigCounts.set(sig, (toolSigCounts.get(sig) ?? 0) + 1)
             if (toolSigCounts.size > 256) toolSigCounts.delete(toolSigCounts.keys().next().value)
+            // v115 loop halt: same signature AND same result, consecutively.
+            const sigResult = `${sig}\u0000${String(result).slice(0, 200)}`
+            if (sigResult === lastSigResult) sameSigResultRun++
+            else { lastSigResult = sigResult; sameSigResultRun = 1 }
+            if (sameSigResultRun >= LOOP_HALT_REPEATS && !loopHalt) {
+              loopHalt = { tool: tc.name, repeats: sameSigResultRun, step: steps }
+              onEvent?.({ type: "LOOP_HALT", tool: tc.name, repeats: sameSigResultRun, step: steps, sig: sig.slice(0, 120), ...identityMeta() })
+            }
           }
           if (tc.name === "bash" && !sub) {
             try {
@@ -1335,6 +1371,35 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // like no answer at all: INCOMPLETE + checkpoint + resume. meta continues
     // on budgetHit either way; direct callers get the honest status.
     const exhausted = budgetHit && (!answerPresent || coercedByNudge)
+
+    // v115 — A RUN WHOSE ONLY MUTATING ATTEMPTS WERE REFUSED IS NOT COMPLETE.
+    //
+    // Reproduced: the governor refused the single write_file ("BLOCKED:
+    // governor SEARCH forbids write_file"), the model then said "Added the
+    // key. The task is complete." — and the run reported COMPLETED with
+    // wrote=false. Nothing happened and forge agreed it was done.
+    //
+    // The signal has to be narrow, because a read-only task legitimately
+    // writes nothing and must still be able to complete. What is NOT
+    // legitimate is claiming completion when every mutating call you made was
+    // refused: the agent tried to change something, was told no, and said it
+    // was finished anyway.
+    // WRITE_TOOLS includes `bash`, which is mostly used read-only (git status,
+    // ls, a test run), so a refused `bash ls` would be miscounted as a refused
+    // mutation. Only the tools that exist to change files count here.
+    const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])
+    const mutatingAttempts = toolLog.filter((t) => FILE_WRITE_TOOLS.has(t.name))
+    const mutationsRefused = mutatingAttempts.length > 0 &&
+      mutatingAttempts.every((t) => String(t.result).startsWith("BLOCKED") || String(t.result).startsWith("ERROR"))
+    // ...and nothing else landed either. A run whose apply_patch was refused
+    // but which then wrote through `bash` DID change the workspace, so it is
+    // not a refused-only run and must not be judged as one.
+    const refusedOnly = mutationsRefused && !wrote
+    if (refusedOnly) {
+      onEvent?.({ type: "MUTATIONS_ALL_REFUSED", attempts: mutatingAttempts.length,
+        reasons: [...new Set(mutatingAttempts.map((t) => String(t.result).slice(0, 80)))].slice(0, 3), ...identityMeta() })
+    }
+
     const verificationGap = unverifiedWrites({ writesSoFar, commandChecks })
     // v102 — the adversarial review finally runs on the path everything uses.
     // It has always existed (review.js) and has always been reachable ONLY
@@ -1367,7 +1432,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         text: formatReview(runReview), ...identityMeta() })
     }
     const fastGate = canCompleteFastPath({
-      finalText: answerPresent ? finalText : "", error: null, budgetHit: exhausted, toolLog, commandChecks,
+      // v115: a refused-only run and a provably looping run are both reported
+      // to the ONE completion module the same way budget exhaustion is — as a
+      // reason this run did not finish, not as a separate private verdict.
+      finalText: answerPresent ? finalText : "", error: null,
+      budgetHit: exhausted || refusedOnly || Boolean(loopHalt),
+      toolLog, commandChecks,
       unverified: verificationGap.unverified,
       requireVerification: config.agent?.requireVerification === true,
       // "report" (the default) surfaces blockers without changing the verdict —
@@ -1428,12 +1498,32 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         checkpointId = boundaryCheckpoint(process.cwd(), { runId, label: "budget-incomplete", objective: task })
         if (checkpointId && log) log.checkpoint(checkpointId)
       } catch { /* checkpoint is best-effort, never breaks the run */ }
-      finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
+      // v115: say which of the three it actually was. The refused-mutation and
+      // loop cases ride the same gate input as budget exhaustion, so without
+      // this they inherited its wording and the run reported "stopped at the
+      // step budget" after two steps of an eight-step budget — a false reason
+      // attached to an honest verdict, which is its own kind of lie.
+      const resume = checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""
+      if (loopHalt) {
+        finalText = `(run stopped after repeating the same ${loopHalt.tool} call with the same result ${loopHalt.repeats} times in a row at step ${loopHalt.step} — it was making no progress, so continuing would only have cost more model calls; status INCOMPLETE, not completed${resume})`
+      } else if (refusedOnly) {
+        const why = [...new Set(mutatingAttempts.map((t) => String(t.result).replace(/^(BLOCKED|ERROR):\s*/, "").slice(0, 90)))][0] ?? "refused"
+        finalText = `(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`
+      } else {
+        finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${resume})`
+      }
     }
     const endStatus = waitingForUser ? "waiting_for_user" : (fastGate.ok && !waitingForUser ? "completed" : "incomplete")
     endRun(endStatus, { text: finalText, wrote })
-    const govReason = waitingForUser ? "GOVERNOR_ASK" : (governorHalt ? "GOVERNOR_STOP" : (fastGate.ok ? null : "RESOURCE_LIMIT"))
-    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : (fastGate.ok ? null : "RESOURCE_LIMIT"), resource: waitingForUser || governorHalt ? null : (fastGate.ok ? null : "steps"), completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    // v115: name the real reason. Everything that is not completion used to
+    // come back as RESOURCE_LIMIT, so a refused-mutation run and a looping run
+    // both reported a budget problem they never had.
+    const stopReason = fastGate.ok ? null
+      : loopHalt ? "LOOP_DETECTED"
+      : refusedOnly ? "MUTATIONS_REFUSED"
+      : "RESOURCE_LIMIT"
+    const govReason = waitingForUser ? "GOVERNOR_ASK" : (governorHalt ? "GOVERNOR_STOP" : stopReason)
+    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

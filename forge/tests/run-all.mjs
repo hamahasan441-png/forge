@@ -233,6 +233,9 @@ const suites = [
   ["v108", "node", ["test-v108.mjs"]],
   // ---- v114 measurewise: the learning claims become falsifiable ----------
   ["v114", "node", ["test-v114.mjs"]],
+  // ---- v115 honestwise: loops halt, refused runs are not COMPLETED, a -----
+  // ---- cancel is CANCELLED at the node level ------------------------------
+  ["v115", "node", ["test-v115.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],
