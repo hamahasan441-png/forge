@@ -177,5 +177,57 @@ console.log("== 3. one event, one field naming ==")
     }), `${emitters.length} emitter(s)`)
 }
 
+// ---------------------------------------------------------------------------
+console.log("== 4. the two follow-ups, root-caused before being touched ==")
+{
+  // FIRST, THE CORRECTION. The trace showed "59 lines hidden" per read and I
+  // read that as forge returning 60-line windows. It is the CLI collapsing the
+  // transcript. read_file's default limit is 400 lines, and prediction.js
+  // (353 lines) comes back WHOLE in one call — so those three re-reads were
+  // the model's choice, not a forge limit. Nothing to fix there, and the
+  // assertion below is what proves it rather than my say-so.
+  const tools = await import("../tools.js")
+  // the suite may run from tests/ — read against the forge root, not the cwd
+  const ROOT = path.dirname(new URL("../package.json", import.meta.url).pathname)
+  const ctx = { cwd: ROOT, root: ROOT, timeoutSec: 10, maxToolOutput: 32000, readOnly: true, _plugins: new Map() }
+
+  const whole = String(await tools.execTool(ctx, "read_file", { path: "prediction.js" }))
+  ok("a 353-line file needs exactly one default read", /^\s*353\|/m.test(whole) && !/continue with offset/.test(whole),
+    whole.split("\n").slice(-1)[0])
+
+  // What IS a real gap: a file past the 400-line window said "there is more"
+  // without saying where. The next offset is the one fact the note exists for.
+  const partial = String(await tools.execTool(ctx, "read_file", { path: "cognition.js" }))
+  const m = /continue with offset: (\d+)/.exec(partial)
+  ok("a partial read names the offset to continue from", Boolean(m), partial.split("\n").slice(-1)[0])
+  eq("and it is the line after the last one shown", m && Number(m[1]), 401)
+
+  // ...and following it actually works, in one hop rather than a guess.
+  const rest = String(await tools.execTool(ctx, "read_file", { path: "cognition.js", offset: Number(m[1]) }))
+  ok("following that offset resumes exactly where the first read stopped", /^\s*401\|/m.test(rest), rest.split("\n")[0])
+  ok("and reaches the end of the file", !/continue with offset/.test(rest), rest.split("\n").slice(-1)[0])
+}
+
+console.log("== 4b. the 60s of connect guards was a stale CONFIG, not a forge default ==")
+{
+  // providers.js ships connectMs: 8000. The run reported 30s — the default
+  // before it was lowered. v89 already stops connect failures from stacking
+  // (they skip retry and fail over), so there was nothing to fix in the guard;
+  // the cost came from a value an older forge wrote and nothing ever revisits.
+  const { defaultConfig } = await import("../config.js")
+  eq("the shipped connect guard is 8s", defaultConfig().retry.connectMs, 8000)
+
+  const src = fs.readFileSync(new URL("../providers.js", import.meta.url), "utf8")
+  ok("a connect failure still skips the retry loop rather than stacking waits",
+    /kind === "connect"\) throw e/.test(src))
+
+  // So the fix is visibility: a stale value announces itself in `forge doctor`.
+  const forgeSrc = fs.readFileSync(new URL("../forge.js", import.meta.url), "utf8")
+  ok("doctor compares the live retry settings against the shipped ones",
+    /shipped = defaultConfig\(\)\.retry/.test(forgeSrc) && /well above the shipped default/.test(forgeSrc))
+  ok("and only flags a value well clear of the default, not every difference",
+    /mine\[k\] > v \* 2/.test(forgeSrc))
+}
+
 console.log(`\n== v120 honestcheck suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
