@@ -288,6 +288,18 @@ function pidAlive(pid) {
  * adds: discovered launch, ownership ledger, health probing, evidence, and
  * crash reconciliation.
  */
+/**
+ * v122: how long `health` may wait for a launched process to OPEN a port when
+ * the caller did not name one. A `launch` returns as soon as the shell forked;
+ * `npm run dev` still has to boot npm, boot node, and let the grandchild bind.
+ * Detection therefore polls, bounded, and gives up in favour of an honest
+ * refusal — it never converts a missing listener into a pass. Kept well below
+ * `bringUp`'s 30s ready budget because `health` is also a one-shot question the
+ * model asks between steps, and a crashed server must cost nothing (it exits
+ * the loop on the spot — see the fail-fast below).
+ */
+export const HEALTH_DETECT_GRACE_MS = 6000
+
 export function createRuntimeSession({ cwd = process.cwd(), mgr } = {}) {
   const root = path.resolve(cwd || process.cwd())
   const evidence = []
@@ -353,32 +365,78 @@ export function createRuntimeSession({ cwd = process.cwd(), mgr } = {}) {
     }
   }
 
-  /** §11: a health claim needs a REAL probe. Probing records evidence. */
-  async function health({ port = null, host = "127.0.0.1", timeoutMs = 2500 } = {}) {
+  /**
+   * §11: a health claim needs a REAL probe. Probing records evidence.
+   *
+   * v122 — the port DETECTION waits, briefly and bounded; the probe never lies.
+   * `npm run dev` does not own the socket: npm boots, node boots, the grandchild
+   * binds. Reading the OS socket table once, milliseconds after the launch
+   * returned, therefore reported "no port detected" on a loaded machine while
+   * the server was coming up perfectly well — which is how a CI check went red
+   * on a commit whose own pull_request run of the SAME SHA was green. The wait
+   * applies only to finding the port (`graceMs`, default
+   * `HEALTH_DETECT_GRACE_MS` = 6s, `0` = instant,
+   * for a caller that wants a single verdict), and the failure keeps the exact
+   * wording it had so nothing that greps for it changes meaning. What a probe
+   * then says about the port is untouched: found-but-unreachable is still not
+   * healthy, and no amount of waiting turns a refused connection into a pass.
+   */
+  async function health({ port = null, host = "127.0.0.1", timeoutMs = 2500, graceMs = HEALTH_DETECT_GRACE_MS } = {}) {
     let portNum = Number(port)
-    if (!portNum) {
+    const explicit = Number.isInteger(portNum) && portNum > 0
+    const detectStartedAt = Date.now()
+    const grace = explicit ? 0 : Math.max(0, Number(graceMs) || 0)
+    if (!explicit) {
       // detect from live processes' ports (OS socket table — never a guess)
-      const st = await status()
-      const ports = (st.processes ?? []).flatMap((p) => p.ports ?? [])
-      portNum = ports[0]
-      if (!portNum) return { ok: false, error: "no port detected on live runtime processes (empty = none detected — pass an explicit port only if the project documents one)", evidence: null }
+      const deadline = detectStartedAt + grace
+      for (;;) {
+        const st = await status()
+        const procs = st.processes ?? []
+        portNum = procs.flatMap((p) => p.ports ?? [])[0]
+        if (portNum) break
+        // Fail fast, and say WHY: with no live process there is nothing to wait
+        // for, and a crashed boot must not cost a caller a whole grace window.
+        const live = procs.filter((p) => p.state === "running")
+        if (!live.length) {
+          // `status()` lists LIVE processes; an exited boot has already moved to
+          // `history`. Say which one this is — "your server is not running, and
+          // here is the exit code it left behind" is the whole diagnosis, and
+          // it is available at zero cost instead of after a full grace window.
+          const died = (st.history ?? [])[0] ?? procs[0]
+          return {
+            ok: false,
+            error: `no port detected on live runtime processes (${died
+              ? `the launched process is already ${died.state}${died.exitCode != null ? ` (exit ${died.exitCode})` : ""}${died.signal ? ` signal ${died.signal}` : ""} — nothing left to wait for; its output is in the process log`
+              : "no runtime process is running — launch it first, or pass an explicit port"})`,
+            evidence: null,
+            waitedMs: Date.now() - detectStartedAt,
+          }
+        }
+        if (Date.now() >= deadline) {
+          break
+        }
+        await sleep(200)
+      }
     }
+    const waitedMs = Date.now() - detectStartedAt
+    if (!portNum) return { ok: false, error: `no port detected on live runtime processes after ${waitedMs}ms of bounded grace (the process is still running but has opened no listener — pass an explicit port if the project documents one, or a larger graceMs if its boot is slower than this)`, evidence: null, waitedMs }
     const probe = await healthProbe({ port: portNum, host, timeoutMs })
     const detail = probe.level === "http"
       ? `HTTP ${probe.probe.status} in ${probe.probe.ms}ms`
       : probe.level === "tcp"
         ? `TCP listener on :${portNum} (no HTTP response — protocol-aware probe) in ${probe.probe.ms}ms`
         : probe.error
-    record("health", probe.ok ? `runtime reachable on :${portNum} (${probe.level})` : `runtime NOT healthy on :${portNum}`, detail, probe.probe)
-    return probe
+    const waitedNote = !explicit && waitedMs > 200 ? ` — listener detected after ${waitedMs}ms` : ""
+    record("health", probe.ok ? `runtime reachable on :${portNum} (${probe.level})` : `runtime NOT healthy on :${portNum}`, detail + waitedNote, probe.probe)
+    return { ...probe, port: portNum, waitedMs }
   }
 
   /** The §11 claim gate: "server started" = live process + successful probe. */
-  async function claimServerStarted({ port = null } = {}) {
+  async function claimServerStarted({ port = null, graceMs = HEALTH_DETECT_GRACE_MS } = {}) {
     const st = await status()
     const live = (st.processes ?? []).filter((p) => p.state === "running")
     const procEvidence = live.length >= 1
-    const hp = live.length ? await health({ port }) : { ok: false, error: "no live runtime process" }
+    const hp = live.length ? await health({ port, graceMs }) : { ok: false, error: "no live runtime process" }
     const ok = procEvidence && hp.ok
     const healthDetail = hp.level === "http" ? `health HTTP ${hp.probe?.status}` : hp.level === "tcp" ? `health TCP-listener :${hp.probe?.port}` : ""
     record("claim", ok ? "server started — PROVEN" : "server started — NOT proven", ok

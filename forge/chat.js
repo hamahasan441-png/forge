@@ -36,6 +36,7 @@ import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
+import { yoloState, yoloGrants, formatYolo, NEVER_YOLO, NEVER_YOLO_CORRECTNESS } from "./yolo.js" // v122: one resolved full-control state
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
@@ -117,7 +118,7 @@ export const COMMANDS = [
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", `list the ${toolCount()} agent tools, or toggle auto-tools in chat`],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
-  ["yolo", "[on|off]", "FULL CONTROL — never pause to ask permission (default ON)"],
+  ["yolo", "[on|off|status]", "FULL CONTROL — nothing refused, nothing paused, nothing frozen (default ON); status prints every layer"],
   ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
   ["compact", "", "force context compaction (older turns → summary)"],
   ["usage", "", "session token totals + est. cost"],
@@ -194,7 +195,7 @@ ${bold("setup")}
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the ${toolCount()} agent tools, or toggle auto-tools in chat
-  /yolo [on|off]        FULL CONTROL — run everything, never pause to ask (default ON)
+  /yolo [on|off|status] FULL CONTROL — everything allowed, nothing frozen; status prints every layer (default ON)
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
   /deep                 toggle DEEP THINKING (high reasoning effort + bigger budgets)
@@ -301,8 +302,11 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
     `Date: ${new Date().toISOString().slice(0, 10)}   OS: ${process.platform}   Node: ${process.version}`,
     "Answer in the user's language. Use markdown. Be direct; skip filler.",
   ]
+  const yoloNow = yoloState(config ?? {})
   if (toolsEnabled) {
-    lines.push("", `TOOLS: you can use tools automatically (web_search, fetch_url, bash, read_file, glob_files, grep_files, apply_patch, git_status, todo, think, memory, delegate and more — ${toolCount()} total). Use them whenever they help; results arrive automatically. Writes stay inside the working directory; sensitive files are protected.`)
+    lines.push("", `TOOLS: you can use tools automatically (web_search, fetch_url, bash, read_file, glob_files, grep_files, apply_patch, git_status, todo, think, memory, delegate and more — ${toolCount()} total). Use them whenever they help; results arrive automatically.${yoloNow.yolo
+      ? " The owner granted FULL CONTROL: nothing is refused and nothing pauses to ask — run the command, write the file, and never offer to let the user do it instead."
+      : " Writes stay inside the working directory; the project boundary and the confirmation prompts are live."}`)
     lines.push("", `RULE: ${UNTRUSTED_CONTENT_RULE}`)
   }
   if (deep) {
@@ -564,8 +568,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   // v85: owner master switch — implies every privileged tools.* flag and
   // bypasses both shellguard policy gates (user terminal AND model bash).
   // v87: `let` so /yolo can flip them live in the running session.
-  let unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
-  let assumeYes = unrestricted || config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
+  // v122 "yolowise": the resolution moved into yolo.js so that the governor,
+  // the critique, the router ceiling and the read-only workers answer the SAME
+  // question the shell does. `yoloNow` is reassigned by /yolo and every reader
+  // below goes through `control()` so a live flip reaches them all.
+  let yoloNow = yoloState(config)
+  let unrestricted = yoloNow.unrestricted || yoloNow.yolo
+  let assumeYes = yoloNow.assumeYes || unrestricted
+  const control = () => (yoloNow = yoloState(config))
   const pluginStartedAt = Date.now()
   // v21.2: plugins + MCP for the interactive loop (same path as runAgent).
   // pluginStartedAt is task-scoped so /agent segments cannot import() a plugin
@@ -592,16 +602,21 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     memoryPath,
     todoPath: path.join(DEFAULT_DIR, "todo.json"),
     readOnly: false,
-    allowOutsideProject: unrestricted || config.tools?.allowOutsideProject === true,
-    // v104 §5: EXPLICIT only — `unrestricted` ships true and must not silently
-    // grant a filesystem-wide scan the user never asked for.
-    allowOutsideTraversal: config.tools?.allowOutsideProject === true,
-    allowSudo: unrestricted || config.tools?.allowSudo === true,
-    allowNetworkUpload: unrestricted || config.tools?.allowNetworkUpload === true,
-    allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true,
+    // v122: every grant comes from the resolved control state (yolo.js), so a
+    // `!ls` in chat, a model bash call and a delegated worker cannot disagree
+    // about what the owner allowed.
+    allowOutsideProject: yoloNow.allowOutsideProject || unrestricted,
+    // v104 §5: traversal is a SCOPE grant — YOLO answers it, `unrestricted`
+    // alone still may not silently grant a filesystem-wide scan.
+    allowOutsideTraversal: yoloNow.allowOutsideTraversal,
+    allowSudo: yoloNow.allowSudo || unrestricted,
+    allowNetworkUpload: yoloNow.allowNetworkUpload || unrestricted,
+    allowInterpreterEval: yoloNow.allowInterpreterEval || unrestricted,
     assumeYes,
     unrestricted,
-    fetchPrivateUrls: unrestricted || config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
+    yolo: yoloNow.yolo,
+    readOnlyBashByClass: yoloNow.readOnlyBashByClass,
+    fetchPrivateUrls: yoloNow.fetchPrivateUrls || unrestricted,
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (res.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     vision: config.tools?.vision !== false,
@@ -624,7 +639,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let chatUIEvent = null // set once the terminal UI exists (declared below)
   const chatIntel = createToolIntel({
     exec: tools.exec,
-    ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: unrestricted || config.tools?.allowSudo === true, allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true, assumeYes, unrestricted },
+    ctx: { cwd: process.cwd(), root: process.cwd(), readOnly: false, allowSudo: yoloNow.allowSudo || unrestricted, allowInterpreterEval: yoloNow.allowInterpreterEval || unrestricted, assumeYes, unrestricted, yolo: yoloNow.yolo },
     config,
     onEvent: (ev) => chatUIEvent?.(ev),
     taskId: "chat",
@@ -2206,7 +2221,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  effort:     profile=${cyan(config.chat?.profile ?? "auto")} • deep=${deep ? green("on") : "off"} • tools=${chatToolsEnabled() ? green("on") : "off"} • shell=${config.chat?.shellAuto === false ? yellow("! only") : green("auto")}`)
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
-        console.log(`  safety:     ${yellow("NO GUARDS (v88 noguard)")} — nothing refused, nothing prompts • writes anywhere • sandbox ${process.env.FORGE_SANDBOX === "1" ? yellow("bwrap (opt-in)") : "off"} • redaction ${green("on")} • workers clamp 2..8`)
+        // v122: the safety line tells the truth about EVERY layer, because
+        // "NO GUARDS" was only ever true of the shell — the governor could
+        // still freeze a tool and the critique could still stop a write, and
+        // `/status` said nothing about either.
+        {
+          const y = control()
+          const onoff = (v) => v ? green("on ") : yellow("off")
+          console.log(`  control:    ${y.yolo ? yellow("YOLO — FULL CONTROL") : "guarded"} ${dim(`(${y.source})`)} • shell ${green("never refuses")} (v88) • governor ${y.governorEnforce ? yellow("enforcing") : green("advisory")} • critique ${y.critiqueEnforce ? yellow("enforcing") : green("advisory")} • ceiling ${y.maxRisk ? yellow(String(y.maxRisk)) : green("none")}`)
+          console.log(`              grants: sudo ${onoff(y.allowSudo)} • outside-project ${onoff(y.allowOutsideProject)} • traversal ${onoff(y.allowOutsideTraversal)} • interpreter-eval ${onoff(y.allowInterpreterEval)} • upload ${onoff(y.allowNetworkUpload)} • private-urls ${onoff(y.fetchPrivateUrls)} • new-plugins ${onoff(y.allowNewPlugins)}`)
+          console.log(`              rails YOLO never turns off: project-config strip • injection fence • secret redaction • atomic writes • socket pinning ${dim("(/yolo status)")}`)
+        }
+        console.log(`  runtime:    sandbox ${process.env.FORGE_SANDBOX === "1" ? yellow("bwrap (opt-in)") : "off"} • writes anywhere • workers clamp 2..8`)
         try {
           const { snapshotKnowledge } = await import("./decisions.js")
           const { knowledgeDockText } = await import("./render.js")
@@ -2680,32 +2706,46 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // v87: FULL CONTROL — the agent decides and continues on its own; it
         // never pauses a run with "needs your decision". Persists so CLI
         // runs (`forge agent …`) get the same behaviour.
+        // v122 "yolowise": this now reaches EVERY layer that can refuse or
+        // freeze — the governor's tool veto, the pre-edit critique's BLOCK/ASK,
+        // the capability-risk ceiling, the traversal scope grant, the read-only
+        // worker's command allowlist — not just the three booleans it flipped.
+        // `/yolo status` prints the whole resolved table, so "did it really
+        // take?" is a question you can ask instead of discovering it by hitting
+        // a refusal 40 steps into a run.
         const arg2 = (arg || "").trim().toLowerCase()
-        const currentlyOn = config.tools?.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1"
-        const on = arg2 === "on" ? true : arg2 === "off" ? false : !currentlyOn
-        config.tools = { ...(config.tools || {}), autoApprove: on }
+        const st = control()
+        if (arg2 === "status" || arg2 === "show") {
+          for (const line of formatYolo(st).split("\n")) console.log(line)
+          break
+        }
+        const on = arg2 === "on" ? true : arg2 === "off" ? false : !st.yolo
+        config.tools = { ...(config.tools || {}), yolo: on }
         if (on) {
           config.tools.unrestricted = true
+          config.tools.autoApprove = true
           config.tools.assumeYes = true
           process.env.FORGE_AUTO_APPROVE = "1"
           process.env.FORGE_UNRESTRICTED = "1"
           process.env.FORGE_ASSUME_YES = "1"
-          unrestricted = true
-          assumeYes = true
-          const c = toolsRef?.ctx
-          if (c) { c.unrestricted = true; c.assumeYes = true; c.allowSudo = true; c.allowOutsideProject = true; c.allowInterpreterEval = true; c.allowNetworkUpload = true; c.fetchPrivateUrls = true }
         } else {
           process.env.FORGE_AUTO_APPROVE = "0"
           process.env.FORGE_UNRESTRICTED = "0"
           process.env.FORGE_ASSUME_YES = "0"
-          unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
-          assumeYes = unrestricted || config.tools?.assumeYes === true || process.env.FORGE_ASSUME_YES === "1"
-          const c = toolsRef?.ctx
-          if (c) { c.unrestricted = unrestricted; c.assumeYes = assumeYes }
         }
+        const y = control() // re-resolve from the config we just wrote
+        unrestricted = y.unrestricted || y.yolo
+        assumeYes = y.assumeYes || unrestricted
+        const c = toolsRef?.ctx
+        if (c) Object.assign(c, yoloGrants(y), { readOnlyBashByClass: y.readOnlyBashByClass, unrestricted, assumeYes })
         saveConfig(config)
-        if (on) ok(`YOLO — FULL CONTROL ON • no permission pauses • guards off • every command runs ${dim("(saved: tools.autoApprove in ~/.forge/config.json)")}`)
-        else ok(`yolo OFF — forge asks before risky operations again (saved)`)
+        if (on) {
+          ok(`YOLO — FULL CONTROL ON • no pauses • guards off • governor advisory • critique advisory • no risk ceiling • every command runs ${dim("(saved: tools.yolo in ~/.forge/config.json)")}`)
+          console.log(dim("  rails YOLO deliberately keeps (defence against other people's code, not friction for you):"))
+          for (const [name, where] of NEVER_YOLO) console.log(dim(`    ${name} — ${where}`))
+          console.log(dim("  kept for correctness, not permission:"))
+          for (const [name, where] of NEVER_YOLO_CORRECTNESS) console.log(dim(`    ${name} — ${where}`))
+        } else ok(`yolo OFF — the governor, the critique and the ceilings are back in charge (saved)`)
         break
       }
       case "shell": {
@@ -2720,7 +2760,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(bold("terminal mode"))
         console.log(`  type any Linux command — ${SHELL_COMMANDS.size} commands auto-recognized — or prefix with ${cyan("!")} to force`)
         console.log(`  cd / export persist for this session • output shows here AND is shared with the model`)
-        console.log(`  risky commands ask y/N first • catastrophic ones are always blocked`)
+        console.log(`  ${dim("since v88 nothing asks and nothing blocks:").padEnd(0)} the risk class is computed for the log line only — ${cyan("/yolo status")} shows who is in charge`)
         console.log(`  auto-detect is ${config.chat?.shellAuto === false ? yellow("OFF") : green("ON")}  ${dim("(/shell on|off)")}`)
         break
       }

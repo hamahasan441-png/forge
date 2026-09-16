@@ -74,7 +74,7 @@ export function cognitionPath(cwd) {
   return path.join(projectDir(cwd), "cognition.json")
 }
 
-export function createCognition({ cwd = process.cwd(), objective = "", resume = null } = {}) {
+export function createCognition({ cwd = process.cwd(), objective = "", resume = null, governorEnforce = true } = {}) {
   const kernel = createKernel({ cwd })
   const user = createUserModel()
   const resumedOriginal = String(resume?.contract?.originalIntent || resume?.objective || "").trim()
@@ -276,7 +276,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
       driftReplans += 1
     }
     lastAction = action
-    lastAuth = authorityFor(action.action, { klass })
+    lastAuth = authorityFor(action.action, { klass, enforce: governorEnforce })
     if (action.action === ACTION.PLAN && ranked.length === 0) {
       const hypos = user.understanding?.intentHypotheses || []
       // v121 deadwire: `id` here is POSITIONAL. usermodel.js assigns IH1..IHn
@@ -309,7 +309,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
   }
 
   function enforce(gov = lastAction) {
-    lastAuth = authorityFor(gov?.action || ACTION.EXECUTE, { klass })
+    lastAuth = authorityFor(gov?.action || ACTION.EXECUTE, { klass, enforce: governorEnforce })
     return lastAuth
   }
 
@@ -615,13 +615,15 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     get lastAcquire() { return lastAcquire },
     get lastMeta() { return lastMeta },
     get lastJoint() { return lastJoint },
+    /** v122: was the governor's veto armed for this run? (advisory = false) */
+    get governorEnforce() { return governorEnforce !== false },
   }
 }
 
-export function loadCognition(cwd) {
+export function loadCognition(cwd, { governorEnforce = true } = {}) {
   try {
     const j = JSON.parse(fs.readFileSync(cognitionPath(cwd), "utf8"))
-    return createCognition({ cwd, objective: j.objective || j.contract?.originalIntent || "", resume: j })
+    return createCognition({ cwd, objective: j.objective || j.contract?.originalIntent || "", resume: j, governorEnforce })
   } catch {
     return null
   }

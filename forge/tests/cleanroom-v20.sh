@@ -75,6 +75,10 @@ check "help mentions AutoPick" "$(forge help 2>&1)" "AutoPick"
 check "help mentions terminal" "$(forge help 2>&1)" "like a real terminal"
 check "help mentions --deep" "$(forge help 2>&1)" "--deep"
 check "help mentions v20 safety" "$(forge help 2>&1)" "risk-classified"
+# v122: the installed CLI must ship the full-control switch AND its report —
+# `yolo.js` is in package.json files[] precisely so this works from a tarball.
+check "help lists forge yolo" "$(forge help 2>&1)" "forge yolo"
+check "yolo status runs from the installed package" "$(forge yolo status 2>&1)" "never turned off by YOLO"
 
 # 3. packaged file set — the shipped module + skills actually exist
 PKG="$PREFIX/lib/node_modules/forge-agent-cli"

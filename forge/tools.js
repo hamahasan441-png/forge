@@ -316,7 +316,7 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "read_image",
-      description: "Read a local raster image (png/jpeg/gif/webp) and attach it for vision-capable models. Returns mime, pixel size, and byte size. Sensitive files are protected. Remote URLs and SVG are refused. When the provider cannot accept image parts, only metadata is returned — pixels are never faked.",
+      description: "Read a local raster image (png/jpeg/gif/webp) and attach it for vision-capable models. Returns mime, pixel size, and byte size. Remote URLs and SVG are refused (the provider accepts neither as an image part — it is a capability limit, not a permission). When the provider cannot accept image parts, only metadata is returned — pixels are never faked.",
       parameters: { type: "object", properties: { path: { type: "string", description: "local file path (not a URL)" } }, required: ["path"] },
     },
   },
@@ -364,7 +364,7 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "fetch_url",
-      description: "Fetch a web page or JSON API over http(s) and return its text content (HTML tags stripped, capped, secret-redacted). Private/loopback/metadata addresses are blocked (SSRF guard).",
+      description: "Fetch a web page or JSON API over http(s) and return its text content (HTML tags stripped, capped, secret-redacted). Private/loopback/metadata targets are allowed (v88); the transport still pins the validated IP to the socket and refuses a DNS-rebinding redirect.",
       parameters: { type: "object", properties: { url: { type: "string", description: "absolute http(s) URL" } }, required: ["url"] },
     },
   },
@@ -511,6 +511,7 @@ export const TOOL_DEFS = [
         phase: { type: "string", enum: ["run", "build"], description: "launch: which discovered script (default run)" },
         name: { type: "string", description: "launch/stop: process name (default app for run, build for build)" },
         port: { type: "number", description: "health/claim/up: explicit port (default: detected from live processes)" },
+        grace_ms: { type: "number", description: "health/claim: how long to wait for a launched process to open its port when no port is given (default 6000; 0 = one look). A server is not unhealthy because npm was still booting." },
         host: { type: "string", description: "health/claim/up host (default 127.0.0.1)" },
         timeout_sec: { type: "number", description: "launch auto-kill fuse (default 3600)" },
         kill: { type: "boolean", description: "reconcile: kill forge-owned orphans (default false — report only)" },
@@ -627,6 +628,72 @@ function isReadOnlyAllowedBash(command) {
   return false
 }
 
+/** v122: mutating git subcommands that a read-only role must never run, even
+ *  when the classifier labels them low (git commit writes the object store). */
+const GIT_MUTATING_SUBS = new Set(["commit", "apply", "am", "add", "stage", "mv", "rm", "merge", "rebase", "cherry-pick", "switch", "gc", "prune", "stash", "worktree", "tag", "notes", "config"])
+const BASH_MUTATING_PROGRAMS = new Set(["rm", "rmdir", "mv", "cp", "dd", "tee", "truncate", "chmod", "chown", "chgrp", "shred", "srm", "ln", "install", "patch", "rsync", "tar", "unzip", "mkfs", "sudo", "doas", "su", "kill", "pkill", "killall", "crontab", "systemctl", "service", "sed", "npm", "yarn", "pnpm", "bun", "pip", "pip3", "apt", "apt-get", "apk", "dnf", "yum", "pacman", "brew"])
+
+/**
+ * v122 "yolowise" — the widened question a read-only ROLE may answer with the
+ * classifier instead of a 12-prefix regex list: "is this a CHECK, not a
+ * CHANGE?".
+ *
+ * The allow-list at the top of this file is a hand-written enumeration of the
+ * commands its author thought of, and it failed the way every such list does:
+ * `cargo test --features x`, `./scripts/check.sh`, `make lint`, `pytest -q
+ * tests/test_x.py -k auth`, `go vet ./...`, `npx tsc --noEmit` — real
+ * verification, refused, and the run reported `BLOCKED: bash command is not an
+ * approved verification command`. That is not a safety property; it is a guess
+ * about what a test looks like.
+ *
+ * So under YOLO the test becomes structural, and STRICTER in the places that
+ * matter: no write redirection (ever), a classification of `safe`/`low`, no
+ * mutating program, no mutating git subcommand, and no target outside the
+ * project. `git commit` and `rm x` are refused here even though the old list
+ * said nothing about them; `pytest -q` is allowed even though the old list had
+ * never heard of pytest.
+ *
+ * What this NEVER relaxes: `readOnly` still refuses the write tools and
+ * persistent-state tools (getMutationClass is untouched), so a verifier cannot
+ * change the artifact it is verifying — that is the verification contract, not
+ * a permission.
+ */
+export function isVerificationGradeBash(command, ctx = {}) {
+  const cmd = String(command ?? "").trim()
+  if (!cmd) return false
+  if (hasWriteRedirection(cmd)) return false
+  const cwd = ctx.cwd ?? process.cwd()
+  const root = ctx.root ?? cwd
+  let r
+  try { r = classifyCommand(cmd, { cwd, root }) } catch { return false }
+  if (r.level !== "safe" && r.level !== "low") return false
+  if (r.unsafe === true) return false
+  const progs = (r.programs || []).map((p) => String(p || "").toLowerCase())
+  if (!progs.length) return false
+  if (progs.some((p) => BASH_MUTATING_PROGRAMS.has(p))) return false
+  if (new RegExp(`\\bgit\\s+(-[^\\s]+\\s+)*(${[...GIT_MUTATING_SUBS].join("|")})\\b`, "i").test(cmd)) return false
+  // every named operand stays inside the project (or in scratch space, which
+  // is where test runners put their temp files)
+  const rootReal = (() => { try { return fs.realpathSync(root) } catch { return path.resolve(root) } })()
+  const tmp = (() => { try { return fs.realpathSync(os.tmpdir()) } catch { return os.tmpdir() } })()
+  for (const t of r.targets || []) {
+    const abs = path.resolve(cwd, String(t))
+    if (insideDir(abs, rootReal) || insideDir(abs, tmp)) continue
+    return false
+  }
+  return true
+}
+
+/** v122: the options a read-only role's policy question is asked with. The
+ *  classifier answer is consulted only when the owner granted full control. */
+export function readOnlyOpts(ctx = {}) {
+  return {
+    cwd: ctx.cwd ?? process.cwd(),
+    root: ctx.root ?? ctx.cwd ?? process.cwd(),
+    readOnlyBashByClass: ctx.readOnlyBashByClass === true || ctx.yolo === true,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // P0 — VERIFY ⇒ READ_ONLY, REPAIR ⇒ WRITE
 // ---------------------------------------------------------------------------
@@ -659,12 +726,14 @@ export const VERIFICATION_TOOLS = {
   ],
 }
 
-/** Is this tool permitted for a verification (READ_ONLY) agent? */
-export function verificationAllows(name, args) {
+/** Is this tool permitted for a verification (READ_ONLY) agent?
+ *  `opts.readOnlyBashByClass` (YOLO) widens ONLY the bash question. */
+export function verificationAllows(name, args, opts = {}) {
   const n = String(name ?? "")
   if (VERIFICATION_TOOLS.forbidden.includes(n)) return { ok: false, reason: `${n} is forbidden for a verification agent` }
   if (n === "bash") {
     if (isReadOnlyAllowedBash(String(args?.command ?? ""))) return { ok: true }
+    if (opts.readOnlyBashByClass === true && isVerificationGradeBash(args?.command, opts)) return { ok: true }
     return { ok: false, reason: `bash command is not an approved verification command: ${String(args?.command ?? "").slice(0, 80)}` }
   }
   if (n === "browser") {
@@ -740,11 +809,14 @@ function getMutationClass(name, args) {
   return MUTATION_CLASS.NONE
 }
 
-export function isReadOnlyViolation(name, args, readOnly) {
+export function isReadOnlyViolation(name, args, readOnly, opts = {}) {
   if (!readOnly) return null
   const mutationClass = getMutationClass(name, args)
   if (mutationClass === MUTATION_CLASS.FILESYSTEM) {
     if (name === "bash" && isReadOnlyAllowedBash(args?.command)) return null
+    // v122: under full control a read-only WORKER may run any command the
+    // classifier itself calls a check — the role's write tools stay refused.
+    if (name === "bash" && opts.readOnlyBashByClass === true && isVerificationGradeBash(args?.command, opts)) return null
     return `BLOCKED: ${name} is a filesystem mutation and is disabled in this read-only agent (mutation class: ${mutationClass})`
   }
   if (mutationClass === MUTATION_CLASS.FORGE_STATE) {
@@ -785,6 +857,12 @@ export function makeToolContext(opts = {}) {
      * its own grant, read ONLY from an explicit setting.
      */
     allowOutsideTraversal = false,
+    // v122 "yolowise": the owner's full-control state, resolved ONCE by the
+    // caller (agent.js / chat.js) and carried here so every policy question
+    // inside the tool layer — the read-only role's bash test, the traversal
+    // boundary, the shell verdict — is answered from the same place.
+    yolo = false,
+    readOnlyBashByClass = null,
     allowGeneratedWrites = false,
     allowSudo = false,
     assumeYes = false,
@@ -821,6 +899,7 @@ export function makeToolContext(opts = {}) {
     delegateRunner, readOnly,
     mode,
     allowOutsideProject, allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
+    yolo, readOnlyBashByClass,
     delegateTimeoutSec, signal, subAgent, runId,
     _plugins: pluginMap,
     _delegateActive: 0,
@@ -931,7 +1010,9 @@ const plainWrap = (command) => ({ file: resolveShell(), args: ["-c", command], s
 async function runBash(ctx, command, timeoutSec) {
   if (ctx.readOnly) {
     const mutationCheck = getMutationClass("bash", { command })
-    if (mutationCheck === MUTATION_CLASS.FILESYSTEM && !isReadOnlyAllowedBash(command)) {
+    const ro = readOnlyOpts(ctx)
+    const graded = ro.readOnlyBashByClass === true && isVerificationGradeBash(command, ro)
+    if (mutationCheck === MUTATION_CLASS.FILESYSTEM && !isReadOnlyAllowedBash(command) && !graded) {
       return `BLOCKED: write tools are disabled in this read-only agent — bash command "${String(command).slice(0, 80)}" is a filesystem mutation. Read-only workers may run approved verification commands (test/build/lint) but not arbitrary mutations.`
     }
   }
@@ -1369,7 +1450,7 @@ export function traversalBoundary(ctx, target) {
   const r = real(root)
   const t = real(target)
   if (t === r || t.startsWith(r + path.sep)) return null
-  return `BLOCKED: ${t} is outside the workspace (${r}). Searching there would scan a tree this task has no target in — say which path inside the workspace to search, or the user can allow it with: forge config set tools.allowOutsideProject true`
+  return `BLOCKED: ${t} is outside the workspace (${r}). Searching there would scan a tree this task has no target in — say which path inside the workspace to search, or the user can allow it with: forge config set tools.allowOutsideProject true (full control: forge yolo on)`
 }
 
 function list_dir(ctx, args) {
@@ -2607,10 +2688,11 @@ async function runRuntimeTool(ctx, args) {
     return `project: ${r.project.type} | run: ${r.project.runCommand ?? "NOT discovered"}\nprocesses:\n${procs}${led}`
   }
   if (action === "health") {
-    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1" })
+    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1", ...(args?.grace_ms != null ? { graceMs: Number(args.grace_ms) } : {}) })
     if (r.error && !r.probe) return `ERROR: ${r.error}`
-    if (r.ok && r.level === "http") return `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)`
-    if (r.ok && r.level === "tcp") return `REACHABLE — TCP listener on ${r.probe.host}:${r.probe.port} in ${r.probe.ms}ms (${r.note ?? "no HTTP response — protocol-aware probe"}) (recorded as runtime evidence)`
+    const waitedNote = r.waitedMs > 200 && !args?.port ? ` (listener detected after ${r.waitedMs}ms — the boot was slow, not broken)` : ""
+    if (r.ok && r.level === "http") return `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)${waitedNote}`
+    if (r.ok && r.level === "tcp") return `REACHABLE — TCP listener on ${r.probe.host}:${r.probe.port} in ${r.probe.ms}ms (${r.note ?? "no HTTP response — protocol-aware probe"}) (recorded as runtime evidence)${waitedNote}`
     return `NOT HEALTHY — ${r.probe?.url ?? `${r.probe?.host ?? "127.0.0.1"}:${r.probe?.port ?? "?"}`}: ${r.error ?? "probe failed"} (this is evidence against any 'server started' claim)`
   }
   if (action === "claim") {
@@ -2660,11 +2742,11 @@ export async function execTool(ctx, name, args) {
   // VERIFY ⇒ READ_ONLY: enforce the whitelist even if a tool definition leaks
   // through (a plugin, a direct call, or a future refactor).
   if (ctx.mode === "verifier") {
-    const allowed = verificationAllows(name, args)
+    const allowed = verificationAllows(name, args, readOnlyOpts(ctx))
     if (!allowed.ok) return `BLOCKED: ${allowed.reason} — verification is read-only (VERIFY ⇒ READ_ONLY, REPAIR ⇒ WRITE)`
   }
   if (ctx.readOnly) {
-    const violation = isReadOnlyViolation(name, args, true)
+    const violation = isReadOnlyViolation(name, args, true, readOnlyOpts(ctx))
     if (violation) return violation
     const pl = ctx._plugins?.get(name)
     if (pl && !pl.readOnly) {

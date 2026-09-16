@@ -26,6 +26,40 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v122 "yolowise" — leftovers (completed plan removed, house style)
+
+- [ ] YOLO never touches `gitship` consent, by decision: `push`/`pr` are
+      OUTWARD acts (a remote and a team see them), so they keep their live
+      AUTHORIZATION ask even under full control. A zero-ask delivery mode needs
+      its own explicit key (`gitship.push: "auto"`), not a YOLO consequence.
+      Today `gitship.*` ships `"off"`, so nothing is blocked — only the shape
+      of "full control" is incomplete until that key exists.
+- [ ] a PINNED `governor.enforce: "always"` under YOLO can still park a run in
+      WAITING_FOR_USER on an ASK — correct (the owner asked for the authority
+      back), but `forge yolo` prints the pin without warning that pausing is
+      what it restores. Worth a sentence in the status output.
+- [ ] `isVerificationGradeBash` is conservative about operands: ANY named path
+      outside the project refuses the command, so a read-only worker cannot run
+      `pytest -c /etc/pytest.ini` or `tsc -p ../shared/tsconfig.json`. Splitting
+      read operands from write operands needs the classifier to distinguish them
+      first (it collects `targets` for both).
+- [ ] the read-only bash widening is not applied to `autofix.js`, which still
+      uses its own static formatter table — safe (it only picks a formatter),
+      but it is now the last hand-written command allowlist in the engine.
+- [ ] the v118/v119 completion gate is deliberately NOT relaxed by YOLO (it
+      refuses a false DONE, not a command), which leaves no key for the owner who
+      genuinely wants "finish and tell me the truth later": that needs an
+      explicit `completion.requireEvidence: false`, reported as
+      `COMPLETED_UNVERIFIED` — never as a clean COMPLETED.
+- [ ] `sandbox.js` stays opt-in and YOLO does NOT enable it: the switch is about
+      refusal, not isolation, and silently starting a bwrap sandbox because a
+      flag was flipped would be exactly the surprise this release is removing.
+      A pairing (`forge yolo --sandbox`, "run everything, inside a jail") is the
+      missing combination.
+- [ ] the `block` classification level is computed and reported but honoured by
+      nothing (v88 made that permanent). Fine as a label; a future hard-stop
+      would need its own key, and it must not be a side effect of `yolo:false`.
+
 ## v99 "loopwise" — leftovers (completed plan removed, house style)
 
 - [ ] tree-sitter consumption (inherited from v98): the layer-2 probe

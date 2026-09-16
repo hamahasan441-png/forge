@@ -40,6 +40,12 @@ export const SESSIONS_DIR = path.join(DEFAULT_DIR, "sessions")
  * still cannot set them. Autonomous runs opt into interpreter-eval and
  * in-project git danger at the agent/tool-context layer, never by flipping
  * those privileged keys.
+ *
+ * v122 "yolowise": `tools.yolo` is the umbrella over EVERY layer that can
+ * refuse, pause, or freeze — including the two that are not config-gated
+ * safety but agent authority (the cognitive governor's tool veto and the
+ * pre-edit critique's BLOCK). Resolved once in `yolo.js`; `forge yolo` prints
+ * the whole table, including the five things YOLO deliberately never turns off.
  */
 export const AGENT_BUDGETS = Object.freeze({
   maxSteps: 80,
@@ -94,7 +100,20 @@ export function defaultConfig() {
     // "needs your decision" / "[forge] ask the user"; it picks an approach and
     // continues on its own. Default ON (owner's machine, owner's call). Set
     // tools.autoApprove:false in ~/.forge/config.json to be asked again.
-    tools: { unrestricted: true, autoApprove: true, searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true, browser: true },
+    // v122 "yolowise": `yolo` is the ONE umbrella over every layer that can
+    // refuse or freeze (yolo.js resolves it; `forge yolo` prints the result).
+    // null = derive from unrestricted && autoApprove, which both ship true, so
+    // YOLO is ON by default. `true` forces it even with those keys off; `false`
+    // turns the umbrella off while leaving v88's "shellguard never refuses"
+    // decision untouched. Privileged: never settable from a project config.
+    tools: { yolo: null, unrestricted: true, autoApprove: true, searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true, browser: true },
+    // v122: the cognitive authority layer and the pre-edit critique keep their
+    // ANALYSIS under YOLO and lose only their VETO. "auto" = enforce when YOLO
+    // is off; "always" = freeze tools / block doomed edits even in YOLO (the
+    // knob for someone who wants full control but not a scattered agent);
+    // "never" = advisory even with YOLO off. Privileged (owner-only).
+    governor: { enforce: "auto" },
+    critique: { enforce: "auto" },
     // v23: Model Context Protocol servers. OFF by default (no servers). Each
     // entry: { command, args?, env?, disabled?, timeoutMs? }. A server's tools
     // become agent tools namespaced mcp__<name>__<tool>, behind the same safety
@@ -181,9 +200,9 @@ function deepMerge(base, over) {
 // ---------------------------------------------------------------------------
 
 /** tools.* switches that only the user-level config (or env) may set. */
-const PRIVILEGED_TOOL_KEYS = ["unrestricted", "autoApprove", "allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "allowInterpreterEval", "allowNewPlugins", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify", "contentFence"]
+const PRIVILEGED_TOOL_KEYS = ["unrestricted", "autoApprove", "yolo", "allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "allowInterpreterEval", "allowNewPlugins", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify", "contentFence"]
 /** top-level sections a project file may not touch at all. */
-const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval", "gitship"]
+const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval", "gitship", "governor", "critique"]
 
 /**
  * Strip everything a project-local config is not allowed to set.

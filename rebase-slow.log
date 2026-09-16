@@ -1,0 +1,610 @@
+
+[2mmachine: 2 core(s), 3667MB available, tier low → concurrency 1[0m
+
+[1m[36m▷ security[0m  (node test-security.mjs)
+
+[1m[36m▷ capabilities[0m  (node test-capabilities.mjs)
+
+[1m[36m▷ router[0m  (node test-router.mjs)
+
+[1m[36m▷ toolintel[0m  (node test-toolintel.mjs)
+
+[1m[36m▷ providers[0m  (node test-providers.mjs)
+
+[1m[36m▷ diffpatch[0m  (node test-diffpatch.mjs)
+
+[1m[36m▷ memory[0m  (node test-memory.mjs)
+
+[1m[36m▷ failover[0m  (node test-failover.mjs)
+
+[1m[36m▷ compaction[0m  (node test-context-compaction.mjs)
+
+[1m[36m▷ chat-compact[0m  (node test-chat-compaction.mjs)
+
+[1m[36m▷ parser-fuzz[0m  (node test-parser-fuzz.mjs)
+
+[1m[36m▷ state-writes[0m  (node test-state-writes.mjs)
+
+[1m[36m▷ cp-crash[0m  (node test-checkpoint-crash-matrix.mjs)
+
+[1m[36m▷ mem-pipeline[0m  (node test-memory-pipeline.mjs)
+
+[1m[36m▷ chat[0m  (node test-chat.mjs)
+
+[1m[36m▷ walk[0m  (node test-walk.mjs)
+
+[1m[36m▷ plans[0m  (node test-plans.mjs)
+
+[1m[36m▷ checkpoint[0m  (node test-checkpoint.mjs)
+
+[1m[36m▷ repomap[0m  (node test-repomap.mjs)
+
+[1m[36m▷ plugins[0m  (node test-plugins.mjs)
+
+[1m[36m▷ mcp[0m  (node test-mcp.mjs)
+
+[1m[36m▷ mcp-catalog[0m  (node test-mcpcatalog-top100.mjs)
+
+[1m[36m▷ lsp[0m  (node test-lsp.mjs)
+
+[1m[36m▷ retrieval[0m  (node test-retrieval.mjs)
+
+[1m[36m▷ semantic[0m  (node test-semantic.mjs)
+
+[1m[36m▷ sessions[0m  (node test-sessions.mjs)
+
+[1m[36m▷ skills[0m  (node test-skills.mjs)
+
+[1m[36m▷ json[0m  (node test-json.mjs)
+
+[1m[36m▷ install[0m  (node test-install.mjs)
+
+[1m[36m▷ config[0m  (node test-config.mjs)
+
+[1m[36m▷ package[0m  (node test-package.mjs)
+
+[1m[36m▷ effort[0m  (node test-effort.mjs)
+
+[1m[36m▷ ui[0m  (node test-ui.mjs)
+
+[1m[36m▷ autonomy[0m  (node test-autonomy.mjs)
+
+[1m[36m▷ chaos[0m  (node test-chaos.mjs)
+
+[1m[36m▷ dag-done[0m  (node test-whole-dag-completion.mjs)
+
+[1m[36m▷ node-gate[0m  (node test-node-verification-gate.mjs)
+
+[1m[36m▷ final-risk[0m  (node test-final-risk-recalculation.mjs)
+
+[1m[36m▷ verif-ro[0m  (node test-verifier-readonly.mjs)
+
+[1m[36m▷ worker-to[0m  (node test-worker-timeout-cleanup.mjs)
+
+[1m[36m▷ node-id[0m  (node test-exact-node-attribution.mjs)
+
+[1m[36m▷ conflicts[0m  (node test-dag-conflicts.mjs)
+
+[1m[36m▷ readonly[0m  (node test-readonly-state.mjs)
+
+[1m[36m▷ bad-plan[0m  (node test-invalid-plan.mjs)
+
+[1m[36m▷ continuation[0m  (node test-max-segment-continuation.mjs)
+
+[1m[36m▷ verif-scope[0m  (node test-verification-scope.mjs)
+
+[1m[36m▷ verif-stale[0m  (node test-verification-staleness.mjs)
+
+[1m[36m▷ exit-code[0m  (node test-unknown-exit-code.mjs)
+
+[1m[36m▷ cp-integrity[0m  (node test-checkpoint-integrity.mjs)
+
+[1m[36m▷ cp-restore[0m  (node test-checkpoint-restore.mjs)
+
+[1m[36m▷ crash-resume[0m  (node test-crash-resume.mjs)
+
+[1m[36m▷ effects[0m  (node test-effect-reconciliation.mjs)
+
+[1m[36m▷ git-recov[0m  (node test-git-recovery.mjs)
+
+[1m[36m▷ routing[0m  (node test-model-routing-history.mjs)
+
+[1m[36m▷ mcp-life[0m  (node test-mcp-lifecycle.mjs)
+
+[1m[36m▷ lsp-life[0m  (node test-lsp-lifecycle.mjs)
+
+[1m[36m▷ leaks[0m  (node test-resource-leaks.mjs)
+
+[1m[36m▷ version[0m  (node test-version-consistency.mjs)
+
+[1m[36m▷ lessons[0m  (node test-lessons-schema.mjs)
+
+[1m[36m▷ hygiene[0m  (node test-path-hygiene.mjs)
+
+[1m[36m▷ ssrf-pin[0m  (node test-ssrf-pinning.mjs)
+
+[1m[36m▷ fs-toctou[0m  (node test-fs-toctou.mjs)
+
+[1m[36m▷ plugin-iso[0m  (node test-plugin-isolation.mjs)
+
+[1m[36m▷ hardening[0m  (node test-hardening-v21.mjs)
+
+[1m[36m▷ v21-2[0m  (node test-v21-2.mjs)
+
+[1m[36m▷ omega[0m  (node test-omega.mjs)
+
+[1m[36m▷ infinity[0m  (node test-infinity.mjs)
+
+[1m[36m▷ v25[0m  (node test-v25.mjs)
+
+[1m[36m▷ v26[0m  (node test-v26.mjs)
+
+[1m[36m▷ v27[0m  (node test-v27.mjs)
+
+[1m[36m▷ v28[0m  (node test-v28.mjs)
+
+[1m[36m▷ v29[0m  (node test-v29.mjs)
+
+[1m[36m▷ v30[0m  (node test-v30.mjs)
+
+[1m[36m▷ v31[0m  (node test-v31.mjs)
+
+[1m[36m▷ v32[0m  (node test-v32.mjs)
+
+[1m[36m▷ v33[0m  (node test-v33.mjs)
+
+[1m[36m▷ v34[0m  (node test-v34.mjs)
+
+[1m[36m▷ v35[0m  (node test-v35.mjs)
+
+[1m[36m▷ v36[0m  (node test-v36.mjs)
+
+[1m[36m▷ v37[0m  (node test-v37.mjs)
+
+[1m[36m▷ v38[0m  (node test-v38.mjs)
+
+[1m[36m▷ v39[0m  (node test-v39.mjs)
+
+[1m[36m▷ v40[0m  (node test-v40.mjs)
+
+[1m[36m▷ v41[0m  (node test-v41.mjs)
+
+[1m[36m▷ v42[0m  (node test-v42.mjs)
+
+[1m[36m▷ v43[0m  (node test-v43.mjs)
+
+[1m[36m▷ v44[0m  (node test-v44.mjs)
+
+[1m[36m▷ v45[0m  (node test-v45.mjs)
+
+[1m[36m▷ v46[0m  (node test-v46.mjs)
+
+[1m[36m▷ v47[0m  (node test-v47.mjs)
+
+[1m[36m▷ v48[0m  (node test-v48.mjs)
+
+[1m[36m▷ v49[0m  (node test-v49.mjs)
+
+[1m[36m▷ v50[0m  (node test-v50.mjs)
+
+[1m[36m▷ v51[0m  (node test-v51.mjs)
+
+[1m[36m▷ v52[0m  (node test-v52.mjs)
+
+[1m[36m▷ v53[0m  (node test-v53.mjs)
+
+[1m[36m▷ v54[0m  (node test-v54.mjs)
+
+[1m[36m▷ v55[0m  (node test-v55.mjs)
+
+[1m[36m▷ v56[0m  (node test-v56.mjs)
+
+[1m[36m▷ v57[0m  (node test-v57.mjs)
+
+[1m[36m▷ v58[0m  (node test-v58.mjs)
+
+[1m[36m▷ v59[0m  (node test-v59.mjs)
+
+[1m[36m▷ v60[0m  (node test-v60.mjs)
+
+[1m[36m▷ v61[0m  (node test-v61.mjs)
+
+[1m[36m▷ v62[0m  (node test-v62.mjs)
+
+[1m[36m▷ v63[0m  (node test-v63.mjs)
+
+[1m[36m▷ v64[0m  (node test-v64.mjs)
+
+[1m[36m▷ v65[0m  (node test-v65.mjs)
+
+[1m[36m▷ v66[0m  (node test-v66.mjs)
+
+[1m[36m▷ v67[0m  (node test-v67.mjs)
+
+[1m[36m▷ v68[0m  (node test-v68.mjs)
+
+[1m[36m▷ v69[0m  (node test-v69.mjs)
+
+[1m[36m▷ v70[0m  (node test-v70.mjs)
+
+[1m[36m▷ v71[0m  (node test-v71.mjs)
+
+[1m[36m▷ v72[0m  (node test-v72.mjs)
+
+[1m[36m▷ v73[0m  (node test-v73.mjs)
+
+[1m[36m▷ v74[0m  (node test-v74.mjs)
+
+[1m[36m▷ v75[0m  (node test-v75.mjs)
+
+[1m[36m▷ v76[0m  (node test-v76.mjs)
+
+[1m[36m▷ v77[0m  (node test-v77.mjs)
+
+[1m[36m▷ v78[0m  (node test-v78.mjs)
+
+[1m[36m▷ v79[0m  (node test-v79.mjs)
+
+[1m[36m▷ v80[0m  (node test-v80.mjs)
+
+[1m[36m▷ v81[0m  (node test-v81.mjs)
+
+[1m[36m▷ v82[0m  (node test-v82.mjs)
+
+[1m[36m▷ v83[0m  (node test-v83.mjs)
+
+[1m[36m▷ v84[0m  (node test-v84.mjs)
+
+[1m[36m▷ v85[0m  (node test-v85.mjs)
+
+[1m[36m▷ v86[0m  (node test-v86.mjs)
+
+[1m[36m▷ v87[0m  (node test-v87.mjs)
+
+[1m[36m▷ v88[0m  (node test-v88.mjs)
+
+[1m[36m▷ v89[0m  (node test-v89.mjs)
+
+[1m[36m▷ v90[0m  (node test-v90.mjs)
+
+[1m[36m▷ v91[0m  (node test-v91.mjs)
+
+[1m[36m▷ v91-core[0m  (node test-v91-core.mjs)
+
+[1m[36m▷ v92[0m  (node test-v92.mjs)
+
+[1m[36m▷ v92-core[0m  (node test-v92-core.mjs)
+
+[1m[36m▷ v93[0m  (node test-v93.mjs)
+
+[1m[36m▷ v93g[0m  (node test-v93g.mjs)
+
+[1m[36m▷ v93r[0m  (node test-v93r.mjs)
+
+[1m[36m▷ v93w[0m  (node test-v93w.mjs)
+
+[1m[36m▷ v93b[0m  (node test-v93b.mjs)
+
+[1m[36m▷ v93l[0m  (node test-v93l.mjs)
+
+[1m[36m▷ v93t[0m  (node test-v93t.mjs)
+
+[1m[36m▷ v93st[0m  (node test-v93st.mjs)
+
+[1m[36m▷ v94a[0m  (node test-v94a.mjs)
+
+[1m[36m▷ v93s[0m  (node test-v93s.mjs)
+
+[1m[36m▷ search-providers[0m  (node test-search-providers.mjs)
+
+[1m[36m▷ exec-controller[0m  (node test-execution-controller.mjs)
+
+[1m[36m▷ eng-memory[0m  (node test-engmemory.mjs)
+
+[1m[36m▷ plannerisk[0m  (node test-plannerisk.mjs)
+
+[1m[36m▷ v94b[0m  (node test-v94b.mjs)
+
+[1m[36m▷ toolwise[0m  (node test-toolwise.mjs)
+
+[1m[36m▷ skillwise[0m  (node test-skillwise.mjs)
+
+[1m[36m▷ knowwise[0m  (node test-knowwise.mjs)
+
+[1m[36m▷ deepwise[0m  (node test-deepwise.mjs)
+
+[1m[36m▷ fastwise[0m  (node test-fastwise.mjs)
+
+[1m[36m▷ todowise[0m  (node test-todowise.mjs)
+
+[1m[36m▷ worktreewise[0m  (node test-worktreewise.mjs)
+
+[1m[36m▷ unifywise[0m  (node test-unifywise.mjs)
+
+[1m[36m▷ envfingerprint[0m  (node test-envfingerprint.mjs)
+
+[1m[36m▷ sourceresolve[0m  (node test-sourceresolve.mjs)
+
+[1m[36m▷ v97[0m  (node test-v97.mjs)
+
+[1m[36m▷ gitship[0m  (node test-gitship.mjs)
+
+[1m[36m▷ v98[0m  (node test-v98.mjs)
+
+[1m[36m▷ v99[0m  (node test-v99.mjs)
+
+[1m[36m▷ v100[0m  (node test-v100.mjs)
+
+[1m[36m▷ v101[0m  (node test-v101.mjs)
+
+[1m[36m▷ v102[0m  (node test-v102.mjs)
+
+[1m[36m▷ v103[0m  (node test-v103.mjs)
+
+[1m[36m▷ v104[0m  (node test-v104.mjs)
+
+[1m[36m▷ v105[0m  (node test-v105.mjs)
+
+[1m[36m▷ v106[0m  (node test-v106.mjs)
+
+[1m[36m▷ v107[0m  (node test-v107.mjs)
+
+[1m[36m▷ v108[0m  (node test-v108.mjs)
+
+[1m[36m▷ v114[0m  (node test-v114.mjs)
+
+[1m[36m▷ v115[0m  (node test-v115.mjs)
+
+[1m[36m▷ v116[0m  (node test-v116.mjs)
+
+[1m[36m▷ v117[0m  (node test-v117.mjs)
+
+[1m[36m▷ v118[0m  (node test-v118.mjs)
+
+[1m[36m▷ v119[0m  (node test-v119.mjs)
+
+[1m[36m▷ v120[0m  (node test-v120.mjs)
+
+[1m[36m▷ v121[0m  (node test-v121.mjs)
+
+[1m[36m▷ v122[0m  (node test-v122.mjs)
+
+[1m[36m▷ cognition[0m  (node test-cognition.mjs)
+
+[1m[36m▷ authority[0m  (node test-authority.mjs)
+
+[1m[36m▷ intel[0m  (node test-intel.mjs)
+
+[1m[36m▷ learn[0m  (node test-learn.mjs)
+
+[1m[36m▷ bind[0m  (node test-bind.mjs)
+
+[1m[36m▷ route[0m  (node test-route.mjs)
+
+[1m[36m▷ caplearn[0m  (node test-caplearn.mjs)
+
+[1m[36m▷ create[0m  (node test-create.mjs)
+
+[1m[36m▷ perform[0m  (node test-perform.mjs)
+
+[1m[36m▷ meta[0m  (node test-meta.mjs)
+
+[1m[36m▷ modelwise[0m  (node test-modelwise.mjs)
+
+[1m[36m▷ joint[0m  (node test-joint.mjs)
+
+[1m[36m▷ critic[0m  (node test-critic.mjs)
+
+[1m[36m▷ github[0m  (node test-github.mjs)
+
+[1m[36m▷ cleanroom-pkg[0m  (node test-clean-room-package.mjs)
+
+[1m[36m▷ e2e[0m  (bash e2e-forge.sh)
+
+[1m[36m▷ cleanroom[0m  (bash cleanroom-v20.sh)
+
+────────────────────────────────────────────────
+[1mtest summary[0m
+  [32mPASS[0m  security    1.4s
+  [32mPASS[0m  capabilities 129ms
+  [32mPASS[0m  router      165ms
+  [32mPASS[0m  toolintel   3.2s
+  [32mPASS[0m  providers   171ms
+  [32mPASS[0m  diffpatch   34ms
+  [32mPASS[0m  memory      1.1s
+  [32mPASS[0m  failover    798ms
+  [32mPASS[0m  compaction  172ms
+  [32mPASS[0m  chat-compact 360ms
+  [32mPASS[0m  parser-fuzz 2.9s
+  [32mPASS[0m  state-writes 1.7s
+  [32mPASS[0m  cp-crash    392ms
+  [32mPASS[0m  mem-pipeline 3.4s
+  [32mPASS[0m  chat        237ms
+  [32mPASS[0m  walk        154ms
+  [32mPASS[0m  plans       77ms
+  [32mPASS[0m  checkpoint  78ms
+  [32mPASS[0m  repomap     82ms
+  [32mPASS[0m  plugins     1.1s
+  [32mPASS[0m  mcp         1.2s
+  [32mPASS[0m  mcp-catalog 432ms
+  [32mPASS[0m  lsp         1.7s
+  [32mPASS[0m  retrieval   33ms
+  [32mPASS[0m  semantic    3.4s
+  [32mPASS[0m  sessions    100ms
+  [32mPASS[0m  skills      84ms
+  [32mPASS[0m  json        863ms
+  [32mPASS[0m  install     72ms
+  [32mPASS[0m  config      47ms
+  [32mPASS[0m  package     2.7s
+  [32mPASS[0m  effort      192ms
+  [32mPASS[0m  ui          43.3s
+  [32mPASS[0m  autonomy    1.7s
+  [32mPASS[0m  chaos       1.0s
+  [32mPASS[0m  dag-done    937ms
+  [32mPASS[0m  node-gate   1.1s
+  [32mPASS[0m  final-risk  887ms
+  [32mPASS[0m  verif-ro    989ms
+  [32mPASS[0m  worker-to   10.1s
+  [32mPASS[0m  node-id     994ms
+  [32mPASS[0m  conflicts   68ms
+  [32mPASS[0m  readonly    248ms
+  [32mPASS[0m  bad-plan    1.1s
+  [32mPASS[0m  continuation 1.3s
+  [32mPASS[0m  verif-scope 42ms
+  [32mPASS[0m  verif-stale 1.3s
+  [32mPASS[0m  exit-code   907ms
+  [32mPASS[0m  cp-integrity 106ms
+  [32mPASS[0m  cp-restore  87ms
+  [32mPASS[0m  crash-resume 859ms
+  [32mPASS[0m  effects     61ms
+  [32mPASS[0m  git-recov   303ms
+  [32mPASS[0m  routing     167ms
+  [32mPASS[0m  mcp-life    1.4s
+  [32mPASS[0m  lsp-life    2.3s
+  [32mPASS[0m  leaks       4.5s
+  [32mPASS[0m  version     291ms
+  [32mPASS[0m  lessons     156ms
+  [32mPASS[0m  hygiene     5.8s
+  [32mPASS[0m  ssrf-pin    700ms
+  [32mPASS[0m  fs-toctou   773ms
+  [32mPASS[0m  plugin-iso  13.9s
+  [32mPASS[0m  hardening   2.7s
+  [32mPASS[0m  v21-2       1.1s
+  [32mPASS[0m  omega       231ms
+  [32mPASS[0m  infinity    159ms
+  [32mPASS[0m  v25         160ms
+  [32mPASS[0m  v26         68ms
+  [32mPASS[0m  v27         77ms
+  [32mPASS[0m  v28         77ms
+  [32mPASS[0m  v29         446ms
+  [32mPASS[0m  v30         134ms
+  [32mPASS[0m  v31         164ms
+  [32mPASS[0m  v32         149ms
+  [32mPASS[0m  v33         213ms
+  [32mPASS[0m  v34         82ms
+  [32mPASS[0m  v35         208ms
+  [32mPASS[0m  v36         67ms
+  [32mPASS[0m  v37         215ms
+  [32mPASS[0m  v38         175ms
+  [32mPASS[0m  v39         177ms
+  [32mPASS[0m  v40         182ms
+  [32mPASS[0m  v41         292ms
+  [32mPASS[0m  v42         290ms
+  [32mPASS[0m  v43         219ms
+  [32mPASS[0m  v44         230ms
+  [32mPASS[0m  v45         210ms
+  [32mPASS[0m  v46         253ms
+  [32mPASS[0m  v47         263ms
+  [32mPASS[0m  v48         395ms
+  [32mPASS[0m  v49         202ms
+  [32mPASS[0m  v50         316ms
+  [32mPASS[0m  v51         153ms
+  [32mPASS[0m  v52         244ms
+  [32mPASS[0m  v53         248ms
+  [32mPASS[0m  v54         450ms
+  [32mPASS[0m  v55         211ms
+  [32mPASS[0m  v56         227ms
+  [32mPASS[0m  v57         194ms
+  [32mPASS[0m  v58         235ms
+  [32mPASS[0m  v59         203ms
+  [32mPASS[0m  v60         174ms
+  [32mPASS[0m  v61         64ms
+  [32mPASS[0m  v62         127ms
+  [32mPASS[0m  v63         184ms
+  [32mPASS[0m  v64         237ms
+  [32mPASS[0m  v65         235ms
+  [32mPASS[0m  v66         152ms
+  [32mPASS[0m  v67         175ms
+  [32mPASS[0m  v68         157ms
+  [32mPASS[0m  v69         217ms
+  [32mPASS[0m  v70         155ms
+  [32mPASS[0m  v71         149ms
+  [32mPASS[0m  v72         152ms
+  [32mPASS[0m  v73         211ms
+  [32mPASS[0m  v74         219ms
+  [32mPASS[0m  v75         153ms
+  [32mPASS[0m  v76         125ms
+  [32mPASS[0m  v77         175ms
+  [32mPASS[0m  v78         103ms
+  [32mPASS[0m  v79         242ms
+  [32mPASS[0m  v80         165ms
+  [32mPASS[0m  v81         230ms
+  [32mPASS[0m  v82         117ms
+  [32mPASS[0m  v83         197ms
+  [32mPASS[0m  v84         158ms
+  [32mPASS[0m  v85         77ms
+  [32mPASS[0m  v86         750ms
+  [32mPASS[0m  v87         207ms
+  [32mPASS[0m  v88         136ms
+  [32mPASS[0m  v89         837ms
+  [32mPASS[0m  v90         949ms
+  [32mPASS[0m  v91         140ms
+  [32mPASS[0m  v91-core    174ms
+  [32mPASS[0m  v92         884ms
+  [32mPASS[0m  v92-core    1.3s
+  [32mPASS[0m  v93         7.2s
+  [32mPASS[0m  v93g        1.3s
+  [32mPASS[0m  v93r        1.1s
+  [32mPASS[0m  v93w        99ms
+  [32mPASS[0m  v93b        872ms
+  [32mPASS[0m  v93l        1.3s
+  [32mPASS[0m  v93t        476ms
+  [32mPASS[0m  v93st       97ms
+  [32mPASS[0m  v94a        1.3s
+  [32mPASS[0m  v93s        143ms
+  [32mPASS[0m  search-providers 296ms
+  [32mPASS[0m  exec-controller 1.6s
+  [32mPASS[0m  eng-memory  9.1s
+  [32mPASS[0m  plannerisk  1.0s
+  [32mPASS[0m  v94b        301ms
+  [32mPASS[0m  toolwise    745ms
+  [32mPASS[0m  skillwise   177ms
+  [32mPASS[0m  knowwise    1.3s
+  [32mPASS[0m  deepwise    205ms
+  [32mPASS[0m  fastwise    1.0s
+  [32mPASS[0m  todowise    3.7s
+  [32mPASS[0m  worktreewise 14.4s
+  [32mPASS[0m  unifywise   703ms
+  [32mPASS[0m  envfingerprint 564ms
+  [32mPASS[0m  sourceresolve 93ms
+  [32mPASS[0m  v97         2.3s
+  [32mPASS[0m  gitship     593ms
+  [32mPASS[0m  v98         2.3s
+  [32mPASS[0m  v99         1.4s
+  [32mPASS[0m  v100        7.6s
+  [32mPASS[0m  v101        3.0s
+  [32mPASS[0m  v102        876ms
+  [32mPASS[0m  v103        1.3s
+  [32mPASS[0m  v104        432ms
+  [32mPASS[0m  v105        28.3s
+  [32mPASS[0m  v106        16.9s
+  [32mPASS[0m  v107        1.8s
+  [32mPASS[0m  v108        26.5s
+  [32mPASS[0m  v114        4.6s
+  [32mPASS[0m  v115        15.8s
+  [32mPASS[0m  v116        492ms
+  [32mPASS[0m  v117        163ms
+  [32mPASS[0m  v118        1.1s
+  [32mPASS[0m  v119        1.5s
+  [32mPASS[0m  v120        176ms
+  [32mPASS[0m  v121        184ms
+  [32mPASS[0m  v122        1.1s
+  [32mPASS[0m  cognition   109ms
+  [32mPASS[0m  authority   528ms
+  [32mPASS[0m  intel       496ms
+  [32mPASS[0m  learn       369ms
+  [32mPASS[0m  bind        117ms
+  [32mPASS[0m  route       89ms
+  [32mPASS[0m  caplearn    148ms
+  [32mPASS[0m  create      213ms
+  [32mPASS[0m  perform     227ms
+  [32mPASS[0m  meta        152ms
+  [32mPASS[0m  modelwise   121ms
+  [32mPASS[0m  joint       144ms
+  [32mPASS[0m  critic      133ms
+  [32mPASS[0m  github      633ms
+  [32mPASS[0m  e2e         47.0s
+  [32mPASS[0m  cleanroom   9.3s
+  [32mPASS[0m  cleanroom-pkg 6.1s
+────────────────────────────────────────────────
+[32mall 201 suite(s) passed[0m

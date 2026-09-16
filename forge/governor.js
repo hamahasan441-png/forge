@@ -243,10 +243,34 @@ export function directiveFor(action) {
  * What the loop MUST do with a governor action. MICRO/SMALL keep mutation
  * available (existing one-shot paths, verify-nudge); ASK/WAIT/STOP always
  * halt regardless of class. MEDIUM+ hide writes on INSPECT/VERIFY/PLAN/REPLAN.
+ *
+ * v122 "yolowise" — `enforce: false` (what YOLO resolves to) keeps EVERYTHING
+ * this function says except the veto: the action, the directive, the depth,
+ * and the event stream stay identical, but nothing is hidden, nothing is
+ * frozen, and no step waits for a human. That is a deliberate asymmetry:
+ * INSPECT-before-write is a *quality* policy that reads brilliantly in a log
+ * and obstructs terribly in practice (v115 had to add MUTATIONS_ALL_REFUSED
+ * because runs were COMPLETING on top of a refused write). Under YOLO the
+ * governor advises; the model decides.
  */
-export function authorityFor(action, { klass = "SMALL" } = {}) {
+export function authorityFor(action, { klass = "SMALL", enforce = true } = {}) {
   const a = String(action || ACTION.EXECUTE)
   const micro = MICRO_CLASS.has(klass)
+  if (enforce === false) {
+    const advisoryHalt = a === ACTION.STOP // closing a run is not a veto: it stays
+    return {
+      action: a,
+      klass,
+      hideWrites: false,
+      halt: advisoryHalt,
+      waitForUser: false,
+      enforce: false,
+      advisory: true,
+      keep: null,
+      forbidden: [],
+      directive: directiveFor(a),
+    }
+  }
   const waitForUser = a === ACTION.ASK || a === ACTION.WAIT
   const halt = waitForUser || a === ACTION.STOP
   let hideWrites = false
@@ -274,6 +298,12 @@ export function authorityFor(action, { klass = "SMALL" } = {}) {
     hideWrites,
     halt,
     waitForUser,
+    // v122: the enforced branch reports what it IS. v118 started surfacing
+    // `lastAuth.enforce` in GOVERNOR_ACTION, the run's `governor:` report and
+    // the AUTHORITY prompt line — and it always read false, because no branch
+    // ever set the key. The flag now says what the owner decided in both
+    // directions, so "was the veto armed?" is answerable from a log line.
+    enforce: true,
     enforce: halt || (!micro && hideWrites),
     keep,
     forbidden,

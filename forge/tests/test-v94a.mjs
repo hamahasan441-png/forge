@@ -188,7 +188,7 @@ console.log("== H. orphan processes + resource bounds ==")
 console.log("== I. package + documentation truth ==")
 {
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", here), "utf8"))
-  eqv("ADV: package version is 113.0.0", pkg.version, "113.0.0")
+  eqv("ADV: package version is 122.0.0", pkg.version, "122.0.0")
   for (const m of ["runtimesession.js", "toolcreate.js", "runtime.js", "repl.js", "codesearch.js", "worldmodel.js", "completion.js", "bus.js", "core.js"]) {
     ok(`ADV: ${m} shipped in files[]`, pkg.files.includes(m))
   }
@@ -205,9 +205,9 @@ console.log("== I. package + documentation truth ==")
   ok("ADV: /tools is dynamic (no hardcoded count)", /toolCount\(\)/.test(chatSrc))
   const read = (p) => fs.readFileSync(new URL(p, here), "utf8")
   ok("ADV: inner README claims v94", /v94/.test(read("../README.md")))
-  // v96 unifywise: the metadata claims track the CURRENT version (113.0.0)
+  // v96 unifywise: the metadata claims track the CURRENT version (122.0.0)
   ok("ADV: PACKAGE_INFO claims v113.0.0", /v102\.0\.0/.test(read("../../PACKAGE_INFO.txt")))
-  ok("ADV: root README claims 113.0.0 + 30 tools", /113\.0\.0/.test(read("../../README.md")) && /30 tools/.test(read("../../README.md")))
+  ok("ADV: root README claims 122.0.0 + 30 tools", /122\.0\.0/.test(read("../../README.md")) && /30 tools/.test(read("../../README.md")))
 }
 function eqv(name, got, want) { ok(`${name} (got ${JSON.stringify(got)})`, got === want) }
 

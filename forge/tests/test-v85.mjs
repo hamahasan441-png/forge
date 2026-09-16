@@ -104,17 +104,41 @@ console.log("== chat.js / agent.js imply every privileged flag ==")
 {
   const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  // v122 "yolowise": the implication moved into yolo.js so that the SAME
+  // answer covers the governor, the critique and the ceiling too. These pins
+  // keep the v85 property — one master switch, both entry points, every
+  // privileged flag — expressed in the new shape.
   for (const [name, src] of [["chat.js", chat], ["agent.js", agent]]) {
-    ok(`${name} computes unrestricted from config + env`, /unrestricted = config\.tools\?\.unrestricted === true \|\| process\.env\.FORGE_UNRESTRICTED === "1"/.test(src))
-    ok(`${name} unrestricted implies allowOutsideProject`, /allowOutsideProject: unrestricted \|\| config\.tools\?\.allowOutsideProject === true/.test(src))
-    ok(`${name} unrestricted implies allowSudo`, /allowSudo: unrestricted \|\| config\.tools\?\.allowSudo === true/.test(src))
-    ok(`${name} unrestricted implies fetchPrivateUrls`, /fetchPrivateUrls: unrestricted \|\| config\.tools\?\.fetchPrivateUrls === true/.test(src))
+    ok(`${name} resolves control through yolo.js (one state, not four booleans)`, /yoloState\(config\)/.test(src))
+    ok(`${name} computes unrestricted from config + env (via the resolved state)`, /unrestricted = yolo(?:Now)?\.unrestricted \|\| yolo(?:Now)?\.yolo/.test(src))
+    ok(`${name} unrestricted implies allowOutsideProject`, /allowOutsideProject: yolo(?:Now)?\.allowOutsideProject \|\| unrestricted/.test(src))
+    ok(`${name} unrestricted implies allowSudo`, /allowSudo: yolo(?:Now)?\.allowSudo \|\| unrestricted/.test(src))
+    ok(`${name} unrestricted implies fetchPrivateUrls`, /fetchPrivateUrls: yolo(?:Now)?\.fetchPrivateUrls \|\| unrestricted/.test(src))
+    ok(`${name} unrestricted implies allowInterpreterEval`, /allowInterpreterEval: yolo(?:Now)?\.allowInterpreterEval \|\| unrestricted/.test(src))
+    ok(`${name} unrestricted implies allowNetworkUpload`, /allowNetworkUpload: yolo(?:Now)?\.allowNetworkUpload \|\| unrestricted/.test(src))
+    ok(`${name} carries the yolo state into the tool context`, /yolo: yolo(?:Now)?\.yolo/.test(src))
   }
-  ok("chat.js unrestricted implies assumeYes", /assumeYes = unrestricted \|\| config\.tools\?\.assumeYes === true/.test(chat))
+  ok("chat.js unrestricted implies assumeYes", /assumeYes = yoloNow\.assumeYes \|\| unrestricted/.test(chat))
   ok("chat.js user terminal passes unrestricted", /userMayRun\(cmd, \{ cwd: shellState\.cwd, root: process\.cwd\(\), allowInterpreterEval: unrestricted \|\| config\.tools\?\.allowInterpreterEval === true, unrestricted \}, \{ interactive, assumeYes, unrestricted \}\)/.test(chat))
-  ok("agent.js unrestricted implies assumeYes", /assumeYes: unrestricted \|\| config\.tools\?\.assumeYes === true/.test(agent))
+  ok("agent.js unrestricted implies assumeYes", /assumeYes: yolo\.assumeYes \|\| unrestricted/.test(agent))
   ok("chat.js unrestricted implies allowNewPlugins", /allowNewPlugins: unrestricted \|\| config\.tools\?\.allowNewPlugins === true/.test(chat))
   ok("agent.js unrestricted implies allowNewPlugins", /allowNewPlugins: unrestricted \|\| config\.tools\?\.allowNewPlugins === true/.test(agent))
+}
+
+console.log("== v122: the implication is BEHAVIOUR, not a grep ==")
+{
+  const { yoloState } = await import("../yolo.js")
+  const on = yoloState({ tools: { unrestricted: true, autoApprove: true } }, {})
+  for (const k of ["allowSudo", "allowOutsideProject", "allowOutsideTraversal", "allowInterpreterEval", "allowNetworkUpload", "allowNewPlugins", "fetchPrivateUrls", "assumeYes", "autoApprove"]) {
+    ok(`full control grants ${k}`, on[k] === true)
+  }
+  ok("full control drops the risk ceiling", on.maxRisk === null)
+  ok("full control makes the governor advisory", on.governorEnforce === false)
+  ok("full control makes the critique advisory", on.critiqueEnforce === false)
+  const off = yoloState({ tools: { unrestricted: false, autoApprove: false } }, {})
+  ok("without it, nothing is implied", off.allowSudo === false && off.allowOutsideProject === false && off.assumeYes === false)
+  ok("and the layers keep their veto", off.governorEnforce === true && off.critiqueEnforce === true)
+  ok("the shell verdict never depended on it (v88 is unconditional)", /unrestricted: true/.test(fs.readFileSync(new URL("../shellguard.js", import.meta.url), "utf8")))
 }
 
 console.log(`\n== v85 suite: ${PASS} passed, ${FAIL} failed ==`)

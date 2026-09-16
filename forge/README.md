@@ -12,6 +12,9 @@ execution and proof).**
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
+**Version 122.0.0 — "yolowise" (full control is one switch, and it is
+inspectable: `forge yolo` prints every layer that can refuse, pause or freeze).**
+
 **Version 99.0.0 — "loopwise" (the agency release: the stop fix, the
 reviewer, the fixer, the planner gate, the reach surfaces).**
 
@@ -377,6 +380,41 @@ coverage** in every agent prompt (67 languages, honest deep-vs-conservative),
 P0 plugin-load TDZ fix (user tool plugins work again). Carries **v91
 "corewise"** (∞ CORE), **v90 "gitwise"**, **v89 "fast"** and **v88 "noguard
 + worker clamp"**: no guards, no blocks, workers 2–8. One folder: `forge/`.
+
+## v122 in one line — full control is ONE switch, and it is inspectable
+
+`forge yolo` prints the resolved state of every layer that can refuse, pause or
+freeze; `forge yolo on|off` sets it (`tools.yolo`); `--yolo` / `--safe` force it
+for one process; `FORGE_YOLO=0|1` for the shell. It is ON by default because
+`tools.unrestricted` and `tools.autoApprove` are, and v122 made that umbrella
+reach the layers `--yolo` used to stop short of — the ones that kept refusing
+work after "all guards off" was supposedly already true:
+
+| layer | what it did after v88 | what YOLO changes |
+|---|---|---|
+| shellguard | never refused, still labelled | nothing (already off) |
+| governor authority | froze/hid write tools on INSPECT/VERIFY/PLAN, halted on ASK | advises only — the directive, the action and the event stay; the veto goes |
+| pre-edit critique | secret-looking path → WAITING_FOR_USER, edit thrash → refusal | the note stays, the block goes |
+| read-only workers | bash had to match a 12-prefix allowlist | the classifier answers "is this a check, not a change" — writes stay refused |
+| capability router | withheld mutating MCP on INSPECT, froze externals on ASK | quality gates stay (stale, measured-broken, budget); permission-shaped ones go |
+| system prompt | told the model commands were blocked, so it declined to try | says full control is granted, in both modes truthfully |
+
+Pin one layer without touching the rest:
+`forge config set governor.enforce always` (or `never`, or `auto` = YOLO
+decides), same for `critique.enforce`; `FORGE_GOVERNOR=1` /
+`FORGE_CRITIQUE_ENFORCE=1` for a single run. Inside chat: `/yolo on|off|status`.
+
+**Five rails YOLO never turns off** — they defend you from *other people's
+code*, not from yourself, so switching them off would make the agent less free,
+not more: the project-config privilege strip (a cloned `forge.config.json` can
+never arm the agent), the injection fence on tool results, secret redaction,
+atomic/TOCTOU-safe writes, and socket pinning on URL fetches. `forge yolo`
+lists them every time, so none of this is a footnote. Two further behaviours
+survive because they are **correctness, not permission**: a read-only worker's
+write refusal (a verifier must not edit what it verifies) and the v118/v119
+completion gate (it refuses a false DONE, never your command) — printed in
+their own block, so "all safety off" never means "results stop meaning
+anything".
 
 ## v88 in one line
 

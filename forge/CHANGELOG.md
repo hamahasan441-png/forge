@@ -5,6 +5,125 @@ reads it at runtime and every user-agent is built from that single source.
 Historical entries below are kept honest and short; completed plans are not
 preserved — leftovers live in TODO.md.
 
+## 122.0.0 — yolowise (full control is one switch, and it is inspectable)
+
+
+CLI only. No Web OS. No SafetyManager. The owner's decision, recorded once.
+
+v88 removed the shell guards and v87 defaulted `autoApprove` ON, so "all guards
+off" was already the shipped posture — and work still got refused. Four layers
+the switch never reached were doing the refusing, and a fifth (the prompt) made
+the model refuse on the owner's behalf:
+
+- **the governor's authority** (v101) froze or hid every write tool on
+  INSPECT/SEARCH/PLAN/REPAIR-adjacent actions and turned ASK into
+  WAITING_FOR_USER. Its `enforce` flag existed; nothing outside `governor.js`
+  ever set it. `authorityFor(action, { klass, enforce })` now takes the owner's
+  state: under YOLO the action, the depth, the directive and the
+  `GOVERNOR_ACTION` event all survive, `forbidden`/`keep` are empty,
+  `maskToolDefs` offers the full tool set, `enforceToolCall` never refuses, and
+  ASK no longer waits. STOP still ends the run — closing a verified run is not
+  a veto. `createCognition({ governorEnforce })` carries it to both the
+  one-shot agent and `runMeta`, which had been building its own cognition with
+  no idea who was in charge.
+- **the pre-edit critique** (v112) made a path that merely *looks* secret-bearing
+  (`SECRET_HINT` matches a file named `token.ts`) pause the whole run, and a
+  third edit to one file a refusal. `critiqueVerdict(c, { klass, enforce })`
+  keeps every concern as a note and drops the block; `agent.js` cannot pause on
+  a critique ASK when enforcement is off. The checklist itself is never
+  disabled by YOLO — the sentence is the useful part.
+- **read-only workers** (verifier / reviewer / planner) had to match a
+  12-prefix bash allowlist, so `pytest -q tests/test_auth.py`, `make lint`,
+  `./check.sh`, `vendor/bin/phpunit` were refused mid-verification while `cat`
+  of any file was allowed. `isVerificationGradeBash()` answers the same question
+  structurally — no write redirection, classification ≤ `low`, no mutating
+  program, no mutating git subcommand, every operand inside the project or
+  scratch — which is *stricter* where the list was blind (`git commit`,
+  `cp a ~/b`) and correct where it was merely small. The role itself is
+  untouched: `write_file`/`edit_file`/`memory`/`todo` stay refused for a
+  read-only agent, because "verification cannot change the artifact it
+  verifies" is the verification contract, not a permission.
+- **the capability router** (v105) withheld mutating MCP on INSPECT/VERIFY and
+  froze all externals on ASK/WAIT/STOP — permission rules wearing a routing
+  costume, since the model is never told the tool exists. `applyRoutePolicy` /
+  `selectForTurn` take `enforce`; under YOLO the action-keyed drops stop while
+  every quality gate (stale, measured UNRELIABLE/BROKEN, klass budget,
+  native-already-covers) keeps working.
+- **the system prompt** still said "catastrophic commands, writes outside the
+  project, sudo and publishes are blocked — refine the command instead of
+  asking the user to disable safety", four releases after v88 stopped blocking
+  them. That is the one guard no config key can turn off: the model believes it
+  and never tries. Both prompts (agent + chat) now branch on the same resolved
+  state, and the stale `fetch_url`/`read_image` descriptions that claimed a
+  protection the code no longer has were corrected.
+
+`yolo.js` is the single resolution (`tools.yolo` ⇒ unrestricted, autoApprove,
+assumeYes, sudo, outside-project, traversal, interpreter-eval, network upload,
+new plugins, private URLs, no risk ceiling, governor+critique advisory), read
+from `agent.js`, `chat.js`, `meta.js`, `toolintel.js` and `tools.js` — never
+re-derived per file, and read LIVE in the two places a session can change it
+(`/yolo` mid-chat no longer needs a restart to drop the ceiling).
+
+Surface: **`forge yolo [on|off|status]`** — the status table names each layer
+and its state, the grants implied, and the **five rails YOLO deliberately never
+turns off** (project-config privilege strip, tool-result injection fence, secret
+redaction, atomic/TOCTOU-safe writes, socket pinning) with the reason for each,
+plus a second block, **kept for correctness, not permission** — a read-only
+worker's write refusal and the v118/v119 completion gate. Listing them separately
+is the point: `all safety off` must never be silently readable as `a result no
+longer has to be true`.
+Those are defences against *other people's code*, not friction for the owner: a
+cloned repository must never be able to arm the agent that runs on the machine
+that cloned it, so `tools.yolo`, `governor.*` and `critique.*` are privileged
+keys (`sanitizeProjectConfig` strips them and says so). `--yolo` forces it for
+one process; **`--safe`** is the opposite; `FORGE_YOLO=0|1` for the shell;
+`FORGE_GOVERNOR=1` / `FORGE_CRITIQUE_ENFORCE=1` pin exactly one layer;
+`governor.enforce` / `critique.enforce` accept `auto|always|never` so structure
+can be kept without keeping the vetoes. `/status` in chat replaced its single
+"NO GUARDS (v88 noguard)" line with the same per-layer truth, since that line
+was the part of the UI that was wrong.
+
+FORGE-BENCH unchanged at 24/24. `tests/test-v122.mjs` (158 assertions, 10
+sections: resolution, governor authority, cognition wiring, critique, read-only
+roles, router, who may arm it, the real exec path, the prompts, the CLI) joins
+the run; three v85/v25/v27 source-grep pins that asserted the OLD shape of the
+unrestricted implication were rewritten to assert the property — plus a new
+behavioural section proving the implication is behaviour, not a grep.
+
+Landing on top of v118–v121 changed two things about this release, and both are
+reported rather than smoothed over. It was numbered **v117** while it was being
+built; main had already spent v117 on searchwise and shipped through v121, so the
+number moved and the suite is `test-v122.mjs` (the name collision was the
+discovery — a per-release suite name is a shared namespace, and only a test run
+across the real merge proves the two do not fight). And v118's completion work
+made `cognition.enforce(gov)` a second path into `authorityFor`: that call is
+threaded through the same `governorEnforce`, so a completion candidate that moves
+the authority cannot re-arm a veto YOLO already removed. The gate itself is
+untouched on purpose — it refuses a *claim*, never a command — and the run report
+now says so: `authorityFor`'s enforced branch returns `enforce: true`, which v118
+began surfacing in `GOVERNOR_ACTION`, the run's `governor:` field and the
+AUTHORITY prompt line, where it had been reading `false` since the day it was
+added because no branch ever set the key.
+
+The third finding is the one that made a check go RED, and it was not this
+release's code: Actions runs the `push` copy and the `pull_request` copy of the
+same commit at the same time, and `test-v93r`'s health assertion slept a FIXED
+2500ms and then read the OS socket table exactly once. `npm run dev` does not
+own the socket — npm boots, node boots, the grandchild binds — so under doubled
+load the port simply was not there yet at 2500ms, `health` said "no port
+detected", and the sibling run of the identical SHA was green. A test that
+depends on wall-clock luck is not a test. The sleep became a deadline, and the
+root cause got fixed where it lives: `health()` (and `claim`, which shares it)
+now waits a BOUNDED `HEALTH_DETECT_GRACE_MS` for a launched process to OPEN its
+port — `grace_ms` is exposed on the `runtime` tool so a slow Vite app is a
+parameter and not a false "not healthy" — while a boot that has already exited
+fails at once with its exit code as the diagnosis, so the wait is never paid for
+a crash. What no amount of waiting can do is turn a missing listener into a
+pass; the refusal keeps its wording and gains the reason. v93r grew 54 → 72
+assertions, including the proof that the wait happened, that it is bounded, that
+it is switchable off, and that eight concurrent copies of the suite pass under
+14-way load (they did not before).
+
 ## 113.0.0 — githubwise (GitHub is evidence)
 
 CLI only. No forge-held GitHub token. No GitHubManager.
