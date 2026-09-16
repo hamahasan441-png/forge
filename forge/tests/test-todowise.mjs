@@ -101,8 +101,15 @@ console.log("== 1. protocol-aware health probe (runtimesession.js) ==")
   const session = rs.createRuntimeSession({ cwd: WORK, mgr })
   const launched = session.launch({ command: `node -e "require('net').createServer(s=>s.on('data',()=>s.destroy())).listen(${freePort}, '127.0.0.1')"`, name: "tcpsrv" })
   ok("TCP service launched through the runtime session", launched.ok === true, JSON.stringify(launched).slice(0, 200))
-  await sleep(700)
-  const health = await session.health({ port: freePort })
+  // v122: `sleep(700)` then one probe was the same race in a smaller hat — a
+  // bare `node -e` server boots in ~50ms unloaded and in far more when CI is
+  // doubling every job. Poll what the assertion is about, inside a deadline.
+  const bootBy = Date.now() + 15000
+  let health = await session.health({ port: freePort })
+  while (!(health.ok === true && health.level === "tcp") && Date.now() < bootBy) {
+    await sleep(200)
+    health = await session.health({ port: freePort })
+  }
   ok("session health on the TCP service → ok at tcp level", health.ok === true && health.level === "tcp", JSON.stringify(health).slice(0, 200))
   const claim = await session.claimServerStarted({ port: freePort })
   ok("CLAIM 'server started' PROVEN for a TCP-only service (process + listener)", claim.ok === true, JSON.stringify({ procs: claim.processes?.length, h: claim.health?.error }).slice(0, 200))

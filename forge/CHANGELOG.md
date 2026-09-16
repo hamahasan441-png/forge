@@ -105,6 +105,25 @@ began surfacing in `GOVERNOR_ACTION`, the run's `governor:` field and the
 AUTHORITY prompt line, where it had been reading `false` since the day it was
 added because no branch ever set the key.
 
+The third finding is the one that made a check go RED, and it was not this
+release's code: Actions runs the `push` copy and the `pull_request` copy of the
+same commit at the same time, and `test-v93r`'s health assertion slept a FIXED
+2500ms and then read the OS socket table exactly once. `npm run dev` does not
+own the socket — npm boots, node boots, the grandchild binds — so under doubled
+load the port simply was not there yet at 2500ms, `health` said "no port
+detected", and the sibling run of the identical SHA was green. A test that
+depends on wall-clock luck is not a test. The sleep became a deadline, and the
+root cause got fixed where it lives: `health()` (and `claim`, which shares it)
+now waits a BOUNDED `HEALTH_DETECT_GRACE_MS` for a launched process to OPEN its
+port — `grace_ms` is exposed on the `runtime` tool so a slow Vite app is a
+parameter and not a false "not healthy" — while a boot that has already exited
+fails at once with its exit code as the diagnosis, so the wait is never paid for
+a crash. What no amount of waiting can do is turn a missing listener into a
+pass; the refusal keeps its wording and gains the reason. v93r grew 54 → 72
+assertions, including the proof that the wait happened, that it is bounded, that
+it is switchable off, and that eight concurrent copies of the suite pass under
+14-way load (they did not before).
+
 ## 113.0.0 — githubwise (GitHub is evidence)
 
 CLI only. No forge-held GitHub token. No GitHubManager.

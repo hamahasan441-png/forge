@@ -511,6 +511,7 @@ export const TOOL_DEFS = [
         phase: { type: "string", enum: ["run", "build"], description: "launch: which discovered script (default run)" },
         name: { type: "string", description: "launch/stop: process name (default app for run, build for build)" },
         port: { type: "number", description: "health/claim/up: explicit port (default: detected from live processes)" },
+        grace_ms: { type: "number", description: "health/claim: how long to wait for a launched process to open its port when no port is given (default 6000; 0 = one look). A server is not unhealthy because npm was still booting." },
         host: { type: "string", description: "health/claim/up host (default 127.0.0.1)" },
         timeout_sec: { type: "number", description: "launch auto-kill fuse (default 3600)" },
         kill: { type: "boolean", description: "reconcile: kill forge-owned orphans (default false — report only)" },
@@ -2687,10 +2688,11 @@ async function runRuntimeTool(ctx, args) {
     return `project: ${r.project.type} | run: ${r.project.runCommand ?? "NOT discovered"}\nprocesses:\n${procs}${led}`
   }
   if (action === "health") {
-    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1" })
+    const r = await session.health({ port: args?.port ?? null, host: args?.host ?? "127.0.0.1", ...(args?.grace_ms != null ? { graceMs: Number(args.grace_ms) } : {}) })
     if (r.error && !r.probe) return `ERROR: ${r.error}`
-    if (r.ok && r.level === "http") return `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)`
-    if (r.ok && r.level === "tcp") return `REACHABLE — TCP listener on ${r.probe.host}:${r.probe.port} in ${r.probe.ms}ms (${r.note ?? "no HTTP response — protocol-aware probe"}) (recorded as runtime evidence)`
+    const waitedNote = r.waitedMs > 200 && !args?.port ? ` (listener detected after ${r.waitedMs}ms — the boot was slow, not broken)` : ""
+    if (r.ok && r.level === "http") return `HEALTHY — ${r.probe.url} → HTTP ${r.probe.status} in ${r.probe.ms}ms (real probe, recorded as runtime evidence)${waitedNote}`
+    if (r.ok && r.level === "tcp") return `REACHABLE — TCP listener on ${r.probe.host}:${r.probe.port} in ${r.probe.ms}ms (${r.note ?? "no HTTP response — protocol-aware probe"}) (recorded as runtime evidence)${waitedNote}`
     return `NOT HEALTHY — ${r.probe?.url ?? `${r.probe?.host ?? "127.0.0.1"}:${r.probe?.port ?? "?"}`}: ${r.error ?? "probe failed"} (this is evidence against any 'server started' claim)`
   }
   if (action === "claim") {

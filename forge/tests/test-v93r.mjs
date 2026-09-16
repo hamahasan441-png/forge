@@ -99,6 +99,83 @@ console.log("== 2. health probes are REAL (never faked) ==")
 }
 
 // ---------------------------------------------------------------------------
+console.log("== 2b. the detection GRACE is bounded, honest and switchable ==")
+{
+  // v122: this section exists because the health check that CI ran went red on
+  // a commit whose parallel run was green: `launch` returns long before the
+  // grandchild binds its socket, and health read the OS socket table exactly
+  // once. The fix is a bounded wait for the LISTENER (never a softening of the
+  // probe), so the test is that the wait is real, short, and switchable off.
+  const LATE = path.join(WORK, "lateboot")
+  fs.mkdirSync(LATE, { recursive: true })
+  const latePort = 21000 + Math.floor(Math.random() * 20000)
+  fs.writeFileSync(path.join(LATE, "package.json"), JSON.stringify({
+    name: "lateboot",
+    scripts: { dev: `node -e "setTimeout(() => require('http').createServer((q, s) => s.end('ok')).listen(${latePort}, '127.0.0.1'), 900)"` },
+  }))
+  process.chdir(LATE)
+  disposeToolManagers()
+  const lateMgr = getProcessManager()
+  const ses = rs.createRuntimeSession({ cwd: LATE, mgr: lateMgr })
+  const launched = ses.launch({})
+  ok("late-binding service launched through discovery", launched.ok === true, JSON.stringify(launched.error ?? ""))
+  // NO sleep here: health()'s own grace is the only waiting in this assertion.
+  const t0 = Date.now()
+  const h = await ses.health({})
+  const elapsed = Date.now() - t0
+  ok("a listener that appears 900ms late is still detected", h.ok === true, JSON.stringify({ err: h.error ?? null, elapsed }))
+  eq("the port it probed is the port the process bound", h.port, latePort)
+  ok("the wait actually waited (not luck)", elapsed >= 600, `elapsed=${elapsed}ms`)
+  ok("it stayed bounded by the grace it was given", elapsed < 9000, `elapsed=${elapsed}ms`)
+
+  // a live process that never listens must NOT become healthy by waiting, and
+  // graceMs: 0 must answer immediately with the same honest refusal
+  const DEAD = path.join(WORK, "noport")
+  fs.mkdirSync(DEAD, { recursive: true })
+  fs.writeFileSync(path.join(DEAD, "package.json"), JSON.stringify({ name: "noport", scripts: { dev: "sleep 30" } }))
+  process.chdir(DEAD)
+  disposeToolManagers()
+  const deadMgr = getProcessManager()
+  const dses = rs.createRuntimeSession({ cwd: DEAD, mgr: deadMgr })
+  dses.launch({})
+  const t1 = Date.now()
+  const h0 = await dses.health({ graceMs: 0 })
+  const elapsed0 = Date.now() - t1
+  ok("no listener → still NOT healthy (a grace never fakes a pass)", h0.ok === false)
+  ok("the refusal still names the missing port", /no port detected on live runtime processes/.test(String(h0.error)), String(h0.error).slice(0, 90))
+  ok("graceMs: 0 answers instantly", elapsed0 < 900, `elapsed=${elapsed0}ms`)
+  const hG = await dses.health({ graceMs: 1200 })
+  ok("and the bounded grace reports the wait it spent", hG.ok === false && hG.waitedMs >= 1000, JSON.stringify({ waitedMs: hG.waitedMs }))
+  ok("a live process with no listener is named as such (still running, not dead)", /still running but has opened no listener/.test(String(hG.error)), String(hG.error).slice(0, 80))
+  ok("the default grace is a real budget, not a lucky guess", (await import("../runtimesession.js")).HEALTH_DETECT_GRACE_MS >= 4000)
+  // …and the model can ask for more of it: the runtime tool exposes the knob, so
+  // a Vite app that needs 20s is a parameter, not a false "not healthy".
+  const toolsSrc = fs.readFileSync(new URL("../tools.js", import.meta.url), "utf8")
+  ok("the runtime tool exposes grace_ms to the model", /grace_ms:\s*\{/.test(toolsSrc) && /args\?\.grace_ms/.test(toolsSrc))
+  ok("the claim gate threads the same grace (one policy, not two)", /health\(\{ port, graceMs \}\)/.test(fs.readFileSync(new URL("../runtimesession.js", import.meta.url), "utf8")))
+
+  // and a boot that DIES must cost nothing: fail fast with the exit as evidence
+  const CRASH = path.join(WORK, "crashboot")
+  fs.mkdirSync(CRASH, { recursive: true })
+  fs.writeFileSync(path.join(CRASH, "package.json"), JSON.stringify({ name: "crashboot", scripts: { dev: "node -e \"process.exit(3)\"" } }))
+  process.chdir(CRASH)
+  disposeToolManagers()
+  const crashMgr = getProcessManager()
+  const cses = rs.createRuntimeSession({ cwd: CRASH, mgr: crashMgr })
+  cses.launch({})
+  const t2 = Date.now()
+  const hc = await cses.health({})
+  const elapsedC = Date.now() - t2
+  ok("crashed boot: NOT healthy, and no grace window burned", hc.ok === false && elapsedC < 2500, JSON.stringify({ elapsed: elapsedC, err: hc.error }))
+  ok("the refusal carries the exit code as evidence", /exit 3/.test(String(hc.error)), String(hc.error).slice(0, 110))
+  crashMgr.dispose(); disposeToolManagers(); process.chdir(WORK)
+  dses.stop({})
+  lateMgr.dispose(); deadMgr.dispose()
+  disposeToolManagers()
+  process.chdir(WORK)
+}
+
+// ---------------------------------------------------------------------------
 console.log("== 3/4. session — discovered launch, ledger, claim gate (BEHAVIORAL) ==")
 {
   const WEB = path.join(WORK, "webproj")
@@ -122,9 +199,22 @@ console.log("== 3/4. session — discovered launch, ledger, claim gate (BEHAVIOR
   ok("ledger records /proc starttime (pid-reuse guard)", st0 == null || typeof st0 === "number") // null only on non-/proc systems
 
   // wait for boot, then health + claim
-  await mgr.poll(launch.entry.id, { waitMs: 2500 })
-  const health = await session.health({})
-  ok("health probe against the live server passes", health.ok === true, JSON.stringify(health.error ?? ""))
+  // v122: this used to be a FIXED 2500ms sleep followed by exactly one probe.
+  // GitHub Actions runs the push copy and the pull_request copy of a commit at
+  // the same time (eight jobs on two runners), and `npm run dev` — npm boots,
+  // then node boots, then the grandchild binds — sometimes needed more than
+  // 2500ms of that. The probe said "no port detected", the check went red, and
+  // nothing was actually wrong with the code under test: the sibling run of the
+  // same SHA was green. A deadline replaces the sleep. The assertion is the
+  // same one, with the same evidence; only the wall-clock luck is gone.
+  await mgr.poll(launch.entry.id, { waitMs: 500 })
+  const bootDeadline = Date.now() + 20000
+  let health = await session.health({})
+  while (health.ok !== true && Date.now() < bootDeadline) {
+    await new Promise((r) => setTimeout(r, 250))
+    health = await session.health({})
+  }
+  ok("health probe against the live server passes", health.ok === true, JSON.stringify({ waitedUpToMs: 20000, err: health.error ?? null }))
   const claim = await session.claimServerStarted({})
   ok("CLAIM 'server started' PROVEN: process + health evidence", claim.ok === true, JSON.stringify({ procs: claim.processes.length, h: claim.health.error }))
   ok("claim recorded as evidence", session.evidenceLog().some((e) => /PROVEN/.test(e.claim)))
