@@ -315,7 +315,7 @@ console.log("== fastwise: DEDUP AUDIT — zero duplicate skills, tools, aliases 
 
   // — first-party catalog: names AND aliases may not collide —
   const FP = skillforge.FIRST_PARTY
-  eq("34 first-party catalog skills", FP.length, 34)
+  eq("38 first-party catalog skills (34 + v99 bundled pack)", FP.length, 38)
   const fpNames = FP.map((s) => s.name)
   eq("catalog names unique", new Set(fpNames).size, fpNames.length)
   const aliases = FP.flatMap((s) => s.aliases ?? [])

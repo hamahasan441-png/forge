@@ -54,7 +54,7 @@ function listGlobalTools() {
 
 console.log("== catalog ==")
 {
-  ok("12 domains", DOMAINS.length === 12)
+  ok("13 domains (12 + v113 github)", DOMAINS.length === 13)
   ok("ids unique", new Set(DOMAINS.map((d) => d.id)).size === DOMAINS.length)
   ok("payment is CRITICAL", DOMAINS.find((d) => d.id === "payment")?.impact === IMPACT.CRITICAL)
   ok("ui is LOW", DOMAINS.find((d) => d.id === "ui")?.impact === IMPACT.LOW)

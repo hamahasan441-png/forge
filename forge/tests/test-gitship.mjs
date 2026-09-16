@@ -256,7 +256,17 @@ console.log("== 10. surface audit — kernel policy, never a tool ==")
   const tools = await fs.promises.readFile(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "tools.js"), "utf8")
   const caps = await fs.promises.readFile(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "capabilities.js"), "utf8")
   ok("no gitship tool in TOOL_DEFS", !/name:\s*"gitship/.test(tools) && !/"git_(commit|push|branch)"/.test(tools))
-  ok("no gitship entry in the capability registry", !/gitship/.test(caps))
+  // v113: this grepped capabilities.js for the bare word "gitship" and tripped
+  // on the new read-only `github` entry's own description — "Writes stay in
+  // gitship." — which STATES the invariant rather than breaking it. Assert the
+  // invariant itself instead of a word: no capability entry named gitship, and
+  // no git-touching capability that mutates. Stricter than the grep, and it
+  // cannot be fooled by prose in either direction.
+  const { BUILTIN_CAPABILITIES } = await import("../capabilities.js")
+  ok("no gitship entry in the capability registry",
+    !BUILTIN_CAPABILITIES.some((c) => /gitship/i.test(String(c.name))))
+  ok("no git capability mutates — delivery is kernel policy, never a tool",
+    !BUILTIN_CAPABILITIES.some((c) => /git|github/i.test(String(c.name)) && (c.mutates ?? []).length > 0))
   const config = await fs.promises.readFile(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "config.js"), "utf8")
   ok("gitship is a PRIVILEGED section (project config can never enable delivery)", /PRIVILEGED_SECTIONS = \[[^\]]*"gitship"/.test(config))
   const meta = await fs.promises.readFile(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8")

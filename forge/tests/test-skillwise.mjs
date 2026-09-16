@@ -123,7 +123,7 @@ console.log("== superpowers pack: byte-identity manifest ==")
 console.log("== superpowers pack: catalog routing ==")
 {
   for (const name of PACK) ok(`FIRST_PARTY entry: ${name}`, FIRST_PARTY.some((s) => s.name === name && s.tags?.length >= 3))
-  eq("34 first-party skills", FIRST_PARTY.length, 34)
+  eq("38 first-party skills (34 + v99 bundled pack)", FIRST_PARTY.length, 38)
   eq("names unique", new Set(firstPartyNames()).size, FIRST_PARTY.length)
   // every pack skill exists on disk AND is catalog-registered (no virtuals)
   for (const name of PACK) {
