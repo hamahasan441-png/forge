@@ -241,6 +241,10 @@ export function selectForTurn({
   klass = "",
   action = "EXECUTE",
   cwd = "",
+  /** v122: false = the governor is ADVISING this run (YOLO), so the route must
+   *  not freeze externals because of its action. Quality gates (stale,
+   *  measured-broken, klass budget) are untouched — they were never authority. */
+  enforce = true,
 } = {}) {
   const mcp = selectCapabilities({
     task, plugins: mcpPlugins, nativeNames, stats, ...mcpOptions,
@@ -265,6 +269,7 @@ export function selectForTurn({
     mcpDropped: mcp.dropped,
     nativeNames,
     store,
+    enforce, // v122: an advisory governor may not withhold capability
   })
   mcp.kept = routed.mcpKept
   mcp.dropped = routed.mcpDropped

@@ -157,14 +157,19 @@ console.log("== runAgent never auto-flips assumeYes ==")
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   // v85: assumeYes is implied only by the owner's tools.unrestricted switch —
   // never by `autonomous` or any model/skill-reachable path.
-  ok("assumeYes is unrestricted || config.tools.assumeYes === true", /assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/.test(src))
-  ok("autonomous does not assign assumeYes true", !/assumeYes:\s*true\b/.test(src.replace(/assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/g, "")) && !/assumeYes:\s*autonomous/.test(src))
-  ok("allowInterpreterEval ORs unrestricted + autonomous", /allowInterpreterEval:\s*unrestricted \|\| config\.tools\?\.allowInterpreterEval === true \|\| autonomous/.test(src))
+  // v122: the owner's switch is now the resolved YOLO state (yolo.js), so the
+  // accepted shape is `yolo.assumeYes || unrestricted` — same property, one
+  // more owner-level way to set it, and `autonomous` still never grants it.
+  const ASSUME_YES_SHAPE = /assumeYes:\s*(?:unrestricted \|\| config\.tools\?\.assumeYes === true|yolo\.assumeYes \|\| unrestricted)/
+  const EVAL_SHAPE = /allowInterpreterEval:\s*(?:unrestricted \|\| config\.tools\?\.allowInterpreterEval === true \|\| autonomous|yolo\.allowInterpreterEval \|\| unrestricted \|\| autonomous)/
+  ok(`assumeYes is owner-switch only (${ASSUME_YES_SHAPE.source})`, ASSUME_YES_SHAPE.test(src))
+  ok("autonomous does not assign assumeYes true", !/assumeYes:\s*true\b/.test(src.replace(ASSUME_YES_SHAPE, "")) && !/assumeYes:\s*autonomous/.test(src))
+  ok(`allowInterpreterEval ORs owner switch + config + autonomous (${EVAL_SHAPE.source})`, EVAL_SHAPE.test(src))
   ok("unrestricted is a privileged key (project configs cannot set it)", /PRIVILEGED_TOOL_KEYS = \["unrestricted"/.test(fs.readFileSync(new URL("../config.js", import.meta.url), "utf8")))
 }
 
 console.log("== package version ==")
-ok("VERSION is 113.0.0", VERSION === "113.0.0")
+ok("VERSION is 122.0.0", VERSION === "122.0.0")
 ok("package.json version is what version.js serves", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === VERSION)
 
 console.log(`\n== v25 suite: ${PASS} passed, ${FAIL} failed ==`)

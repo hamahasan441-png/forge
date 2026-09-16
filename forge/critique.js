@@ -129,12 +129,24 @@ export function preMutationCritique({ tool, args, cwd, mutationCounts = null } =
  * v112: the checklist is no longer advisory-only on the default path.
  * MICRO stays one-shot (advisory). Named/explicit writes still execute if
  * the caller passes `force: true` (not used by the default loop).
+ *
+ * v122 "yolowise" — `enforce: false` (what YOLO resolves to) keeps the
+ * checklist and drops the veto. The three enforced findings were the last
+ * refusals left in the default path after v88: a write to a path that merely
+ * LOOKS secret-ish paused the whole run for a human (WAITING_FOR_USER), a
+ * third edit to one file returned REPLAN instead of the edit, and a missing
+ * target blocked an edit the model could have fixed by creating the file.
+ * Each of those is worth SAYING, and none of them is worth stopping an
+ * autonomous run the owner told not to stop. The note rides on regardless.
  */
-export function critiqueVerdict(critique = {}, { klass = "SMALL" } = {}) {
+export function critiqueVerdict(critique = {}, { klass = "SMALL", enforce = true } = {}) {
   const concerns = Array.isArray(critique.concerns) ? critique.concerns : []
   const why = concerns.join("; ").slice(0, 400)
   if (!concerns.length) return { ok: true, action: "allow", why: "" }
   const k = String(klass || "SMALL")
+  if (enforce === false) {
+    return { ok: true, action: "advisory", why: why || "critique is advisory (enforce off)", advisory: true }
+  }
   if (k === "MICRO" || k === "trivial") {
     return { ok: true, action: "advisory", why: why || "MICRO does not enforce critique" }
   }

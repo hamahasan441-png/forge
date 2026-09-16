@@ -1,3 +1,4 @@
+forge v122.0.0 — CLI-only build "yolowise" (full control is ONE switch: tools.yolo / --yolo / --safe / FORGE_YOLO — resolved once in yolo.js and honoured by shellguard, governor authority, pre-edit critique, read-only workers, capability router and BOTH system prompts; `forge yolo` prints every layer + the 5 rails YOLO never turns off (project-config privilege strip, injection fence, secret redaction, atomic writes, socket pinning) + the 2 correctness keeps (read-only worker writes, the completion gate); governor.enforce / critique.enforce pin one layer; FORGE-BENCH 24/24; 201 suites)
 forge v113.0.0 — CLI-only build "githubwise" (gh inspect → evidence → governor; push/PR = gitship; no forge-held token)
 forge v112.0.0 — CLI-only build "criticwise" (missing-file/thrash/secret BLOCK; MICRO advisory; no web OS)
 forge v111.0.0 — CLI-only build "jointwise" (one route: depth+model+skill; MICRO/lock/named win; no web OS)
@@ -319,7 +320,7 @@ forge v99.0.0 — CLI-only build "loopwise" (the agency release: THE STOP FIX �
   playbooks — never spawned, never auto-ACTIVE)
 - state: sessions with resume (messages + cwd + usage), checkpoints with
   gzip backups + sha256 undo, task records with fsync durability
-- self-test: `npm test` from forge/ — 169 suites incl. e2e (mock provider)
+- self-test: `npm test` from forge/ — 201 suites incl. e2e (mock provider)
   and clean-room npm install; zero network needed; CI: Node 20 + 22
 Config file: ~/.forge/config.json (chmod 600, keys stay on your device).
 Requirements: Node.js >= 20 only (18 is EOL, untested).

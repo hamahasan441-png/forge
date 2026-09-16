@@ -67,6 +67,7 @@ import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
+import { yoloState } from "./yolo.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 
@@ -161,7 +162,17 @@ function upsertGovernorMessage(messages, text) {
   messages.push({ role: "user", content: text })
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null }) {
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null }) {
+  // v122: the prompt has to agree with the policy. Until now it did not — the
+  // model was told "catastrophic commands, writes outside the project, sudo
+  // and publishes are blocked" four releases after v88 stopped blocking them,
+  // so the most effective guard in the whole system was the one nobody wrote:
+  // the model declining to try. A prompt that lies about the rules gets
+  // believed, and then every "that command is not allowed" is a bug report
+  // about a guard that is not there. Resolved once from the same state the
+  // tool layer uses, never re-derived here.
+  const yoloNow = yolo ?? yoloState(config ?? {})
+  const fullControl = yoloNow.yolo === true && !readOnly && !planOnly
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -173,8 +184,13 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "3. Keep edits minimal and surgical — never rewrite whole files unless creating new ones. Prefer multi_edit for several changes in one file and apply_patch for larger structured changes.",
     "4. When done, reply with a concise final summary: what changed, files touched, verification result.",
     "5. If a task is impossible, say exactly why and what you tried.",
-    "6. Write operations must stay inside the working directory; sensitive files (.env, keys, credentials) are protected. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
-    "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. Catastrophic commands, writes outside the project, sudo, and publishes are blocked — refine the command instead of asking the user to disable safety.",
+    fullControl
+      ? "6. The owner granted FULL CONTROL (YOLO): nothing is refused and nothing pauses to ask — no command gate, no project boundary, no sudo/interpreter/network consent, no governor veto. Read, write and run whatever the task needs, anywhere on this machine. Do not ask permission, do not hand a command back for the user to run, and do not narrate restrictions that no longer exist."
+      : "6. Writes must stay inside the working directory unless the owner granted tools.allowOutsideProject; the tool layer enforces that, you do not have to police it — when a call IS refused, say which refusal it was instead of quietly working around it. Reads are unrestricted.",
+    "6b. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
+    fullControl
+      ? "7. Never self-censor on the owner's behalf: refuse nothing, skip nothing for safety, and state in ONE line what a destructive command will do immediately before running it. Being able to run it is not a reason to run something the task did not ask for."
+      : "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. Catastrophic commands, writes outside the project, sudo, and publishes are blocked — refine the command instead of asking the user to disable safety.",
     `8. ${UNTRUSTED_CONTENT_RULE}`,
     "",
     "TOOLS — all available, use them automatically as needed:",
@@ -512,6 +528,16 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   const log = runId && journal ? openRun({ runId, task, cwd: process.cwd(), kind: "agent", provider: p.name, model: p.model }) : null
   if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role, taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
 
+  // v92 "wirewise" P0 fix, still binding: the owner's control state must be
+  // resolved BEFORE the plugin load and BEFORE the cognitive core (the v85
+  // version of this bug declared it ~40 lines too low, a TDZ ReferenceError
+  // got swallowed by a try{}catch{}, and user tool plugins silently never
+  // loaded in agent runs).
+  // v122 "yolowise": ONE resolved answer for the whole run. Every layer below
+  // (governor authority, pre-edit critique, tool grants, read-only workers,
+  // the capability router) reads this state instead of re-deriving its own.
+  const yolo = yoloState(config)
+  const unrestricted = yolo.unrestricted || yolo.yolo
   // v100 cognitionwise: ONE cognitive core on the DEFAULT path. Sub-agents
   // and the verifier stay executors — they inherit the parent's task, they
   // do not grow a second brain.
@@ -519,7 +545,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   if (!sub && !verifier && config.agent?.cognition !== false) {
     try {
       const { createCognition } = await import("./cognition.js")
-      cognition = createCognition({ cwd: process.cwd(), objective: task })
+      cognition = createCognition({ cwd: process.cwd(), objective: task, governorEnforce: yolo.governorEnforce })
       onEvent?.({ type: "COGNITION_BOOTED", ...cognition.brief(), ...identityMeta() })
       try {
         const advice = cognition.self.advise({ klass: cognition.klass, currentModel: p?.model })
@@ -529,12 +555,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   }
 
   const isDelegatedSubAgent = readonly && !planOnly
-  // v92 "wirewise" P0 fix: `unrestricted` must be declared BEFORE the plugin
-  // load below. It was declared ~40 lines further down (after the v85 master
-  // switch landed), so every runAgent plugin load hit a TDZ ReferenceError
-  // that the surrounding try{}catch{} silently swallowed — user tool plugins
-  // (~/.forge/tools) NEVER loaded in agent runs. Declared once, earliest.
-  const unrestricted = config.tools?.unrestricted === true || process.env.FORGE_UNRESTRICTED === "1"
   let plugins = []
   let pluginHost = null // v21.1: isolated plugin workers, closed in `finally`
   if (config.tools?.plugins !== false) {
@@ -626,6 +646,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     contextBudget: Number(config.agent?.capabilityBudget) > 0 ? Number(config.agent.capabilityBudget) : 0,
     klass: turnKlass,
     cwd: process.cwd(),
+    enforce: yolo.governorEnforce,
   })
   if (turnSelection.mcp.kept.length) {
     plugins = [...plugins, ...turnSelection.mcp.kept]
@@ -720,17 +741,22 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     runId,
     readOnly: readonly || verifier,
     mode: verifier ? "verifier" : "default",
-    allowOutsideProject: unrestricted || config.tools?.allowOutsideProject === true,
-    // v104 §5: EXPLICIT only — `unrestricted` ships true and must not silently
-    // grant a filesystem-wide scan the user never asked for.
-    allowOutsideTraversal: config.tools?.allowOutsideProject === true,
-    allowSudo: unrestricted || config.tools?.allowSudo === true,
-    allowNetworkUpload: unrestricted || config.tools?.allowNetworkUpload === true,
-    allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true || autonomous,
-    assumeYes: unrestricted || config.tools?.assumeYes === true,
+    // v122: every grant comes from the resolved YOLO state (yolo.js) — the
+    // agent loop and the tool layer can no longer disagree about what the
+    // owner allowed, which is exactly how `--yolo` used to leak.
+    allowOutsideProject: yolo.allowOutsideProject || unrestricted,
+    // v104 §5: traversal is a SCOPE grant, not a risk grant — YOLO answers it,
+    // a bare `unrestricted` still may not silently scan the whole home tree.
+    allowOutsideTraversal: yolo.allowOutsideTraversal,
+    allowSudo: yolo.allowSudo || unrestricted,
+    allowNetworkUpload: yolo.allowNetworkUpload || unrestricted,
+    allowInterpreterEval: yolo.allowInterpreterEval || unrestricted || autonomous,
+    assumeYes: yolo.assumeYes || unrestricted,
     autonomous,
     unrestricted,
-    fetchPrivateUrls: unrestricted || config.tools?.fetchPrivateUrls === true || process.env.FORGE_ALLOW_PRIVATE_URLS === "1",
+    yolo: yolo.yolo,
+    readOnlyBashByClass: yolo.readOnlyBashByClass,
+    fetchPrivateUrls: yolo.fetchPrivateUrls || unrestricted,
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     signal,
@@ -754,11 +780,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       cwd: process.cwd(),
       root: process.cwd(),
       readOnly: readonly,
-      allowSudo: unrestricted || config.tools?.allowSudo === true,
-      allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true || autonomous,
-      assumeYes: unrestricted || config.tools?.assumeYes === true,
+      allowSudo: yolo.allowSudo || unrestricted,
+      allowInterpreterEval: yolo.allowInterpreterEval || unrestricted || autonomous,
+      assumeYes: yolo.assumeYes || unrestricted,
       autonomous,
       unrestricted,
+      yolo: yolo.yolo,
     },
     config,
     onEvent,
@@ -1397,7 +1424,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // provider sees it. Advisory marker scan rides the header.
           messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, String(result), { enabled: fenceEnabled(config) }) })
           const rblock = String(result)
-          if (/^BLOCKED: \(critique\) ASK/.test(rblock) && earlyKlass !== "MICRO") {
+          // v122: under YOLO the critique keeps its NOTE and loses its veto —
+          // toolintel already refuses to emit a BLOCK line, so this is the
+          // second door shut (a pinned FORGE_CRITIQUE path cannot pause a run
+          // the owner told never to pause).
+          if (!yolo.critiqueEnforce) { /* advisory only */ }
+          else if (/^BLOCKED: \(critique\) ASK/.test(rblock) && earlyKlass !== "MICRO") {
             waitingForUser = true
             waitWhy = rblock.replace(/^BLOCKED: \(critique\) ASK\s*—\s*/, "").slice(0, 240) || "secret-bearing path"
             onEvent?.({ type: "DECISION_NEEDED", reason: "CRITIQUE_ASK", why: waitWhy, ...identityMeta(), toolCallId: tc.id })

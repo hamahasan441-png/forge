@@ -84,6 +84,13 @@ export function applyRoutePolicy({
   mcpDropped = [],
   nativeNames = [],
   store = null,
+  /** v122: `enforce: false` (advisory governor / YOLO) means the ACTION may
+   *  not withhold capability. "externals frozen" and "mutating MCP withheld on
+   *  INSPECT/VERIFY" are permission rules wearing a routing costume — the
+   *  model is not even told the tool exists, so it cannot argue with it.
+   *  Quality gates (stale, measured-broken, klass budget, native-duplicate)
+   *  are untouched: those answer "is this worth its tokens", not "may you". */
+  enforce = true,
 } = {}) {
   const budget = budgetFor(klass)
   const dropped = Array.isArray(mcpDropped) ? mcpDropped.slice() : []
@@ -100,10 +107,15 @@ export function applyRoutePolicy({
     trimmed.push({ name: s?.name || s, kind: "skill", reason })
   }
 
-  if (HALT_ACTIONS.has(action)) {
+  if (enforce !== false && HALT_ACTIONS.has(action)) {
     for (const p of mcpOut) dropMcp(p, `governor ${action} — externals frozen`)
     for (const s of skillsOut) dropSkill(s, `governor ${action}`)
     return { skills: [], mcpKept: [], mcpDropped: dropped, trimmed, budget, policy: action }
+  }
+  if (enforce === false && HALT_ACTIONS.has(action)) {
+    // v122: an advisory governor that just chose STOP/ASK/WAIT does not get to
+    // strip the offer — the loop decides whether the run ends, not the route.
+    trimmed.push({ name: "(governor)", kind: "policy", reason: `${action} is advisory — no freeze` })
   }
 
   // quality: CANDIDATE/stale never auto-injected; measured UNRELIABLE/BROKEN withheld
@@ -158,8 +170,15 @@ export function applyRoutePolicy({
     })
   }
 
-  // INSPECT/VERIFY: mutating MCP is withheld (read-only MCP may stay)
-  if (INSPECT_ACTIONS.has(action) || VERIFY_ACTIONS.has(action)) {
+  // v122: under an ADVISORY governor (YOLO) the action is a recommendation,
+  // so it may not withhold capability. The two rules that key off the action —
+  // "externals frozen" and "mutating MCP withheld on INSPECT/VERIFY" — are
+  // exactly the shape of a veto wearing a routing costume: the model is not
+  // told the tool exists, so it cannot even argue. Quality gates above and
+  // below (stale, measured-broken, klass budget, native-duplicate) stay: they
+  // are about whether an external is worth its tokens, not about permission.
+  const authority = enforce !== false
+  if (authority && (INSPECT_ACTIONS.has(action) || VERIFY_ACTIONS.has(action))) {
     mcpOut = mcpOut.filter((p) => {
       const mutating = p?.readOnly === false || isMutatingName(p?.name)
       if (mutating && p?.readOnly !== true) {

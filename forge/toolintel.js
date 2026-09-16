@@ -39,7 +39,8 @@ import { createRegistry, registerPlugins, operationRisk, classifyCall, RISK, STA
 import { planExecution, cheaperAlternative, nextAction, targetsOf, repeatedFailures, route, classifySearch, SEARCH_INTENT } from "./router.js"
 import { classifyFailure, recoveryPlan, formatDiagnosis, shouldEscalate, FAILURE } from "./diagnose.js"
 import { predictBlastRadius } from "./impact.js" // v94 knowwise: blast-radius prediction before/after mutations
-import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique, critiqueVerdict } from "./critique.js" // v94 advisory; v112 enforces BLOCK/ASK/REPLAN
+import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique, critiqueVerdict } from "./critique.js" // v94 advisory; v112 enforces BLOCK/ASK/REPLAN; v122 YOLO makes it advisory again
+import { yoloState } from "./yolo.js" // v122: one resolved control state for ceiling + critique
 import { verificationPlan, runVerification, formatVerification, verifyTargets } from "./verify.js"
 import { redact } from "./secrets.js"
 import { listCheckpoints } from "./checkpoint.js"
@@ -162,7 +163,12 @@ export function createToolIntel({
   const autoApprove = cfg.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1"
   const verifyOn = enabled && cfg.verify !== false
   const cacheOn = enabled && cfg.cache !== false
-  const maxRiskCeiling = cfg.maxRisk ?? null
+  // v122 "yolowise": the owner's control state is read LIVE, on every call.
+  // `cfg` is a snapshot of the same object `/yolo` mutates, so a ceiling or a
+  // critique veto that was frozen at construction time would keep refusing
+  // calls for the rest of the session after the owner said stop. The ceiling
+  // and the critique enforcement come from here, not from `cfg` directly.
+  const control = () => yoloState(config ?? {}, process.env)
   const reg = registry ?? createRegistry({ config })
   if (plugins?.length) registerPlugins(reg, plugins)
 
@@ -229,8 +235,11 @@ export function createToolIntel({
     }
     // identical to the v16..v20.4 read-only guard (string kept byte-for-byte)
     if (ctx.readOnly && !meta.read_only) return "BLOCKED: write tools are disabled in this read-only agent"
-    if (maxRiskCeiling && riskRank(risk) > riskRank(maxRiskCeiling)) {
-      return `BLOCKED: operation risk ${risk} exceeds the configured ceiling (tools.maxRisk=${maxRiskCeiling}) — narrow the operation or ask the user.`
+    // v122: ceiling resolved LIVE — YOLO means no ceiling, and a run that
+    // turns YOLO on mid-session must not keep an old one.
+    const ceiling = control().maxRisk
+    if (ceiling && riskRank(risk) > riskRank(ceiling)) {
+      return `BLOCKED: operation risk ${risk} exceeds the configured ceiling (tools.maxRisk=${ceiling}) — narrow the operation or run \`forge yolo on\` to lift it.`
     }
     // §8/§14 — never blindly repeat a call that already failed the same way
     if (!enabled) return null
@@ -326,6 +335,9 @@ export function createToolIntel({
     // ---- deepwise + criticwise: checklist BEFORE the mutation runs.
     // v112: missing-file / thrash / secret BLOCK on non-MICRO. Hub → VERIFY.
     // MICRO stays advisory. Off with tools.intelligence:false or FORGE_CRITIQUE=0.
+    // v122: the CHECKLIST is never switched off by YOLO (its note is the most
+    // useful sentence in the transcript); only its VETO is. `critiqueEnforce`
+    // decides which of the two this run gets.
     let critiqueLine = ""
     if (enabled && !meta.read_only && CRITIQUE_TOOLS.has(name) && critiqueEnabled()) {
       try {
@@ -333,7 +345,7 @@ export function createToolIntel({
         if (c.concerns.length) {
           record.critique = c.concerns
           critiqueLine = c.line
-          const verdict = critiqueVerdict(c, { klass: klass || meta.klass || "" })
+          const verdict = critiqueVerdict(c, { klass: klass || meta.klass || "", enforce: control().critiqueEnforce })
           record.critiqueVerdict = verdict.action
           emit({ type: "TOOL_CRITIQUE", tool: name, callId, taskId, runId, step, concerns: c.concerns, verdict: verdict.action, enforce: !!verdict.block })
           if (verdict.block) {

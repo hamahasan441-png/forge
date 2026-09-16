@@ -34,7 +34,7 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-caplearn-proj-"))
 
 console.log("== version identity ==")
 {
-  ok("package version is 113.x", /^113\./.test(VERSION), VERSION)
+  ok("package version is 117.x", /^122\./.test(VERSION), VERSION)
   ok("cognition protocol is 1.5.x", /^1\.5\./.test(COGNITION_VERSION), COGNITION_VERSION)
   ok("caplearn protocol set", CAPLEARN_VERSION === "1.0.0")
 }

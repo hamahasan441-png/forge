@@ -254,6 +254,9 @@ const suites = [
   // ---- a task class is not a strategy, a learning key must identify what --
   // ---- was learned --------------------------------------------------------
   ["v121", "node", ["test-v121.mjs"]],
+  // ---- v122 yolowise: ONE full-control switch, honoured by every layer ------
+  // ---- that can refuse, pause or freeze ------------------------------------
+  ["v122", "node", ["test-v122.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

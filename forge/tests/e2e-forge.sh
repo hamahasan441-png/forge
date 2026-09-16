@@ -62,7 +62,7 @@ echo "== forge E2E (v19) =="
 # v113 audit: pinned to the literal "forge v99.0.0", so every release broke it.
 # The version lives in package.json and version.js reads it; the check now
 # derives the expectation the same way, and still proves the CLI reports it.
-VER=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("../package.json","utf8")).version)')
+VER=$(node -e "console.log(JSON.parse(require(\"fs\").readFileSync(\"$FORGE_DIR/package.json\",\"utf8\")).version)")
 out=$($F version 2>&1); check "forge version" "$out" "forge v$VER"
 
 # 1. config
@@ -731,7 +731,13 @@ check "overflow retry succeeded" "$out" "Hello from mock!"
 # 87. /status + /profile
 out=$(printf '/status\n/exit\n' | $F chat 2>&1)
 check "/status header" "$out" "forge status"
-check "/status safety line" "$out" "safety:"
+# v122 audit: this used to grep for "safety:", the one line that claimed
+# "NO GUARDS (v88 noguard)" — true of the shell, false of the governor and the
+# critique. /status now prints one labelled line per layer; the check asserts
+# the layer table exists AND that the old blanket claim is gone.
+check "/status control line" "$out" "control:"
+check "/status names the governor" "$out" "governor"
+check_absent "/status no longer claims a single global guard state" "$out" "NO GUARDS (v88 noguard)"
 check "/status effort line" "$out" "effort:"
 out=$(printf '/profile fast\n/profile\n/exit\n' | $F chat 2>&1)
 check "/profile set" "$out" "effort profile → fast"

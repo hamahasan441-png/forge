@@ -201,8 +201,12 @@ console.log("== runBash still classifies before wrapping (source) ==")
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   ok("runAgent passes tier into resolveEffort", /resolveEffort\([^)]*tier:\s*resProfile\.tier/.test(agent) || /resolveEffort\(profile,\s*task,\s*\{\s*tier:/.test(agent))
   // v85: assumeYes may only be implied by the owner's tools.unrestricted switch.
-  const agentNoUnrestricted = agent.replace(/assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/g, "")
-  ok("assumeYes is still not auto-flipped", /assumeYes:\s*unrestricted \|\| config\.tools\?\.assumeYes === true/.test(agent) && !/assumeYes:\s*true\b/.test(agentNoUnrestricted) && !/assumeYes:\s*autonomous/.test(agent))
+  // v122: that switch is the resolved YOLO state, so `yolo.assumeYes ||
+  // unrestricted` is the same promise — owner-set, never model- or
+  // autonomy-set. `autonomous` still must not appear on the right-hand side.
+  const SHAPE = /assumeYes:\s*(?:unrestricted \|\| config\.tools\?\.assumeYes === true|yolo\.assumeYes \|\| unrestricted)/
+  const agentNoUnrestricted = agent.replace(new RegExp(SHAPE.source, "g"), "")
+  ok("assumeYes is still not auto-flipped", SHAPE.test(agent) && !/assumeYes:\s*true\b/.test(agentNoUnrestricted) && !/assumeYes:\s*autonomous/.test(agent))
 }
 
 console.log("== package version ==")

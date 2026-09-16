@@ -60,6 +60,7 @@ import { critiquePlan, planRevisionPrompt } from "./plancritique.js" // v99 loop
 import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
 import { AGENT_BUDGETS } from "./config.js"
 import { createCognition } from "./cognition.js"
+import { yoloState } from "./yolo.js" // v122: one resolved full-control state (the meta loop honours it too)
 import { classifyUserMessage } from "./msgclass.js"
 import { requirementDelta, formatDelta } from "./reqdelta.js"
 import { shouldReplan, replanPrompt, planLessonsPrefix } from "./replan.js"
@@ -444,7 +445,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const riskLevel = riskForChange({ task: state.objective })
   const classified = classifyTask(state.objective, { resume: Boolean(resumeRec) })
-  const cognition = createCognition({ cwd: process.cwd(), objective: state.objective, resume: resumeRec ? { objective: state.objective } : null })
+  // v122 "yolowise": the autonomous lifecycle honours the SAME control state
+  // the one-shot agent does. Before this, `forge agent --auto` under YOLO still
+  // froze tools on the governor's action, because meta built its cognition
+  // without asking who is in charge.
+  const cognition = createCognition({
+    cwd: process.cwd(),
+    objective: state.objective,
+    resume: resumeRec ? { objective: state.objective } : null,
+    governorEnforce: yoloState(config).governorEnforce,
+  })
   const omega = cognition.kernel
   emit({ type: "COGNITION_BOOTED", taskId, runId: taskRunId, ...cognition.brief() })
   clearComposeOnce()

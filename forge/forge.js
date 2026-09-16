@@ -27,6 +27,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
+import { yoloState, formatYolo } from "./yolo.js" // v122: one resolved full-control state, one command that shows it
 import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
@@ -70,7 +71,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "new"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -351,10 +352,20 @@ async function main() {
   // v87: --yolo = FULL CONTROL for this process — every guard off, no
   // permission pauses. tools.autoApprove already defaults ON; this flag is
   // the one-command way to force it (and unrestricted + assumeYes) anywhere.
+  // v122 "yolowise": FORGE_YOLO is the ONE switch every layer reads (yolo.js),
+  // so the flag now also takes the governor's tool veto, the pre-edit
+  // critique's BLOCK, the capability-risk ceiling, the traversal scope grant
+  // and the read-only worker's command allowlist — the five layers --yolo used
+  // to leave running, which is why "I passed --yolo and it still refused".
   if (flags.yolo === true) {
+    process.env.FORGE_YOLO = "1"
     process.env.FORGE_UNRESTRICTED = "1"
     process.env.FORGE_ASSUME_YES = "1"
     process.env.FORGE_AUTO_APPROVE = "1"
+  }
+  if (flags.safe === true || flags["no-yolo"] === true) {
+    process.env.FORGE_YOLO = "0"
+    process.env.FORGE_AUTO_APPROVE = "0"
   }
 
   if (flags.version || flags.v || cmd === "version") {
@@ -940,6 +951,39 @@ async function main() {
         return
       }
       err(`unknown: forge config ${sub} (show|path|get|set|unset)`); process.exit(1); return
+    }
+    // v122 "yolowise": the control state is a SYSTEM, so it gets one command
+    // that shows the whole thing. Before this, "did my --yolo take?" was
+    // unanswerable from the CLI — the booleans lived in four files and the
+    // only honest report was a refusal 40 steps into a run.
+    case "yolo": {
+      const sub = (positional[1] || "status").toLowerCase()
+      if (sub === "on" || sub === "off") {
+        const on = sub === "on"
+        config.tools = { ...(config.tools || {}), yolo: on }
+        if (on) {
+          config.tools.unrestricted = true
+          config.tools.autoApprove = true
+          config.tools.assumeYes = true
+        }
+        const p = saveConfig(config)
+        console.log(`${bold(`tools.yolo = ${on}`)}  ${dim(`(saved to ${p})`)}`)
+        console.log(on
+          ? "  every layer that can refuse, pause or freeze is now off; the classification, the directive and the critique NOTE all stay visible."
+          : "  the governor, the pre-edit critique, the risk ceiling and the scope grants are back in charge (the shell still never refuses — that has been v88 policy since).")
+        console.log(dim("  run `forge yolo` to see the resolved state; --yolo forces it for one process without saving."))
+        return
+      }
+      if (sub !== "status" && sub !== "show") {
+        err("usage: forge yolo [on|off|status]")
+        process.exit(1)
+        return
+      }
+      const st = yoloState(config)
+      for (const line of formatYolo(st).split("\n")) console.log(line)
+      console.log(dim(`\noverride for one process: ${st.yolo ? "forge --safe …" : "forge --yolo …"}   env: FORGE_YOLO=0|1`))
+      console.log(dim(`pin one layer without touching the rest: forge config set governor.enforce ${st.governorEnforce ? "\"never\"" : "\"always\""}  ·  forge config set critique.enforce ${st.critiqueEnforce ? "\"never\"" : "\"always\""}`))
+      return
     }
     case "models": {
       // v18: `forge models [provider] [--free]` — list for ANY provider (no
@@ -2389,7 +2433,9 @@ ${bold("usage")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)
   ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
-  ${cyan("forge --yolo …")}            FULL CONTROL — all guards off, zero permission pauses ${dim("(tools.autoApprove in ~/.forge/config.json makes it permanent)")}
+  ${cyan("forge --yolo …")}            FULL CONTROL for ONE process — every layer that can refuse, pause or freeze is off ${dim("(tools.yolo + tools.autoApprove in ~/.forge/config.json make it permanent)")}
+  ${cyan("forge yolo [on|off|status]")}  the resolved control state: shell, governor, critique, ceiling, grants — and the rails YOLO never turns off
+  ${cyan("forge --safe …")}              the opposite of --yolo for one process ${dim("(FORGE_YOLO=0)")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
@@ -2440,12 +2486,25 @@ ${bold("terminal + deep (v19/v20)")}
   ${cyan("--deep")} / ${cyan("/deep")}             DEEP THINKING — high reasoning effort (OpenRouter/o-series), bigger budgets, verify-first
   ${cyan("--profile")} / ${cyan("/profile")}       effort profile: fast | balanced | deep | auto (auto = deep for complex tasks)
 
-${bold("safety (v88 full control + correctness rails)")}
-  shell commands risk-classified for honest labels, nothing refused or paused by default (v88 "noguard" — the owner's standing decision)
+${bold("control (v88 shell + v122 YOLO — one switch, one report)")}
+  ${cyan("forge yolo")}                   print the resolved state of EVERY layer: shell, autoApprove, governor authority,
+                              pre-edit critique, risk ceiling, and the grants (sudo, scope, traversal, eval, upload)
+  ${cyan("forge yolo on|off")}            persist the umbrella switch (tools.yolo in ~/.forge/config.json)
+  shell commands are risk-classified for honest labels, never refused and never paused (v88 "noguard" — the owner's standing decision)
+  governor INSPECT/VERIFY/ASK and the critique checklist still RUN and still narrate — under YOLO they advise instead of vetoing
+  pin one layer without touching the rest: ${cyan("forge config set governor.enforce always|never|auto")} · ${cyan("critique.enforce")}
+  YOLO never turns off: project-config privilege strip · injection fence on tool results · secret redaction ·
+  atomic/TOCTOU-safe writes · socket pinning on URL fetches — those defend you from OTHER people's code, not from
+  yourself; and read-only workers keep their write refusal while the completion gate keeps needing evidence,
+  because those two are correctness (a result must mean something), not permission over your machine
   sandbox is OPT-IN only (${cyan("FORGE_SANDBOX=1")} + working bwrap) • writes are TOCTOU-safe (securefs) • tool results secret-redacted
-  sub-agents read-only, depth-capped, timed out • URL fetches DNS/socket-pinned (hijack-proof); ${cyan("fetch_url")} allows private targets
+  sub-agents read-only (writes refused; under YOLO their bash commands are CLASSIFIED, not allowlisted) • depth-capped, timed out
+  URL fetches stay DNS/socket-pinned (hijack-proof); ${cyan("fetch_url")} allows private targets
 ${bold("environment (full power on any device — Termux/NetHunter ready)")}
   ${cyan("FORGE_SHELL=<path>")}            override the shell (auto: /bin/sh → $PREFIX/bin/sh on Termux → $SHELL)
+  ${cyan("FORGE_YOLO=0|1")}                force the full-control umbrella for ONE process (1 = every layer off, 0 = back on)
+  ${cyan("FORGE_GOVERNOR=0|1")}           pin ONLY the governor's tool veto (1 = freeze/hide tools mid-run)
+  ${cyan("FORGE_CRITIQUE_ENFORCE=0|1")}    pin ONLY the pre-edit critique's BLOCK/ASK
   ${cyan("FORGE_ALLOW_PRIVATE_URLS=1")}     private-network targets allowed in web_search/browser fetches
   ${cyan("FORGE_SKILL_ALLOW_PRIVATE=1")}    allow skill download from private mirrors
   ${cyan("FORGE_BLAST_RADIUS=0")}           disable the per-edit blast-radius prediction note
@@ -2459,7 +2518,8 @@ ${bold("resilience")}
   ${cyan("forge memory")}                  curate long-term memory: list | add | forget <n> | clear | prune
 
 ${bold("flags")}
-  --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>
+  --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>  --yolo  --safe
+  --yolo / --safe     full control for this process (nothing refused, nothing paused, nothing frozen) / the opposite
   --json (machine-readable output: sessions/models/plugins/skills --check/memory list)  •  FORGE_DEBUG=1 (agent trace)
   --config <path>    --cwd <dir> (agent)  --plan (agent)  --continue  --resume <n|id>  -m "message"  --no-color
 
