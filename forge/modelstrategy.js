@@ -361,7 +361,7 @@ export function selectModel(config, opts = {}) {
   const {
     task = "", provider: active = null, risk = "medium", files = 0,
     contextTokens = 0, latencyBudgetMs = null, preferredClass = null,
-    excludeModel = null,
+    excludeModel = null, requireCapabilities = [],
   } = opts
   // v101 P3: which KIND of work this is. Callers that know it pass it; when
   // absent it is derived from the task text, so class-aware routing works
@@ -385,6 +385,24 @@ export function selectModel(config, opts = {}) {
     const models = [...new Set([p.model, ...remembered, ...(cat?.models ?? [])].filter(Boolean))]
     for (const model of models.slice(0, 6)) {
       if (excludeModel && model === excludeModel && name === active?.name) continue
+      // v113 audit — A REQUIRED CAPABILITY IS A FILTER, NOT A PREFERENCE.
+      //
+      // The reasoning requirement for a deep-effort run was enforced on the
+      // FAILOVER path (providers.js:160, "lacks required capability") and
+      // nowhere else. v110 put selectModel on the live path AHEAD of it, so a
+      // deep run was silently switched to a fast model before failover could
+      // ever object. Reproduced: a deep:true run was moved
+      //   "bad/bad-model" -> "good/gpt-4o-mini"  why: "fast + cheap for this
+      //   light task"
+      // and gpt-4o-mini's registry entry has no `reasoning`. The run that most
+      // needs a reasoning model was the one most likely to lose it.
+      //
+      // A model the registry does not know is NOT rejected — same rule as
+      // providers.js: no entry means no claim, not a negative claim.
+      if (requireCapabilities.length) {
+        const reg = lookupRegistry(model)
+        if (reg?.capabilities && requireCapabilities.some((c) => !reg.capabilities.includes(c))) continue
+      }
       const { score, reasons, window, tags, recognized, performance: performance_ } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow, taskClass })
       const isActive = active?.name === name && active?.model === model
       candidates.push({
@@ -455,13 +473,13 @@ export function selectModel(config, opts = {}) {
  * Live-path hook. MICRO never switches (a typo is not a bake-off).
  * Low-confidence decisions keep the caller's model. Lock skips selection.
  */
-export function applyModelChoice({ config, provider, task = "", klass = "", lock = false } = {}) {
+export function applyModelChoice({ config, provider, task = "", klass = "", lock = false, deep = false } = {}) {
   if (lock) return { provider, switched: false, why: "model locked by the user" }
   const k = String(klass || "")
   if (k === "MICRO" || k === "trivial") {
     return { provider, switched: false, why: "MICRO keeps the caller's model" }
   }
-  const sel = selectModel(config, { task, provider, taskClass: deriveTaskClass(task) })
+  const sel = selectModel(config, { task, provider, taskClass: deriveTaskClass(task), requireCapabilities: deep ? ["reasoning"] : [] })
   const d = sel?.decision
   if (!d) return { provider, switched: false, why: sel?.reason || "no decision", selection: sel }
   if (d.provider === provider?.name && d.model === provider?.model) {

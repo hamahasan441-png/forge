@@ -312,12 +312,26 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
   const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
   const earlyKlass = (() => { try { return classifyTask(task || "").class } catch { return "SMALL" } })()
+  // v113 audit: the effort decision has to happen BEFORE the model is chosen.
+  // It used to be resolved ~80 lines below, so applyModelChoice could not know
+  // a run was deep and swapped in a fast, non-reasoning model — the capability
+  // gate existed only on the failover path, which never ran. Same inputs as
+  // before, just computed early; the value is reused below, not recomputed.
+  const resProfile = resourceProfile()
+  let deepEffort = deep
+  if (deepEffort === undefined) {
+    const profile = config.chat?.profile ?? "auto"
+    const resolved = resolveEffort(profile, task, { tier: resProfile.tier })
+    deepEffort = resolved.deep
+    if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
+  }
   if (!readonly && config?.agent?.modelStrategy !== false && process.env.FORGE_LOCK_MODEL !== "1") {
     try {
       const { applyModelChoice } = await import("./modelstrategy.js")
       const choice = applyModelChoice({
         config, provider: p, task, klass: earlyKlass,
         lock: Boolean(process.env.FORGE_LOCK_MODEL),
+        deep: deepEffort === true,
       })
       if (choice.switched && choice.provider) {
         onEvent?.({
@@ -389,14 +403,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   } catch { /* empirics rank failover; they never steal the user's chosen model */ }
   let chainIdx = 0
   const isFailworthy = isFailoverWorthy
-  const resProfile = resourceProfile()
-  let deepEffort = deep
-  if (deepEffort === undefined) {
-    const profile = config.chat?.profile ?? "auto"
-    const resolved = resolveEffort(profile, task, { tier: resProfile.tier })
-    deepEffort = resolved.deep
-    if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
-  }
   // v101 P0: phase tracing. telemetry.js counts WHAT happened; this records
   // WHERE THE WALL-CLOCK WENT, so an optimization can be attributed to the
   // phase it claims to improve instead of judged on total runtime alone.
@@ -1239,6 +1245,18 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         for (let i = messages.length - 1; i >= 0; i--) {
           const m = messages[i]
           if (m.role === "assistant") continue
+          // v113 audit: THE GOVERNOR'S OWN TURN IS NOT THE USER'S.
+          //
+          // This walks back for the last real user turn to decide whether the
+          // final answer was FORCED by the budget nudge — the guard behind
+          // "budget exhaustion is never completion". The v101 governor appends
+          // its own `user` directive after every step, so the last user
+          // message became "(governor) GOVERNOR: EXECUTE ..." and never the
+          // nudge. coercedByNudge stayed false, `exhausted` stayed false, and
+          // a run that burned its whole budget and answered only because it
+          // was told to reported COMPLETED. Reproduced: budgetHit=true,
+          // status=COMPLETED, reason=null, no checkpoint.
+          if (m.role === "user" && String(m.content ?? "").startsWith(GOV_PREFIX)) continue
           if (m.role === "user") { coercedByNudge = String(m.content ?? "").startsWith(BUDGET_NUDGE_PREFIX); break }
           if (m.role === "tool") continue
           break
