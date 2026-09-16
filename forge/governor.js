@@ -345,6 +345,27 @@ export const CHEAPEST_FIRST = "native deterministic → existing skill → MCP �
  * Rank competing strategies by expected value: reversible and cheap first.
  * Confidence is never treated as evidence — it only breaks ties.
  */
+/**
+ * v121 deadwire — the stable identity of a strategy, for the outcome ledger.
+ *
+ * A strategy's `id` is positional (IH1, S2) and its `text` embeds the
+ * objective, so one is too coarse to mean anything across tasks and the other
+ * too fine to ever repeat. The key is the slug of what the strategy is FOR,
+ * which is drawn from a fixed table and so recurs run after run.
+ */
+export function strategyKey(source = "") {
+  return String(source ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    // 40, not an arbitrary cap: metalearn.recordStrategy truncates the id it
+    // stores to 40 chars. A longer key would be WRITTEN truncated and READ in
+    // full, so every lookup of a long goal would miss and the row would read
+    // as "never tried" forever.
+    .slice(0, 40)
+    .replace(/-+$/, "") || ""
+}
+
 export function rankStrategies(list = [], { rates = null } = {}) {
   const map = rates && typeof rates === "object" ? rates : {}
   const rows = (Array.isArray(list) ? list : []).map((s, i) => {
@@ -354,14 +375,18 @@ export function rankStrategies(list = [], { rates = null } = {}) {
     const blast = Math.max(0, Math.min(1, Number(s?.blast) || (reversible ? 0.2 : 0.7)))
     const id = s?.id || `S${i + 1}`
     const text = String(s?.text || s?.strategy || s?.label || "").slice(0, 200)
-    const rec = map[id] || map[text] || null
+    // v121: the stable key first. `id` stays as a fallback so rows recorded
+    // before v121 still read, and `text` stays for callers that pass a
+    // recurring label rather than a per-task sentence.
+    const key = s?.key ? String(s.key) : ""
+    const rec = (key && map[key]) || map[id] || map[text] || null
     const n = rec?.samples || 0
     const rate = n >= 2 ? (Number(rec.ok || 0) / n) : null
     let ev = (reversible ? 0.35 : 0) + (1 - cost) * 0.25 + (1 - blast) * 0.15
     if (rate != null) ev += rate * 0.45 - (1 - rate) * 0.4
     else ev += confidence * 0.05
     return {
-      id, text, reversible, cost, confidence, blast,
+      id, key, text, reversible, cost, confidence, blast,
       expectedValue: Number(ev.toFixed(3)),
       measured: rate != null ? { samples: n, rate } : null,
     }

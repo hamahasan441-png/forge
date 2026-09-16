@@ -23,6 +23,10 @@ import { namedIn, scoreAgainst } from "./evaluate.js"
 export const STRATEGY_FILE = "strategy.json"
 export const MAX_STRATEGIES = 24
 
+/** Rows written by the pre-v121 `klass:<CLASS>` recorder — a task class is not
+ *  a strategy, and a store of them can only ever rank classes. */
+export const LEGACY_CLASS_ROW = /^klass:/i
+
 export function strategyPath(cwd = process.cwd()) {
   return path.join(projectDir(cwd), STRATEGY_FILE)
 }
@@ -84,6 +88,13 @@ export function pickStrategy(task = "", { cwd = process.cwd(), klass = null, lim
   for (const name of names) {
     const rec = items[name]
     if (!rec || (rec.samples ?? 0) < 1) continue
+    // v121 deadwire: until v121 meta.js recorded every segment here as
+    // `klass:<CLASS>`, so existing projects carry rows that name a task class
+    // rather than a strategy. Surfacing one produces "STRATEGY: klass:MEDIUM —
+    // 71% ok; not klass:LARGE: 50% ok (lower)", which offers the model a
+    // choice between task classes. The writer is gone; these skip the rows
+    // already on disk rather than asking every user to delete a file.
+    if (LEGACY_CLASS_ROW.test(name)) continue
     const hit = namedIn(task, name) ? 2 : scoreAgainst(task, name, name)
     const rate = Number(rec.rate ?? 0)
     // --- v93 §23: contextual factors (real data only; absent = unused) ---

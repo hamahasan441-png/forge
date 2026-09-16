@@ -36,6 +36,106 @@ export const REALITY_DELTA = {
 
 export const RISK_ORDER = { trivial: 0, low: 1, medium: 2, high: 3, critical: 4 }
 
+// ---------------------------------------------------------------------------
+// v121 deadwire — measured prediction error reaches the risk NUMBER
+//
+// predictionCalibration() computes eight signals from settled predictions.
+// Before v121 this module consumed exactly one of them: avgDrift, into an
+// uncertainty bump. riskBias, riskEscalations, outcomeAccuracy, testBias,
+// stepBias, fileRecall and scopeDriftRate reached only PROSE — the sentence
+// predictionsForPrompt adds to the system prompt and the weakness selfmodel
+// lists. So a project whose last eight plans each ended TWO ladder steps above
+// what was predicted assessed its next plan at exactly the number a project
+// with no history at all would get:
+//
+//   riskBias +2 over 8 samples : 0.278 low
+//   no calibration whatsoever  : 0.278 low
+//
+// The prompt said "risk was UNDER-predicted 8/8 times — predict risk honestly"
+// while forge's own estimate stayed optimistic, and riskLadder is not
+// cosmetic: meta.js only generates and adopts alternatives() at high/critical.
+//
+// Three rules keep this evidence and not enthusiasm:
+//
+//   DAMPING     nothing is claimed below CALIBRATION_MIN_SAMPLES observations
+//               of the SPECIFIC signal (riskSamples for risk, outcomeSamples
+//               for outcome accuracy) — not merely of settled predictions.
+//   RAISE-ONLY  every term is non-negative by construction, so a calibrated
+//               estimate can never fall below its uncalibrated value. Having
+//               been wrong in the SAFE direction is not evidence for optimism.
+//   BOUNDED     total risk pressure caps at RISK_PRESSURE_MAX. Calibration
+//               adjusts the shape model; it never replaces it.
+// ---------------------------------------------------------------------------
+
+/** Observations of one signal needed before it may move a number. Mirrors
+ *  prediction.js MIN_CALIBRATION_SAMPLES — two observations are an anecdote. */
+export const CALIBRATION_MIN_SAMPLES = 5
+
+/** One ladder step (trivial→low→medium→high→critical) is worth about this
+ *  much of the 0..1 risk scale, whose bands sit at .15/.32/.55/.75. */
+const LADDER_BAND = 0.2
+
+/** Calibration may lift the estimate by at most ~1.5 ladder steps. */
+const RISK_PRESSURE_MAX = 0.3
+const COMPLEXITY_PRESSURE_MAX = 0.12
+const UNCERTAINTY_PRESSURE_MAX = 0.12
+
+/** The shape-model prior for "this node declares no targets, so the change
+ *  may land anywhere". Measured drift may raise it; nothing lowers it. */
+const SCOPE_DRIFT_PRIOR = 0.3
+
+/**
+ * Turn settled-prediction error into bounded, damped, raise-only pressure on
+ * the planning numbers. Returns zeros — never negatives — when the evidence
+ * is too thin to say anything, so callers can add unconditionally.
+ */
+export function calibrationPressure(calibration) {
+  const out = { risk: 0, complexity: 0, uncertainty: 0, why: [], sufficient: false }
+  if (calibration?.sufficient !== true) return out
+  out.sufficient = true
+
+  // §15 — risk systematically under-predicted. riskDelta is signed ladder
+  // steps (finalRisk − expectedRisk), so riskBias is directly in ladder units.
+  const riskSamples = Number(calibration.riskSamples) || 0
+  const riskBias = Number(calibration.riskBias)
+  if (riskSamples >= CALIBRATION_MIN_SAMPLES && Number.isFinite(riskBias) && riskBias > 0) {
+    out.risk += Math.min(RISK_PRESSURE_MAX, riskBias * LADDER_BAND)
+    const esc = Number(calibration.riskEscalations) || 0
+    out.why.push(`risk under-predicted by ${riskBias} ladder step(s) over ${riskSamples} settled prediction(s) (${esc} escalation(s))`)
+  }
+
+  // §6/§21 — changes keep landing outside the declared targets, or the work
+  // keeps taking more steps/tests than planned. Both are complexity the shape
+  // model did not see in the DAG.
+  let complexity = 0
+  const drift = Number(calibration.scopeDriftRate)
+  if (Number.isFinite(drift) && drift > 0.25) {
+    complexity += Math.min(0.08, (drift - 0.25) * 0.2)
+    out.why.push(`scope drift ${Math.round(drift * 100)}% — changes land outside the declared targets`)
+  }
+  const stepBias = Number(calibration.stepBias)
+  if (Number.isFinite(stepBias) && stepBias > 0.5) {
+    complexity += Math.min(0.06, stepBias * 0.02)
+    out.why.push(`segments needed ~+${stepBias} more steps than predicted`)
+  }
+  const testBias = Number(calibration.testBias)
+  if (Number.isFinite(testBias) && testBias > 0.5) {
+    complexity += Math.min(0.04, testBias * 0.015)
+    out.why.push(`~+${testBias} more verification run(s) than predicted`)
+  }
+  out.complexity = Math.min(COMPLEXITY_PRESSURE_MAX, complexity)
+
+  // §15 — the outcome call itself has been wrong. That is uncertainty about
+  // the estimate, not risk in the plan, so it widens the band instead.
+  const outcomeSamples = Number(calibration.outcomeSamples) || 0
+  const acc = Number(calibration.outcomeAccuracy)
+  if (outcomeSamples >= CALIBRATION_MIN_SAMPLES && Number.isFinite(acc) && acc < 0.6) {
+    out.uncertainty = Math.min(UNCERTAINTY_PRESSURE_MAX, (0.6 - acc) * 0.3)
+    out.why.push(`outcome prediction was right only ${Math.round(acc * 100)}% of ${outcomeSamples} time(s)`)
+  }
+  return out
+}
+
 /** §28 — risk-based verification ladder (deterministic mapping). */
 export function verificationPlanForRisk(risk) {
   switch (risk) {
@@ -134,6 +234,9 @@ export function predictNodes(dag, { klass = "MEDIUM", lessons = [], calibration 
   const classBase = { MICRO: 0.95, SMALL: 0.9, MEDIUM: 0.82, LARGE: 0.74, ARCHITECTURAL: 0.65, RECOVERY: 0.7 }
   const base = classBase[klass] ?? 0.8
   const riskPenalty = { trivial: 0, low: 0.03, medium: 0.1, high: 0.2, critical: 0.32 }
+  // v121 deadwire: measured error widens the band and sets the scope-drift
+  // failure probability that used to be the constant 0.3.
+  const pressure = calibrationPressure(calibration)
   for (const n of nodes) {
     const risk = RISK_ORDER[n.risk] != null ? n.risk : "low"
     let p = base - (riskPenalty[risk] ?? 0.1)
@@ -157,7 +260,16 @@ export function predictNodes(dag, { klass = "MEDIUM", lessons = [], calibration 
       }
     }
     if (!isReadOnly && (n.targetFiles?.length ?? 0) === 0 && (n.dependencies?.length ?? 0) > 0) {
-      failureModes.push({ mode: "scope_drift", from: "no declared targets", probability: 0.3 })
+      // v121: scopeDriftRate measured how often changes actually landed
+      // outside the declared targets and reached nothing — this probability
+      // was the constant 0.3 however much drift had been observed. Raise-only,
+      // like every other calibration term here: measured drift ABOVE the shape
+      // prior lifts it; a low measured rate leaves the prior alone rather than
+      // talking the planner out of a caution it has not earned.
+      const measuredDrift = pressure.sufficient ? Number(calibration.scopeDriftRate) : NaN
+      failureModes.push(Number.isFinite(measuredDrift) && measuredDrift > SCOPE_DRIFT_PRIOR
+        ? { mode: "scope_drift", from: `measured scope drift ${Math.round(measuredDrift * 100)}%`, probability: Number(Math.min(0.7, measuredDrift).toFixed(3)) }
+        : { mode: "scope_drift", from: "no declared targets", probability: SCOPE_DRIFT_PRIOR })
     }
     if (risk === "high" || risk === "critical") {
       failureModes.push({ mode: "verification_gap", from: "risk ladder", probability: risk === "critical" ? 0.4 : 0.25 })
@@ -168,7 +280,7 @@ export function predictNodes(dag, { klass = "MEDIUM", lessons = [], calibration 
     // calibration evidence adjusts confidence, not the estimate itself (§20)
     const calibrated = calibration?.sufficient === true
     const uncertainty = calibrated
-      ? Math.min(0.5, 0.15 + (calibration.avgDrift ?? 0.2) * 0.5)
+      ? Math.min(0.5, 0.15 + (calibration.avgDrift ?? 0.2) * 0.5 + pressure.uncertainty)
       : 0.45 // thin evidence → high uncertainty, never fake precision
     out.set(n.id, {
       nodeId: n.id,
@@ -247,6 +359,14 @@ export function assessPlan(dag, {
   let overall = 0
   for (const k of Object.keys(weights)) overall += factors[k] * weights[k]
   overall = Math.min(1, Math.max(0, overall))
+  // v121 deadwire: the DAG shape is what the planner can SEE. Settled
+  // predictions are what actually happened last time, and before v121 they
+  // reached this number not at all. Pressure is non-negative by construction,
+  // so `overall` can only ever rise from here — `shapeRisk` below keeps the
+  // uncalibrated estimate visible so the lift is inspectable, not folded in.
+  const shapeRisk = overall
+  const pressure = calibrationPressure(calibration)
+  overall = Math.min(1, overall + pressure.risk + pressure.complexity)
 
   // success probability: noisy-OR style combination of node predictions,
   // dampened (nodes are not fully independent) — a plan-level ESTIMATE.
@@ -263,12 +383,20 @@ export function assessPlan(dag, {
   const evidenceSamples = calibration?.sufficient === true ? (calibration.filePrecision != null ? 5 : 0) : 0
   const lessonCount = lessons.length
   const confidence = evidenceSamples >= 5 && lessonCount >= 3 ? "high" : evidenceSamples >= 5 || lessonCount >= 3 ? "medium" : "low"
-  const uncertainty = calibratedUncertainty(calibration)
+  const uncertainty = calibratedUncertainty(calibration, pressure)
 
   const ladder = overall >= 0.75 ? "critical" : overall >= 0.55 ? "high" : overall >= 0.32 ? "medium" : overall >= 0.15 ? "low" : "trivial"
 
   return {
     risk: Number(overall.toFixed(3)),
+    // what the DAG shape alone said, before settled-prediction evidence
+    shapeRisk: Number(shapeRisk.toFixed(3)),
+    calibrationPressure: {
+      risk: Number(pressure.risk.toFixed(3)),
+      complexity: Number(pressure.complexity.toFixed(3)),
+      uncertainty: Number(pressure.uncertainty.toFixed(3)),
+      why: pressure.why.slice(0, 3),
+    },
     riskLadder: ladder,
     successProbability: Number(successAdjusted.toFixed(3)),
     failureProbability: Number((1 - successAdjusted).toFixed(3)),
@@ -283,9 +411,14 @@ export function assessPlan(dag, {
   }
 }
 
-function calibratedUncertainty(calibration) {
+function calibratedUncertainty(calibration, pressure = null) {
   if (calibration?.sufficient !== true) return 0.45
-  return Number(Math.min(0.4, 0.1 + (calibration.avgDrift ?? 0.2) * 0.5).toFixed(3))
+  const drift = Math.min(0.4, 0.1 + (calibration.avgDrift ?? 0.2) * 0.5)
+  // v121: outcomeAccuracy measured how often the outcome CALL was right and
+  // then reached nothing. A planner that keeps being wrong about outcomes is
+  // more uncertain than its drift alone says.
+  const extra = Number(pressure?.uncertainty) || 0
+  return Number(Math.min(0.5, drift + extra).toFixed(3))
 }
 
 // ---------------------------------------------------------------------------

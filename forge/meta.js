@@ -2465,18 +2465,23 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const tokIn = u.prompt ?? u.prompt_tokens ?? u.input_tokens ?? u.promptTokens ?? 0
     const tokOut = u.completion ?? u.completion_tokens ?? u.output_tokens ?? u.completionTokens ?? 0
     resources.record({ tokensIn: tokIn, tokensOut: tokOut, toolCalls: segToolCalls, latencyMs: segMs, workers: manager.stats().active })
-    // v93 §23: store the actual segment outcome WITH context (class +
-    // languages + latency) — strategy 3.0 selection learns what worked where
-    try {
-      const { recordStrategy } = await import("./strategy.js")
-      recordStrategy({
-        cwd: process.cwd(), name: `klass:${classified.class ?? "UNKNOWN"}`,
-        ok: !res.error && !res.budgetHit,
-        klass: classified.class ?? null,
-        langs: languagesIn(state.objective).slice(0, 6),
-        latencyMs: segMs,
-      })
-    } catch { /* strategy memory is best-effort */ }
+    // v121 deadwire: v93 §23 recorded every segment here as `klass:<CLASS>`.
+    // Nothing else wrote to strategy.json on the live path, so the store
+    // degenerated into one row per task class and both prompt emitters
+    // rendered that as a choice the model cannot make:
+    //
+    //   STRATEGY: klass:MEDIUM — klass:MEDIUM: 71% ok over 7 sample(s)
+    //     not klass:LARGE: 50% ok (lower) over 4 sample(s)
+    //   STRAT: klass:MEDIUM (71%), klass:LARGE (50%)
+    //
+    // "Your strategy is: be a MEDIUM task. Rejected alternative: be a LARGE
+    // task." It names no approach, and pickStrategy's contextual scoring
+    // (language overlap, latency, failure history) could only ever separate
+    // rows by the class it already had. The class success rate itself is not
+    // lost — metalearn's recordReasoning byKlass is exactly that, correctly
+    // keyed, and jointroute/crewroute/empirics/resources each already record
+    // this same segment outcome. A sixth copy under a key that cannot be
+    // matched is not memory; recording nothing is the honest option.
     // v96 unifywise: skill-variant outcomes were CLI-only (`forge variant
     // score`) — the autonomous loop never scored the variants compose
     // surfaced, so variant rates stayed at 0 and selection ran on name hits
