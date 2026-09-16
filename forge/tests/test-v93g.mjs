@@ -77,15 +77,20 @@ console.log("== 2. BEHAVIORAL: direct agent, budget reached, false completion de
 {
   // mock provider: EVERY turn is a tool call — the task intentionally
   // requires more steps than the budget allows
+  // every turn is a DIFFERENT tool call: a genuine budget burn keeps exploring.
+  // repeating one identical call would trip the loop halt (agent.js) and stop the
+  // run for a different, equally honest reason — that is not what this asserts
+  let turn = 0
   const server = http.createServer((req, res) => {
     if (req.method === "POST" && /chat\/completions$/.test(req.url)) {
       let body = ""
       req.on("data", (c) => { body += c })
       req.on("end", () => {
+        turn++
         res.writeHead(200, { "content-type": "application/json" })
         res.end(JSON.stringify({
           id: "mock", object: "chat.completion", created: Date.now(), model: "mock-1",
-          choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo step" }) } }] }, finish_reason: "tool_calls" }],
+          choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [{ id: `c${turn}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: `echo step ${turn}` }) } }] }, finish_reason: "tool_calls" }],
           usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 },
         }))
       })

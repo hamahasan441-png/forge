@@ -179,7 +179,14 @@ console.log("== 4. it runs on the REAL agent path, end to end ==")
 
   const d = await run("fix the failing auth test", secretScript, { review: "off" })
   eq("OFF means not run at all, not run-and-hidden", d.review, null)
-  eq("and the run is exactly what it was before v102", d.status, "COMPLETED")
+  // v115: this used to assert COMPLETED — "exactly what it was before v102".
+  // It no longer is, and not because of the review: every attempt this script
+  // makes to change a file is refused, and v115 stops calling a run that
+  // changed nothing COMPLETED. What this line is actually for is that
+  // review:"off" does not influence the verdict, so that is what it pins now.
+  ok("the verdict owes nothing to the review when it is off",
+    d.review === null && d.completionGate?.checks?.reviewClean === undefined, JSON.stringify(d.completionGate?.checks ?? {}))
+  eq("…and the refused write is still what decided it", d.reason, "MUTATIONS_REFUSED")
 
   const readOnly = (n) => n === 1
     ? call("r1", "read_file", { path: "auth.js" })

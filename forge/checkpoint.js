@@ -513,9 +513,18 @@ function restoreOne(c) {
 }
 
 export function restoreLast(cwd) {
-  const found = listCheckpoints(cwd, 1)
-  if (!found.length) return null
-  return restoreOne(found[0])
+  // v115: a boundary checkpoint is a RESUME marker — it snapshots no files
+  // (boundaryCheckpoint writes `files: []`), so there is nothing in it to
+  // undo. Consuming one as an undo step made `forge undo` report "nothing to
+  // restore" and swallow the step, leaving the real pre-edit snapshot one
+  // undo further back than the user counted. Walk past the empty markers to
+  // the most recent checkpoint that actually holds file content, and leave
+  // them on disk so `forge tasks --resume` still finds them.
+  for (const c of listCheckpoints(cwd, 999)) {
+    if (!c.files?.length) continue
+    return restoreOne(c)
+  }
+  return null
 }
 
 export function restoreRun(cwd, runId = null) {

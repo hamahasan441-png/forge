@@ -341,7 +341,9 @@ else
   FAIL=$((FAIL+1)); echo "  FAIL second undo restored multi.txt"
 fi
 out=$(cd "$T/work" && $F undo 2>&1)
-check "undo exhausted" "$out" "no checkpoints yet"
+# v115: undo walks past boundary/resume checkpoints (they snapshot no files), so
+# once the real snapshots are consumed the honest message names what is left
+check "undo exhausted" "$out" "no file snapshots left to undo"
 
 # 44. doctor environment checks
 out=$($F doctor 2>&1)

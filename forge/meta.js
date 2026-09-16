@@ -2887,6 +2887,38 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     finalText = finalText || "cancelled by user"
   }
 
+  // v115 — THE CANCEL HAS TO REACH THE NODES, NOT ONLY THE TASK.
+  //
+  // The task level was always handled correctly: three separate abort points
+  // transition to CANCELLED. The DAG was not. dag.markCancelled() — written
+  // for exactly this, cascade included — had NO caller anywhere, tests
+  // included, which forge's own selfaudit reported. So a user pressing Ctrl+C
+  // left the in-flight node RUNNING on disk forever:
+  //
+  //   TASK status : CANCELLED      node n1: running      node n2: pending
+  //
+  // That is not cosmetic. empirics, lessons, metalearn and selfmodel all learn
+  // from node outcomes, and a resumed run's recovery reads a RUNNING node with
+  // a dead pid as interrupted work. A person changing their mind was being
+  // recorded as the agent failing, and then learned from.
+  if (finalStatus === FINAL.CANCELLED && dag) {
+    try {
+      const inFlight = [...dag.nodes.values()]
+        .filter((n) => n.status === dagLib.NODE_STATUS.RUNNING || n.status === dagLib.NODE_STATUS.PENDING)
+        .map((n) => n.id)
+      const cancelled = new Set()
+      for (const id of inFlight) {
+        if (cancelled.has(id)) continue
+        for (const c of dagLib.markCancelled(dag, id, { cascade: true })) cancelled.add(c)
+      }
+      if (cancelled.size) {
+        persistDAG()
+        emit({ type: "PLAN_CANCELLED", taskId, runId: taskRunId, cancelledNodes: [...cancelled],
+          reason: "cancelled by user — unfinished work is CANCELLED, never FAILED" })
+      }
+    } catch { /* the cancel verdict stands even if the graph cannot be written */ }
+  }
+
   // P0 explicit finalization: preserve actual terminal state
   // COMPLETED → COMPLETED, FAILED → FAILED, WAITING → WAITING, CANCELLED → CANCELLED
   // Never silently convert WAITING into FAILED

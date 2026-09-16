@@ -684,8 +684,14 @@ async function main() {
         ok(`restored ${r.files} file(s) from checkpoint ${r.id}`)
         for (const n of r.notes ?? []) console.log(dim(`  · ${n}`))
       } else {
-        const n = listCheckpoints(process.cwd(), 99).length
-        if (n) warn(`no restorable checkpoint (all ${n} consumed or from other directories)`)
+        // v115: a boundary checkpoint holds no file content — it is a resume
+        // marker for an INCOMPLETE run. Counting those as "restorable but
+        // consumed" told the user undo had eaten snapshots that never existed.
+        const all = listCheckpoints(process.cwd(), 99)
+        const markers = all.filter((c) => !c.files?.length).length
+        const snapshots = all.length - markers
+        if (snapshots) warn(`no restorable checkpoint (all ${snapshots} consumed or from other directories)`)
+        else if (markers) warn(`no file snapshots left to undo — ${markers} resume checkpoint(s) hold no file content (see: forge tasks)`)
         else warn("no checkpoints yet — files are snapshotted automatically before every write/edit/patch")
       }
       return

@@ -220,7 +220,10 @@ console.log("== 6. agent-level: a budget-FORCED answer is INCOMPLETE, a real ans
       if (mode === "coerced") {
         // req1: five tool calls (count 5, executed) → req2: six more (count 11
         // > the floored budget of 10 → nudge fires) → req3: coerced answer
-        const mk = (n, tag) => Array.from({ length: n }, (_, i) => ({ id: `c${tag}_${i}`, type: "function", function: { name: "list_dir", arguments: "{\"path\":\".\"}" } }))
+        // each call names a DIFFERENT path on purpose: a real budget burn explores,
+        // it does not repeat one call — an identical call repeated would trip the
+        // loop halt (agent.js LOOP_HALT_REPEATS) and stop the run before the budget
+        const mk = (n, tag) => Array.from({ length: n }, (_, i) => ({ id: `c${tag}_${i}`, type: "function", function: { name: "list_dir", arguments: JSON.stringify({ path: `./probe-${tag}${i}` }) } }))
         if (nudgeSeen) message = { role: "assistant", content: "final answer under budget pressure" }
         else if (reqIdx === 1) message = { role: "assistant", content: "", tool_calls: mk(5, "a") }
         else message = { role: "assistant", content: "", tool_calls: mk(6, "b") }

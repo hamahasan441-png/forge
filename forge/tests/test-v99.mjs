@@ -116,8 +116,17 @@ console.log("== 2. agent: productive step-budget auto-extension (real loop) ==")
         task: "loop forever", onEvent: (e) => events.push(e), journal: false,
       })
       ok("signature loop got NO extension", r.stepExtensions === 0 && !events.some((e) => e.type === "step_budget_extended"))
-      ok("loop run stopped honestly at its budget", r.steps === 4 && r.status === "INCOMPLETE", `steps=${r.steps} status=${r.status}`)
-      ok("INCOMPLETE text names the budget", /stopped at the step budget/.test(r.text))
+      // v115: the loop no longer has to burn the budget to be noticed. v99
+      // withheld the EXTENSION and then let the run spend every remaining step
+      // on the same call; v115 stops as soon as the repeat is provable (same
+      // call, same result, 3x in a row), which is one step earlier here and 37
+      // steps earlier on a 40-step budget. Both halves are still pinned: no
+      // extension was granted, AND the run ends INCOMPLETE — it just ends
+      // sooner, and says the true reason instead of blaming a budget it never
+      // reached.
+      ok("a loop stops BEFORE spending the budget", r.steps < 4 && r.status === "INCOMPLETE", `steps=${r.steps} status=${r.status}`)
+      ok("and the reason is the loop, not the budget", r.reason === "LOOP_DETECTED", String(r.reason))
+      ok("INCOMPLETE text names the repetition", /repeating the same .* with the same result/.test(r.text), String(r.text).slice(0, 140))
     } finally { server.close() }
   }
 
