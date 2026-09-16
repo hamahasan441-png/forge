@@ -92,11 +92,18 @@ console.log("== ledger.touch(files) ==")
 
 console.log("== runAgent: checks know which writes followed them ==")
 {
-  // scripted openai-protocol server: test → write → test → write
+  // scripted openai-protocol server: check → write → check → write
+  //
+  // v120: these used to be `echo 'ok 1 passed'; true # npm test` — a command
+  // that only MENTIONED a test runner, in a comment. It was recorded as a
+  // passing verification because the old detector matched the word anywhere in
+  // the string, which is the defect v120 fixes (a grep over a file named
+  // test-*.mjs was being counted as a test run, and covering real writes).
+  // The fixture now uses a genuine check that needs no dependencies.
   const script = [
-    { tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo 'ok 1 passed'; true # npm test" }) } }] },
+    { tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "node --check seed.js" }) } }] },
     { tool_calls: [{ id: "c2", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "src/a.js", content: "export const a = 1\n" }) } }] },
-    { tool_calls: [{ id: "c3", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo 'ok 2 passed' # npm test" }) } }] },
+    { tool_calls: [{ id: "c3", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "node --check seed.js" }) } }] },
     { tool_calls: [{ id: "c4", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo hi > notes.txt" }) } }] },
     { content: "done" },
   ]
@@ -111,6 +118,7 @@ console.log("== runAgent: checks know which writes followed them ==")
   })
   await new Promise((r) => srv.listen(0, "127.0.0.1", r))
   fs.mkdirSync(path.join(WORK, "src"), { recursive: true })
+  fs.writeFileSync(path.join(WORK, "seed.js"), "export const seed = 1\n")   // something real for `node --check`
   const cfg = { activeProvider: "p", providers: { p: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, apiKey: "k", model: "m" } }, agent: { maxSteps: 10, timeoutSec: 10, modelStrategy: false }, skills: { enabled: false }, tools: {} }
   const { buildProvider } = await import("../providers.js")
   const r = await runAgent({ config: cfg, provider: buildProvider(cfg, "p"), task: "do it", onEvent: () => {} })

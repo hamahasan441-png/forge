@@ -26,7 +26,7 @@
  */
 import fs from "node:fs"
 import path from "node:path"
-import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS } from "./config.js"
+import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
 import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
@@ -781,6 +781,20 @@ async function main() {
       const dir = resolveSkillsDir(config.skills?.dir)
       const idx = dir ? indexSkills(dir) : []
       console.log(`  skills:    ${idx.length ? green(`${idx.length} indexed`) : yellow("none")} ${dim(dir ?? "")} ${config.skills?.enabled === false ? yellow("(disabled)") : ""}`)
+      // v120: a config written by an older forge keeps that version's defaults
+      // alive forever. A real run spent ~60s on two 30s connect guards because
+      // `retry.connectMs` was still 30000 — the default before it became 8000.
+      // Nothing is changed here; a stale value is simply made to announce
+      // itself instead of silently costing time on every unreachable provider.
+      try {
+        const shipped = defaultConfig().retry ?? {}
+        const mine = config.retry ?? {}
+        const stale = Object.entries(shipped)
+          .filter(([k, v]) => typeof v === "number" && typeof mine[k] === "number" && mine[k] > v * 2)
+          .map(([k, v]) => `${k}=${mine[k]} (shipped ${v})`)
+        console.log(`  retry:     ${stale.length ? yellow(`${stale.length} setting(s) well above the shipped default`) : green("at or near defaults")}`)
+        for (const line of stale) console.log(`             ${dim(line)} — from an older forge; delete it to take the current default`)
+      } catch { /* doctor never fails on a view */ }
       const prof = loadProfile(process.cwd())
       const langList = [...new Set((prof.langs ?? []).map((l) => l.ext))].slice(0, 4).join("/")
       console.log(`  project:   ${langList || prof.packageManager ? green(`${langList || "detected"}${prof.git?.branch ? " on " + prof.git.branch : ""}${prof.scripts?.test ? " • " + prof.scripts.test : ""}`) : dim("not a code project (plain folder)")} ${dim(prof.cached ? "(cached)" : "(fresh)")}`)

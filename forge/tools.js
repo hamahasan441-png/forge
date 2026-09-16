@@ -1221,9 +1221,14 @@ function read_file(ctx, args) {
   const numbered = lines.map((l, i) => String(offset + i).padStart(5) + "| " + l).join("\n")
   let note = ""
   const shown = offset - 1 + lines.length
-  if (truncated) note = `\n... (read_file kept ${mb(READ_MAX_BYTES)} — use offset/limit to page through the rest)`
-  else if (eof && total > shown) note = `\n... (${total - shown} more lines; total ${total})`
-  else if (!eof) note = "\n... (more lines follow — use offset/limit to continue)"
+  // v120: every one of these said "there is more" without saying WHERE. The
+  // caller then had to derive the next offset itself, and in a real run a
+  // 616-line file was paged in three guessed windows. The next offset is the
+  // one fact the note is for; it costs nothing to state it.
+  const nextOffset = shown + 1
+  if (truncated) note = `\n... (read_file kept ${mb(READ_MAX_BYTES)} — continue with offset: ${nextOffset})`
+  else if (eof && total > shown) note = `\n... (${total - shown} more lines; total ${total} — continue with offset: ${nextOffset})`
+  else if (!eof) note = `\n... (more lines follow — continue with offset: ${nextOffset})`
   return cap(numbered + note, ctx.maxToolOutput)
 }
 

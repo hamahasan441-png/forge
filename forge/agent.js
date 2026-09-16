@@ -93,6 +93,54 @@ const LOOP_HALT_REPEATS = 3
  */
 const COMPLETION_BLOCKER_REPEATS = 3
 
+/**
+ * v120 — IS THIS COMMAND ACTUALLY A CHECK, OR DOES IT MERELY MENTION ONE?
+ *
+ * The old test was `/\b(test|jest|...|lint)\b/i.test(command)`, matched
+ * anywhere in the string. Found in a real run:
+ *
+ *   grep -n "riskBias" tests/test-plannerisk.mjs
+ *
+ * `test-plannerisk` contains `test` followed by a word boundary, so that grep
+ * was recorded as a PASSING verification check. That is not cosmetic:
+ * completion.unverifiedWrites() treats every write before a passing check as
+ * covered, so a grep over a file whose NAME contains "test" could mark real
+ * writes as verified. Reproduced against the real gate — one write, one grep,
+ * `unverified: []`.
+ *
+ * A check is what the command RUNS, not what it mentions. So: split on the
+ * shell separators a command can chain with, and look at the head of each
+ * segment. A segment whose verb is a reader (grep, ls, cat, find…) is never a
+ * check, whatever its arguments say.
+ */
+/** Runners whose NAME already says "this is a check" — no keyword needed. */
+const SELF_EVIDENT_CHECK = /^(jest|vitest|mocha|pytest|rspec|ava|tap|tox|nose2?|eslint|ruff|flake8|mypy|tsc|snyk|semgrep|bandit|gosec|shellcheck|clippy)\b/i
+/** Runners that check only when the rest of the command says so. */
+const GENERIC_RUNNER = /^(npm|pnpm|yarn|bun|node|deno|python3?|cargo|go|rake|bundle|make|cmake|gradle|mvn|dotnet|swift|ruby|php|composer)\b/i
+const CHECK_INTENT = /\b(test|tests|check|build|compile|lint|typecheck|audit|coverage|verify)\b/i
+/** A reader is never a check, whatever its arguments happen to be named. */
+const READ_ONLY_VERBS = /^(grep|rg|ag|ls|cat|head|tail|wc|find|fd|stat|file|echo|printf|pwd|which|type|tree|du|df|sed|awk|cut|sort|uniq|diff|git)\b/i
+/** Wrappers that run the NEXT word — the verb that matters is behind them. */
+const WRAPPERS = /^(npx|bunx|pnpm\s+dlx|yarn\s+dlx|time|env|sudo|nice)\s+/i
+
+export function looksLikeCheck(command) {
+  const raw = String(command ?? "")
+  if (!raw.trim()) return false
+  // `cd x && npm test` chains; each segment is judged on its own head.
+  for (const seg of raw.split(/(?:&&|\|\||;|\||\n)/)) {
+    let head = seg.trim().replace(/^(?:[A-Za-z_][\w]*=\S*\s+)+/, "") // strip VAR=1 prefixes
+    while (WRAPPERS.test(head)) head = head.replace(WRAPPERS, "")
+    if (!head) continue
+    if (READ_ONLY_VERBS.test(head)) continue
+    if (SELF_EVIDENT_CHECK.test(head)) return true
+    // `python -m pytest` / `node --test`: the runner is generic, but the thing
+    // it is asked to run names itself. "pytest" has no word boundary around
+    // "test", so the intent regex alone cannot see it.
+    if (GENERIC_RUNNER.test(head) && (CHECK_INTENT.test(head) || head.split(/\s+/).slice(1).some((a) => SELF_EVIDENT_CHECK.test(a)))) return true
+  }
+  return false
+}
+
 const ROLE_DIRECTIVES = {
   researcher: "You are a RESEARCH sub-agent: investigate quickly, read code/docs, and report findings. Zero writes. Keep the report dense and under 400 words.",
   reviewer: "You are a CODE REVIEW sub-agent: inspect the relevant files for bugs, edge cases, and quality issues. Report concrete findings with file:line references. Zero writes.",
@@ -359,6 +407,14 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           type: "MODEL_SELECTED",
           from: `${p.name}/${p.model}`,
           to: `${choice.provider.name}/${choice.provider.model}`,
+          // v120: uistate renders `model ${ev.provider}/${ev.model} … ${ev.reason}`,
+          // which is meta.js's field naming. The agent path only ever sent
+          // from/to/why, so every selection on this path printed
+          // "model undefined/undefined (low) —". Both shapes are emitted now;
+          // from/to stay because the switch itself is worth showing.
+          provider: choice.provider.name,
+          model: choice.provider.model,
+          reason: choice.why,
           why: choice.why,
           confidence: choice.selection?.decision?.confidence ?? null,
           ...identityMeta(),
@@ -369,6 +425,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           type: "MODEL_SELECTED",
           from: `${p.name}/${p.model}`,
           to: `${p.name}/${p.model}`,
+          provider: p.name,
+          model: p.model,
+          reason: choice.why,
           why: choice.why,
           confidence: choice.selection.decision.confidence,
           switched: false,
@@ -1288,7 +1347,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             try {
               const rawArgs = safeJson(tc.args)
               const command = typeof rawArgs === "object" && rawArgs ? String(rawArgs.command ?? "") : ""
-              if (/\b(test|jest|vitest|mocha|pytest|cargo|go test|rspec|build|tsc|make|compile|audit|snyk|semgrep|bandit|gosec|lint)\b/i.test(command)) {
+              if (looksLikeCheck(command)) {
                 const rstr = String(result)
                 const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
                 const timedOut = /timed out after/i.test(rstr)
