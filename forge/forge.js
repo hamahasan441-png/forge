@@ -2017,11 +2017,22 @@ async function main() {
     // scores it by a hidden test the agent never sees. The headline number is
     // FALSE COMPLETIONS — claimed done, test fails.
     case "eval": {
-      const { EVAL_TASKS, runEval, formatEvalReport } = await import("./evalbench.js")
+      const { EVAL_TASKS, runEval, runAB, formatEvalReport, formatABReport } = await import("./evalbench.js")
       if (flags.list === true || positional[1] === "list") {
-        if (JSON_OUT) { emitJson({ version: VERSION, tasks: EVAL_TASKS.map((t) => ({ id: t.id, prompt: t.prompt })) }); return }
-        console.log(bold(`FORGE EVAL v${VERSION}`) + dim(`  ${EVAL_TASKS.length} task(s), live model, hidden tests`))
-        for (const t of EVAL_TASKS) console.log(`  ${cyan(t.id.padEnd(18))} ${dim(t.prompt.slice(0, 90))}`)
+        if (JSON_OUT) { emitJson({ version: VERSION, tasks: EVAL_TASKS.map((t) => ({ id: t.id, class: t.class ?? null, prompt: t.prompt })) }); return }
+        console.log(bold(`FORGE EVAL v${VERSION}`) + dim(`  ${EVAL_TASKS.length} task(s), live model, hidden tests written after each run`))
+        // grouped by defect class: the point of the class is to say WHERE the
+        // agent is weak, and a flat list cannot
+        const groups = new Map()
+        for (const t of EVAL_TASKS) {
+          const k = t.class ?? "unclassified"
+          if (!groups.has(k)) groups.set(k, [])
+          groups.get(k).push(t)
+        }
+        for (const [k, ts] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
+          console.log(dim(`  ${k}`))
+          for (const t of ts) console.log(`    ${cyan(t.id.padEnd(20))} ${dim(t.prompt.slice(0, 84))}`)
+        }
         return
       }
       const p = resolveProvider(config)
@@ -2034,6 +2045,26 @@ async function main() {
       const tasks = only ? EVAL_TASKS.filter((t) => t.id === only) : EVAL_TASKS
       if (!tasks.length) { err(`no eval task named ${only} (try: forge eval list)`); process.exit(1); return }
       const { runAgent } = await import("./agent.js")
+
+      // v114: the A/B. Same tasks, cognition ON vs OFF, so the v109-v113
+      // claims about learning can be checked instead of asserted.
+      if (flags.ab === true) {
+        if (!JSON_OUT) console.log(bold(`FORGE EVAL A/B`) + dim(`  ${tasks.length} task(s) x 2 arms · ${p.name}/${p.model}${flags["lock-model"] === true ? " · model locked" : ""}`))
+        const ab = await runAB({
+          tasks, runAgent, provider: p, config,
+          timeoutMs: Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : undefined,
+          lockModel: flags["lock-model"] === true,
+          onTask: JSON_OUT ? null : (armLabel, r) => console.log(`  ${dim(armLabel.padEnd(3))} ${r.falseCompletion ? red("LIE ") : r.solved ? green("PASS") : r.errored ? yellow("ERR ") : red("FAIL")}  ${r.id}`),
+        })
+        if (JSON_OUT) { emitJson(ab); process.exit(ab.on.errored || ab.off.errored ? 1 : 0); return }
+        console.log("")
+        console.log(formatABReport(ab))
+        // An arm that never reached the model is a setup failure, not a result.
+        // A false completion in EITHER arm still fails the command.
+        process.exit(ab.on.errored || ab.off.errored || ab.on.falseCompletions || ab.off.falseCompletions ? 1 : 0)
+        return
+      }
+
       if (!JSON_OUT) console.log(bold(`FORGE EVAL`) + dim(`  ${tasks.length} task(s) · ${p.name}/${p.model} · hidden tests written after each run`))
       const summary = await runEval({
         tasks, runAgent, provider: p, config,

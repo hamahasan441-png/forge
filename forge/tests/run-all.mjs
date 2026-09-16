@@ -231,6 +231,8 @@ const suites = [
   ["v107", "node", ["test-v107.mjs"]],
   // ---- v108 rootwise: memory survives `cd`; an answer knows its question --
   ["v108", "node", ["test-v108.mjs"]],
+  // ---- v114 measurewise: the learning claims become falsifiable ----------
+  ["v114", "node", ["test-v114.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],
