@@ -19,7 +19,9 @@ const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v46-work-"))
 process.chdir(WORK)
 fs.writeFileSync(path.join(WORK, "auth.js"), "export function login(){}\n")
 
-const { authorSkill, formatSkillMd, learnedSkillsDir } = await import("../evolve.js")
+const { authorSkill, formatSkillMd, learnedSkillsDir, promoteSkill, recordSkillOutcome } = await import("../evolve.js")
+const { ALL_CHECKS } = await import("../completion.js")
+const passingGate = () => { const checks = {}; for (const k of ALL_CHECKS) checks[k] = true; return { ok: true, status: "COMPLETED", checks, blockers: [] } }
 const { authorPlugin, learnedPluginsDir } = await import("../extend.js")
 const { parseSkillPlaybook } = await import("../skills.js")
 const { compose, formatCompose, playbookFilesOf } = await import("../compose.js")
@@ -87,9 +89,32 @@ console.log("== compose attaches learned skill body ==")
   })
   eq("authored skill ok", r.ok, true)
   ok("name is learned- hyphen", /^learned-/.test(r.name), r.name)
+  // v113 audit: a FRESHLY authored skill is deliberately withheld.
+  //
+  // v58 made learned skills CANDIDATE until a second 9/9 evolveRun proves them
+  // ("learned skills tagged CANDIDATE until a second 9/9 evolveRun"), and
+  // evaluate.js:102 skips CANDIDATE unless the skill is named outright. This
+  // assertion predates that and expected the skill the instant it was written.
+  //
+  // The product is right — unproven learned knowledge should not be offered —
+  // so the test now checks BOTH halves of the contract. Measured: the learned
+  // skill scores 13 against this task, the top of 107 candidates, so it is
+  // withheld by lifecycle and not by relevance.
+  const beforePromote = compose(TASK, { cwd: WORK, includePlugins: false })
+  ok("a freshly authored skill is withheld while it is only a CANDIDATE",
+    !(beforePromote.skills || []).some((s) => s.name === r.name),
+    JSON.stringify((beforePromote.skills || []).map((s) => s.name)))
+
+  // promoteSkill refuses a CANDIDATE outright ("never auto-ACTIVE from
+  // CANDIDATE"), so the skill is proven the way v58 specifies: a second 9/9
+  // evolveRun VERIFIES it, and only then is it promoted.
+  recordSkillOutcome({ cwd: WORK, name: r.name, gate: passingGate(), files: ["auth.js"], task: TASK })
+  const promoted = promoteSkill(WORK, r.name)
+  ok("a twice-proven skill promotes to ACTIVE", promoted.ok === true, JSON.stringify(promoted))
   const c = compose(TASK, { cwd: WORK, includePlugins: false })
   const hit = (c.skills || []).find((s) => s.name === r.name)
-  ok("skill picked", !!hit, JSON.stringify((c.skills || []).map((s) => s.name)))
+  ok("and once promoted it is picked — it outranks every bundled skill", !!hit,
+    JSON.stringify((c.skills || []).map((s) => s.name)))
   eq("skill learned flag", hit?.learned, true)
   eq("repair attached", hit?.repair, REPAIR)
   ok("files attached", (hit?.files || []).includes("auth.js"))

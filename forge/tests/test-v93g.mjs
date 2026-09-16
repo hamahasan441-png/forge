@@ -289,7 +289,15 @@ console.log("== 5. entry-point honesty (source contracts) ==")
 
   ok("agent.js: the fast path consults the ONE completion module", /canCompleteFastPath/.test(agentSrc) && /from "\.\/completion\.js"/.test(agentSrc))
   ok("agent.js: budget path checkpoints (resumable)", /budget-incomplete/.test(agentSrc))
-  ok("agent.js: endRun uses the honest incomplete status", /endRun\(fastGate\.ok \? "completed" : "incomplete"/.test(agentSrc))
+  // v113 audit: this pinned the exact call text `endRun(fastGate.ok ? ...)`.
+  // The derivation moved into an `endStatus` binding when waiting_for_user was
+  // added (agent.js:1415), so the pin broke while the invariant it guards —
+  // the end status is DERIVED FROM THE COMPLETION GATE and is never a bare
+  // "completed" — held perfectly. Assert the invariant, not the spelling.
+  ok("agent.js: the end status is derived from the completion gate",
+    /fastGate\.ok[^\n]*\?[^\n]*"completed"[^\n]*:[^\n]*"incomplete"/.test(agentSrc))
+  ok("agent.js: endRun is handed that derived status, never a literal completed",
+    /endRun\(endStatus\b/.test(agentSrc) || /endRun\(fastGate\.ok \?/.test(agentSrc))
   ok("runlog.js: incomplete is a first-class journal state", /\["completed", "failed", "cancelled", "incomplete"\]/.test(runlogSrc))
   ok("forge.js: one-shot prints the honest status + resume hint", /status: \$\{res\.status\}/.test(forgeSrc) && /the task can resume/.test(forgeSrc))
   ok("chat.js: history persists only honest COMPLETED results", /res\.status === "COMPLETED"/.test(chatSrc) && !/reached max steps/.test(chatSrc))
