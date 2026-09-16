@@ -205,6 +205,19 @@ export default {
     if (!q) return "ERROR: missing query"
     const hits = []
     walk(process.cwd(), q, hits, process.cwd(), 0)
+    // v113 audit: SHAPE THE RESULT TO THE DECLARED OUTPUT SCHEMA.
+    //
+    // This body always returned a string, whatever the design declared. So a
+    // tool designed with outputSchema {type:"object"} or {type:"array"} could
+    // never pass verifyTool — outputMatches() compares the observed value
+    // against the declared type — and was born INACTIVE. The v107 create →
+    // implement → verify → activate pipeline only ever worked for string
+    // tools, silently. Reproduced: design {type:"object"} → implement →
+    // verifyTool ok=false, outputMatchedSchema=false, lifecycle INACTIVE.
+    //
+    // The declared type is the contract; the generated body now honours it.
+    if (DESIGN.outputType === "array") return hits
+    if (DESIGN.outputType === "object") return { query: q, count: hits.length, hits }
     if (!hits.length) return DESIGN.name + ": 0 local hits for " + q
     return hits.join("\\n")
   },
