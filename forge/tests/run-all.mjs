@@ -250,6 +250,10 @@ const suites = [
   // ---- v120 honestcheck: a grep is not a test, "do not implement" is not ---
   // ---- an instruction to implement ----------------------------------------
   ["v120", "node", ["test-v120.mjs"]],
+  // ---- v121 deadwire: measured prediction error reaches the risk number, ---
+  // ---- a task class is not a strategy, a learning key must identify what --
+  // ---- was learned --------------------------------------------------------
+  ["v121", "node", ["test-v121.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

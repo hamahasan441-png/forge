@@ -29,7 +29,7 @@ import path from "node:path"
 import { createKernel } from "./omega.js"
 import { createUserModel, AUTHORITY } from "./usermodel.js"
 import { createTaskContract, REQ, GAP } from "./contract.js"
-import { chooseNextAction, formatAction, authorityFor, formatGovernorMessage, rankStrategies, CHEAPEST_FIRST, ACTION, DEPTH, depthFor } from "./governor.js"
+import { chooseNextAction, formatAction, authorityFor, formatGovernorMessage, rankStrategies, strategyKey, CHEAPEST_FIRST, ACTION, DEPTH, depthFor } from "./governor.js"
 import { predictForAction, settlePrediction as settleLedger, recordPrediction, driftVerdict, predictionsForPrompt, formatPrediction, formatSettlement } from "./prediction.js"
 import { rankExperiments, formatExperiment } from "./infogain.js"
 import { createSelfModel } from "./selfmodel.js"
@@ -279,17 +279,28 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     lastAuth = authorityFor(action.action, { klass })
     if (action.action === ACTION.PLAN && ranked.length === 0) {
       const hypos = user.understanding?.intentHypotheses || []
+      // v121 deadwire: `id` here is POSITIONAL. usermodel.js assigns IH1..IHn
+      // by position inside whichever cue branch matched, so IH1 is "repair the
+      // currently failing test" for a *fix it* task and "quality of the
+      // existing behavior" for an *improve* task — and both used to land in
+      // the same metalearn row byKlass[MEDIUM].strategies.IH1. rankStrategies
+      // weights that rate at +rate*0.45 − (1−rate)*0.4, an EV swing of ±0.85
+      // against a base spread of ~0.75, so a conflated row can flip the pick.
+      // `key` is the stable identity: the hypothesis GOAL, which comes from a
+      // fixed table and therefore repeats across runs. (`text` cannot serve —
+      // it embeds the objective, so it would never repeat at all.)
       const list = hypos.length
         ? hypos.map((h) => ({
           id: h.id,
+          key: strategyKey(h.goal || h.meaning || h.id),
           text: String(h.meaning || h.goal || h.id).slice(0, 200),
           reversible: true,
           cost: 0.35,
           confidence: h.confidence,
         }))
         : [
-          { id: "S1", text: `smallest reversible change: ${String(objective).slice(0, 120)}`, reversible: true, cost: 0.2, blast: 0.2 },
-          { id: "S2", text: `broader change: ${String(objective).slice(0, 120)}`, reversible: false, cost: 0.75, blast: 0.7 },
+          { id: "S1", key: "smallest-reversible-change", text: `smallest reversible change: ${String(objective).slice(0, 120)}`, reversible: true, cost: 0.2, blast: 0.2 },
+          { id: "S2", key: "broader-change", text: `broader change: ${String(objective).slice(0, 120)}`, reversible: false, cost: 0.75, blast: 0.7 },
         ]
       noteStrategies(list)
     }
@@ -456,7 +467,8 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
         repairs: driftReplans,
         replans: driftReplans,
       })
-      if (ranked[0]?.id) recordStrategy({ cwd, klass, id: ranked[0].id, ok: gate.ok === true })
+      // v121: record under the STABLE key, not the positional id.
+      if (ranked[0]?.key || ranked[0]?.id) recordStrategy({ cwd, klass, id: ranked[0].key || ranked[0].id, ok: gate.ok === true })
       recordRoute({
         cwd,
         klass,
