@@ -214,3 +214,143 @@ export function replayDepth({ cwd = process.cwd(), klass = "SMALL", historical =
     source: now.source,
   }
 }
+
+// ---------------------------------------------------------------------------
+// v119 — HOW MANY ATTEMPTS A COMPLETION BLOCKER DESERVES
+//
+// v118 made the governor's STOP a candidate that must survive a check against
+// reality, and gave every refused candidate a flat three attempts. Three is a
+// reasonable guess and it is only a guess: a blocker that has never once been
+// cleared in this project still burns three model turns before the run reports
+// the BLOCKED it was always going to report.
+//
+// The signal needs no oracle, because v118 already produces both outcomes
+// inside the run that produced them:
+//
+//   CLEARED    a later candidate passed with the blocker gone — the refusal
+//              caught a genuinely premature stop and earned its cost
+//   ABANDONED  the same blocker refused to the limit — the refusal cleared
+//              nothing and cost the turns anyway
+//
+// THE INVARIANT THAT BOUNDS THIS: what is learned is the attempt BUDGET, never
+// a verdict. A run that would end BLOCKED still ends BLOCKED — sooner. A run
+// that would complete still completes. Learning may remove wasted work; it may
+// never manufacture a completion. That is the only reason it is safe to let it
+// run unattended.
+// ---------------------------------------------------------------------------
+
+export const COMPLETION_ATTEMPTS_MIN = 1
+export const COMPLETION_ATTEMPTS_MAX = 3
+export const COMPLETION_MIN_SAMPLES = 3
+
+export const COMPLETION_OUTCOME = Object.freeze({
+  CLEARED: "cleared",
+  ABANDONED: "abandoned",
+})
+
+/**
+ * Record what a refusal on `blocker` actually achieved.
+ *
+ * `attempt` is which attempt cleared it (1-based). It is the part that keeps
+ * the budget honest: a blocker seen to clear on the 3rd attempt can never be
+ * squeezed below 3, however many times it later gets abandoned.
+ */
+export function recordCompletionOutcome({
+  cwd = process.cwd(),
+  klass = "SMALL",
+  blocker = "",
+  outcome = COMPLETION_OUTCOME.ABANDONED,
+  attempt = 1,
+} = {}) {
+  const b = String(blocker || "").trim()
+  if (!b) return null
+  const k = String(klass || "SMALL").slice(0, 24)
+  const store = loadMetaLearn(cwd)
+  if (!store.completion || typeof store.completion !== "object") store.completion = {}
+  const row = store.completion[k] && typeof store.completion[k] === "object" ? store.completion[k] : {}
+  const slice = row[b] && typeof row[b] === "object" ? row[b] : { samples: 0, cleared: 0, abandoned: 0, maxClearedAttempt: 0 }
+  slice.samples = (slice.samples || 0) + 1
+  if (outcome === COMPLETION_OUTCOME.CLEARED) {
+    slice.cleared = (slice.cleared || 0) + 1
+    slice.maxClearedAttempt = Math.max(Number(slice.maxClearedAttempt) || 0, Math.max(1, Number(attempt) || 1))
+  } else {
+    slice.abandoned = (slice.abandoned || 0) + 1
+  }
+  slice.lastAt = Date.now()
+  row[b] = slice
+  store.completion[k] = row
+  store.v = METALEARN_VERSION
+  store.updated = Date.now()
+  saveMetaLearn(cwd, store)
+  return slice
+}
+
+/**
+ * The attempt budget for this blocker, in this project, for this task class.
+ *
+ * Below COMPLETION_MIN_SAMPLES nothing is claimed — two observations are an
+ * anecdote and the default is already defensible. An environment that drifted
+ * discards the stats for the same reason recommendDepth does: a clearing rate
+ * measured on a different toolchain is not evidence about this one.
+ */
+export function completionAttemptsFor({
+  cwd = process.cwd(),
+  klass = "SMALL",
+  blocker = "",
+  fallback = COMPLETION_ATTEMPTS_MAX,
+  drifted = null,
+} = {}) {
+  const fb = Math.min(COMPLETION_ATTEMPTS_MAX, Math.max(COMPLETION_ATTEMPTS_MIN, Number(fallback) || COMPLETION_ATTEMPTS_MAX))
+  const b = String(blocker || "").trim()
+  if (!b) return { attempts: fb, why: "no blocker named", source: "default" }
+
+  let envShifted = drifted === true
+  if (drifted == null) {
+    try {
+      const prev = loadEnv(cwd)
+      if (prev) {
+        const fp = capture({ persistedVersions: prev.toolchains ?? null })
+        const d = prev && fp ? diff(prev, fp) : null
+        envShifted = Boolean(d?.drifted)
+      }
+    } catch { /* fingerprint is advisory */ }
+  }
+  if (envShifted) return { attempts: fb, why: "environment drifted — old clearing rates are not evidence about this one", source: "shift", shifted: true }
+
+  const slice = loadMetaLearn(cwd).completion?.[String(klass)]?.[b]
+  const n = Number(slice?.samples) || 0
+  if (n < COMPLETION_MIN_SAMPLES) {
+    return { attempts: fb, why: `only ${n} observation(s) — not enough to shorten the budget`, source: "default", samples: n }
+  }
+  const cleared = Number(slice.cleared) || 0
+  const rate = cleared / n
+  // The floor that makes this safe: never below an attempt this blocker has
+  // actually been seen to clear on.
+  const floor = Math.max(COMPLETION_ATTEMPTS_MIN, Math.min(COMPLETION_ATTEMPTS_MAX, Number(slice.maxClearedAttempt) || COMPLETION_ATTEMPTS_MIN))
+  if (cleared === 0) {
+    return {
+      attempts: Math.max(COMPLETION_ATTEMPTS_MIN, floor === COMPLETION_ATTEMPTS_MIN ? COMPLETION_ATTEMPTS_MIN : floor),
+      why: `${b} has never cleared here in ${n} attempt(s) — spend one turn learning that, not ${fb}`,
+      source: "learned", rate, samples: n,
+    }
+  }
+  return {
+    attempts: Math.max(floor, fb),
+    why: `${b} cleared ${Math.round(rate * 100)}% of ${n}, latest on attempt ${floor} — keep the budget`,
+    source: "learned", rate, samples: n,
+  }
+}
+
+/** Human-readable, for `forge cognition`. Empty when nothing is known. */
+export function formatCompletionPolicy(cwd = process.cwd(), klass = "SMALL") {
+  const row = loadMetaLearn(cwd).completion?.[String(klass)]
+  if (!row || !Object.keys(row).length) return ""
+  const lines = []
+  for (const [blocker, s] of Object.entries(row)) {
+    const n = Number(s?.samples) || 0
+    if (n < COMPLETION_MIN_SAMPLES) continue
+    const rate = Math.round(((Number(s.cleared) || 0) / n) * 100)
+    lines.push(`  ${blocker}: cleared ${rate}% of ${n} — budget ${completionAttemptsFor({ cwd, klass, blocker }).attempts}`)
+  }
+  return lines.length ? `COMPLETION POLICY (measured in this project)\n${lines.join("\n")}` : ""
+}
