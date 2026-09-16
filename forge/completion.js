@@ -25,6 +25,8 @@
  * that can crash the controller would be bypassed the first time it did.
  */
 
+import nodeFs from "node:fs"
+import nodePath from "node:path"
 import { allComplete, incompleteRequiredNodes, graphNodes, NODE_STATUS } from "./dag.js"
 
 export const CHECK = {
@@ -403,4 +405,170 @@ export function canCompleteDAG(dag, { optionalPolicy = "ignore" } = {}) {
     criticalPersistenceSucceeded: true,
     requireDAG: true,
   })
+}
+
+// ---------------------------------------------------------------------------
+// v118 — COMPLETION CANDIDATE vs COMPLETED
+//
+// The governor's STOP rested on contract.canComplete(), whose own verdict
+// reads "goal satisfied OR no open requirements". That `or` was the bug in one
+// word: a contract with NOTHING registered in it is "closed", and closed was
+// being spent as complete. Reproduced against the real runtime — the task
+// "create one.js and two.js" wrote one.js, never wrote two.js, never produced
+// an answer, and forge reported COMPLETED with `reason: GOVERNOR_STOP` and a
+// final text the governor had written about itself.
+//
+// So STOP becomes a CANDIDATE, and a candidate has to survive one more
+// question, asked of reality rather than of the model or the contract:
+//
+//     is the outcome the user asked for actually true on disk?
+//
+// This is the ONE place that answers it (§44). It does not replace the gate
+// above — it consumes the same signals and adds the checks a closed-but-empty
+// contract cannot make.
+// ---------------------------------------------------------------------------
+
+/** A candidate is not a verdict. Kept distinct from GATE_STATUS on purpose. */
+export const COMPLETION = Object.freeze({
+  CANDIDATE: "COMPLETION_CANDIDATE",
+  COMPLETED: "COMPLETED",
+  BLOCKED: "BLOCKED",
+  INCOMPLETE: "INCOMPLETE",
+})
+
+/** Why a candidate was refused, and what to do about it (§16/§50). */
+export const BLOCKER = Object.freeze({
+  MISSING_ARTIFACT: "MISSING_ARTIFACT",
+  NO_ANSWER: "NO_ANSWER",
+  NOTHING_CHANGED: "NOTHING_CHANGED",
+  UNVERIFIED_WRITES: "UNVERIFIED_WRITES",
+  FAILED_CHECK: "FAILED_CHECK",
+})
+
+/**
+ * Files the task ITSELF named that do not exist (§36 output existence).
+ *
+ * The extraction is router.analyzeTask's — the same FILE_RE that already feeds
+ * tool routing, so there is no second opinion about what a path looks like in
+ * a sentence. A task that names no file is not suspicious, it is simply not
+ * making a claim this check can test.
+ *
+ * `existsFn` is injected so this stays pure and testable.
+ */
+export function missingNamedArtifacts(named = [], { cwd = ".", existsFn = null } = {}) {
+  const exists = existsFn ?? ((p) => { try { return nodeFs.existsSync(nodePath.resolve(cwd, p)) } catch { return false } })
+  const out = []
+  for (const f of named) {
+    const p = String(f || "").trim()
+    if (!p) continue
+    // A path that already existed before the run is not evidence of work, but
+    // its ABSENCE is evidence of work not done — that is the only direction
+    // this check claims.
+    if (!exists(p)) out.push(p)
+  }
+  return [...new Set(out)]
+}
+
+/**
+ * The completion evaluation (§6). Cheap: no model call, no network, and for a
+ * task that named nothing and changed nothing it is a handful of array reads.
+ *
+ * Returns the candidate's fate plus the evidence BOTH ways, because "why do we
+ * believe this is complete" has to be answerable with something other than
+ * "the governor said so".
+ */
+export function evaluateCompletion({
+  task = "",
+  namedFiles = [],
+  cwd = ".",
+  existsFn = null,
+  wrote = false,
+  mutating = false,
+  modelAnswered = false,
+  unverified = [],
+  commandChecks = [],
+  requireVerification = false,
+  klass = "SMALL",
+} = {}) {
+  const blockers = []
+  const positive = []
+  const checks = Array.isArray(commandChecks) ? commandChecks : []
+
+  const missing = missingNamedArtifacts(namedFiles, { cwd, existsFn })
+  if (missing.length) {
+    blockers.push({
+      code: BLOCKER.MISSING_ARTIFACT,
+      why: `the task names ${missing.length === 1 ? "a file that does not exist" : "files that do not exist"}: ${missing.slice(0, 4).join(", ")}`,
+      nextAction: "EXECUTE",
+      detail: { missing: missing.slice(0, 8) },
+    })
+  } else if (namedFiles.length) {
+    positive.push(`every file the task named exists (${namedFiles.slice(0, 4).join(", ")})`)
+  }
+
+  // A task that asked for a change and produced none is not finished, whatever
+  // the contract says. A READ-ONLY task legitimately writes nothing, so this
+  // fires only when the task itself was a mutation.
+  if (mutating && !wrote) {
+    blockers.push({
+      code: BLOCKER.NOTHING_CHANGED,
+      why: "the task asks for a change and nothing was written",
+      nextAction: "EXECUTE",
+    })
+  } else if (wrote) {
+    positive.push("the run changed the workspace")
+  }
+
+  // The governor's own note is not an answer. Neither is silence.
+  if (!modelAnswered) {
+    blockers.push({
+      code: BLOCKER.NO_ANSWER,
+      why: "no final answer was produced — a governor note about stopping is not an answer to the user",
+      nextAction: "EXECUTE",
+    })
+  } else {
+    positive.push("a real final answer was produced")
+  }
+
+  const failing = checks.filter((c) => c && c.passed === false)
+  if (failing.length) {
+    blockers.push({
+      code: BLOCKER.FAILED_CHECK,
+      why: `a check the run itself ran is failing: ${String(failing[failing.length - 1].command || "").slice(0, 80)}`,
+      nextAction: "REPAIR",
+      detail: { command: failing[failing.length - 1].command ?? null },
+    })
+  } else if (checks.length) {
+    positive.push(`${checks.length} check(s) ran and passed`)
+  }
+
+  const uncovered = Array.isArray(unverified) ? unverified.filter(Boolean) : []
+  if (uncovered.length && (requireVerification || klass === "LARGE" || klass === "ARCHITECTURAL" || klass === "MEDIUM")) {
+    blockers.push({
+      code: BLOCKER.UNVERIFIED_WRITES,
+      why: `${uncovered.length} write(s) have no covering check`,
+      nextAction: "VERIFY",
+      detail: { unverified: uncovered.slice(0, 8) },
+    })
+  }
+
+  const ok = blockers.length === 0
+  return {
+    ok,
+    status: ok ? COMPLETION.COMPLETED : COMPLETION.BLOCKED,
+    blockers,
+    evidence: { positive, negative: blockers.map((b) => b.why) },
+    // Deliberately coarse and deliberately internal: a number here decides
+    // candidate/continue, and is never shown to a user as a percentage.
+    confidence: ok ? Math.min(1, 0.55 + 0.15 * positive.length) : Math.max(0, 0.4 - 0.1 * blockers.length),
+    next: ok ? null : blockers[0].nextAction,
+  }
+}
+
+/** The one line the model is given instead of a bare "continue" (§48). */
+export function formatCompletionBlock(verdict) {
+  if (!verdict || verdict.ok) return ""
+  const b = verdict.blockers[0]
+  const rest = verdict.blockers.slice(1).map((x) => x.why)
+  return `TASK NOT COMPLETE. Reason: ${b.why}. Next required action: ${b.nextAction}.${rest.length ? ` Also open: ${rest.join("; ")}.` : ""}`
 }
