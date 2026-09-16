@@ -27,6 +27,7 @@ import { loadIndex } from "./index.js"
 import { entryIsStale, worldFromIndex } from "./memgraph.js"
 
 const MAX_LESSONS = 300
+export const RETIRE_BELOW = 0.15
 
 function lessonsPath(cwd) {
   return path.join(projectDir(cwd), "lessons.json")
@@ -239,6 +240,7 @@ export function ineffectiveStrategies(query, { cwd = process.cwd(), strategyHint
   // here — it must not contaminate an unrelated project's strategy choices.
   if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
   if (minConfidence > 0) lessons = lessons.filter((l) => Number(l.confidence ?? 0) >= minConfidence)
+  else lessons = lessons.filter((l) => Number(l.confidence ?? 0.6) >= RETIRE_BELOW)
   lessons = lessons.filter((l) => !lessonIsStale(l, cwd))
   if (!lessons.length) return []
   const scored = rankDocs(String(query ?? "") + " " + String(strategyHint ?? ""), lessons.map((l, i) => ({ i, text: `${l.failure} ${l.cause} ${l.failed_strategy} ${l.failed_action} ${l.applicable_context}` })))
@@ -387,7 +389,8 @@ function lessonPool(query, { cwd, framework, minConfidence, needRepair }) {
   let lessons = loadLessons(cwd)
   if (needRepair) lessons = lessons.filter((l) => l.successful_repair || l.solution)
   if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
-  if (minConfidence > 0) lessons = lessons.filter((l) => Number(l.confidence ?? 0) >= minConfidence)
+  const floor = Number(minConfidence) > 0 ? Number(minConfidence) : RETIRE_BELOW
+  lessons = lessons.filter((l) => Number(l.confidence ?? 0.6) >= floor)
   lessons = lessons.filter((l) => !lessonIsStale(l, cwd))
   return lessons
 }

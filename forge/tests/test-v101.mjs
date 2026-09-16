@@ -454,9 +454,20 @@ console.log("== 17. P0c: the eval scores the TEST's verdict, not the agent's cla
         seen.push(body)
         let message
         if (mode === "honest") {
-          message = calls > 1
-            ? { role: "assistant", content: "Fixed the loop bound in sum.js. The task is complete." }
-            : { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "sum.js", content: FIXED }) } }] }
+          // v113 audit: this used to write on call 1 without looking at
+          // anything. The governor (v101 authoritywise) chooses INSPECT for a
+          // fresh objective and forbids write_file until reality has been
+          // inspected — so a blind first-step write is refused:
+          //   "BLOCKED: governor INSPECT forbids write_file"
+          // An HONEST agent reads before it edits, which is the behaviour this
+          // mock is supposed to stand for. Reproduced both ways: read→write
+          // lands the fix and scores solved; write-first is blocked and the
+          // file is unchanged. The mock inspects first; the governor stays on.
+          message = calls === 1
+            ? { role: "assistant", content: "", tool_calls: [{ id: "c0", type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "sum.js" }) } }] }
+            : calls === 2
+              ? { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "sum.js", content: FIXED }) } }] }
+              : { role: "assistant", content: "Fixed the loop bound in sum.js. The task is complete." }
         } else if (mode === "liar") {
           // does not touch a single file, and declares victory anyway
           message = { role: "assistant", content: "I fixed the off-by-one in sum.js. The task is complete." }
@@ -644,7 +655,21 @@ console.log("== 23. the nudge turns a false completion into a real one ==")
     try {
       const r = await runEvalTask(EVAL_TASKS[0], {
         runAgent: (a) => runAgent({ ...a, ...extra }),
-        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 10, ...agentCfg } },
+        // v113 audit — cognition off FOR THIS SECTION ONLY, deliberately.
+        //
+        // These mocks write on their first call. The governor (v101
+        // authoritywise) chooses INSPECT for a fresh objective and forbids
+        // write_file until reality has been inspected, so every mock below was
+        // being refused its edit and the assertions were measuring runs that
+        // changed nothing ("BLOCKED: governor INSPECT forbids write_file").
+        //
+        // This section is about the VERIFY NUDGE, not about governor authority
+        // — which keeps its own coverage in test-authority.mjs, and which the
+        // eval-harness section above now exercises with a read-then-write mock
+        // on the full default path. Scoping this section to its subject tests
+        // the nudge honestly instead of re-tuning four mocks around a rule
+        // they were never written to exercise.
+        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 10, cognition: false, ...agentCfg } },
         provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${m.server.address().port}`, apiKey: "k", model: "mock-1" },
         timeoutMs: 60_000,
       })

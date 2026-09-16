@@ -59,7 +59,7 @@ import { tryNativeAutoFix } from "./autofix.js" // v99 loopwise: deterministic l
 import { critiquePlan, planRevisionPrompt } from "./plancritique.js" // v99 loopwise: plan-quality gate + one revision pass
 import { classifyTask, synthesizePlan, TASK_CLASS } from "./classify.js"
 import { AGENT_BUDGETS } from "./config.js"
-import { createKernel } from "./omega.js"
+import { createCognition } from "./cognition.js"
 import { classifyUserMessage } from "./msgclass.js"
 import { requirementDelta, formatDelta } from "./reqdelta.js"
 import { shouldReplan, replanPrompt, planLessonsPrefix } from "./replan.js"
@@ -444,8 +444,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const riskLevel = riskForChange({ task: state.objective })
   const classified = classifyTask(state.objective, { resume: Boolean(resumeRec) })
-  const omega = createKernel({ cwd: process.cwd() })
-  omega.classify(state.objective, { resume: Boolean(resumeRec) })
+  const cognition = createCognition({ cwd: process.cwd(), objective: state.objective, resume: resumeRec ? { objective: state.objective } : null })
+  const omega = cognition.kernel
+  emit({ type: "COGNITION_BOOTED", taskId, runId: taskRunId, ...cognition.brief() })
   clearComposeOnce()
   let composedSnap = null
   const takeCompose = ({ refresh = false } = {}) => {
@@ -2108,11 +2109,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
 
 
-    const segTask = resumeRec && segment === 1
+    const baseTask = resumeRec && segment === 1
       ? resumePrompt(resumeRec, resumeRecon ?? reconcileTask(resumeRec, { cwd: process.cwd() }), process.cwd())
       : segment === 1
         ? state.objective
         : buildContinuation({ state, segment, planText, riskNow, knownBad })
+    const nodeObj = currentNode?.objective && String(currentNode.objective).trim()
+    const segTask = nodeObj && nodeObj !== state.objective
+      ? `${nodeObj}\n\n(parent objective: ${state.objective})`
+      : baseTask
+    try { cognition.notePlan(planText || "plan") } catch { }
 
     // v92 §9 (wirewise): PREDICT before acting — deterministic, derived from
     // the DAG node's declared targets and the planning risk. Never a model's
@@ -2169,7 +2175,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         runId: taskRunId,
         segmentId,
         nodeId: currentNodeId,
-        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, infogainBlock, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : "", (() => { try { return engMem.retrievalBlock(segTask, { limit: 6, maxChars: 1200 }) } catch { return "" } })()].filter(Boolean).join("\n\n") || undefined,
+        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, infogainBlock, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : "", (() => { try { return cognition.promptBlock() } catch { return "" } })(), (() => { try { return engMem.retrievalBlock(segTask, { limit: 6, maxChars: 1200 }) } catch { return "" } })()].filter(Boolean).join("\n\n") || undefined,
         maxStepsOverride: segSteps, deep, onEvent: segmentEvents(emit, segment, { taskId, runId: taskRunId, segmentId, nodeId: currentNodeId }),
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
@@ -2626,6 +2632,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           stillAtRisk: cf?.stillAtRisk?.slice(0, 8) || [],
         })
         for (const f of changedRel) omega.noteWrite(f)
+        try { cognition.observeTools(changedRel.map((f) => ({ name: "edit_file", args: { path: f }, result: "ok" }))) } catch { }
+        try { cognition.persist() } catch { }
       } catch { /* impact is advisory; never block verification */ }
     }
     const finalRisk = finalRiskForChange({

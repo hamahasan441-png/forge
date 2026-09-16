@@ -53,7 +53,11 @@ export const FIRST_PARTY = [
   { name: "executing-plans", tags: ["execute-plan", "implementation-plan", "checkpoints", "review-gates"], aliases: ["plan-execution"], desc: "Execute a written implementation plan with review checkpoints per task" },
   { name: "finishing-a-development-branch", tags: ["merge", "integration", "branch", "pr", "cleanup"], aliases: ["finish-branch", "merge-branch"], desc: "Decide how to integrate completed, verified work: merge, PR, or keep" },
   { name: "receiving-code-review", tags: ["code-review", "feedback", "critique", "technical-rigor"], aliases: ["review-feedback", "handle-review"], desc: "Receive review feedback with rigor: verify claims before implementing, no performative agreement" },
-  { name: "requesting-code-review", tags: ["code-review", "review-request", "pre-merge", "quality"], aliases: ["request-review", "code-reviewer"], desc: "Dispatch a thorough code review subagent against your completed work" },
+  // v113 audit: "code-reviewer" was an alias here AND a real skill name (added
+  // with the v99 bundled pack). Those are different capabilities — this one
+  // DISPATCHES a review subagent, the other REVIEWS a change — so the alias
+  // made "code-reviewer" resolve ambiguously. The real skill of that name wins.
+  { name: "requesting-code-review", tags: ["code-review", "review-request", "pre-merge", "quality"], aliases: ["request-review"], desc: "Dispatch a thorough code review subagent against your completed work" },
   { name: "subagent-driven-development", tags: ["subagents", "orchestration", "delegation", "plan-execution", "isolation"], aliases: ["sdd", "subagent-development"], desc: "Execute plans task-by-task through specialized subagents with fresh context and inter-task review" },
   { name: "systematic-debugging", tags: ["bug", "root-cause", "debugging", "repro", "isolation", "failure"], aliases: ["root-cause", "debugging-process"], desc: "Four-phase root-cause process for any bug or test failure BEFORE proposing fixes" },
   { name: "test-driven-development", tags: ["tdd", "red-green", "tests-first", "discipline", "unit-tests"], aliases: ["tdd", "red-green-refactor"], desc: "RED-GREEN-REFACTOR: write the failing test first, then implement, then refactor" },
@@ -61,6 +65,12 @@ export const FIRST_PARTY = [
   { name: "using-superpowers", tags: ["skills", "meta", "discipline", "process", "skill-routing"], aliases: ["superpowers", "skill-discipline"], desc: "Check for a relevant skill BEFORE any response; process skills before implementation skills" },
   { name: "verification-before-completion", tags: ["verification", "evidence", "completion", "claims", "honesty"], aliases: ["verify-before-done", "evidence-first"], desc: "Run verification commands and confirm output BEFORE claiming any work is done" },
   { name: "writing-skills", tags: ["skill-creation", "authoring", "skill-design", "testing-skills"], aliases: ["create-skill", "skill-authoring"], desc: "Create, edit, and test agent skills with rigorous quality gates" },
+  // v113 audit: this listed its own name as an alias — redundant, and it made
+  // the "no alias steals a catalog name" invariant unsatisfiable.
+  { name: "api-design", tags: ["api", "rest", "openapi", "endpoint", "contract"], aliases: ["http-api"], desc: "Design HTTP APIs with validation, errors, and tests" },
+  { name: "data-migration", tags: ["migration", "schema", "etl", "backfill", "database"], aliases: ["migrate-data"], desc: "Plan and verify a data or schema migration with rollback" },
+  { name: "code-reviewer", tags: ["review", "pr", "diff", "nits", "security"], aliases: ["reviewer"], desc: "Review a change: correctness, security, blast radius, tests" },
+  { name: "experiment-suite", tags: ["experiment", "ablation", "eval", "benchmark"], aliases: ["experiments"], desc: "Design a focused experiment with a discriminating metric" },
 ]
 
 const BY_NAME = new Map(FIRST_PARTY.map((s) => [s.name, s]))

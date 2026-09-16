@@ -39,7 +39,7 @@ import { createRegistry, registerPlugins, operationRisk, classifyCall, RISK, STA
 import { planExecution, cheaperAlternative, nextAction, targetsOf, repeatedFailures, route } from "./router.js"
 import { classifyFailure, recoveryPlan, formatDiagnosis, shouldEscalate, FAILURE } from "./diagnose.js"
 import { predictBlastRadius } from "./impact.js" // v94 knowwise: blast-radius prediction before/after mutations
-import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique } from "./critique.js" // v94 deepwise: pre-mutation self-critique
+import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique, critiqueVerdict } from "./critique.js" // v94 advisory; v112 enforces BLOCK/ASK/REPLAN
 import { verificationPlan, runVerification, formatVerification, verifyTargets } from "./verify.js"
 import { redact } from "./secrets.js"
 import { listCheckpoints } from "./checkpoint.js"
@@ -135,6 +135,7 @@ export function createToolIntel({
   legacyEvents = true,
   journal = null,
   task = "",
+  klass = "",
 } = {}) {
   const cfg = config?.tools ?? {}
   const enabled = cfg.intelligence !== false
@@ -304,12 +305,9 @@ export function createToolIntel({
       }
     }
 
-    // ---- deepwise: pre-mutation self-critique -----------------------------
-    // A deterministic checklist BEFORE the mutation runs. Advisory only:
-    // one event, one record field, and (when there is something real to say)
-    // one line appended to the result so the model sees it on the next
-    // decision. Off with tools.intelligence:false or FORGE_CRITIQUE=0.
-    // Never throws, never blocks, never costs a model call.
+    // ---- deepwise + criticwise: checklist BEFORE the mutation runs.
+    // v112: missing-file / thrash / secret BLOCK on non-MICRO. Hub → VERIFY.
+    // MICRO stays advisory. Off with tools.intelligence:false or FORGE_CRITIQUE=0.
     let critiqueLine = ""
     if (enabled && !meta.read_only && CRITIQUE_TOOLS.has(name) && critiqueEnabled()) {
       try {
@@ -317,9 +315,21 @@ export function createToolIntel({
         if (c.concerns.length) {
           record.critique = c.concerns
           critiqueLine = c.line
-          emit({ type: "TOOL_CRITIQUE", tool: name, callId, taskId, runId, step, concerns: c.concerns })
+          const verdict = critiqueVerdict(c, { klass: klass || meta.klass || "" })
+          record.critiqueVerdict = verdict.action
+          emit({ type: "TOOL_CRITIQUE", tool: name, callId, taskId, runId, step, concerns: c.concerns, verdict: verdict.action, enforce: !!verdict.block })
+          if (verdict.block) {
+            const result = `BLOCKED: (critique) ${verdict.action} — ${verdict.why}`
+            finish(record, { status: "blocked", result, failure: FAILURE.SAFETY_BLOCK, ms: Date.now() - t0 })
+            emit({ type: "TOOL_BLOCKED", tool: name, callId, taskId, runId, step, reason: result, critique: true })
+            if (legacyEvents) {
+              emit({ type: "tool_start", name, args: JSON.stringify(args), step })
+              emit({ type: "tool_result", name, result, step, ms: 0 })
+            }
+            return { result, ms: Date.now() - t0, record, blocked: true, critique: verdict }
+          }
         }
-      } catch { /* critique is advisory — never breaks a mutation */ }
+      } catch { /* critique must never throw; a throw would skip the mutation silently */ }
     }
 
     // ---- execute ----------------------------------------------------------

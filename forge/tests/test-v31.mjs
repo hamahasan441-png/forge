@@ -146,8 +146,8 @@ console.log("== UNAVAILABLE: no binary, tools.browser false ==")
 
 console.log("== tool: 19th is browser, not a write tool, verifier look-not-drive ==")
 {
-  eq("toolCount 29 (v94c toolwise)", toolCount(), 29)
-  eq("TOOL_DEFS length 29", TOOL_DEFS.length, 29)
+  eq("toolCount 30 (v94c toolwise 29 + v113 github)", toolCount(), 30)
+  eq("TOOL_DEFS length 30", TOOL_DEFS.length, 30)
   ok("browser in defs", TOOL_DEFS.some((t) => t.function.name === "browser"))
   ok("not a write tool", !WRITE_TOOLS.has("browser"))
   ok("BUILTIN_TOOL_NAMES", BUILTIN_TOOL_NAMES.has("browser"))
@@ -203,8 +203,8 @@ console.log("== router: UI tasks pick browser; file reads stay read_file ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 99.0.0", VERSION, "99.0.0")
-  eq("package.json is 99.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "99.0.0")
+  eq("VERSION matches package.json", VERSION, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version)
+  eq("package.json version is what version.js serves", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, VERSION)
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
   ok("files includes browser.js", pkg.files.includes("browser.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)

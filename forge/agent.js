@@ -27,11 +27,13 @@ import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection }
 import { injectPendingVision } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
-import { loadActiveCreatedTools, listToolLife } from "./toolcreate.js"
-import { capabilityCoverage, capabilitiesImpliedByTask } from "./capabilities.js" // v97 §33 ladder
+import { loadActiveCreatedTools, listToolLife, considerCreateForGaps } from "./toolcreate.js"
+import { capabilityCoverage, capabilitiesImpliedByTask, defaultRegistry } from "./capabilities.js" // v97 §33 ladder
 import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
 import { formatSelection } from "./capfabric.js"
 import { selectForTurn } from "./capindex.js"
+import { recommendForGaps, formatRecommendations, formatRoute } from "./caproute.js"
+import { recordRunOutcomes } from "./caplearn.js"
 import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
@@ -40,7 +42,7 @@ import { swallowed, snapshot as softfailSnapshot } from "./softfail.js"
 import { toolGuidance } from "./router.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills } from "./evolve.js"
-import { formatSkillPicks, selectPlugins, formatSteer } from "./evaluate.js"
+import { formatSkillPicks, selectPlugins, formatSteer, namedIn } from "./evaluate.js"
 import { pickSkills } from "./skillforge.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { engineFor } from "./langengine.js"
@@ -50,7 +52,7 @@ import { engineFor } from "./langengine.js"
 // deep adapters get normal treatment, shallow/unknown get conservative rules.
 import { languageCoverage } from "./langadapter.js"
 import { composeOnce, clearComposeOnce, formatCompose, playbookFilesOf } from "./compose.js"
-import { ingestAcquire } from "./knowgap.js"
+import { ingestAcquire, runAcquire } from "./knowgap.js"
 import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
@@ -64,6 +66,7 @@ import { canCompleteFastPath, unverifiedWrites } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
+import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 
@@ -80,7 +83,16 @@ const ROLE_DIRECTIVES = {
   integrator: "You are the INTEGRATOR: merge the other workers' findings into ONE ordered apply list (file → action). Do NOT write files. Do NOT invent edits. If findings conflict, list the conflict and pick one. Empty findings → empty list.",
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null }) {
+function upsertGovernorMessage(messages, text) {
+  const last = messages[messages.length - 1]
+  if (last?.role === "user" && String(last.content).startsWith(GOV_PREFIX)) {
+    last.content = text
+    return
+  }
+  messages.push({ role: "user", content: text })
+}
+
+function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null }) {
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -183,6 +195,11 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
           })
           if (cov.gaps.length) {
             lines.push("", `Capability gaps (native → skill → MCP → created all checked): ${cov.gaps.join(", ")}. No provider exists — proceed without it, or build it via the tool-creation pipeline and verify before trusting it.`)
+            try {
+              const recs = recommendForGaps({ task, gaps: cov.gaps, limit: 3 })
+              const block = formatRecommendations(recs)
+              if (block) lines.push("", block)
+            } catch { /* recommendations are advisory */ }
           }
         }
       } catch { /* ladder is advisory, never fatal */ }
@@ -226,6 +243,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }
   }
+  if (cognitionBlock) lines.push("", cognitionBlock)
   return lines.join("\n")
 }
 
@@ -293,8 +311,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
 
   const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
   const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
-  let chainIdx = 0
-  const isFailworthy = isFailoverWorthy
+  const earlyKlass = (() => { try { return classifyTask(task || "").class } catch { return "SMALL" } })()
+  // v113 audit: the effort decision has to happen BEFORE the model is chosen.
+  // It used to be resolved ~80 lines below, so applyModelChoice could not know
+  // a run was deep and swapped in a fast, non-reasoning model — the capability
+  // gate existed only on the failover path, which never ran. Same inputs as
+  // before, just computed early; the value is reused below, not recomputed.
   const resProfile = resourceProfile()
   let deepEffort = deep
   if (deepEffort === undefined) {
@@ -303,6 +325,84 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     deepEffort = resolved.deep
     if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
   }
+  if (!readonly && config?.agent?.modelStrategy !== false && process.env.FORGE_LOCK_MODEL !== "1") {
+    try {
+      const { applyModelChoice } = await import("./modelstrategy.js")
+      const choice = applyModelChoice({
+        config, provider: p, task, klass: earlyKlass,
+        lock: Boolean(process.env.FORGE_LOCK_MODEL),
+        deep: deepEffort === true,
+      })
+      if (choice.switched && choice.provider) {
+        onEvent?.({
+          type: "MODEL_SELECTED",
+          from: `${p.name}/${p.model}`,
+          to: `${choice.provider.name}/${choice.provider.model}`,
+          why: choice.why,
+          confidence: choice.selection?.decision?.confidence ?? null,
+          ...identityMeta(),
+        })
+        p = choice.provider
+      } else if (choice.selection?.decision) {
+        onEvent?.({
+          type: "MODEL_SELECTED",
+          from: `${p.name}/${p.model}`,
+          to: `${p.name}/${p.model}`,
+          why: choice.why,
+          confidence: choice.selection.decision.confidence,
+          switched: false,
+          ...identityMeta(),
+        })
+      }
+    } catch (e) { swallowed("agent", "model strategy", e) }
+  }
+  if (!readonly && earlyKlass !== "MICRO" && process.env.FORGE_LOCK_MODEL !== "1") {
+    try {
+      const { scoreRoute } = await import("./jointroute.js")
+      const joint = scoreRoute({
+        cwd: process.cwd(),
+        klass: earlyKlass,
+        task,
+        model: p.model,
+        lockModel: false,
+      })
+      if (joint.model && joint.model !== p.model && joint.source === "joint") {
+        const specs = config?.providers || {}
+        for (const name of Object.keys(specs)) {
+          const spec = specs[name] || {}
+          const models = [spec.model, ...(spec.models || [])].filter(Boolean)
+          if (!models.includes(joint.model)) continue
+          const { buildProvider } = await import("./providers.js")
+          const built = buildProvider(config, name)
+          if (!built) continue
+          onEvent?.({
+            type: "JOINT_ROUTE",
+            from: `${p.name}/${p.model}`,
+            to: `${name}/${joint.model}`,
+            depth: joint.depth,
+            why: joint.why,
+            ...identityMeta(),
+          })
+          p = { ...built, model: joint.model }
+          break
+        }
+      }
+    } catch (e) { swallowed("agent", "joint route", e) }
+  }
+  try {
+    const { pickModelEmpiric } = await import("./empirics.js")
+    const ranked = pickModelEmpiric({
+      candidates: [{ provider: p.name, model: p.model }, ...chain.map((c) => ({ provider: c.name, model: c.model }))],
+      limit: 4,
+    })
+    if (ranked[0]) onEvent?.({ type: "MODEL_EMPIRIC", ranking: ranked.slice(0, 3).map((r) => `${r.model}:${Math.round((r.rate || 0) * 100)}%n${r.samples}`), ...identityMeta() })
+    if (chain.length && ranked.length) {
+      const rate = new Map(ranked.map((r) => [r.model, Number(r.rate) || 0]))
+      chain.sort((a, b) => (rate.get(b.model) ?? 0) - (rate.get(a.model) ?? 0))
+    }
+  } catch { /* empirics rank failover; they never steal the user's chosen model */ }
+  let chainIdx = 0
+  const isFailworthy = isFailoverWorthy
   // v101 P0: phase tracing. telemetry.js counts WHAT happened; this records
   // WHERE THE WALL-CLOCK WENT, so an optimization can be attributed to the
   // phase it claims to improve instead of judged on total runtime alone.
@@ -331,6 +431,22 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   const runId = effectiveRunId
   const log = runId && journal ? openRun({ runId, task, cwd: process.cwd(), kind: "agent", provider: p.name, model: p.model }) : null
   if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role, taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
+
+  // v100 cognitionwise: ONE cognitive core on the DEFAULT path. Sub-agents
+  // and the verifier stay executors — they inherit the parent's task, they
+  // do not grow a second brain.
+  let cognition = null
+  if (!sub && !verifier && config.agent?.cognition !== false) {
+    try {
+      const { createCognition } = await import("./cognition.js")
+      cognition = createCognition({ cwd: process.cwd(), objective: task })
+      onEvent?.({ type: "COGNITION_BOOTED", ...cognition.brief(), ...identityMeta() })
+      try {
+        const advice = cognition.self.advise({ klass: cognition.klass, currentModel: p?.model })
+        onEvent?.({ type: "SELF_MODEL", calibrated: advice.snapshot.calibrated, samples: advice.snapshot.samples, weaknesses: advice.snapshot.weaknesses, recommend: advice.recommend?.model ?? null, autoSwitch: false, ...identityMeta() })
+      } catch (e) { swallowed("agent", "self-model", e) }
+    } catch (e) { swallowed("agent", "cognition boot", e) }
+  }
 
   const isDelegatedSubAgent = readonly && !planOnly
   // v92 "wirewise" P0 fix: `unrestricted` must be declared BEFORE the plugin
@@ -420,6 +536,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     skillOptions: { klass: turnKlass, skillsDir, cwd: process.cwd() },
     nativeDefs: [],
     nativeNames: [...BUILTIN_TOOL_NAMES],
+    createdTools: (() => { try { return listToolLife(process.cwd()) } catch { return [] } })(),
     stats: (() => { try { return loadToolStats(process.cwd())?.tools ?? null } catch (e) { swallowed("agent", "load tool stats", e); return null } })(),
     mcpOptions: {
       maxExternal: Number(config.mcp?.maxTools) > 0 ? Number(config.mcp.maxTools) : undefined,
@@ -427,16 +544,59 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       breaker: config.mcp?.breaker !== false,
     },
     contextBudget: Number(config.agent?.capabilityBudget) > 0 ? Number(config.agent.capabilityBudget) : 0,
+    klass: turnKlass,
+    cwd: process.cwd(),
   })
   if (turnSelection.mcp.kept.length) {
     plugins = [...plugins, ...turnSelection.mcp.kept]
     for (const t of turnSelection.mcp.kept) onEvent?.({ type: "info", text: `mcp tool loaded: ${t.name} — ${t.source}`, ...identityMeta() })
   }
   {
+    const keepCreated = new Set((turnSelection.created || []).map((t) => t.name))
+    if (keepCreated.size || (turnSelection.trimmed || []).some((t) => t.kind === "created")) {
+      plugins = plugins.filter((p) => !p.created || keepCreated.has(p.name) || namedIn(task, p.name))
+    }
+  }
+  {
     const summary = formatSelection(turnSelection.mcp)
     if (summary && !isDelegatedSubAgent) onEvent?.({ type: "info", text: summary, ...identityMeta() })
+    try {
+      const line = formatRoute({ skills: turnSelection.skills, mcpKept: turnSelection.mcp.kept, trimmed: turnSelection.trimmed, policy: String(turnKlass || "") })
+      if (line && !isDelegatedSubAgent) onEvent?.({ type: "info", text: line, ...identityMeta() })
+    } catch { /* route summary is a view */ }
     for (const d of turnSelection.mcp.dropped) onEvent?.({ type: "mcp_tool_withheld", tool: d.name, reason: d.reason, ...identityMeta() })
     for (const t of turnSelection.trimmed) onEvent?.({ type: "capability_trimmed", capability: t.name, kind: t.kind, reason: t.reason, ...identityMeta() })
+  }
+  if (!isDelegatedSubAgent && (turnKlass === "LARGE" || turnKlass === "ARCHITECTURAL")) {
+    try {
+      const caps = capabilitiesImpliedByTask(task)
+      if (caps.length) {
+        const cov = capabilityCoverage({
+          registry: defaultRegistry(),
+          capabilities: caps,
+          skills: turnSelection.skills,
+          mcpTools: turnSelection.mcp.kept,
+          createdTools: listToolLife(process.cwd()),
+        })
+        if (cov.gaps.length) {
+          for (const g of cov.gaps) onEvent?.({ type: "CAPABILITY_GAP_DETECTED", capability: g, ...identityMeta() })
+          const made = await considerCreateForGaps({ cwd: process.cwd(), gaps: cov.gaps, task, klass: turnKlass })
+          for (const m of made) {
+            if (m.created) {
+              onEvent?.({ type: "TOOL_CREATED", tool: m.name, capability: m.capability, ...identityMeta() })
+              onEvent?.({ type: "info", text: `created tool ${m.name} for gap ${m.capability} (verified + ACTIVE)`, ...identityMeta() })
+            } else if (m.reused) {
+              onEvent?.({ type: "info", text: `reused created tool ${m.name} for gap ${m.capability}`, ...identityMeta() })
+            }
+          }
+          if (made.some((m) => m.created || m.reused)) {
+            const fresh = await loadActiveCreatedTools(process.cwd())
+            const safe = fresh.filter((t) => !BUILTIN_TOOL_NAMES.has(t.name) && !plugins.some((p) => p.name === t.name))
+            plugins = [...plugins, ...safe]
+          }
+        }
+      }
+    } catch (e) { swallowed("agent", "create for gap", e) }
   }
   let lspSession = null
   // v98 shipwise: the autostart table counts too — the read-only LSP tools
@@ -527,6 +687,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     task,
     plugins,
     legacyEvents: true,
+    klass: earlyKlass,
   })
   if (!sub && config.tools?.explainRouting !== false) {
     try {
@@ -593,7 +754,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // independent retrievals, one after another, on the event loop.
   const endContext = tracer.span(PHASE.CONTEXT)
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText }) },
+    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText, cognitionBlock: cognition && !readonly ? cognition.promptBlock() : null }) },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
   endContext()
@@ -638,6 +799,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // agent edited src/x.js" apart from "edited, then tests passed". The former
   // is stale evidence for src/x.js and must not verify it.
   const writesSoFar = []
+  const readsSoFar = []
   const createdFiles = []   // v103 §2 — a subset of writesSoFar: brand-new files
   const outsideWrites = [] // v104 §4 — writes that landed outside the workspace
   // v99 loopwise extension evidence: step-numbered writes, bounded tool
@@ -655,6 +817,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { return null }
   })()
   const tokenUsage = { prompt: 0, completion: 0, total: 0, estimated: false }
+  let waitingForUser = false
+  let runOk = false
+  let waitWhy = ""
+  let waitDecision = null
+  let governorHalt = false
+  let lastGov = null
+  let lastAuth = null
   let ended = false
   const endRun = (status, extra = {}) => {
     if (ended) return
@@ -708,11 +877,110 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       steps++
       log?.step(steps)
       onEvent?.({ type: "step", step: steps, ...identityMeta() })
+      if (cognition && !readonly) {
+        try {
+          const gov = cognition.next({
+            steps,
+            writes: writesSoFar.length,
+            unverified: unverifiedWrites({ writesSoFar, commandChecks }).unverified,
+            inspected: toolLog.some((t) => t.name === "read_file" || t.name === "glob_files" || t.name === "grep" || t.name === "grep_files" || t.name === "git_status"),
+            hasPlan: planOnly || toolLog.some((t) => t.name === "todo" || t.name === "think"),
+            failed: toolLog.slice(-3).every((t) => String(t.result).startsWith("ERROR")) && toolLog.length >= 3,
+            looping: [...toolSigCounts.values()].some((n) => n >= 4),
+            pendingDecision: waitingForUser,
+          })
+          lastGov = gov
+          lastAuth = cognition.enforce(gov)
+          onEvent?.({ type: "GOVERNOR_ACTION", action: gov.action, why: gov.why, depth: gov.depth, voi: gov.voi, enforce: lastAuth.enforce, halt: lastAuth.halt, ...identityMeta() })
+          if (lastAuth.waitForUser) {
+            onEvent?.({ type: "USER_INTENT_CONFLICT", why: gov.why, ...identityMeta() })
+            let proceed = false
+            try {
+              const { createDecisionEngine, DECISION_TYPE } = await import("./decisionengine.js")
+              const eng = createDecisionEngine({ cwd: process.cwd(), taskId: effectiveTaskId })
+              const hypos = cognition.user?.understanding?.intentHypotheses || []
+              const asked = eng.ask({
+                type: DECISION_TYPE.CLARIFICATION,
+                key: `governor-intent-${String(task).slice(0, 40)}`,
+                title: "Ambiguous or irreversible intent — decision required",
+                question: gov.why || "which interpretation should I execute?",
+                options: hypos.length
+                  ? hypos.slice(0, 6).map((h) => ({ id: h.id, label: String(h.meaning || h.goal || h.id).slice(0, 200) }))
+                  : [{ id: "clarify", label: "clarify the intended outcome" }, { id: "smallest", label: "proceed with the smallest reversible interpretation" }],
+                reason: "governor ASK — inspect cannot collapse competing intent hypotheses",
+                taskId: effectiveTaskId,
+              })
+              if (asked?.skipped && eng.pendingList().length === 0) {
+                proceed = true
+                onEvent?.({ type: "DECISION_NEEDED", skipped: true, why: asked.why, ...identityMeta() })
+              } else {
+                waitDecision = asked
+                onEvent?.({ type: "DECISION_NEEDED", id: asked?.decision_id, skipped: !!asked?.skipped, ...identityMeta() })
+                try {
+                  const { openTask, TASK_STATUS } = await import("./taskstate.js")
+                  if (effectiveTaskId) {
+                    const ts = openTask(effectiveTaskId, { create: false, cwd: process.cwd() })
+                    ts?.transition?.(TASK_STATUS.WAITING_FOR_USER, { reason: gov.why })
+                  }
+                } catch { /* task record is optional on one-shot agent */ }
+              }
+            } catch (e) { swallowed("agent", "governor ask", e) }
+            if (!proceed) {
+              waitingForUser = true
+              waitWhy = gov.why || "governor ASK"
+              try { cognition.persist() } catch { }
+              break
+            }
+          }
+          if (lastAuth.halt && gov.action === "STOP") {
+            governorHalt = true
+            onEvent?.({ type: "GOVERNOR_STOP", why: gov.why, ...identityMeta() })
+            if (!finalText) finalText = `Governor stopped: ${gov.why}`
+            try { cognition.persist() } catch { }
+            break
+          }
+          if (!noTools) {
+            upsertGovernorMessage(messages, cognition.stepDirective(gov, lastAuth))
+          }
+          if (gov.action === "SEARCH" && !cognition.lastAcquire) {
+            try {
+              const plan = cognition.acquirePlan?.() || { tool: "grep_files", query: String(task).slice(0, 80), method: "REPO", why: "governor SEARCH" }
+              const acq = runAcquire(plan, { cwd: process.cwd() })
+              cognition.observeAcquire(acq)
+              ingestAcquire({
+                cwd: process.cwd(),
+                task,
+                klass: turnKlass,
+                records: [{ name: acq.tool, tool: acq.tool, result: acq.preview || acq.skipped || "", status: acq.ok ? "ok" : "error" }],
+              })
+              const body = acq.skipped
+                ? `(acquire skipped) ${acq.tool} — ${acq.skipped}`
+                : `(acquire ${acq.ok ? "ok" : "empty"}) ${acq.tool} ${acq.query || ""}\n${String(acq.preview || "").slice(0, 1800)}`
+              messages.push({ role: "user", content: body })
+              onEvent?.({ type: "ACQUIRE_RAN", tool: acq.tool, ok: acq.ok === true, skipped: acq.skipped || null, hits: acq.hits ?? 0, ...identityMeta() })
+            } catch (e) { swallowed("agent", "governor SEARCH acquire", e) }
+          }
+          if ((gov.action === "EXECUTE" || gov.action === "REPAIR") && !cognition.openPrediction) {
+            const pred = cognition.predict({
+              action: gov.action,
+              objective: task,
+              reads: readsSoFar,
+              writes: writesSoFar,
+              taskId: effectiveTaskId,
+            })
+            onEvent?.({ type: "PREDICTION_MADE", id: pred.id, files: pred.expectedFiles, derived: pred.derived, action: pred.action, ...identityMeta() })
+          }
+        } catch (e) { swallowed("agent", "governor next", e) }
+      }
       let msg
       // declared OUTSIDE the try so every exit path — success, provider error,
       // failover, retry — closes the span exactly once (end() is idempotent).
       const endModel = tracer.span(PHASE.MODEL)
       try {
+        const offered = noTools ? undefined : intel.toolDefs(lastAuth ? maskToolDefs(tools.defs, {
+          ...lastAuth,
+          allow: (plugins || []).filter((p) => p && p.readOnly).map((p) => p.name),
+        }) : tools.defs)
         msg = await chatOnce({
           protocol: p.protocol,
           baseUrl: p.baseUrl,
@@ -720,7 +988,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           model: p.model,
           providerName: p.name,
           messages,
-          tools: noTools ? undefined : intel.toolDefs(tools.defs),
+          tools: offered,
           signal,
           deep: deepEffort,
           maxTokens: deepEffort ? 16384 : undefined,
@@ -805,11 +1073,32 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
         })
         const endTools = tracer.span(PHASE.TOOL)
-        const results = await intel.runBatch(
-          msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) })),
-          { step: steps }
-        )
+        const mapped = msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) }))
+        const results = new Array(mapped.length)
+        const runnable = []
+        for (let i = 0; i < mapped.length; i++) {
+          const verdict = lastAuth ? enforceToolCall(mapped[i].name, lastAuth) : { ok: true }
+          if (!verdict.ok) {
+            results[i] = { result: verdict.reason, ms: 0, blocked: true }
+            onEvent?.({ type: "TOOL_BLOCKED", tool: mapped[i].name, reason: verdict.reason, governor: lastAuth?.action, ...identityMeta(), toolCallId: mapped[i].id })
+          } else {
+            runnable.push(i)
+          }
+        }
+        if (runnable.length) {
+          const batch = await intel.runBatch(runnable.map((i) => mapped[i]), { step: steps })
+          for (let j = 0; j < runnable.length; j++) results[runnable[j]] = batch[j]
+        }
         endTools()
+        if (cognition) {
+          try {
+            cognition.observeTools(msg.toolCalls.map((tc, i) => ({
+              name: tc.name,
+              args: safeJson(tc.args),
+              result: results?.[i]?.result,
+            })))
+          } catch (e) { swallowed("agent", "cognition observe", e) }
+        }
         // per-tool attribution: "tools took 40s" is far less useful than
         // knowing WHICH tool did. runBatch already timed each call.
         for (let i = 0; i < msg.toolCalls.length; i++) {
@@ -874,6 +1163,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             } else if (okRes && tc.name === "bash" && hasWriteRedirection(String(safeJson(tc.args)?.command ?? ""))) {
               writesSoFar.push("(shell write)") // unknown target: conservatively counts as a write after any earlier check
               writeSteps.push(steps)
+            } else if (okRes && (tc.name === "read_file" || tc.name === "read_image")) {
+              const rp = safeJson(tc.args)?.path
+              if (rp) readsSoFar.push(path.resolve(process.cwd(), String(rp)))
             }
             if (log) log.tool(tc.name, journalTarget(tc.name, tc.args), okRes)
           }
@@ -881,6 +1173,31 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // after cap/shrink/redaction (budget math unchanged), before the
           // provider sees it. Advisory marker scan rides the header.
           messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, String(result), { enabled: fenceEnabled(config) }) })
+          const rblock = String(result)
+          if (/^BLOCKED: \(critique\) ASK/.test(rblock) && earlyKlass !== "MICRO") {
+            waitingForUser = true
+            waitWhy = rblock.replace(/^BLOCKED: \(critique\) ASK\s*—\s*/, "").slice(0, 240) || "secret-bearing path"
+            onEvent?.({ type: "DECISION_NEEDED", reason: "CRITIQUE_ASK", why: waitWhy, ...identityMeta(), toolCallId: tc.id })
+          } else if (/^BLOCKED: \(critique\) REPLAN/.test(rblock)) {
+            messages.push({ role: "user", content: `(critique) REPLAN — stop editing the same file. ${rblock.slice(0, 280)}` })
+          }
+        }
+        if (waitingForUser) {
+          try { cognition?.persist?.() } catch { }
+          break
+        }
+        if (cognition?.openPrediction && writesSoFar.length) {
+          try {
+            const anyFail = results.some((r) => /^ERROR|^BLOCKED/.test(String(r?.result ?? "")))
+            const settled = cognition.settle({
+              actualFiles: writesSoFar.filter((f) => f !== "(shell write)"),
+              status: anyFail ? "error" : "ok",
+              actualSteps: 1,
+            })
+            if (settled?.drift) {
+              onEvent?.({ type: "PREDICTION_SETTLED", id: settled.settled?.id, drift: settled.drift.level, driftScore: settled.drift.driftScore, extra: settled.settled?.filesExtra, missed: settled.settled?.filesMissed, ...identityMeta() })
+            }
+          } catch (e) { swallowed("agent", "cognition settle", e) }
         }
         injectPendingVision(messages, tools.ctx)
         messages = await compactAgentHistory(messages, p, { onEvent })
@@ -928,6 +1245,18 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         for (let i = messages.length - 1; i >= 0; i--) {
           const m = messages[i]
           if (m.role === "assistant") continue
+          // v113 audit: THE GOVERNOR'S OWN TURN IS NOT THE USER'S.
+          //
+          // This walks back for the last real user turn to decide whether the
+          // final answer was FORCED by the budget nudge — the guard behind
+          // "budget exhaustion is never completion". The v101 governor appends
+          // its own `user` directive after every step, so the last user
+          // message became "(governor) GOVERNOR: EXECUTE ..." and never the
+          // nudge. coercedByNudge stayed false, `exhausted` stayed false, and
+          // a run that burned its whole budget and answered only because it
+          // was told to reported COMPLETED. Reproduced: budgetHit=true,
+          // status=COMPLETED, reason=null, no checkpoint.
+          if (m.role === "user" && String(m.content ?? "").startsWith(GOV_PREFIX)) continue
           if (m.role === "user") { coercedByNudge = String(m.content ?? "").startsWith(BUDGET_NUDGE_PREFIX); break }
           if (m.role === "tool") continue
           break
@@ -1047,8 +1376,51 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       reviewBlockers: reviewMode === "enforce" ? (runReview?.blockers ?? []).map((b) => b.id) : [],
     })
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
+    runOk = resStatus === "COMPLETED" && !waitingForUser && !governorHalt
+    if (waitingForUser) {
+      resStatus = "WAITING_FOR_USER"
+      if (!finalText) finalText = `Waiting for user decision: ${waitWhy}`
+    }
+    if (cognition && !readonly && !planOnly && !verifier) {
+      try {
+        if (!waitingForUser) {
+          const cg = cognition.close({ wrote, unverified: verificationGap.unverified })
+          onEvent?.({ type: cg.ok ? "TASK_COMPLETED" : "TASK_INCOMPLETE", why: cg.why, status: cg.status, ...identityMeta() })
+          // Contract may only DOWNGRADE a BLOCKED false completion (a user
+          // decision is pending). Unverified writes are the completion gate's
+          // job (`requireVerification`) — v101 authority already blocked more
+          // writes during VERIFY; it must not silently reverse report-mode.
+          if (fastGate.ok && !cg.ok && cg.status === "BLOCKED" && !governorHalt && !waitingForUser) {
+            resStatus = "BLOCKED"
+          }
+        }
+        cognition.persist()
+      } catch (e) { swallowed("agent", "cognition close", e) }
+    }
+    try {
+      const { recordModelOutcome } = await import("./empirics.js")
+      recordModelOutcome({
+        provider: p?.name, model: p?.model,
+        ok: resStatus === "COMPLETED",
+        ms: Number(tokenUsage.latencyMs) || 0,
+        klass,
+      })
+    } catch { /* empirics is a view, never a gate */ }
+    try {
+      const { recordOutcome } = await import("./modelstrategy.js")
+      recordOutcome({
+        provider: p?.name, model: p?.model,
+        ok: resStatus === "COMPLETED",
+        latencyMs: Number(tokenUsage.latencyMs) || 0,
+        tokensIn: tokenUsage.prompt ?? 0,
+        tokensOut: tokenUsage.completion ?? 0,
+        toolCalls: toolLog?.length ?? 0,
+        taskClass: klass,
+        verificationPassed: verificationGap?.unverified?.length === 0,
+      })
+    } catch { /* modelstrategy ledger is best-effort */ }
     let checkpointId = null
-    if (!fastGate.ok && fastGate.status === "INCOMPLETE") {
+    if (!waitingForUser && !governorHalt && !fastGate.ok && fastGate.status === "INCOMPLETE") {
       // §32: a resource limit is an execution control — checkpoint so the
       // work can resume (the same checkpoint module meta uses at segment
       // boundaries; no second checkpoint system).
@@ -1058,8 +1430,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       } catch { /* checkpoint is best-effort, never breaks the run */ }
       finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""})`
     }
-    endRun(fastGate.ok ? "completed" : "incomplete", { text: finalText, wrote })
-    return { status: resStatus, reason: fastGate.ok ? null : "RESOURCE_LIMIT", resource: fastGate.ok ? null : "steps", completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    const endStatus = waitingForUser ? "waiting_for_user" : (fastGate.ok && !waitingForUser ? "completed" : "incomplete")
+    endRun(endStatus, { text: finalText, wrote })
+    const govReason = waitingForUser ? "GOVERNOR_ASK" : (governorHalt ? "GOVERNOR_STOP" : (fastGate.ok ? null : "RESOURCE_LIMIT"))
+    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : (fastGate.ok ? null : "RESOURCE_LIMIT"), resource: waitingForUser || governorHalt ? null : (fastGate.ok ? null : "steps"), completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
@@ -1067,6 +1441,30 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     throw e
   } finally {
     try { recordToolRun({ cwd: process.cwd(), task, klass, records: intel.records() }) } catch { /* persist is best-effort */ }
+    try {
+      recordRunOutcomes({
+        cwd: process.cwd(),
+        klass,
+        ok: runOk,
+        records: intel.records(),
+        createdNames: (plugins || []).filter((p) => p && p.created).map((p) => p.name),
+      })
+    } catch { /* caplearn is a view, never a gate */ }
+    try {
+      const { recordRoute } = await import("./jointroute.js")
+      const skillNames = (intel.records() || []).flatMap((r) => {
+        if (r.name === "load_skill" && r.args?.name) return [String(r.args.name)]
+        return []
+      })
+      recordRoute({
+        cwd: process.cwd(),
+        klass,
+        depth: lastGov?.depth || "L2",
+        model: p?.model || "*",
+        skills: skillNames,
+        ok: runOk,
+      })
+    } catch { /* joint ledger is best-effort */ }
     try {
       if (ingestAcquire({ cwd: process.cwd(), task, klass, records: intel.records() })) clearComposeOnce()
     } catch { /* ingest is best-effort */ }

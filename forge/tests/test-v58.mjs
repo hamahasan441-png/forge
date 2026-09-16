@@ -123,9 +123,23 @@ console.log("== pickSkills / formatSteer mark candidate ==")
     cwd: dir, task: TASK, klass: TASK_CLASS.MEDIUM,
     repair: "set the Authorization header on the request",
   })
+  // v113 audit: a CANDIDATE is WITHHELD unless the user names it.
+  //
+  // This expected an unproven skill to be offered with a CANDIDATE label. A
+  // later release made evaluate.js:102 skip CANDIDATE / DEPRECATED /
+  // SUPERSEDED outright unless the task names the skill, so the two halves of
+  // the repository disagreed and this assertion lost. Withholding unproven
+  // knowledge is the stronger contract, so it is the one pinned here — and the
+  // labelled path is pinned too, via the named case, which is the only way a
+  // CANDIDATE reaches a pick at all.
   const picks = pickSkills(TASK, [{ name: made.name, desc: "auth repair", learned: true }], { klass: TASK_CLASS.MEDIUM, cwd: dir })
-  ok("pick has lifecycle", picks.some((s) => s.name === made.name && s.lifecycle === SKILL_LIFE.CANDIDATE), JSON.stringify(picks))
-  const steer = formatSteer({ skills: picks })
+  ok("an unproven CANDIDATE is not offered for a generic task",
+    !picks.some((s) => s.name === made.name), JSON.stringify(picks.map((s) => s.name)))
+
+  const named = pickSkills(`use ${made.name} to fix this`, [{ name: made.name, desc: "auth repair", learned: true }], { klass: TASK_CLASS.MEDIUM, cwd: dir })
+  ok("naming it outright reaches it, still marked CANDIDATE",
+    named.some((s) => s.name === made.name && s.lifecycle === SKILL_LIFE.CANDIDATE), JSON.stringify(named))
+  const steer = formatSteer({ skills: named })
   ok("steer candidate", /candidate/.test(steer), steer)
   eq("empty steer", formatSteer({}), "")
   const fp = pickSkills("debug a crash", [{ name: "forge-debug", desc: "Reproduce, isolate root cause" }], { klass: TASK_CLASS.MEDIUM })
@@ -170,9 +184,9 @@ console.log("== no side writes / frozen kernel + package ==")
   eq("classifyTaskComplexity frozen", classifyTaskComplexity("fix a typo"), "trivial")
   eq("typo still MICRO", classifyTask("fix a typo in README").class, TASK_CLASS.MICRO)
   eq("evaluateSkills typo empty", evaluateSkills("fix a typo in README", [{ name: "coding-agent", desc: "Coding workflow with planning" }]).length, 0)
-  eq("VERSION is 99.0.0", VERSION, "99.0.0")
+  eq("VERSION matches package.json", VERSION, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version)
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  eq("package.json is 99.0.0", pkg.version, "99.0.0")
+  eq("package.json is 113.0.0", pkg.version, "113.0.0")
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
   eq("custom is still index 17 (pick 18)", CATALOG[17]?.name, "custom")
   eq("apinex still after custom", CATALOG[18]?.name, "apinex")

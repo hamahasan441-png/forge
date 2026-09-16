@@ -240,6 +240,14 @@ console.log("== §12 parallel execution is real, and only where it is safe ==")
     return "ok"
   }
   const tmp = project()
+  // v113 audit: this section edits a.js and b.js, which project() never
+  // created. v112 criticwise BLOCKS a doomed edit — one whose target does not
+  // exist — before it reaches exec, so both edits returned in ~1ms and the
+  // "were they serialized" timing assertion measured two refusals rather than
+  // two edits. The critic is right; the fixture was editing files that were
+  // never there.
+  fs.writeFileSync(path.join(tmp, "a.js"), "export const x = 1\n")
+  fs.writeFileSync(path.join(tmp, "b.js"), "export const x = 1\n")
   const intel = createToolIntel({ exec, ctx: { cwd: tmp, root: tmp }, config: { tools: { verify: false } }, runId: "r", taskId: "t" })
   let t0 = Date.now()
   await intel.runBatch([
@@ -258,6 +266,10 @@ console.log("== §12 parallel execution is real, and only where it is safe ==")
   const serialMs = Date.now() - t0
   ok(`two edits were serialized (${serialMs}ms >= 110ms)`, serialMs >= 110)
 
+  // same reason as above: z.js and q.js must exist, or the critic refuses the
+  // edit as doomed and the read never gets its turn
+  fs.writeFileSync(path.join(tmp, "z.js"), "export const a = 1\n")
+  fs.writeFileSync(path.join(tmp, "q.js"), "export const q = 1\n")
   const order = []
   const execOrder = async (name, args) => { order.push(`${name}:${args.path ?? args.pattern}`); return "ok" }
   const intel2 = createToolIntel({ exec: execOrder, ctx: { cwd: tmp, root: tmp }, config: { tools: { verify: false } } })

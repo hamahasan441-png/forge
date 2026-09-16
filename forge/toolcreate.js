@@ -30,6 +30,7 @@ import { spawn } from "node:child_process"
 import { projectDir } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
 import { learnedPluginsDir } from "./extend.js"
+import { noteCapabilityGap, gapRepeats, recordCapOutcome, shouldWithhold, loadCapLearn } from "./caplearn.js"
 
 export const TOOL_LIFE = {
   CANDIDATE: "CANDIDATE",
@@ -162,9 +163,35 @@ function generatedToolSrc(record) {
     capabilities: record.capabilities,
     provenance: record.provenance,
   }, null, 2)
-  return `/** forge created tool — generated, isolated, read-only. Lifecycle: ${record.lifecycle} (see toollife.json). */
+  return `/** forge created tool — generated, isolated, read-only. Performs a bounded local search; it does not echo metadata. */
+import fs from "node:fs"
+import path from "node:path"
 const DESIGN = ${safe}
 const REQUIRED = ${JSON.stringify(record.inputSchema.required ?? [])}
+const SKIP = new Set(["node_modules", ".git", "dist", "build", "coverage", ".forge", ".venv", "venv"])
+function walk(cwd, needle, hits, dir, depth) {
+  if (depth > 6 || hits.length >= 12) return
+  let ents
+  try { ents = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+  for (const e of ents) {
+    if (hits.length >= 12) return
+    if (SKIP.has(e.name) || e.name.startsWith(".")) continue
+    const p = path.join(dir, e.name)
+    if (e.isDirectory()) { walk(cwd, needle, hits, p, depth + 1); continue }
+    if (!e.isFile()) continue
+    let txt = ""
+    try {
+      const st = fs.statSync(p)
+      if (st.size > 200000) continue
+      txt = fs.readFileSync(p, "utf8")
+    } catch { continue }
+    const i = txt.toLowerCase().indexOf(needle)
+    if (i < 0) continue
+    const rel = path.relative(cwd, p)
+    const line = txt.slice(Math.max(0, i - 40), i + needle.length + 80).replace(/\\s+/g, " ")
+    hits.push(rel + ": " + line.slice(0, 140))
+  }
+}
 export default {
   name: DESIGN.name,
   description: DESIGN.description + " (created tool v" + ${record.version} + ")",
@@ -174,14 +201,25 @@ export default {
   async run(args) {
     const a = (args && typeof args === "object") ? args : {}
     for (const k of REQUIRED) if (a[k] == null) return "ERROR: missing required argument: " + k
-    const out = { tool: DESIGN.name, ok: true, input: a, capabilities: DESIGN.capabilities, provenance: DESIGN.provenance.task }
-    if (DESIGN.outputType === "string") {
-      const lines = [DESIGN.name + ": " + DESIGN.description, "input: " + JSON.stringify(a)]
-      if (DESIGN.capabilities.length) lines.push("capabilities: " + DESIGN.capabilities.join(", "))
-      if (DESIGN.provenance.task) lines.push("designed for: " + DESIGN.provenance.task)
-      return lines.join("\\n")
-    }
-    return out
+    const q = String(a.query || a.pattern || a.text || DESIGN.capabilities[0] || DESIGN.name || "").toLowerCase().slice(0, 80)
+    if (!q) return "ERROR: missing query"
+    const hits = []
+    walk(process.cwd(), q, hits, process.cwd(), 0)
+    // v113 audit: SHAPE THE RESULT TO THE DECLARED OUTPUT SCHEMA.
+    //
+    // This body always returned a string, whatever the design declared. So a
+    // tool designed with outputSchema {type:"object"} or {type:"array"} could
+    // never pass verifyTool — outputMatches() compares the observed value
+    // against the declared type — and was born INACTIVE. The v107 create →
+    // implement → verify → activate pipeline only ever worked for string
+    // tools, silently. Reproduced: design {type:"object"} → implement →
+    // verifyTool ok=false, outputMatchedSchema=false, lifecycle INACTIVE.
+    //
+    // The declared type is the contract; the generated body now honours it.
+    if (DESIGN.outputType === "array") return hits
+    if (DESIGN.outputType === "object") return { query: q, count: hits.length, hits }
+    if (!hits.length) return DESIGN.name + ": 0 local hits for " + q
+    return hits.join("\\n")
   },
 }
 `
@@ -443,4 +481,77 @@ export async function loadActiveCreatedTools(cwd = process.cwd()) {
     } catch { /* a broken generated tool is skipped, never breaks the agent */ }
   }
   return out
+}
+
+const MICRO_KLASS = new Set(["MICRO", "SMALL", "trivial", "simple"])
+
+export function toolNameFor(capability) {
+  const slug = String(capability || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 36)
+  const name = `x_${slug || "cap"}`.slice(0, 40)
+  return NAME_RE.test(name) ? name : "x_cap"
+}
+
+/**
+ * Create a tool for a REAL gap only when justified.
+ * MICRO never. A single miss never permanently creates. Existing ACTIVE
+ * that already declares the capability is reused.
+ */
+export async function createForGap({
+  cwd = process.cwd(),
+  capability = "",
+  task = "",
+  klass = "LARGE",
+  force = false,
+} = {}) {
+  const cap = String(capability || "").trim()
+  if (!cap) return { ok: false, skipped: "no capability" }
+  if (!force && MICRO_KLASS.has(klass)) return { ok: false, skipped: "MICRO/SMALL never creates tools" }
+  if (!force && !gapRepeats({ cwd, capability: cap, klass })) {
+    return { ok: false, skipped: "single miss does not justify creation — need a repeated gap" }
+  }
+  const life = loadToolLife(cwd)
+  const existing = Object.values(life.tools || {}).find((t) =>
+    t.lifecycle === TOOL_LIFE.ACTIVE && t.verification?.passed === true
+    && (t.name === toolNameFor(cap) || (Array.isArray(t.capabilities) && t.capabilities.includes(cap)))
+  )
+  if (existing) return { ok: true, reused: true, name: existing.name, lifecycle: TOOL_LIFE.ACTIVE }
+
+  const name = toolNameFor(cap)
+  const designed = designTool({
+    cwd, name,
+    description: `created for missing capability ${cap}`.slice(0, 200),
+    task: String(task || cap).slice(0, 400),
+    capabilities: [cap],
+    author: "forge-createwise",
+  })
+  if (!designed.ok) return designed
+  const impl = implementTool(cwd, name)
+  if (!impl.ok) return impl
+  const ver = await verifyTool(cwd, name)
+  if (!ver.ok) {
+    try { recordCapOutcome({ cwd, name, kind: "created", klass, ok: false, why: "behavioral verify failed" }) } catch { /* stats */ }
+    return { ok: false, name, lifecycle: ver.lifecycle, skipped: "behavioral verify failed", evidence: ver.evidence }
+  }
+  const act = activateTool(cwd, name)
+  if (!act.ok) return act
+  try { recordCapOutcome({ cwd, name, kind: "created", klass, ok: true, why: "verified and activated" }) } catch { /* stats */ }
+  return { ok: true, created: true, name, lifecycle: TOOL_LIFE.ACTIVE, version: loadToolLife(cwd).tools[name]?.version }
+}
+
+/** Record a gap; if it has repeated for this class, create. MICRO never. */
+export async function considerCreateForGaps({ cwd, gaps = [], task = "", klass = "LARGE" } = {}) {
+  const list = (Array.isArray(gaps) ? gaps : []).filter(Boolean).slice(0, 3)
+  const out = []
+  for (const cap of list) {
+    try { noteCapabilityGap({ cwd, capability: cap, klass }) } catch { /* observation */ }
+    const r = await createForGap({ cwd, capability: cap, task, klass })
+    out.push({ capability: cap, ...r })
+  }
+  return out
+}
+
+export function createdWithheld(cwd, name, { klass = "", named = false } = {}) {
+  try {
+    return shouldWithhold(loadCapLearn(cwd), { name, kind: "created", klass, named })
+  } catch { return false }
 }

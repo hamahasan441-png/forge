@@ -231,6 +231,20 @@ const suites = [
   ["v107", "node", ["test-v107.mjs"]],
   // ---- v108 rootwise: memory survives `cd`; an answer knows its question --
   ["v108", "node", ["test-v108.mjs"]],
+  ["cognition", "node", ["test-cognition.mjs"]],
+  ["authority", "node", ["test-authority.mjs"]],
+  ["intel", "node", ["test-intel.mjs"]],
+  ["learn", "node", ["test-learn.mjs"]],
+  ["bind", "node", ["test-bind.mjs"]],
+  ["route", "node", ["test-route.mjs"]],
+  ["caplearn", "node", ["test-caplearn.mjs"]],
+  ["create", "node", ["test-create.mjs"]],
+  ["perform", "node", ["test-perform.mjs"]],
+  ["meta", "node", ["test-meta.mjs"]],
+  ["modelwise", "node", ["test-modelwise.mjs"]],
+  ["joint", "node", ["test-joint.mjs"]],
+  ["critic", "node", ["test-critic.mjs"]],
+  ["github", "node", ["test-github.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

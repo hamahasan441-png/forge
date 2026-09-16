@@ -38,8 +38,8 @@ const NEW = ["kg_query", "plan_whatif", "code_context"]
 // ---------------------------------------------------------------------------
 console.log("== 1. contract: counts, classes, verifier + read-only gating ==")
 {
-  eq("toolCount is 29", toolCount(), 29)
-  eq("TOOL_DEFS length 29", TOOL_DEFS.length, 29)
+  eq("toolCount is 30 (v94c 29 + v113 github)", toolCount(), 30)
+  eq("TOOL_DEFS length 30", TOOL_DEFS.length, 30)
   eq("capabilities registry 1:1 with the wire", BUILTIN_CAPABILITIES.length, TOOL_DEFS.length)
   const reg = defaultRegistry()
   for (const n of NEW) {

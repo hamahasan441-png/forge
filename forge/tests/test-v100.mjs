@@ -764,7 +764,20 @@ console.log("== 24. unified capability index: all four registries, one scale =="
   const irrelevantButProven = rankCapabilities(idx, "format csv", { limit: 1 })
   eq("a relevant created tool beats a proven-but-unrelated one", irrelevantButProven[0].name, "csvfmt")
 
-  ok("the report names counts and evidence", /CAPABILITY INDEX — 33 total \(1 with recorded runs, 3 by lifecycle\)/.test(formatCapabilityIndex(idx)))
+  // v113 audit: this pinned "33 total", a number that moves whenever the tool
+  // or skill catalog legitimately grows (29→30 tools, 34→38 skills in v113).
+  // The claim worth holding is that the header REPORTS THE REAL COUNTS, so it
+  // is checked against the index itself rather than against a frozen literal.
+  {
+    const report = formatCapabilityIndex(idx)
+    const m = /CAPABILITY INDEX — (\d+) total \((\d+) with recorded runs, (\d+) by lifecycle\)/.exec(report)
+    ok("the report names counts and evidence", Boolean(m), report.split("\n")[0])
+    if (m) {
+      eq("the total is the real number of indexed capabilities", Number(m[1]), idx.length)
+      eq("proven counts the entries with recorded runs", Number(m[2]), idx.filter((e) => e.evidence === EVIDENCE.COUNTED).length)
+      eq("inferred counts the entries judged by lifecycle", Number(m[3]), idx.filter((e) => e.evidence === EVIDENCE.LIFECYCLE).length)
+    }
+  }
   ok("a stale entry is labeled in the report", /old-pack.*STALE/.test(formatCapabilityIndex(idx)))
   eq("an empty index is honest", formatCapabilityIndex([]), "no capabilities indexed")
 

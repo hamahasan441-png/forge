@@ -3,7 +3,7 @@
  *
  * bash, read_file, read_image, write_file, edit_file, multi_edit, apply_patch, list_dir, glob_files,
  * grep_files, fetch_url, web_search, browser, todo, think, memory, delegate, load_skill, git_status,
- * git_diff, git_log, git_blame, process, repl, semantic_search
+ * git_diff, git_log, git_blame, github, process, repl, semantic_search
  * (25 tools — v93 "sensewise": background processes, persistent REPL, meaning-ranked code search)
  *
  * v20 hardening:
@@ -57,6 +57,7 @@ import { createRuntimeSession, formatDiscovery } from "./runtimesession.js"
 import { createReplManager } from "./repl.js"
 import { semanticSearch, formatSemanticSearch } from "./codesearch.js"
 import { createWorldModel } from "./worldmodel.js"
+import { ghInspect, formatGithub } from "./github.js"
 import { assessPlan, gatherPlannerEvidence, alternatives } from "./plannerisk.js"
 import { knowledgeGraphFacts } from "./engmemory.js"
 
@@ -290,6 +291,17 @@ export const TOOL_DEFS = [
         start: { type: "number", description: "first line (default 1)" },
         end: { type: "number", description: "last line (default start+39)" },
       }, required: ["path"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "github",
+      description: "READ-ONLY GitHub evidence via your gh CLI (no forge-held token). action: status|repo|issues|issue|prs|pr|checks|runs|run|releases. Optional id for issue/pr/checks/run. Writes (push, PR create) are gitship, never this tool.",
+      parameters: { type: "object", properties: {
+        action: { type: "string", description: "status, repo, issues, issue, prs, pr, checks, runs, run, releases (default repo)" },
+        id: { type: "string", description: "issue/PR/run number or ref when required" },
+      } },
     },
   },
   {
@@ -627,7 +639,7 @@ function isReadOnlyAllowedBash(command) {
 export const VERIFICATION_TOOLS = {
   allowed: [
     "read_file", "read_image", "list_dir", "glob_files", "grep_files", "git_status",
-    "git_diff", "git_log", "git_blame",   // read-only git views — verify what changed
+    "git_diff", "git_log", "git_blame", "github",   // read-only git + GitHub evidence
     "bash",            // approved verification commands only (test/build/lint)
     "think",           // reasoning never mutates
     "load_skill",      // read-only skill docs
@@ -1880,6 +1892,17 @@ async function git_blame(ctx, args = {}) {
   return cap((clamped ? `… blame window capped at ${WINDOW} lines (use start=/end= to move it)\n` : "") + body, ctx.maxToolOutput)
 }
 
+function runGithub(ctx, args = {}) {
+  const inspect = ghInspect({
+    action: String(args.action || "repo"),
+    id: String(args.id || ""),
+    cwd: ctx.cwd || process.cwd(),
+  })
+  const head = formatGithub(inspect)
+  if (!inspect.ok) return head
+  return cap(`${head}\n${inspect.preview || ""}`, ctx.maxToolOutput)
+}
+
 // --- todo / think -----------------------------------------------------------------
 
 function readTodo(ctx) {
@@ -2555,7 +2578,7 @@ async function runCodeContextTool(ctx, args) {
 // secret redaction before it reaches the model / sessions / logs.
 // ---------------------------------------------------------------------------
 
-const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "browser", "delegate", "git_status", "grep_files", "memory", "process", "repl", "semantic_search", "runtime", "kg_query", "plan_whatif", "code_context"])
+const REDACTED_TOOLS = new Set(["bash", "read_file", "read_image", "fetch_url", "web_search", "browser", "delegate", "git_status", "grep_files", "memory", "process", "repl", "semantic_search", "runtime", "kg_query", "plan_whatif", "code_context", "github"])
 
 /** v93 gap fix §7–§11 — the Runtime Intelligence tool. Backed by
  *  runtimesession.js (discovery with evidence, the shared process manager,
@@ -2663,6 +2686,7 @@ export async function execTool(ctx, name, args) {
     case "git_diff": result = await git_diff(ctx, args); break
     case "git_log": result = await git_log(ctx, args); break
     case "git_blame": result = await git_blame(ctx, args); break
+    case "github": result = runGithub(ctx, args); break
     case "todo": result = todo(ctx, args); break
     case "think": result = think(ctx, args); break
     case "memory": result = memory(ctx, args); break

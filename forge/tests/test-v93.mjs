@@ -235,8 +235,8 @@ console.log("== 3. codesearch.js — meaning-ranked search ==")
 console.log("== 4. tools.js wiring — defs, dispatch, gating, redaction ==")
 {
   const names = TOOL_DEFS.map((t) => t.function.name)
-  eq("toolCount is 29 (v94c toolwise)", toolCount(), 29)
-  eq("TOOL_DEFS length is 29", TOOL_DEFS.length, 29)
+  eq("toolCount is 30 (v94c 29 + v113 github)", toolCount(), 30)
+  eq("TOOL_DEFS length is 30", TOOL_DEFS.length, 30)
   for (const n of ["process", "repl", "semantic_search"]) ok(`${n} in TOOL_DEFS`, names.includes(n))
 
   const tools = makeToolContext({ cwd: WORK, root: WORK, skillsDir: null })

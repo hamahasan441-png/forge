@@ -5,6 +5,283 @@ reads it at runtime and every user-agent is built from that single source.
 Historical entries below are kept honest and short; completed plans are not
 preserved — leftovers live in TODO.md.
 
+## 113.0.0 — githubwise (GitHub is evidence)
+
+CLI only. No forge-held GitHub token. No GitHubManager.
+
+```
+gh inspect (issues / PRs / checks / runs / repo)
+        ↓
+   Evidence (contract.noteEvidence)
+        ↓
+   Governor INSPECT / SEARCH
+```
+
+Writes (commit / push / `gh pr create`) stay in gitship: opt-in, consent-gated.
+
+- one read-only `github` tool (allowlisted `gh` argv)
+- knowledge-gap acquire prefers gh before the web when the task is GitHub/CI
+- MICRO does not fetch GitHub
+- shell-injection ids refused
+
+## 112.0.0 — criticwise (doomed mutations do not run)
+
+
+CLI only. No Web OS. No CritiqueManager.
+
+`preMutationCritique` already existed and was advisory-only. The default
+agent still executed missing-file edits, secret-path writes, and edit-thrash.
+
+- missing edit target → BLOCK before exec
+- same file mutated ≥ 3 times → REPLAN (no 4th patch)
+- secret-bearing path → ASK (WAITING_FOR_USER)
+- hub file → VERIFY (advisory, write still allowed)
+- MICRO stays one-shot (advisory, not blocked)
+- `FORGE_CRITIQUE=0` still disables the checklist
+
+## 111.0.0 — jointwise (one route: depth + model + skill)
+
+
+CLI only. No Web OS. The LLM is an instrument. No JointManager.
+
+The leftover gap after v110: governor, metalearn, modelstrategy, and caplearn
+picked independently, so a cheap-failing combo could still be assembled.
+
+- `scoreRoute` composes the three pickers, then prefers a measured-better combo
+- MICRO / `FORGE_LOCK_MODEL` / named skill still win
+- live agent may switch model only when joint evidence says so
+- cognition uses joint depth on the next similar task
+
+## 110.0.0 — modelwise (measured-best model actually runs)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+What was forgotten: `selectModel` / performance history already existed, but
+the default agent never called them (modelstrategy imported agent → cycle).
+Unrecognized custom model ids were also pinned forever, so history could not
+switch.
+
+- modelstrategy imports classify.js, not agent.js
+- `applyModelChoice` on the live path (LARGE/SMALL)
+- MICRO and `FORGE_LOCK_MODEL=1` keep the caller's model
+- measured margin ≥ 3 can switch even for unregistered ids
+- outcomes recorded into the existing modelstrategy ledger on close
+
+## 109.0.0 — metawise (reasoning depth is learned)
+
+
+CLI only. No Web OS. The LLM is an instrument. No second brain.
+
+v106 learned which skill to use. v109 learns how HARD to think:
+
+- record (klass, depth, ok) on cognition.close
+- next similar task uses cheaper depth when success is equal
+- LARGE cheap-depth failure keeps the deeper governor default
+- MICRO never learns extra depth
+- env drift (existing envfingerprint) discounts old cheap-depth stats
+- ASK/STOP/PLAN authority unchanged
+- strategy outcomes rank future PLAN lists (failed strategy is not preferred)
+- env drift option discounts learned cheap depth
+- retired lessons (confidence ≤ 0.15) no longer retrieve into default routing
+- metalearn.json is project-local and survives restart
+
+Not implemented (already exist or not this layer): lesson store, calibration
+ledger, capability routing, 20 new event types, counterfactual replay UI.
+
+## 108.0.0 — performwise (layers that planned now run)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+What was forgotten: SEARCH, created tools, and model empirics *existed* but
+did not perform.
+
+- governor SEARCH runs `runAcquire` (local grep/glob/read/skill) once
+- web is never auto-fetched; acquire is read-only
+- after acquire, SEARCH does not fire again
+- created tools search the tree; they no longer echo "designed for"
+- failover chain is ranked by recorded model empirics (user's chosen model stays)
+
+## 107.0.0 — createwise (gap → verified tool → future route)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+v106 learned which existing capability to use. v107 extends that:
+
+- a *repeated* capability gap (not a single miss) may design/implement/verify
+  a project-local tool via the existing toolcreate pipeline
+- only VERIFIED tools activate; CANDIDATE never reaches the agent
+- MICRO/SMALL never create
+- an ACTIVE created tool is reused, not duplicated
+- created tools join `selectForTurn` and caplearn (kind: `created`)
+- if X then fails on LARGE, the next LARGE turn withholds X
+- no ToolManager, no co-router, no RFC crawler, no provenance UI
+
+## 106.0.0 — capabilitywise (measured routing + free knowledge VOI)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+v105 routed catalogs. v106 makes routing LEARN:
+
+- `caplearn.js` records skill/MCP outcomes per task class (conditional
+  reputation — strong for A, broken for B)
+- UNRELIABLE/BROKEN capabilities are withheld on the next similar turn
+  unless the user named them. That is the acceptance test: behavior change.
+- Credit assignment from real `load_skill` / `mcp__*` records, not from
+  "something failed somewhere"
+- Knowledge gaps (existing knowgap engine) feed governor SEARCH — cheapest
+  acquire (skill/repo) before a patch; the web is last and never auto-fetched
+- Cognition prompt shows measured capability health
+- Native / models stay in toolintel / empirics; this does not duplicate them
+
+## 105.0.0 — routewise (smart skill + MCP routing)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+107 bundled skills and a curated 100-server MCP catalog already existed.
+Dumping them into every prompt is not intelligence. v105 is the router:
+
+- klass budgets: MICRO/SMALL auto-inject nothing unless named
+- quality gate: CANDIDATE skills are not auto-injected; stale playbooks
+  are withheld by the turn router unless named
+- INSPECT/VERIFY withhold mutating MCP; read-only MCP may stay via allow
+- capability gaps recommend `forge mcp add` / `forge skill download` —
+  never auto-install, never auto-connect
+- load_skill stays available under INSPECT (skills are how the list is used)
+- first-party tags for api-design, data-migration, code-reviewer, experiment-suite
+
+## 104.0.0 — bindwise (wire the gaps, close the blind spots)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+v103 learned. Several engines still sat idle on the default path, and one
+heuristic silently treated `echo ok` as verification.
+
+v104 binds what already existed:
+
+- `isCoveringCheck` — a covering check is a real test/lint command that
+  passed. `echo ok` / `ls` / a body containing the word "pass" is not
+  verification. The live `observeTools` path uses this, not a regex.
+- VOI experiments are recorded on the omega infogain ledger when a
+  bash/test result lands, so the same experiment is not re-picked forever.
+- PLAN ranks competing strategies (intent hypotheses, or smallest-reversible
+  vs broader) instead of leaving the strategy list empty.
+- World-model `testsFor` fills `expectedTests` on a live prediction;
+  `invalidate` runs on every successful write so the world cannot stay stale.
+- Dead `predictionCalibration` import removed (the prompt already used
+  `predictionsForPrompt`).
+
+## 103.0.0 — learnwise (self-model + intent invalidation + VOI)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+v102 predicted and calibrated. The system still did not know itself, still
+treated a changed instruction as a new original, and still patched before
+the cheapest discriminating experiment.
+
+v103:
+
+- `selfmodel.js` — measured strengths/weaknesses from the prediction ledger
+  and model empirics. Insufficient evidence is said out loud. Never a
+  personality. Never auto-switches models.
+- `absorbInstruction` — a changed instruction becomes v2 discovery; v1
+  wording stays frozen; the prior plan is invalidated; a CONFLICT gap is
+  recorded. Resume with a new objective uses this path.
+- VOI — omega's information-gain catalog now feeds the governor: a
+  discriminate experiment is TEST, an inspect experiment is INSPECT, not
+  another identical patch.
+- Default `forge agent` emits `SELF_MODEL` (calibrated, weaknesses,
+  recommend, autoSwitch=false).
+- Prompt carries SELF-MODEL + VOI EXPERIMENT on the live path.
+
+## 102.0.0 — intelwise (prediction-calibrated intelligence)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+v101 made the governor the authority. It still chose VERIFY/REPLAN with no
+expected observation — so it could not tell a miss from a hit. `prediction.js`
+already predicted DAG nodes for `--auto`. Default `forge agent` never opened
+a prediction, never settled one, never recorded model empirics.
+
+v102 closes the loop on the live path:
+
+- `predictForAction` — deterministic prediction from intent/reads/scope,
+  never from the model's self-reported confidence
+- every EXECUTE/REPAIR on default `forge agent` opens a prediction
+- settlement against actual writes emits `PREDICTION_SETTLED`
+- file drift MISS → governor REPLAN (bounded, never MICRO)
+- SCOPE drift → VERIFY before more writes
+- objective-only predictions are UNSCORED (honest: "no files named" is not
+  "I predicted zero files")
+- competing strategies ranked by expected value (reversible + cheap first)
+- cheapest-first capability router in the live prompt (native → skill → MCP
+  → generated → model)
+- default agent records `empirics` (model-outcomes.json) like meta already did
+- calibration from the real ledger is injected when samples suffice
+
+Not a rewrite. prediction.js, empirics.js, capfabric.js, omega stay the
+engines they were. They now share the contract on the path everything uses.
+
+## 101.0.0 — authoritywise (governor is the authority)
+
+
+CLI only. No Web OS. The LLM is an instrument.
+
+v100 put a cognitive core on the default `forge agent` path. The governor
+chose INSPECT / VERIFY / ASK / STOP — and the loop ignored it. The model
+still picked every tool. ASK emitted an event. VERIFY was a comment.
+STOP never stopped.
+
+v101 enforces the action:
+
+- ASK / WAIT freeze the run as `WAITING_FOR_USER` (decisionengine.ask,
+  no silent goal substitution)
+- STOP ends the loop — but only after real verified work; a run that has
+  not started is never halted
+- VERIFY / INSPECT / PLAN / REPLAN on MEDIUM+ hide write tools and
+  BLOCK a forbidden call (`TOOL_BLOCKED`) even if the model ignores the mask
+- MICRO / SMALL keep mutation available (existing one-shot paths and the
+  verify-nudge stay honest); ASK / STOP still always halt
+- every step injects `(governor) GOVERNOR: ACTION [depth] — why` into the
+  model request, replacing the previous governor turn so context does not grow
+- `cognition.enforce()` / `authorityFor()` / `maskToolDefs()` /
+  `enforceToolCall()` are the authority surface; agent.js is the live path
+
+Not a rewrite. Omega, world model, verifyledger, completion, engmemory stay
+the engines they were. The governor is no longer a narrator.
+
+## 100.0.0 — cognitionwise (unified cognitive core)
+
+CLI only. No Web OS. The LLM is an instrument.
+
+Default `forge agent` used to skip the kernel entirely — the model picked
+every tool, omega lived only on `--auto`, and `core.nextBestAction` was a
+read-only view. v100 puts ONE cognitive core on the live path:
+
+- `usermodel.js` — explicit vs inferred, competing intent hypotheses,
+  preference provenance + decay, structured feedback, negative knowledge,
+  decision authority, attention economics (ask only when inspect cannot)
+- `contract.js` — versioned intent (v1 frozen), requirements that refuse
+  ASSUMPTION→REQUIREMENT, gap analysis, IMPLEMENTED ≠ VERIFIED ≠ CLOSED
+- `governor.js` — chooses THINK/INSPECT/…/ASK/STOP from that state
+  (VOI-directed; MICRO stays L1; looping forces REPLAN)
+- `cognition.js` — composes those with the existing omega kernel
+  (hypothesis/evidence/causal/infogain). Persist `cognition.json`.
+- `forge cognition` — inspect the core without a model
+- `agent.js` loads cognition on the DEFAULT path (sub-agents stay executors)
+- `meta.js` uses `createCognition` instead of a second kernel; DAG node
+  objectives actually reach the segment task
+
+Not a rewrite. Omega, world model, verifyledger, completion, engmemory,
+prediction stay the engines they were. They now share a contract.
+
 ## 99.0.0 — loopwise (the agency release)
 
 - Expanded the offline MCP catalog from 12 hand-written presets to a generated,

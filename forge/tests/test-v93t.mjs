@@ -91,16 +91,35 @@ console.log("== 3. BEHAVIORAL VERIFY — real child process, observed evidence =
   ok("evidence: output matched the declared schema", ev.outputMatchedSchema === true)
   ok("evidence: output preview recorded", typeof ev.outputPreview === "string" && /deploy_probe/.test(ev.outputPreview))
 
-  // a schema MISMATCH must fail even with exit 0 (object output vs string schema)
-  const d2 = tc.designTool({ cwd: WORK, name: "shape_bad", description: "declares string output but returns object", task: "t", outputSchema: { type: "string" } })
-  void d2
-  const rec = tc.readToolRecord(WORK, "shape_bad")
-  // force an object output by patching the generated file's declared output type
+  // a schema MISMATCH must fail even with exit 0
+  //
+  // v113 audit: this used to declare `string` and then patch the GENERATED
+  // FILE's "outputType" field to "object". verifyTool compares the observed
+  // output against the RECORD's outputSchema (toolcreate.js:382,
+  // `outputMatches(output, rec.outputSchema)`), never the file's metadata — and
+  // patching that field does not change what the tool returns either. So the
+  // record still said string, the tool still returned a string, they matched,
+  // and the assertion failed while the product was behaving correctly.
+  //
+  // The mismatch is forced where verifyTool actually looks — the record. The
+  // tool is designed and implemented as a string tool (so the generated body
+  // really does return a string), and only then is the RECORD's declared
+  // outputSchema changed to object. Now the observed value and the declared
+  // contract genuinely disagree, which is the condition under test.
+  //
+  // (Declaring `object` up front no longer produces a mismatch: v113 fixed the
+  // generator to shape its result to the declared type, so an object tool
+  // returns an object. That fix is covered in test-todowise.)
+  tc.designTool({ cwd: WORK, name: "shape_bad", description: "string tool whose declared schema is later changed", task: "t", outputSchema: { type: "string" } })
   tc.implementTool(WORK, "shape_bad")
-  const f2 = path.join(learnedPluginsDir(WORK), "shape_bad.mjs")
-  fs.writeFileSync(f2, fs.readFileSync(f2, "utf8").replace('"outputType": "string"', '"outputType": "object"'), "utf8")
+  const lifeFile = path.join(projectDir(WORK), "toollife.json")
+  const life = JSON.parse(fs.readFileSync(lifeFile, "utf8"))
+  life.tools.shape_bad.outputSchema = { type: "object" }
+  fs.writeFileSync(lifeFile, JSON.stringify(life), "utf8")
   const r2 = await tc.verifyTool(WORK, "shape_bad", { args: {} })
-  ok("exit 0 + schema MISMATCH → NOT verified (never a fake pass)", r2.ok === false)
+  ok("exit 0 + schema MISMATCH → NOT verified (never a fake pass)", r2.ok === false, JSON.stringify(r2.evidence ?? {}))
+  ok("the mismatch is what failed it, not the exit code",
+    r2.evidence?.exitCode === 0 && r2.evidence?.outputMatchedSchema === false, JSON.stringify(r2.evidence ?? {}))
   eq("mismatching tool goes INACTIVE", tc.readToolRecord(WORK, "shape_bad").lifecycle, "INACTIVE")
   ok("mismatch evidence recorded", r2.evidence?.outputMatchedSchema === false)
 

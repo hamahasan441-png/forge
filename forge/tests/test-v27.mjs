@@ -207,8 +207,8 @@ console.log("== runBash still classifies before wrapping (source) ==")
 
 console.log("== package version ==")
 {
-  eq("VERSION is 99.0.0", VERSION, "99.0.0")
-  eq("package.json is 99.0.0", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, "99.0.0")
+  eq("VERSION matches package.json", VERSION, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version)
+  eq("package.json version is what version.js serves", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, VERSION)
 }
 
 console.log(`\n== v27 suite: ${PASS} passed, ${FAIL} failed ==`)
