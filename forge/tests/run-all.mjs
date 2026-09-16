@@ -269,6 +269,9 @@ const suites = [
   // ---- v126 shapewise: the planner adopted the SAME plan shape 32/32 and ----
   // ---- never learned whether it was the one that worked -------------------
   ["v126", "node", ["test-v126.mjs"]],
+  // ---- v127 costwise: the A/B called "no measurable difference" on tied ----
+  // ---- outcomes without ever reading the cost it had just printed ---------
+  ["v127", "node", ["test-v127.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

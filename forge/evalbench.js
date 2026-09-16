@@ -30,6 +30,10 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
+// v122: the A/B runs each task ONCE per arm, so a cost delta is a
+// single-sample comparison — exactly what perfbench's widest band is for.
+// Reused rather than re-guessed: one threshold, one place, already tested.
+import { SINGLE_NOISE_PCT } from "./perfbench.js"
 
 const DEFAULT_TASK_TIMEOUT_MS = 300_000
 const VERIFY_TIMEOUT_MS = 60_000
@@ -531,7 +535,7 @@ export async function runAB({ tasks = EVAL_TASKS, runAgent, provider, config = {
   const on = await arm("on", { ...config, agent: { ...(config.agent || {}), cognition: true } })
   const off = await arm("off", { ...config, agent: { ...(config.agent || {}), cognition: false } })
   const models = [...new Set([...on.models, ...off.models])]
-  return {
+  const out = {
     on, off, lockModel,
     // Same model in both arms, or the comparison is partly about model choice.
     // Reported either way — a confound that is named is a result; one that is
@@ -548,6 +552,10 @@ export async function runAB({ tasks = EVAL_TASKS, runAgent, provider, config = {
       toolCalls: on.toolCalls - off.toolCalls,
     },
   }
+  // v122: the cost verdict travels with the result, so `--json` consumers see
+  // the same conclusion the text report draws instead of re-deriving it.
+  out.cost = costVerdict(out)
+  return out
 }
 
 export function formatEvalReport(summary) {
@@ -591,6 +599,77 @@ export function formatEvalReport(summary) {
  * does not help on this set — a report that can only announce a win is not a
  * measurement, it is advertising.
  */
+/**
+ * v122 costwise — what the tie branch was throwing away.
+ *
+ * runAB has always computed delta.tokensIn/tokensOut/totalMs/toolCalls, and
+ * formatABReport has always PRINTED them in the arm table. But the verdict
+ * underneath read `d.solved === 0 && d.falseCompletions === 0` and nothing
+ * else, so a run where cognition ON scored the same 23/24 for twice the
+ * tokens was reported as:
+ *
+ *   NO MEASURABLE DIFFERENCE on this set: same solved count, same false
+ *   completions.
+ *
+ * Same correctness at higher cost is not "no difference" — it is a NEGATIVE
+ * result, and the eval's whole purpose is to be able to say so. (§27: never
+ * call something unchanged when one axis silently got worse.) The numbers
+ * were computed and displayed and never reached the conclusion — the same
+ * dead wire v121 closed three of.
+ *
+ * WHAT COUNTS AS EVIDENCE, and what does not:
+ *
+ *   tokens, tool calls   the verdict. Both are attributable to the stack and
+ *                        stable given the same task set.
+ *   wall time            reported as context, NEVER the verdict. One run per
+ *                        task against a live provider carries network and
+ *                        queueing the cognitive stack does not control, so a
+ *                        time delta is not evidence about the stack.
+ *
+ * The band is SINGLE_NOISE_PCT, reused from perfbench: each arm is one sample
+ * per task, which is the case that constant already exists for.
+ */
+export const COST = Object.freeze({
+  UNCHANGED: "unchanged",
+  COSTLIER: "costlier",
+  CHEAPER: "cheaper",
+  MIXED: "mixed",
+  UNKNOWN: "unknown",
+})
+
+export function costVerdict(ab, { band = SINGLE_NOISE_PCT } = {}) {
+  const none = { verdict: COST.UNKNOWN, axes: [], why: "", band }
+  if (!ab?.on || !ab?.off) return none
+  // An errored arm measures the setup, not the stack. No cost claim from it.
+  if (ab.on.errored || ab.off.errored) {
+    return { ...none, why: "an arm never reached the model" }
+  }
+  const axis = (label, onV, offV) => {
+    const on = Number(onV) || 0, off = Number(offV) || 0
+    // No baseline to be a percentage OF: only an exact tie is honest here.
+    if (!off) return { label, on, off, pct: null, moved: on !== 0 }
+    const pct = (on - off) / off
+    return { label, on, off, pct, moved: Math.abs(pct) > band }
+  }
+  const axes = [
+    axis("tokens", ab.on.tokensIn + ab.on.tokensOut, ab.off.tokensIn + ab.off.tokensOut),
+    axis("tool calls", ab.on.toolCalls, ab.off.toolCalls),
+  ]
+  const moved = axes.filter((a) => a.moved)
+  if (!moved.length) return { verdict: COST.UNCHANGED, axes, band, why: `every cost axis is inside the ±${Math.round(band * 100)}% single-sample band` }
+  const up = moved.filter((a) => (a.pct ?? (a.on - a.off)) > 0)
+  const down = moved.filter((a) => (a.pct ?? (a.on - a.off)) < 0)
+  const phrase = (a) => `${a.label} ${a.pct == null ? `${a.on} vs ${a.off}` : `${a.pct > 0 ? "+" : ""}${Math.round(a.pct * 100)}%`}`
+  if (up.length && down.length) {
+    return { verdict: COST.MIXED, axes, band, why: `${up.map(phrase).join(", ")} but ${down.map(phrase).join(", ")}` }
+  }
+  return {
+    verdict: up.length ? COST.COSTLIER : COST.CHEAPER,
+    axes, band,
+    why: moved.map(phrase).join(", "),
+  }
+}
+
 export function formatABReport(ab) {
   if (!ab?.on?.results?.length) return "no A/B results"
   const ms = (x) => (x >= 1000 ? `${(x / 1000).toFixed(1)}s` : `${x}ms`)
@@ -623,9 +702,33 @@ export function formatABReport(ab) {
 
   const d = ab.delta
   if (d.solved === 0 && d.falseCompletions === 0) {
-    lines.push("", `  NO MEASURABLE DIFFERENCE on this set: same solved count, same false completions.`,
-      `  That is a result. It does not prove the stack is useless — it proves this set does not show it — and`,
-      `  the honest next move is a harder set, not a louder claim.`)
+    // v122: outcomes tied — now ask what it COST to tie, before calling it
+    // "no difference". Cost is reported on tokens and tool calls only; wall
+    // time is context, never the verdict.
+    const cost = costVerdict(ab)
+    const timeNote = `  time ${sign(Math.round(d.totalMs / 1000))}s — reported, but a live provider's latency is not evidence about the stack.`
+    if (cost.verdict === COST.COSTLIER) {
+      lines.push("", `  SAME OUTCOMES AT HIGHER COST: identical solved count and identical false completions, for ${cost.why}.`,
+        `  That is a NEGATIVE result for cognition ON on this set, not a neutral one — the stack was paid for and`,
+        `  bought nothing measurable here.`, timeNote)
+    } else if (cost.verdict === COST.CHEAPER) {
+      lines.push("", `  SAME OUTCOMES FOR LESS: identical solved count and identical false completions, for ${cost.why}.`,
+        `  Cheaper at equal correctness is a real win, and the only one this set can show at its ceiling.`, timeNote)
+    } else if (cost.verdict === COST.MIXED) {
+      lines.push("", `  SAME OUTCOMES, MIXED COST: ${cost.why}.`,
+        `  The axes disagree, so this set does not support a cost claim either way.`, timeNote)
+    } else {
+      lines.push("", `  NO MEASURABLE DIFFERENCE on this set: same solved count, same false completions, and ${cost.why}.`,
+        `  That is a result. It does not prove the stack is useless — it proves this set does not show it — and`,
+        `  the honest next move is a harder set, not a louder claim.`, timeNote)
+    }
+    // At a ceiling the solved column has no room left to move, so "no
+    // difference" there says more about the set than about the stack.
+    const ceiling = ab.on.tasks > 0 && (ab.on.solved / ab.on.tasks) >= 0.9 && (ab.off.solved / ab.off.tasks) >= 0.9
+    if (ceiling) {
+      lines.push("", `  CEILING: both arms solved ${ab.on.solved}/${ab.on.tasks}. With that little headroom the solved column`,
+        `  cannot show a difference even if one exists — treat the outcome tie as uninformative, not as evidence.`)
+    }
   } else {
     const better = d.solved > 0 || (d.solved === 0 && d.falseCompletions < 0)
     lines.push("", `  ${better ? "cognition ON did better" : "cognition ON did WORSE"} on this set: ` +
