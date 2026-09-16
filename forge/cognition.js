@@ -37,7 +37,7 @@ import { createWorldModel } from "./worldmodel.js"
 import { summarizeCommand } from "./cmdout.js"
 import { detectGaps } from "./knowgap.js"
 import { formatCapLearn, loadCapLearn } from "./caplearn.js"
-import { recommendDepth, recordReasoning, formatMetaPolicy, recordStrategy, strategyRates } from "./metalearn.js"
+import { recommendDepth, recordReasoning, formatMetaPolicy, recordStrategy, strategyRates, formatCompletionPolicy } from "./metalearn.js"
 import { scoreRoute, formatJointRoute, recordRoute } from "./jointroute.js"
 import { projectDir } from "./memory.js"
 
@@ -547,6 +547,12 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
       const health = formatCapLearn(loadCapLearn(cwd), { klass, limit: 4 })
       if (health) parts.push(health)
     } catch { /* health is context */ }
+    // v119: what this project measured about its own completion blockers —
+    // beside the other learned policies, not in a surface of its own.
+    try {
+      const completion = formatCompletionPolicy(cwd, klass)
+      if (completion) parts.push(completion)
+    } catch { /* policy is context */ }
     if (ranked.length) {
       parts.push("STRATEGIES (ranked by expected value — reversible and cheap first):")
       for (const s of ranked.slice(0, 4)) parts.push(`- ${s.id} ev=${s.expectedValue} rev=${s.reversible} ${s.text}`)

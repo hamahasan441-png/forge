@@ -840,6 +840,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   let completionCandidates = 0
   let completionAbandoned = false
   let completionBlockedThisTurn = false
+  const completionBudget = new Map()
   let lastCompletionBlocker = null
   let sameBlockerRun = 0
   let completionVerdict = null
@@ -1011,6 +1012,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
               ...identityMeta(),
             })
             if (completionVerdict.ok) {
+              // v119: this candidate passed. If an earlier one was refused,
+              // that refusal just proved it was catching a real premature stop
+              // — record WHICH attempt cleared it, because that becomes the
+              // floor the budget can never be squeezed below.
+              if (lastCompletionBlocker) {
+                try {
+                  const { recordCompletionOutcome, COMPLETION_OUTCOME } = await import("./metalearn.js")
+                  recordCompletionOutcome({
+                    cwd: process.cwd(), klass: turnKlass ?? klass ?? "SMALL",
+                    blocker: lastCompletionBlocker, outcome: COMPLETION_OUTCOME.CLEARED, attempt: sameBlockerRun,
+                  })
+                } catch { /* calibration is a view, never a gate */ }
+              }
               governorHalt = true
               onEvent?.({ type: "GOVERNOR_STOP", why: gov.why, ...identityMeta() })
               // Kept OUT of finalText: a note about stopping is not an answer,
@@ -1031,10 +1045,30 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             // other way to be wrong. Three refusals of the SAME blocker means
             // the run cannot clear it by itself — end INCOMPLETE and say which
             // blocker won, never COMPLETED.
-            if (sameBlockerRun >= COMPLETION_BLOCKER_REPEATS) {
+            // v119: how many attempts this blocker gets is what THIS project
+            // measured, not a constant. Read once per run per blocker.
+            if (!completionBudget.has(code)) {
+              let budget = COMPLETION_BLOCKER_REPEATS
+              try {
+                const { completionAttemptsFor } = await import("./metalearn.js")
+                budget = completionAttemptsFor({
+                  cwd: process.cwd(), klass: turnKlass ?? klass ?? "SMALL",
+                  blocker: code, fallback: COMPLETION_BLOCKER_REPEATS,
+                }).attempts
+              } catch { /* an unreadable store means the default, never zero */ }
+              completionBudget.set(code, Math.max(1, Number(budget) || COMPLETION_BLOCKER_REPEATS))
+            }
+            if (sameBlockerRun >= completionBudget.get(code)) {
               governorHalt = true
               onEvent?.({ type: "COMPLETION_ABANDONED", blocker: code, repeats: sameBlockerRun, ...identityMeta() })
               completionAbandoned = true
+              try {
+                const { recordCompletionOutcome, COMPLETION_OUTCOME } = await import("./metalearn.js")
+                recordCompletionOutcome({
+                  cwd: process.cwd(), klass: turnKlass ?? klass ?? "SMALL",
+                  blocker: code, outcome: COMPLETION_OUTCOME.ABANDONED, attempt: sameBlockerRun,
+                })
+              } catch { /* calibration is a view, never a gate */ }
               governorNote = `stopped BLOCKED: ${completionVerdict.blockers[0].why} — ${sameBlockerRun} completion attempts did not clear it`
               try { cognition.persist() } catch { }
               break
@@ -1565,6 +1599,21 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         }
         cognition.persist()
       } catch (e) { swallowed("agent", "cognition close", e) }
+    }
+    // v119: a run that was refused and then COMPLETED cleared its blocker —
+    // and it usually exits here rather than through another STOP candidate,
+    // because the model simply answered. Recording the clearing only at the
+    // candidate site would have counted the abandonments and missed the
+    // successes, which is the worst possible half of the evidence to keep.
+    if (lastCompletionBlocker && resStatus === "COMPLETED") {
+      try {
+        const { recordCompletionOutcome, COMPLETION_OUTCOME } = await import("./metalearn.js")
+        recordCompletionOutcome({
+          cwd: process.cwd(), klass: klass ?? "SMALL",
+          blocker: lastCompletionBlocker, outcome: COMPLETION_OUTCOME.CLEARED,
+          attempt: Math.max(1, sameBlockerRun),
+        })
+      } catch { /* calibration is a view, never a gate */ }
     }
     try {
       const { recordModelOutcome } = await import("./empirics.js")
