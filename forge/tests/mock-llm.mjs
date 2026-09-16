@@ -137,7 +137,18 @@ const server = http.createServer((req, res) => {
       try { j = JSON.parse(body) } catch { res.writeHead(400); res.end('{"error":{"message":"bad json"}}'); return }
       LAST_BODY = j
       const msgs = j?.messages ?? []
-      const last = msgs[msgs.length - 1] ?? {}
+      // v113 audit: the GOVERNOR (v101) appends its own `user` directive after
+      // every tool result, so the wire now ends
+      //     ...assistant, tool, user"(governor) GOVERNOR: EXECUTE [L1] ..."
+      // and the documented contract "last message role=tool -> final answer"
+      // could never fire. This double kept re-issuing the same tool call and
+      // forge burned all 80 steps on one identical `bash echo`. A real model
+      // reads the tool result out of history regardless of what rides last, so
+      // the double now does the same: skip forge's own governor directives when
+      // deciding what the last real turn was.
+      const isGovernor = (m) => m?.role === "user" && /^\(governor\)/.test(String(m?.content ?? ""))
+      const wire = msgs.filter((m) => !isGovernor(m))
+      const last = wire[wire.length - 1] ?? {}
       const auth = req.headers["authorization"] || ""
       if (!auth.includes("test-key")) {
         res.writeHead(401, { "content-type": "application/json" })
@@ -346,7 +357,12 @@ const server = http.createServer((req, res) => {
         return
       }
       const msgs = j?.messages ?? []
-      const last = msgs[msgs.length - 1] ?? {}
+      // v113 audit: same as the OpenAI branch above — forge's governor appends
+      // its own plain-text user turn after the tool_result block, so the last
+      // message is the directive, not the result.
+      const isGovernorA = (m) => m?.role === "user" && typeof m?.content === "string" && /^\(governor\)/.test(m.content)
+      const wireA = msgs.filter((m) => !isGovernorA(m))
+      const last = wireA[wireA.length - 1] ?? {}
       const blockText = (m) => Array.isArray(m.content) ? m.content.filter((b) => b.type === "text" || b.type === "tool_result").map((b) => b.text ?? JSON.stringify(b.content ?? "")).join(" ") : String(m.content ?? "")
 
       let reply = { thinking: "anthropic thinking deeply...", text: "Hello from anthropic mock!" }
