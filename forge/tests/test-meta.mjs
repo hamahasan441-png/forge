@@ -23,7 +23,7 @@ const { VERSION } = await import("../version.js")
 const { DEPTH, chooseNextAction, ACTION, depthFor, rankStrategies } = await import("../governor.js")
 const { recordReasoning, recommendDepth, policyShift, METALEARN_VERSION, recordStrategy, strategyRates, replayDepth, loadMetaLearn } = await import("../metalearn.js")
 const { createCognition } = await import("../cognition.js")
-const { recordLesson, relevantLessons, setLessonConfidence, RETIRE_BELOW } = await import("../lessons.js")
+const { recordLesson, relevantLessons, setLessonConfidence, LESSON_RETIRE_BELOW } = await import("../lessons.js")
 const { shouldWithhold, recordCapOutcome, loadCapLearn } = await import("../caplearn.js")
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-meta-proj-"))
@@ -116,7 +116,7 @@ console.log("== Test F/G — calibration down, retired knowledge does not route 
   ok("fresh lesson can influence", before.some((l) => l.id === a.id) || before.length >= 0)
   setLessonConfidence(a.id, 0.05, work)
   const after = relevantLessons("auth token missing", { cwd: work })
-  ok("retired lesson is below RETIRE_BELOW", RETIRE_BELOW > 0)
+  ok("retired lesson is below LESSON_RETIRE_BELOW", LESSON_RETIRE_BELOW > 0)
   ok("Test G: retired lesson no longer in default retrieval", !after.some((l) => l.id === a.id), JSON.stringify(after.map((l) => l.id)))
 }
 

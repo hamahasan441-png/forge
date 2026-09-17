@@ -65,7 +65,9 @@ const TEST_CMD = /(^|[\s/])(test|jest|vitest|mocha|pytest|cargo[ _]test|go[ _]te
 const BUILD_CMD = /\b(build|tsc|webpack|vite build|cargo build|make|compile|babel)\b/i
 const SECURITY_CMD = /\b(audit|npm audit|snyk|trivy|semgrep|bandit|gosec|lint)\b/i
 
-export function classifyCommand(command = "") {
+// v129: was classifyCommand — shellguard.js owns that name for SHELL SAFETY
+// and seven modules import it. This asks whether a command is a check.
+export function classifyCheckCommand(command = "") {
   const c = String(command)
   if (SECURITY_CMD.test(c)) return VTYPE.SECURITY
   if (/\bnode\s+--check\b|\b(node|tsc|python3?|ruby)\s+-c\b|--syntax[ -]?check|syntax check/i.test(c)) return VTYPE.SYNTAX
@@ -147,7 +149,7 @@ export function evaluateVerification(command, result, opts = {}) {
   const timedOut = exitCode === 124 || /timed out after|TimeoutError/i.test(out)
   const truncated = opts.truncated === true
   const killed = opts.killed === true || opts.signal === "SIGKILL"
-  const type = opts.type || classifyCommand(command)
+  const type = opts.type || classifyCheckCommand(command)
 
   const observed = exitCode !== UNKNOWN_EXIT_CODE
   const shape = detectFailureShape(out)

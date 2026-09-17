@@ -17,7 +17,7 @@ const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v39-work-"))
 process.chdir(WORK)
 
 const {
-  focusedVerify, verificationPlan, runVerification, formatVerification, CHECK,
+  focusedVerify, verificationPlan, runVerification, formatVerification, VERIFY_CHECK,
 } = await import("../verify.js")
 const { detectTestCommand } = await import("../router.js")
 const { inspectProject } = await import("../langengine.js")
@@ -79,12 +79,12 @@ console.log("== verificationPlan HIGH carries command + tests ==")
     "util.test.js": "import { add } from './util.js'\n",
   })
   const plan = verificationPlan("write_file", { path: "util.js" }, { ...HIGH, cwd: js })
-  const tests = plan.checks.find((c) => c.kind === CHECK.TESTS)
+  const tests = plan.checks.find((c) => c.kind === VERIFY_CHECK.TESTS)
   ok("HIGH has TESTS", !!tests)
   eq("HIGH command", tests.command, "npm test")
   ok("HIGH tests list util.test.js", (tests.tests || []).some((t) => t.replace(/\\/g, "/").endsWith("util.test.js")), JSON.stringify(tests.tests))
   const med = verificationPlan("write_file", { path: "util.js" }, { risk: RISK.MEDIUM, cwd: js, meta: { read_only: false, verification_required: true } })
-  ok("MEDIUM does not escalate to TESTS", !med.checks.some((c) => c.kind === CHECK.TESTS))
+  ok("MEDIUM does not escalate to TESTS", !med.checks.some((c) => c.kind === VERIFY_CHECK.TESTS))
   fs.rmSync(js, { recursive: true, force: true })
 }
 
@@ -123,7 +123,7 @@ console.log("== mixed stack + frozen detectTestCommand ==")
   eq("1-arg detectTestCommand frozen", detectTestCommand(mixed), "npm test")
   ok("inspectProject still reports both", inspectProject(mixed).stacks.length >= 2)
   const rustPlan = verificationPlan("write_file", { path: "src/lib.rs" }, { ...HIGH, cwd: mixed })
-  eq("HIGH rust command", rustPlan.checks.find((c) => c.kind === CHECK.TESTS)?.command, "cargo test")
+  eq("HIGH rust command", rustPlan.checks.find((c) => c.kind === VERIFY_CHECK.TESTS)?.command, "cargo test")
   fs.rmSync(mixed, { recursive: true, force: true })
 }
 

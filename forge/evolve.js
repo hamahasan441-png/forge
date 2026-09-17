@@ -28,7 +28,10 @@ import { writeStateFile } from "./securefs.js"
 import { redact } from "./secrets.js"
 import { authorPlugin } from "./extend.js"
 
-export const RETIRE_BELOW = 0.25
+// v129: was RETIRE_BELOW, the same name lessons.js uses for a DIFFERENT value
+// (0.15). Importing the wrong one moved a retirement threshold by 67% with
+// nothing to notice. When two thresholds exist, the subject belongs in the name.
+export const SKILL_RETIRE_BELOW = 0.25
 export const HARD_AVOID_MIN = 0.5
 export const PROMOTE_DELTA = 0.1
 export const SKILL_LIFE_FILE = "skilllife.json"
@@ -52,7 +55,7 @@ const KERNEL_HINT = /(?:^|[^A-Za-z0-9])(agentv19[\\/]forge|classifyTaskComplexit
 const BUNDLED_SKILLS = path.join(path.dirname(fileURLToPath(import.meta.url)), "skills")
 
 export function isRetired(confidence) {
-  return Number(confidence ?? 0) < RETIRE_BELOW
+  return Number(confidence ?? 0) < SKILL_RETIRE_BELOW
 }
 
 export function scoreRun(gate = {}) {

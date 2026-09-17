@@ -275,6 +275,9 @@ const suites = [
   // ---- v128 auditwise: a 30s connect guard that no config could change, ----
   // ---- and a test that passed with the defect put back --------------------
   ["v128", "node", ["test-v128.mjs"]],
+  // ---- v129 dupewise: 21 duplicated export names — RISK_ORDER was two -----
+  // ---- incompatible TYPES, RETIRE_BELOW two values, pidAlive copy-pasted --
+  ["v129", "node", ["test-v129.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

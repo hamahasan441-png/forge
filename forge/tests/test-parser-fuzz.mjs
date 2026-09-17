@@ -12,7 +12,7 @@ import { classifyCommand, splitSubcommands, tokenize } from "../shellguard.js"
 import { parseIPv4, parseIPv6, blockedAddressReason, isPrivateAddress } from "../netguard.js"
 import { parseProvenance, formatProvenance, MEMORY_SOURCES } from "../memory.js"
 import { shrinkToolOutput, historyIsWellFormed, compactHistory } from "../compaction.js"
-import { evaluateVerification, classifyCommand as classifyVerification, resolveExitCode } from "../verifyledger.js"
+import { evaluateVerification, classifyCheckCommand as classifyVerification, resolveExitCode } from "../verifyledger.js"
 
 let PASS = 0, FAIL = 0
 const ok = (name, cond, extra = "") => { if (cond) { PASS++; console.log(`  ok   ${name}`) } else { FAIL++; console.log(`  FAIL ${name}${extra ? " — " + String(extra).slice(0, 300) : ""}`) } }

@@ -26,6 +26,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { sameProject } from "./projectkey.js"
+import { pidAlive } from "./runlog.js"
 
 export const TASKS_DIR = path.join(DEFAULT_DIR, "tasks")
 const MAX_TASKS = 200
@@ -499,10 +500,10 @@ export function interruptedTasks({ cwd = process.cwd() } = {}) {
   )
 }
 
-export function pidAlive(pid) {
-  if (!pid || pid === process.pid) return pid === process.pid
-  try { process.kill(pid, 0); return true } catch (e) { return e?.code === "EPERM" }
-}
+// v129: this was byte-identical to runlog.js's copy. Re-exported rather than
+// re-declared so taskstate's public surface is unchanged. runlog does not
+// import taskstate, so this closes no cycle.
+export { pidAlive }
 
 export function pruneTasks(max = MAX_TASKS) {
   try {

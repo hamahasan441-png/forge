@@ -150,7 +150,10 @@ export function classifyFeedback(text) {
   return FEEDBACK_KIND.TASK_FEEDBACK
 }
 
-export function authorityFor({ irreversible = false, highImpact = false, ambiguous = false, reversible = true } = {}) {
+// v129: was authorityFor — governor.js exports that name for the GOVERNOR's
+// action authority, which is a different question. This one is about how much
+// autonomy the USER's request grants.
+export function userAuthorityFor({ irreversible = false, highImpact = false, ambiguous = false, reversible = true } = {}) {
   if (irreversible) return AUTHORITY.IRREVERSIBLE_CONFIRM
   if (highImpact && ambiguous) return AUTHORITY.HIGH_IMPACT_CONFIRM
   if (highImpact) return AUTHORITY.HIGH_IMPACT_CONFIRM
@@ -231,7 +234,7 @@ export function createUserModel() {
       assumptions: intentHypos.slice(1).map((h) => h.meaning),
       ambiguities: ambiguous ? ["request is underspecified"] : [],
       unknowns: ambiguous ? ["which interpretation the user means"] : [],
-      decisionAuthority: authorityFor({ irreversible, highImpact, ambiguous, reversible: !irreversible }),
+      decisionAuthority: userAuthorityFor({ irreversible, highImpact, ambiguous, reversible: !irreversible }),
       riskTolerance: null,
       urgency: /\basap|urgent|now|today\b/i.test(raw) ? "high" : "normal",
       qualityExpectations: prefs.find((p) => p?.key === "simplicity") ? "simple" : null,

@@ -33,7 +33,7 @@ const { HANDOFF_STATUS, createHandoff, validateHandoff, handoffContextBlock, for
 const { reviewWorkerResult, extractUncertainties, formatSelfReview, REVIEW_QUESTION_KEYS } = await import("../selfreview.js")
 const { CONFLICT_STATUS, reportConflict, resolveConflict, scorePosition, formatConflict } = await import("../crewconflict.js")
 const { ROLE_ROUTE, preferredClassFor, createCrewRouter, effectiveStats, crewPerfPath } = await import("../crewroute.js")
-const { DECISION_TYPE, DECISION_STATUS, createDecisionEngine, buildDecision, formatDecisionPanel, formatDecisionLine, shouldAsk } = await import("../decisionengine.js")
+const { DECISION_TYPE, DECISION_STATUS, createDecisionEngine, buildDecision, formatDecisionPanel, formatDecisionLine } = await import("../decisionengine.js")
 
 // ---------------------------------------------------------------------------
 console.log("== 1. bus: schema + topologies (§27) ==")

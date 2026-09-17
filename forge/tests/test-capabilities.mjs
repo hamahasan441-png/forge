@@ -16,7 +16,7 @@ import path from "node:path"
 import {
   createRegistry, defaultRegistry, registerPlugins, BUILTIN_CAPABILITIES,
   operationRisk, classifyCall, checkWriteClassification, costScore,
-  RISK, RISK_ORDER, CLASS, STATUS, riskRank, maxRisk, riskAtLeast,
+  RISK, RISK_TIERS, CLASS, STATUS, riskRank, maxRisk, riskAtLeast,
 } from "../capabilities.js"
 import { WRITE_TOOLS, TOOL_DEFS } from "../tools.js"
 
@@ -46,7 +46,7 @@ console.log("== every shipped tool is registered, with complete metadata ==")
     (m) =>
       !Array.isArray(m.capabilities) || !m.capabilities.length ||
       typeof m.read_only !== "boolean" || typeof m.parallel_safe !== "boolean" ||
-      !RISK_ORDER.includes(m.risk) || typeof m.timeout !== "number" ||
+      !RISK_TIERS.includes(m.risk) || typeof m.timeout !== "number" ||
       typeof m.cost !== "object" || typeof m.cost.latency !== "number"
   )
   ok(`every entry is well-typed${badTypes.length ? " — " + badTypes.map((m) => m.name).join(", ") : ""}`, badTypes.length === 0)

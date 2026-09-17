@@ -21,7 +21,7 @@ process.chdir(WORK)
 const {
   scoreRun, hardAvoid, authorSkill, evolveRun, formatEvolve, mergeLearnedSkills,
   indexLearnedSkills, readLearnedSkill, learnedSkillsDir, skillSlug, formatSkillMd,
-  RETIRE_BELOW, HARD_AVOID_MIN, PROMOTE_DELTA, isRetired,
+  SKILL_RETIRE_BELOW, HARD_AVOID_MIN, PROMOTE_DELTA, isRetired,
 } = await import("../evolve.js")
 const { ALL_CHECKS } = await import("../completion.js")
 const { recordLesson, loadLessons, setLessonConfidence } = await import("../lessons.js")
@@ -64,7 +64,7 @@ console.log("== scoreRun ==")
   const eight = { ok: false, status: "REPAIRING", checks: Object.fromEntries(ALL_CHECKS.map((k, i) => [k, i !== 0])) }
   eq("eight of nine not completed", scoreRun(eight).ok, false)
   eq("eight of nine passed", scoreRun(eight).passed, 8)
-  eq("RETIRE_BELOW", RETIRE_BELOW, 0.25)
+  eq("SKILL_RETIRE_BELOW", SKILL_RETIRE_BELOW, 0.25)
   eq("HARD_AVOID_MIN", HARD_AVOID_MIN, 0.5)
   eq("PROMOTE_DELTA", PROMOTE_DELTA, 0.1)
   ok("isRetired below threshold", isRetired(0.2) === true)

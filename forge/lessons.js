@@ -27,7 +27,9 @@ import { loadIndex } from "./index.js"
 import { entryIsStale, worldFromIndex } from "./memgraph.js"
 
 const MAX_LESSONS = 300
-export const RETIRE_BELOW = 0.15
+// v129: was RETIRE_BELOW — see evolve.js SKILL_RETIRE_BELOW (0.25). Same name,
+// different number, two importable modules.
+export const LESSON_RETIRE_BELOW = 0.15
 
 function lessonsPath(cwd) {
   return path.join(projectDir(cwd), "lessons.json")
@@ -84,7 +86,9 @@ export const FAILURE_CLASS = {
 }
 
 /** Classify a failure text into a stable failure class. */
-export function classifyFailure(text = "") {
+// v129: was classifyFailure — diagnose.js owns that name and four modules
+// import it. This classifies a lesson's recorded failure text.
+export function classifyLessonFailure(text = "") {
   const t = String(text ?? "")
   if (/\btests? failed|assertion|AssertionError|1\)\s/i.test(t)) return FAILURE_CLASS.TEST_FAILURE
   if (/BUILD FAILED|build failed|error TS\d+|compile error|error\[E\d+\]/i.test(t)) return FAILURE_CLASS.BUILD_FAILURE
@@ -138,7 +142,7 @@ export function recordLesson(l = {}, cwd = process.cwd()) {
     applicable_context: redact(String(l.applicableContext ?? l.applicable_context ?? l.task ?? "")).slice(0, 300),
     task: redact(String(l.task ?? "")).slice(0, 300),
     // --- structured schema (P1)
-    failureClass: l.failureClass ?? classifyFailure(`${l.failure ?? ""} ${l.cause ?? ""}`),
+    failureClass: l.failureClass ?? classifyLessonFailure(`${l.failure ?? ""} ${l.cause ?? ""}`),
     symptoms: redact(String(l.symptoms ?? l.failure ?? "")).slice(0, 400),
     rootCause: redact(String(l.rootCause ?? l.cause ?? "")).slice(0, 400),
     solution: redact(String(l.solution ?? l.successfulRepair ?? l.successful_repair ?? "")).slice(0, 400),
@@ -240,7 +244,7 @@ export function ineffectiveStrategies(query, { cwd = process.cwd(), strategyHint
   // here — it must not contaminate an unrelated project's strategy choices.
   if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
   if (minConfidence > 0) lessons = lessons.filter((l) => Number(l.confidence ?? 0) >= minConfidence)
-  else lessons = lessons.filter((l) => Number(l.confidence ?? 0.6) >= RETIRE_BELOW)
+  else lessons = lessons.filter((l) => Number(l.confidence ?? 0.6) >= LESSON_RETIRE_BELOW)
   lessons = lessons.filter((l) => !lessonIsStale(l, cwd))
   if (!lessons.length) return []
   const scored = rankDocs(String(query ?? "") + " " + String(strategyHint ?? ""), lessons.map((l, i) => ({ i, text: `${l.failure} ${l.cause} ${l.failed_strategy} ${l.failed_action} ${l.applicable_context}` })))
@@ -389,7 +393,7 @@ function lessonPool(query, { cwd, framework, minConfidence, needRepair }) {
   let lessons = loadLessons(cwd)
   if (needRepair) lessons = lessons.filter((l) => l.successful_repair || l.solution)
   if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
-  const floor = Number(minConfidence) > 0 ? Number(minConfidence) : RETIRE_BELOW
+  const floor = Number(minConfidence) > 0 ? Number(minConfidence) : LESSON_RETIRE_BELOW
   lessons = lessons.filter((l) => Number(l.confidence ?? 0.6) >= floor)
   lessons = lessons.filter((l) => !lessonIsStale(l, cwd))
   return lessons

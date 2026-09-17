@@ -2551,7 +2551,18 @@ ${bold("uninstall")}     ${cyan("npm uninstall -g forge-agent-cli")}
 `)
 }
 
-main().catch((e) => {
-  err(e?.message ?? String(e))
-  process.exit(1)
-})
+// v129: importing this module must NOT launch the CLI. tests/test-v129.mjs
+// imports every module to read its real export list, and before this guard that
+// import started an interactive session instead. argv[1] is realpath'd because
+// `npm i -g` installs the bin as a SYMLINK — comparing the raw path would make
+// `forge` a silent no-op for every global install.
+const RUN_AS_ENTRY = (() => {
+  try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname) } catch { return false }
+})()
+
+if (RUN_AS_ENTRY) {
+  main().catch((e) => {
+    err(e?.message ?? String(e))
+    process.exit(1)
+  })
+}
