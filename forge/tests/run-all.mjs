@@ -257,6 +257,9 @@ const suites = [
   // ---- v122 yolowise: ONE full-control switch, honoured by every layer ------
   // ---- that can refuse, pause or freeze ------------------------------------
   ["v122", "node", ["test-v122.mjs"]],
+  // ---- v126 shapewise: the planner adopted the SAME plan shape 32/32 and ----
+  // ---- never learned whether it was the one that worked -------------------
+  ["v126", "node", ["test-v126.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

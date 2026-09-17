@@ -198,6 +198,52 @@ export function recordStrategy({ cwd = process.cwd(), klass = "SMALL", id = "", 
   return rec
 }
 
+// ---------------------------------------------------------------------------
+// v126 — DID THE PLAN SHAPE WORK?
+//
+// plannerisk.alternatives() reshapes a high-risk plan into one of a small,
+// stable set — inspect-first, incremental-verify, conservative-order, or the
+// original — and meta.js:940 ADOPTS the winner and executes it. That choice ran
+// on a pure estimate: expectedVerifiedProgress, a number the planner predicts
+// about itself. Nothing ever looked back at whether the shape it picked was the
+// one that actually worked.
+//
+// It matters more after v121, which wired settled-prediction error into
+// riskLadder and so makes alternatives() FIRE more often. A decision that
+// happens more often on evidence it never collects is the wrong kind of busy.
+//
+// The names are a fixed vocabulary — unlike the IH1/S1 ordinals v121 had to
+// fix, these repeat run after run, so they are a real learning key. Stored in
+// the metalearn row this module already keeps per task class, which gives §6's
+// task-class isolation for free: a LARGE failure cannot poison MICRO.
+// ---------------------------------------------------------------------------
+
+/** Record how a plan shape actually turned out for this task class. */
+export function recordPlanShape({ cwd = process.cwd(), klass = "SMALL", shape = "", ok = false } = {}) {
+  const name = String(shape || "").slice(0, 40)
+  if (!name) return null
+  const store = loadMetaLearn(cwd)
+  const k = String(klass)
+  const row = store.byKlass[k] && typeof store.byKlass[k] === "object" ? store.byKlass[k] : {}
+  const shapes = row.shapes && typeof row.shapes === "object" ? row.shapes : {}
+  const rec = shapes[name] && typeof shapes[name] === "object" ? shapes[name] : { samples: 0, ok: 0 }
+  rec.samples = (rec.samples || 0) + 1
+  if (ok) rec.ok = (rec.ok || 0) + 1
+  rec.rate = rec.samples ? rec.ok / rec.samples : 0
+  shapes[name] = rec
+  row.shapes = shapes
+  store.byKlass[k] = row
+  store.updated = Date.now()
+  saveMetaLearn(cwd, store)
+  return rec
+}
+
+/** What this project has measured about plan shapes for a task class. */
+export function planShapeRates(cwd = process.cwd(), klass = "SMALL") {
+  const row = loadMetaLearn(cwd).byKlass?.[String(klass)] || {}
+  return row.shapes && typeof row.shapes === "object" ? row.shapes : {}
+}
+
 export function strategyRates(cwd = process.cwd(), klass = "SMALL") {
   const row = loadMetaLearn(cwd).byKlass?.[String(klass)] || {}
   return row.strategies && typeof row.strategies === "object" ? row.strategies : {}
