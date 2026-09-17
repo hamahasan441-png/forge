@@ -27,7 +27,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
-import { yoloState, formatYolo } from "./yolo.js" // v122: one resolved full-control state, one command that shows it
+import { yoloState, formatYolo, modeOf, applyYoloMode, yoloModeNote, yoloModeFlags, FULL_CONTROL_FLAGS } from "./yolo.js" // v122: one resolved full-control state, one command that shows it · v130: and a NAME for each state
 import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
@@ -71,7 +71,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "yolo-full", "safe", "no-yolo", "new"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -358,6 +358,17 @@ async function main() {
   // and the read-only worker's command allowlist — the five layers --yolo used
   // to leave running, which is why "I passed --yolo and it still refused".
   if (flags.yolo === true) {
+    process.env.FORGE_YOLO = "1"
+    process.env.FORGE_UNRESTRICTED = "1"
+    process.env.FORGE_ASSUME_YES = "1"
+    process.env.FORGE_AUTO_APPROVE = "1"
+  }
+  // v130 "yolomode": --yolo-full = every grant open AND the governor + the
+  // pre-edit critique keep their veto, for THIS process only. It sets the mode
+  // env var, not the individual layer env vars, so the resolution still happens
+  // in exactly one place (yolo.js) and `forge yolo` describes what a run does.
+  if (flags["yolo-full"] === true) {
+    process.env.FORGE_YOLO_MODE = "full"
     process.env.FORGE_YOLO = "1"
     process.env.FORGE_UNRESTRICTED = "1"
     process.env.FORGE_ASSUME_YES = "1"
@@ -815,9 +826,15 @@ async function main() {
       // answerable without reading yolo.js.
       try {
         const y = yoloState(config)
-        if (y.yolo) {
+        if (y.mode === "full") {
+          // v130: "full" is not YOLO with a broken pin — it is the named state
+          // where every grant is open and the two oversight layers keep their
+          // veto. Say what that costs, because the cost is a pause.
+          console.log(`  control:   ${green("YOLO on — mode full: every grant open, governor + critique enforcing")}`)
+          console.log(`             ${dim("a governor ASK can still park the run in WAITING_FOR_USER, and a critique BLOCK can still stop an edit — forge yolo on releases both")}`)
+        } else if (y.yolo) {
           console.log(`  control:   ${green("YOLO on — nothing refuses, nothing pauses")}${y.pinnedOn?.length ? yellow(` • ${y.pinnedOn.join(", ")} pinned to "always"`) : ""}`)
-          if (y.pinnedOn?.length) console.log(`             ${dim(`that layer still vetoes despite YOLO — release it with: ${y.fix}`)}`)
+          if (y.pinnedOn?.length) console.log(`             ${dim(`that layer still vetoes despite YOLO, and a governor ASK parks the run in WAITING_FOR_USER — release it with: ${y.fix}`)}`)
         } else {
           console.log(`  control:   ${yellow(`YOLO off — held off by ${y.blockedBy.join(", ") || y.source}`)}`)
           console.log(`             ${dim("this ships ON; a saved config is keeping an older default alive")}`)
@@ -976,30 +993,40 @@ async function main() {
     // only honest report was a refusal 40 steps into a run.
     case "yolo": {
       const sub = (positional[1] || "status").toLowerCase()
-      if (sub === "on" || sub === "off") {
-        const on = sub === "on"
-        config.tools = { ...(config.tools || {}), yolo: on }
-        if (on) {
-          config.tools.unrestricted = true
-          config.tools.autoApprove = true
-          config.tools.assumeYes = true
-        }
+      const mode = modeOf(sub)
+      if (mode !== null) {
+        // v130 "yolomode": one command per MODE, and one patch shape for all
+        // three (applyYoloMode) — the CLI, `/yolo` in chat and the tests all
+        // persist the same keys, so `forge yolo` can never disagree with what
+        // a run actually resolves.
+        const next = applyYoloMode(config, mode)
+        config.tools = next.tools
+        config.governor = next.governor
+        config.critique = next.critique
         const p = saveConfig(config)
-        console.log(`${bold(`tools.yolo = ${on}`)}  ${dim(`(saved to ${p})`)}`)
-        console.log(on
-          ? "  every layer that can refuse, pause or freeze is now off; the classification, the directive and the critique NOTE all stay visible."
-          : "  the governor, the pre-edit critique, the risk ceiling and the scope grants are back in charge (the shell still never refuses — that has been v88 policy since).")
-        console.log(dim("  run `forge yolo` to see the resolved state; --yolo forces it for one process without saving."))
+        const st = yoloState(config, {})
+        const flags = yoloModeFlags(st)
+        console.log(`${bold(`mode = ${st.mode}`)}  ${dim(`(tools.yoloMode = ${config.tools.yoloMode}, saved to ${p})`)}`)
+        // kept verbatim: `tools.yolo` is still the key v122 documented, and
+        // "which boolean did this write" should stay answerable from the CLI.
+        console.log(`${bold(`tools.yolo = ${config.tools.yolo}`)}`)
+        for (const line of yoloModeNote(mode)) console.log(`  ${line}`)
+        if (st.mode !== mode) {
+          console.log(yellow(`  asked for ${mode}, resolved ${st.mode} — ${st.blockedBy.join(", ") || st.source}`))
+        }
+        console.log(dim(`  ${FULL_CONTROL_FLAGS.map((k) => `${k} ${flags[k] ? "true" : "false"}`).join(" · ")}`))
+        console.log(dim("  run `forge yolo` to see the resolved state; --yolo / --yolo-full / --safe force one for a single process without saving."))
         return
       }
       if (sub !== "status" && sub !== "show") {
-        err("usage: forge yolo [on|off|status]")
+        err("usage: forge yolo [full|on|off|status]   (full = every grant open AND governor + critique enforcing)")
         process.exit(1)
         return
       }
       const st = yoloState(config)
       for (const line of formatYolo(st).split("\n")) console.log(line)
-      console.log(dim(`\noverride for one process: ${st.yolo ? "forge --safe …" : "forge --yolo …"}   env: FORGE_YOLO=0|1`))
+      console.log(dim(`\noverride for one process: ${st.yolo ? "forge --safe …" : "forge --yolo …"} · forge --yolo-full …   env: FORGE_YOLO=0|1 · FORGE_YOLO_MODE=full|yolo|off`))
+      console.log(dim(`persist a mode: forge yolo full · forge yolo on · forge yolo off   (or tools.yoloMode in ~/.forge/config.json)`))
       console.log(dim(`pin one layer without touching the rest: forge config set governor.enforce ${st.governorEnforce ? "\"never\"" : "\"always\""}  ·  forge config set critique.enforce ${st.critiqueEnforce ? "\"never\"" : "\"always\""}`))
       return
     }
@@ -2452,7 +2479,8 @@ ${bold("usage")}
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)
   ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
   ${cyan("forge --yolo …")}            FULL CONTROL for ONE process — every layer that can refuse, pause or freeze is off ${dim("(tools.yolo + tools.autoApprove in ~/.forge/config.json make it permanent)")}
-  ${cyan("forge yolo [on|off|status]")}  the resolved control state: shell, governor, critique, ceiling, grants — and the rails YOLO never turns off
+  ${cyan("forge --yolo-full …")}       same, but the governor and the pre-edit critique KEEP their veto — unrestricted machine, oversight intact
+  ${cyan("forge yolo [full|on|off]")}    persist a control MODE, or print the resolved state of every layer and the nine YOLO mode flags
   ${cyan("forge --safe …")}              the opposite of --yolo for one process ${dim("(FORGE_YOLO=0)")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
@@ -2504,12 +2532,16 @@ ${bold("terminal + deep (v19/v20)")}
   ${cyan("--deep")} / ${cyan("/deep")}             DEEP THINKING — high reasoning effort (OpenRouter/o-series), bigger budgets, verify-first
   ${cyan("--profile")} / ${cyan("/profile")}       effort profile: fast | balanced | deep | auto (auto = deep for complex tasks)
 
-${bold("control (v88 shell + v122 YOLO — one switch, one report)")}
+${bold("control (v88 shell + v122 YOLO + v130 named modes — one switch, one report)")}
   ${cyan("forge yolo")}                   print the resolved state of EVERY layer: shell, autoApprove, governor authority,
-                              pre-edit critique, risk ceiling, and the grants (sudo, scope, traversal, eval, upload)
-  ${cyan("forge yolo on|off")}            persist the umbrella switch (tools.yolo in ~/.forge/config.json)
+                              pre-edit critique, risk ceiling, the grants (sudo, scope, traversal, eval, upload),
+                              and the nine YOLO mode flags in one block
+  ${cyan("forge yolo full|on|off")}       persist a MODE (tools.yoloMode): ${cyan("full")} = every grant open AND governor + critique enforcing,
+                              ${cyan("on")} = every grant open with those two advising only, ${cyan("off")} = the layers are back in charge
+  ${cyan("--yolo-full")} / ${cyan("FORGE_YOLO_MODE=full")}   the same mode for ONE process, without saving anything
   shell commands are risk-classified for honest labels, never refused and never paused (v88 "noguard" — the owner's standing decision)
-  governor INSPECT/VERIFY/ASK and the critique checklist still RUN and still narrate — under YOLO they advise instead of vetoing
+  governor INSPECT/VERIFY/ASK and the critique checklist still RUN and still narrate — under YOLO they advise instead of vetoing,
+  and under mode=full they keep their veto: a governor ASK can park the run in WAITING_FOR_USER, a critique BLOCK can stop an edit
   pin one layer without touching the rest: ${cyan("forge config set governor.enforce always|never|auto")} · ${cyan("critique.enforce")}
   YOLO never turns off: project-config privilege strip · injection fence on tool results · secret redaction ·
   atomic/TOCTOU-safe writes · socket pinning on URL fetches — those defend you from OTHER people's code, not from
@@ -2536,8 +2568,9 @@ ${bold("resilience")}
   ${cyan("forge memory")}                  curate long-term memory: list | add | forget <n> | clear | prune
 
 ${bold("flags")}
-  --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>  --yolo  --safe
+  --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>  --yolo  --yolo-full  --safe
   --yolo / --safe     full control for this process (nothing refused, nothing paused, nothing frozen) / the opposite
+  --yolo-full         full control WITH the governor and the pre-edit critique still enforcing (mode=full, this process only)
   --json (machine-readable output: sessions/models/plugins/skills --check/memory list)  •  FORGE_DEBUG=1 (agent trace)
   --config <path>    --cwd <dir> (agent)  --plan (agent)  --continue  --resume <n|id>  -m "message"  --no-color
 

@@ -416,6 +416,41 @@ completion gate (it refuses a false DONE, never your command) — printed in
 their own block, so "all safety off" never means "results stop meaning
 anything".
 
+## v130 in one line — full control has three NAMED modes
+
+`full control` was being asked for in two incompatible senses, and only one of
+them had a switch:
+
+| mode | what it means | how to set it (persisted · one process · shell) |
+|---|---|---|
+| `off` | the layers are in charge — grants closed, ceiling back, both oversight layers enforcing | `forge yolo off` · `forge --safe …` · `FORGE_YOLO_MODE=off` |
+| `yolo` | every grant open; the governor and the pre-edit critique **advise only** (the default) | `forge yolo on` · `forge --yolo …` · `FORGE_YOLO_MODE=yolo` |
+| `full` | every grant open **and** those two keep their veto — an unrestricted machine with the audit intact | `forge yolo full` · `forge --yolo-full …` · `FORGE_YOLO_MODE=full` |
+
+`mode=full` is the nine flags `forge yolo` prints under **YOLO mode flags**:
+
+```
+yolo true · assumeYes true · allowSudo true · allowOutsideProject true
+allowInterpreterEval true · allowNetworkUpload true · allowNewPlugins true
+governorEnforce true · critiqueEnforce true
+```
+
+Seven grants, then the two oversight layers — because full control is about the
+owner's *friction* (confirmation pauses, refusals, frozen tools, scope
+ceilings), not about losing the record of what the agent decided. The cost is
+stated on the same screen: under `full` a governor ASK can park a run in
+`WAITING_FOR_USER` and a critique BLOCK can stop an edit. Before v130 that
+state was reachable only by pinning both layers by hand, and `forge yolo`
+reported it as an anomaly ("still enforcing … release it"); now it is a mode
+with a name, and a hand-written `never` still outranks it.
+
+One key (`tools.yoloMode`), one patch shape (`applyYoloMode` in `yolo.js`),
+shared by the CLI, `/yolo` in chat and the tests — so a mode can never mean
+something different depending on where you set it. `tools.yoloMode` is a
+privileged key: a cloned `forge.config.json` cannot arm it. `off` restores the
+three historical switches to the values forge ships, so a mode you turned off
+cannot leave a grant behind.
+
 ## v88 in one line
 
 Every command gate is gone (nothing is refused, nothing prompts — block-class

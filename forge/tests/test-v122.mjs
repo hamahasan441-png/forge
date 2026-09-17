@@ -325,7 +325,9 @@ console.log("== 10. the CLI: one command to arm it, one to see it ==")
   ok("--safe forces the opposite for one process", /YOLO off/.test(run(["--safe", "yolo"]).stdout))
   ok("FORGE_YOLO=1 works with no flags at all", /YOLO — FULL CONTROL/.test(run(["yolo"], { FORGE_YOLO: "1" }).stdout))
   const help = run(["--help"]).stdout
-  ok("--help documents the command", /forge yolo \[on\|off\|status\]/.test(help))
+  // v130: the command grew a third mode, so the usage line reads
+  // `forge yolo [full|on|off]` — the two v122 modes are unchanged.
+  ok("--help documents the command", /forge yolo \[full\|on\|off\]/.test(help))
   ok("--help documents --yolo and --safe", /forge --yolo/.test(help) && /forge --safe/.test(help))
   ok("--help still names the v87 key (compat with the old muscle memory)", /tools\.autoApprove/.test(help))
   ok("--help says what YOLO does NOT turn off", /never turns off/.test(help) && /injection fence/.test(help) && /secret redaction/.test(help))

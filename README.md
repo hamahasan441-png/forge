@@ -407,6 +407,24 @@ refuses a false DONE, never your command). `forge yolo` prints them in their
 own block, so "all safety off" is never read as "results stop meaning
 anything".
 
+## v130 in one line — full control has three NAMED modes
+
+`off` (the layers are in charge) · `yolo` (every grant open, the governor and
+the pre-edit critique advise only — the default) · `full` (every grant open
+**and** those two keep their veto). Set one with `forge yolo full|on|off`,
+`--yolo-full` / `--yolo` / `--safe` for a single process, or
+`FORGE_YOLO_MODE=full|yolo|off` for the shell; in chat, `/yolo full|on|off`.
+
+`mode=full` is nine flags, printed by `forge yolo` under **YOLO mode flags**:
+`yolo · assumeYes · allowSudo · allowOutsideProject · allowInterpreterEval ·
+allowNetworkUpload · allowNewPlugins` all true, plus `governorEnforce ·
+critiqueEnforce` true. Full control is about the owner's friction, not about
+losing the record — so the two layers that produce one are part of the mode.
+The cost is printed on the same screen: under `full`, a governor ASK can park a
+run in `WAITING_FOR_USER` and a critique BLOCK can stop an edit. One key
+(`tools.yoloMode`, privileged — a cloned repo cannot arm it), one patch shape
+(`applyYoloMode`), shared by the CLI, chat and the tests.
+
 ## v88 in one line
 
 Every command gate is gone (nothing is refused, nothing prompts — block-class

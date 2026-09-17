@@ -567,7 +567,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         grants: config.tools?.pluginGrants ?? {},
         cwd: process.cwd(),
         startedAt: pluginStartedAt,
-        allowNewPlugins: unrestricted || config.tools?.allowNewPlugins === true,
+        // v130: the RESOLVED grant, not a re-derivation. `unrestricted ||`
+        // ignored tools.yolo entirely, so this layer and `forge yolo` could
+        // disagree about the same switch (the same shape as the chat loader's
+        // out-of-scope read, which threw instead).
+        allowNewPlugins: yolo.allowNewPlugins,
       })
       // v48: learned plugins are playbooks (indexLearnedPlugins / compose),
       // never a live plugin-host spawn. User ~/.forge/tools still load.

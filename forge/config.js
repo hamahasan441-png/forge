@@ -106,7 +106,13 @@ export function defaultConfig() {
     // YOLO is ON by default. `true` forces it even with those keys off; `false`
     // turns the umbrella off while leaving v88's "shellguard never refuses"
     // decision untouched. Privileged: never settable from a project config.
-    tools: { yolo: null, unrestricted: true, autoApprove: true, searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true, browser: true },
+    // v130 "yolomode": `yoloMode` NAMES the state instead of leaving it to two
+    // booleans — "off" | "yolo" | "full" (yolo.js YOLO_MODES). "full" is every
+    // grant open AND governor.enforce/critique.enforce held at "always", i.e.
+    // an unrestricted machine with the oversight layers still able to say no.
+    // null = derive (today that resolves to "yolo"). Privileged: a cloned repo
+    // must never be able to arm full control on the machine that clones it.
+    tools: { yolo: null, yoloMode: null, unrestricted: true, autoApprove: true, searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true, browser: true },
     // v122: the cognitive authority layer and the pre-edit critique keep their
     // ANALYSIS under YOLO and lose only their VETO. "auto" = enforce when YOLO
     // is off; "always" = freeze tools / block doomed edits even in YOLO (the
@@ -200,7 +206,7 @@ function deepMerge(base, over) {
 // ---------------------------------------------------------------------------
 
 /** tools.* switches that only the user-level config (or env) may set. */
-const PRIVILEGED_TOOL_KEYS = ["unrestricted", "autoApprove", "yolo", "allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "allowInterpreterEval", "allowNewPlugins", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify", "contentFence"]
+const PRIVILEGED_TOOL_KEYS = ["unrestricted", "autoApprove", "yolo", "yoloMode", "allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "allowInterpreterEval", "allowNewPlugins", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify", "contentFence"]
 /** top-level sections a project file may not touch at all. */
 const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval", "gitship", "governor", "critique"]
 

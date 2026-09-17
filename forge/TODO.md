@@ -26,6 +26,30 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v130 "yolomode" — leftovers (completed plan removed, house style)
+
+- [ ] `agent.js` and `chat.js` still OR the resolved grants with the
+      historical `unrestricted` when they build the tool ctx
+      (`allowSudo: yoloNow.allowSudo || unrestricted`, and five more). With
+      mode=off and the SHIPPED `tools.unrestricted: true`, the ctx can carry
+      `allowSudo: true` while `yoloState()` reports `allowSudo: false` — the
+      report is the honest one, but two answers to one question is the exact
+      shape v122 set out to end. Left alone here because closing it turns
+      `--safe` from "no confirmations" into "no sudo", which is a behaviour
+      change that deserves its own release and its own test.
+- [ ] no mode reaches `gitship` consent (see the v122 list): "full control"
+      still stops at an outward act, so `push`/`pr` keep their AUTHORIZATION
+      ask in every mode. Correct, but it means `mode=full` is not literally
+      "nothing asks".
+- [ ] `--yolo-full` sets the mode for one process but there is no
+      `--yolo-mode <m>` for the third value: `FORGE_YOLO_MODE=off` is the only
+      way to force `off` for a single run besides `--safe` (which also clears
+      autoApprove). One flag with a value would replace both.
+- [ ] the mode is not shown in the agent's per-step event stream, only in
+      `forge yolo`, `/yolo status`, `/status` and `forge doctor`. A
+      `CONTROL_MODE` event at run start would put it in the transcript next to
+      the governor directive it now controls.
+
 ## v122 "yolowise" — leftovers (completed plan removed, house style)
 
 - [ ] YOLO never touches `gitship` consent, by decision: `push`/`pr` are
@@ -34,10 +58,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       its own explicit key (`gitship.push: "auto"`), not a YOLO consequence.
       Today `gitship.*` ships `"off"`, so nothing is blocked — only the shape
       of "full control" is incomplete until that key exists.
-- [ ] a PINNED `governor.enforce: "always"` under YOLO can still park a run in
-      WAITING_FOR_USER on an ASK — correct (the owner asked for the authority
-      back), but `forge yolo` prints the pin without warning that pausing is
-      what it restores. Worth a sentence in the status output.
 - [ ] `isVerificationGradeBash` is conservative about operands: ANY named path
       outside the project refuses the command, so a read-only worker cannot run
       `pytest -c /etc/pytest.ini` or `tsc -p ../shared/tsconfig.json`. Splitting
