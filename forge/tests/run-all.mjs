@@ -263,6 +263,9 @@ const suites = [
   // ---- v124 yolodiag: forge already ships unlimited, and one stale config --
   // ---- key silently put every layer back in charge without saying which ----
   ["v124", "node", ["test-v124.mjs"]],
+  // ---- v125 memoryworth: engineering memory was the one retrieval surface --
+  // ---- with no outcome loop — nine ranking priors and not one measurement --
+  ["v125", "node", ["test-v125.mjs"]],
   // ---- v126 shapewise: the planner adopted the SAME plan shape 32/32 and ----
   // ---- never learned whether it was the one that worked -------------------
   ["v126", "node", ["test-v126.mjs"]],

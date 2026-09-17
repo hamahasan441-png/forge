@@ -57,6 +57,40 @@ const MAX_TEXT = 500
 const MAX_HISTORY = 5
 const RETRIEVAL_CACHE_MAX = 64
 
+// ---------------------------------------------------------------------------
+// v125 — WAS THIS MEMORY WORTH RETRIEVING?
+//
+// Every other retrieval surface in forge has an outcome loop: skills through
+// caplearn, tools through toolintel, strategies through metalearn, models
+// through empirics, variants and lessons through their own recorders. This
+// store had none. retrievalBlock() puts up to 1200 characters into EVERY
+// segment prompt (meta.js), and retrieve() ranked candidates on nine terms —
+// BM25, same-task, same-conversation, file-in-query, evidence, confidence,
+// VERIFIED/FACT, REQUIREMENT, freshness — every one of them a PRIOR. A record
+// retrieved into fifty prompts that never once contributed ranked exactly like
+// one that was decisive every time, because nothing ever looked back.
+//
+// THE INVARIANT THAT BOUNDS THIS: what is learned is retrieval PRIORITY, never
+// the record's TRUTH. A record that never helped is still true — it is just
+// not worth a share of every prompt. Nothing here sets STALE or REJECTED;
+// those keep meaning what markStale/markRejected mean, which is a claim about
+// reality, not about usefulness. (v121's rule — what is learned is the attempt
+// budget, never a verdict — applied to the surface that lacked it.)
+//
+// ATTRIBUTION IS DELIBERATELY NARROW. A retrieved record counts as HELPED only
+// when the segment SUCCEEDED and the record cites a file that segment actually
+// CHANGED. Everything else is neutral, not a failure: absence of evidence that
+// a record helped is not evidence that it is useless, and conflating the two
+// would bury correct records that simply never had a file to touch.
+
+/** Retrievals before usefulness may move anything. Mirrors
+ *  prediction.js MIN_CALIBRATION_SAMPLES — two retrievals are an anecdote. */
+const MIN_USES = 5
+/** Bounded either way, so usefulness adjusts the priors and never replaces
+ *  them: a VERIFIED requirement outranks a merely popular observation. */
+const USEFUL_MAX = 0.35
+const USELESS_MAX = 0.30
+
 export const MEM_LAYER = {
   EVIDENCE: "evidence",       // durable verified facts with provenance
   OBSERVATION: "observation", // working-stream records (per task)
@@ -183,6 +217,8 @@ export function createEngMemory({
 
   // retrieval cache (bounded, generation-invalidated, §15)
   const retrievalCache = new Map()
+  // v125: record ids currently sitting in a prompt, awaiting a segment outcome
+  const openRetrievals = new Set()
 
   function load() {
     if (loaded) return
@@ -256,6 +292,12 @@ export function createEngMemory({
       symbols: (symbols ?? []).slice(0, 12),
       at: Date.now(),
       revalidatedAt: null,
+      // v125: how often this record actually REACHED a prompt, and how often a
+      // segment that had it then succeeded while changing a file it cites.
+      uses: 0,
+      chances: 0,
+      helped: 0,
+      lastUsedAt: null,
       supersededBy,
       history: demoted ? [{ at: Date.now(), action: "demoted", note: "model output without evidence cannot be FACT/VERIFIED" }] : [],
     }
@@ -264,7 +306,11 @@ export function createEngMemory({
       // bound: drop oldest STALE/REJECTED/HISTORICAL first, then oldest
       // observations; verified facts and requirements survive longest
       const rank = (r) => (r.layer === MEM_LAYER.REQUIREMENT ? 0 : r.status === MEM_STATUS.VERIFIED || r.status === MEM_STATUS.FACT ? 1 : r.status === MEM_STATUS.STALE || r.status === MEM_STATUS.REJECTED || r.status === MEM_STATUS.HISTORICAL ? 2 : 3)
-      const ordered = [...records].sort((a, b) => rank(b) - rank(a) || a.at - b.at)
+      // v125: within a status band, a record that has PROVEN useful outlives a
+      // never-used peer. Age only breaks the tie once usefulness is equal —
+      // before this, ten proven contributions lost to one day of age.
+      const proven = (r) => ((Number(r.helped) || 0) > 0 ? 1 : 0)
+      const ordered = [...records].sort((a, b) => rank(b) - rank(a) || proven(a) - proven(b) || a.at - b.at)
       records = ordered.slice(records.length - MAX_RECORDS)
     }
     bump()
@@ -462,6 +508,86 @@ export function createEngMemory({
    * context. Composes this store with the project memory pool, lessons and
    * episodes; every source failure degrades independently.
    */
+  /**
+   * v125 — the one OUTCOME term among nine priors. Damped, bounded, and
+   * asymmetric on purpose:
+   *
+   *   promotion  needs MIN_USES retrievals AND at least one that helped
+   *   demotion   needs MIN_USES retrievals with helped === 0 — repeated
+   *              retrieval that never once contributed is evidence; never
+   *              having been cited is not, so an unused record sits at 0
+   *
+   * A REQUIREMENT is never demoted: the task ASKED for it, which is not a
+   * popularity question.
+   */
+  function worth(rec) {
+    if (!rec) return 0
+    // A FAIR CHANCE is a settled retrieval whose segment SUCCEEDED. Judging a
+    // record by segments that failed would blame the memory for an outcome it
+    // had no part in — the run fell over for its own reasons and the record
+    // never got to be cited. `uses` still counts every retrieval, for
+    // visibility and for eviction; only `chances` may move the ranking.
+    const chances = Number(rec.chances) || 0
+    if (chances < MIN_USES) return 0                  // an anecdote moves nothing
+    const helped = Number(rec.helped) || 0
+    if (helped > 0) return Math.min(USEFUL_MAX, (helped / chances) * USEFUL_MAX)
+    if (rec.layer === MEM_LAYER.REQUIREMENT) return 0 // asked for, not voted for
+    // MIN_USES successful segments had this in the prompt and none cited it
+    return -Math.min(USELESS_MAX, (chances / MIN_USES) * 0.1)
+  }
+
+  /**
+   * v125 — mark what actually REACHED a prompt. Not what retrieve() considered:
+   * a candidate that lost the ranking cost nothing and proves nothing.
+   * The ids stay open until settleRetrieval() scores them against the segment.
+   */
+  function noteRetrieved(ids = []) {
+    const list = [...new Set(ids.filter(Boolean))]
+    if (!list.length) return 0
+    load()
+    const at = Date.now()
+    let n = 0
+    for (const r of records) {
+      if (!list.includes(r.id)) continue
+      r.uses = (Number(r.uses) || 0) + 1
+      r.lastUsedAt = at
+      openRetrievals.add(r.id)
+      n++
+    }
+    if (n) { bump(); persist() }
+    return n
+  }
+
+  /**
+   * v125 — score the open set against what the segment actually did.
+   *
+   * HELPED requires BOTH: the segment succeeded, AND the record cites a file
+   * the segment changed. Anything else is neutral — it leaves `helped` alone
+   * and lets `uses` speak. Never touches status: a record that did not help is
+   * not thereby wrong.
+   */
+  function settleRetrieval({ ok = false, changedFiles = [] } = {}) {
+    if (!openRetrievals.size) return { settled: 0, helped: 0 }
+    load()
+    const changed = new Set((changedFiles ?? [])
+      .filter(Boolean)
+      .map((f) => path.basename(String(f)).toLowerCase()))
+    let settled = 0, helped = 0
+    for (const r of records) {
+      if (!openRetrievals.has(r.id)) continue
+      settled++
+      if (!ok) continue                               // a failed segment judges nothing
+      r.chances = (Number(r.chances) || 0) + 1
+      if (changed.size && (r.files ?? []).some((f) => changed.has(path.basename(String(f)).toLowerCase()))) {
+        r.helped = (Number(r.helped) || 0) + 1
+        helped++
+      }
+    }
+    openRetrievals.clear()
+    if (settled) { bump(); persist() }
+    return { settled, helped }
+  }
+
   function retrieve({ query, limit = 8, includeStale = false, includeHistorical = false } = {}) {
     const q = String(query ?? "").trim()
     if (!q) return []
@@ -532,6 +658,7 @@ export function createEngMemory({
       if (c.layer === MEM_LAYER.REQUIREMENT) s += 0.5                  // requirements first-class
       const ageDays = c.at ? (now - c.at) / 86400000 : 30
       s += Math.max(-0.2, 0.2 - ageDays * 0.01)                        // freshness decay
+      s += worth(c.rec)                                                // v125: measured usefulness
       return { ...c, score: s }
     })
     scored.sort((a, b) => b.score - a.score)
@@ -545,6 +672,9 @@ export function createEngMemory({
   function retrievalBlock(query, { limit = 6, maxChars = 1200 } = {}) {
     const results = retrieve({ query, limit })
     if (!results.length) return ""
+    // v125: these are the records that actually reach a prompt — the only ones
+    // whose usefulness a segment outcome can say anything about.
+    try { noteRetrieved(results.map((r) => r.rec?.id).filter(Boolean)) } catch { /* memory never breaks a run */ }
     const lines = results.map((r) => {
       const tag = r.rec ? `${r.status}${r.evidence ? "+evidence" : ""}` : r.status
       return `- (${tag}) ${r.text}`
@@ -705,6 +835,7 @@ export function createEngMemory({
     setTask, touchFiles, setHypothesis, noteEvidence, noteDecision,
     observeSegment, ingestRequirements, requirementsBlock, requirementRecords,
     retrieve, retrievalBlock, consolidate, conversationContext,
+    noteRetrieved, settleRetrieval, worth,
     rememberCheckpoint, onTaskCompleted, stats,
     _introspect: () => ({ records, projectId, conversation, hot, generation }),
   }
