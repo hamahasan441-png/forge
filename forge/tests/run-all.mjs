@@ -257,6 +257,9 @@ const suites = [
   // ---- v122 yolowise: ONE full-control switch, honoured by every layer ------
   // ---- that can refuse, pause or freeze ------------------------------------
   ["v122", "node", ["test-v122.mjs"]],
+  // ---- v123 hardereval: the eval set could only measure one model call, ----
+  // ---- so the A/B it fed could only ever report "no difference" ------------
+  ["v123", "node", ["test-v123.mjs"]],
   // ---- v126 shapewise: the planner adopted the SAME plan shape 32/32 and ----
   // ---- never learned whether it was the one that worked -------------------
   ["v126", "node", ["test-v126.mjs"]],
