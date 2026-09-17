@@ -2297,6 +2297,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         text: formatSettlement(settled),
       })
       try { recordPrediction(settled, process.cwd()) } catch { /* best-effort persistence */ }
+      // v125: settle the OTHER open question of this segment — was the memory
+      // it was handed worth the prompt space? engMem.retrievalBlock() put up
+      // to 1200 chars into the segment above and, until now, nothing ever
+      // looked back at whether any of it contributed. Settled here because
+      // `res` (the outcome) and `segChanged` (what was actually written) are
+      // both already in scope — the same reason the prediction settles here.
+      // A record counts as helped only if the segment SUCCEEDED and the record
+      // cites a file it CHANGED; everything else is neutral, never a failure.
+      try {
+        const worth = engMem.settleRetrieval({
+          ok: !res.error && !res.budgetHit,
+          changedFiles: [...segChanged],
+        })
+        if (worth.settled) {
+          emit({
+            type: "MEMORY_SETTLED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+            settled: worth.settled, helped: worth.helped,
+            text: `memory: ${worth.helped}/${worth.settled} retrieved record(s) cited a file this segment changed`,
+          })
+        }
+      } catch { /* memory never breaks a run */ }
       // v94 masterwise (§25/§26): classify the REALITY DELTA and update the
       // live risk estimate. MATCH/MINOR → keep going; SIGNIFICANT → world
       // model + risk + plan get updated (replan triggers already exist on

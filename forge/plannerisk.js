@@ -26,6 +26,7 @@
  */
 import { loadLessons, relevantLessons } from "./lessons.js"
 import { predictionCalibration } from "./prediction.js"
+import { RISK_ORDER } from "./verifyledger.js"
 
 export const REALITY_DELTA = {
   MATCH: "MATCH",
@@ -34,7 +35,12 @@ export const REALITY_DELTA = {
   CONTRADICTION: "CONTRADICTION",
 }
 
-export const RISK_ORDER = { trivial: 0, low: 1, medium: 2, high: 3, critical: 4 }
+// v129: this constant was declared byte-identically here and in
+// verifyledger.js. verifyledger is a LEAF (it imports nothing local), so the
+// dependency runs this way — the reverse would close a cycle through
+// plannerisk -> prediction -> verifyledger. Re-exported so the public surface
+// is unchanged.
+export { RISK_ORDER }
 
 // ---------------------------------------------------------------------------
 // v121 deadwire — measured prediction error reaches the risk NUMBER

@@ -35,9 +35,17 @@ import { WRITE_TOOLS } from "./tools.js"
 
 /** Risk levels, ordered. */
 export const RISK = { LOW: "low", MEDIUM: "medium", HIGH: "high", CRITICAL: "critical" }
-export const RISK_ORDER = ["low", "medium", "high", "critical"]
+/**
+ * v129: this was `RISK_ORDER` — the same name plannerisk/verifyledger use for a
+ * DIFFERENT TYPE. Theirs is a lookup object ({ trivial:0 … critical:4 });
+ * this is an ordered ARRAY with no "trivial" at all. `RISK_ORDER["medium"]`
+ * was 2 on one and undefined on the other, silently, and both shapes were live
+ * in the same process (router imported this one, prediction imported theirs).
+ * It is a list of tiers, so it is named for what it is.
+ */
+export const RISK_TIERS = ["low", "medium", "high", "critical"]
 export function riskRank(r) {
-  const i = RISK_ORDER.indexOf(String(r || "").toLowerCase())
+  const i = RISK_TIERS.indexOf(String(r || "").toLowerCase())
   return i < 0 ? 1 : i
 }
 export function maxRisk(...risks) {
@@ -511,7 +519,7 @@ function normalizeMeta(meta) {
   m.classes = [...new Set([m.klass, ...(m.classes || [])].filter((c) => CLASSES.includes(c)))]
   if (!m.classes.length) m.classes = [CLASS.WRITE]
   m.klass = m.classes[0]
-  m.risk = RISK_ORDER.includes(m.risk) ? m.risk : RISK.MEDIUM
+  m.risk = RISK_TIERS.includes(m.risk) ? m.risk : RISK.MEDIUM
   m.status = STATUSES.includes(m.status) ? m.status : STATUS.ENABLED
   m.cost = { ...CONSERVATIVE.cost, ...(m.cost || {}) }
   m.preferred_for = (m.preferred_for || []).map(String)

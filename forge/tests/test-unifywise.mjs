@@ -205,7 +205,16 @@ console.log("== 12. core: phase vocabulary + nextBestAction ==")
   for (const m of src.matchAll(/^\s{2}([A-Z_]+):\s+"([A-Z_]+)",/gm)) phasesCovered.add(m[2])
   const missing = core.CORE_PHASES.filter((p) => !phasesCovered.has(p))
   eq("every lifecycle phase is reachable from a real event mapping", missing, [])
-  ok("no dead vocabulary: TASK_CREATED/VERIFY_PASSED entries are gone", !src.includes("TASK_CREATED:") && !src.includes("VERIFY_PASSED: \"VERIFY\"") === true || src.includes("VERIFICATION_PASSED"))
+  // v128: this read
+  //   A && B === true || src.includes("VERIFICATION_PASSED")
+  // and `===` binds tighter than `&&`, which binds tighter than `||`, so the
+  // trailing clause short-circuited the whole assertion. core.js contains
+  // "VERIFICATION_PASSED" (it is a live event name), so this passed even with
+  // the dead vocabulary put back — proven by re-inserting it. Both halves of
+  // the real property are true today, so stating them plainly costs nothing.
+  ok("no dead vocabulary: TASK_CREATED entry is gone", !src.includes("TASK_CREATED:"))
+  ok("no dead vocabulary: VERIFY_PASSED entry is gone", !src.includes('VERIFY_PASSED: "VERIFY"'))
+  ok("…and the live verification event it was replaced by is present", src.includes("VERIFICATION_PASSED"))
   // behavior: nextBestAction on an idle core (fresh project dir — §7 asked a
   // decision in `work`, and nextBestAction correctly reports that one)
   const idleDir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-unify-idle-"))

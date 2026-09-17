@@ -15,7 +15,10 @@ import { listClaims } from "./claims.js"
 export const DECISIONS_FILE = "decisions.json"
 export const MAX_DECISIONS = 32
 export const MAX_DECISION_TEXT = 800
-export const DECISION_STATUS = Object.freeze({
+// v129: was DECISION_STATUS, which decisionengine.js also exports for an
+// entirely different lifecycle (PENDING/ANSWERED/CANCELLED/EXPIRED — a question
+// put to the user). This is an architecture decision record.
+export const ADR_STATUS = Object.freeze({
   ACCEPTED: "accepted",
   SUPERSEDED: "superseded",
   REJECTED: "rejected",
@@ -48,13 +51,13 @@ function saveDecisions(cwd, all) {
   writeStateFile(decisionsPath(cwd), JSON.stringify({ v: 1, updated: Date.now(), items: all.items || {} }, null, 1), { mode: 0o600 })
 }
 
-export function recordDecision({ cwd, title, reason, status = DECISION_STATUS.ACCEPTED } = {}) {
+export function recordDecision({ cwd, title, reason, status = ADR_STATUS.ACCEPTED } = {}) {
   const id = validDecisionTitle(title)
   if (!id) return { ok: false, error: "invalid title" }
   const body = String(reason || "").trim().slice(0, MAX_DECISION_TEXT)
   if (!body) return { ok: false, error: "empty reason" }
-  const st = DECISION_STATUS[String(status || "").toUpperCase()] || String(status || DECISION_STATUS.ACCEPTED).toLowerCase()
-  if (!Object.values(DECISION_STATUS).includes(st)) return { ok: false, error: "invalid status" }
+  const st = ADR_STATUS[String(status || "").toUpperCase()] || String(status || ADR_STATUS.ACCEPTED).toLowerCase()
+  if (!Object.values(ADR_STATUS).includes(st)) return { ok: false, error: "invalid status" }
   const all = loadDecisions(cwd)
   const items = all.items || (all.items = {})
   items[id] = { title: id, reason: body, status: st, at: Date.now() }
@@ -83,7 +86,7 @@ export function pickDecisions(task, rows, { klass, limit = 3 } = {}) {
   const q = String(task || "")
   const scored = []
   for (const d of list) {
-    if (d?.status === DECISION_STATUS.REJECTED) continue
+    if (d?.status === ADR_STATUS.REJECTED) continue
     const n = String(d?.title || "")
     if (!n) continue
     const s = scoreAgainst(q, n, String(d?.reason || ""))

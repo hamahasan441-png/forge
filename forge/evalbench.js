@@ -30,6 +30,10 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
+// v122: the A/B runs each task ONCE per arm, so a cost delta is a
+// single-sample comparison — exactly what perfbench's widest band is for.
+// Reused rather than re-guessed: one threshold, one place, already tested.
+import { SINGLE_NOISE_PCT } from "./perfbench.js"
 
 const DEFAULT_TASK_TIMEOUT_MS = 300_000
 const VERIFY_TIMEOUT_MS = 60_000
@@ -76,6 +80,47 @@ const t = (id, klass, prompt, file, broken, fixed, checks) => ({
  * function or hard-codes the failing case does not pass. Grouped by defect
  * class so the report can say WHERE forge is weak, not only how often.
  */
+/**
+ * v123 — a task the single-file `t()` cannot express.
+ *
+ * WHY THIS EXISTS, measured rather than asserted. The starter set was 24 tasks
+ * and every one of them was the same shape:
+ *
+ *   single-file            24/24
+ *   names the exact file   24/24
+ *   ends in "Fix it."      23/24
+ *   median seed            4 lines   (largest task in the whole set: 6)
+ *
+ * So `forge eval` measured ONE model call's code generation and nothing else.
+ * It could not exercise search (the file is always named), decomposition (one
+ * file), verification strategy (nothing to run) or recovery (no failure to
+ * recover from) — which is the entire stack `--ab` toggles. That is why both
+ * arms scored an identical 23/24 on a live run against deepseek-v4-flash: not
+ * mainly a ceiling, but a treatment whose whole surface the instrument never
+ * touched.
+ *
+ * `imports` names the modules the hidden oracle binds, so a check can assert
+ * across files — the cause AND the symptom — instead of a single export.
+ *
+ * The runner needed no change: writeFiles() has always taken a map, and
+ * test-v114 already proves every task's bug fails its own oracle and its
+ * solution passes, so these are validated the moment they are added.
+ */
+const tm = (id, klass, prompt, files, solution, imports, checks) => ({
+  id,
+  class: klass,
+  prompt,
+  files,
+  solution,
+  hiddenFiles: {
+    "verify.mjs":
+      Object.entries(imports).map(([alias, f]) => `import * as ${alias} from "./${f}"`).join("\n")
+      + '\nconst eq = (got, want, label) => { if (JSON.stringify(got) !== JSON.stringify(want)) { console.error(label + ": got " + JSON.stringify(got) + ", want " + JSON.stringify(want)); process.exit(1) } }\n'
+      + checks + '\nconsole.log("ok")\n',
+  },
+  verify: ["node", ["verify.mjs"]],
+})
+
 export const EVAL_TASKS = [
   t("off-by-one", "off-by-one",
     "sum(numbers) in sum.js returns the wrong total - it is missing the last element. Fix it.",
@@ -244,6 +289,80 @@ export const EVAL_TASKS = [
     "export async function processAll(xs, fn) {\n  const out = []\n  xs.forEach(async (x) => { out.push(await fn(x)) })\n  return out\n}\n",
     "export async function processAll(xs, fn) {\n  const out = []\n  for (const x of xs) out.push(await fn(x))\n  return out\n}\n",
     'eq(await m.processAll([1,2,3], async (x) => x * 2), [2,4,6], "awaited results, in order")\nlet threw = false\ntry { await m.processAll([1], async () => { throw new Error("boom") }) } catch { threw = true }\neq(threw, true, "an error from fn propagates")\neq(await m.processAll([], async (x) => x), [], "empty input")'),
+
+  // -------------------------------------------------------------------------
+  // v123 — tasks the cognitive stack can actually be measured on.
+  //
+  // Each one targets a capability the 24 single-file tasks structurally cannot
+  // reach. They are still hidden-oracle and still carry negative checks, so a
+  // "fix" that deletes the function or hard-codes the case does not pass.
+  // -------------------------------------------------------------------------
+
+  // SEARCH + MULTI-FILE. The symptom is in the file the prompt names; the CAUSE
+  // is one import away, in a file the prompt never mentions. The oracle asserts
+  // the primitive itself, so patching around it in the caller does not pass.
+  tm("cross-file-cause", "cross-file",
+    "Customers are being refunded one cent less than they paid on some orders. Start from refundTotal in order.js and find where it actually goes wrong.",
+    {
+      "order.js": 'import { toCents } from "./money.js"\n\nexport function refundTotal(items) {\n  return items.reduce((a, i) => a + toCents(i.price * i.qty), 0)\n}\n',
+      "money.js": "export function toCents(amount) {\n  return Math.trunc(amount * 100)\n}\n",
+    },
+    {
+      "order.js": 'import { toCents } from "./money.js"\n\nexport function refundTotal(items) {\n  return items.reduce((a, i) => a + toCents(i.price * i.qty), 0)\n}\n',
+      "money.js": "export function toCents(amount) {\n  return Math.round(amount * 100)\n}\n",
+    },
+    { o: "order.js", m: "money.js" },
+    'eq(o.refundTotal([{ price: 19.99, qty: 1 }]), 1999, "a single 19.99 item")\n'
+    + 'eq(o.refundTotal([{ price: 0.29, qty: 3 }]), 87, "cents that float badly")\n'
+    + 'eq(o.refundTotal([{ price: 19.99, qty: 1 }, { price: 0.29, qty: 3 }]), 2086, "two items")\n'
+    + 'eq(o.refundTotal([]), 0, "no items")\n'
+    + '// the CAUSE, not only the symptom: patching the caller leaves this wrong\n'
+    + 'eq(m.toCents(19.99), 1999, "the cents primitive itself")\n'
+    + 'eq(m.toCents(5), 500, "a whole amount still works")'),
+
+  // VERIFICATION SUFFICIENCY. There is a test file in the workspace and it is
+  // GREEN before any change is made. The requirement in the prompt is real and
+  // the test does not cover it. An agent that runs the suite, sees green and
+  // reports COMPLETED produces a false completion — which is the metric this
+  // whole harness exists to measure, on the failure mode most likely to
+  // produce it in a real repo.
+  tm("green-but-wrong", "verification",
+    "titleCase(s) in title.js must leave short joining words (a, an, and, of, the) lowercase unless they are the first word. Run test.mjs — it should stay passing when you are done.",
+    {
+      "title.js": "export function titleCase(s) {\n  return String(s).split(\" \").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(\" \")\n}\n",
+      "test.mjs": 'import { titleCase } from "./title.js"\nconst eq = (got, want) => { if (got !== want) { console.error("got " + got + ", want " + want); process.exit(1) } }\neq(titleCase("hello world"), "Hello World")\neq(titleCase("one"), "One")\nconsole.log("ok")\n',
+    },
+    {
+      "title.js": "const SMALL = new Set([\"a\", \"an\", \"and\", \"of\", \"the\"])\nexport function titleCase(s) {\n  return String(s).split(\" \").map((w, i) => (i > 0 && SMALL.has(w.toLowerCase()) ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(\" \")\n}\n",
+      "test.mjs": 'import { titleCase } from "./title.js"\nconst eq = (got, want) => { if (got !== want) { console.error("got " + got + ", want " + want); process.exit(1) } }\neq(titleCase("hello world"), "Hello World")\neq(titleCase("one"), "One")\nconsole.log("ok")\n',
+    },
+    { m: "title.js" },
+    'eq(m.titleCase("the lord of the rings"), "The Lord of the Rings", "small words stay lowercase, except first")\n'
+    + 'eq(m.titleCase("a tale of two cities"), "A Tale of Two Cities", "leading small word is capitalised")\n'
+    + '// the visible test must STILL pass — the fix may not trade one for the other\n'
+    + 'eq(m.titleCase("hello world"), "Hello World", "the case the visible test covers")\n'
+    + 'eq(m.titleCase("one"), "One", "a single word")'),
+
+  // INCOMPLETE FIX. The value lives in two places because one module hard-codes
+  // what the other exports. Changing the constant alone looks complete and
+  // leaves the system inconsistent — the oracle checks both sites.
+  tm("two-sites", "incomplete-fix",
+    "The upload size limit is going up from 100 to 250. Make the code agree on the new limit.",
+    {
+      "limits.js": "export const MAX_UPLOAD = 100\n",
+      "validate.js": "export function accepts(size) {\n  return Number(size) <= 100\n}\n",
+    },
+    {
+      "limits.js": "export const MAX_UPLOAD = 250\n",
+      "validate.js": 'import { MAX_UPLOAD } from "./limits.js"\n\nexport function accepts(size) {\n  return Number(size) <= MAX_UPLOAD\n}\n',
+    },
+    { l: "limits.js", v: "validate.js" },
+    'eq(l.MAX_UPLOAD, 250, "the exported limit")\n'
+    + '// the second site: changing the constant alone leaves this at 100\n'
+    + 'eq(v.accepts(250), true, "the new limit is accepted")\n'
+    + 'eq(v.accepts(251), false, "one over is still rejected")\n'
+    + 'eq(v.accepts(100), true, "an old-limit value still passes")\n'
+    + 'eq(v.accepts(0), true, "zero is fine")'),
 ]
 
 /** Write a {path: content} map into a directory, creating parents. */
@@ -416,7 +535,7 @@ export async function runAB({ tasks = EVAL_TASKS, runAgent, provider, config = {
   const on = await arm("on", { ...config, agent: { ...(config.agent || {}), cognition: true } })
   const off = await arm("off", { ...config, agent: { ...(config.agent || {}), cognition: false } })
   const models = [...new Set([...on.models, ...off.models])]
-  return {
+  const out = {
     on, off, lockModel,
     // Same model in both arms, or the comparison is partly about model choice.
     // Reported either way — a confound that is named is a result; one that is
@@ -433,6 +552,10 @@ export async function runAB({ tasks = EVAL_TASKS, runAgent, provider, config = {
       toolCalls: on.toolCalls - off.toolCalls,
     },
   }
+  // v122: the cost verdict travels with the result, so `--json` consumers see
+  // the same conclusion the text report draws instead of re-deriving it.
+  out.cost = costVerdict(out)
+  return out
 }
 
 export function formatEvalReport(summary) {
@@ -476,6 +599,77 @@ export function formatEvalReport(summary) {
  * does not help on this set — a report that can only announce a win is not a
  * measurement, it is advertising.
  */
+/**
+ * v122 costwise — what the tie branch was throwing away.
+ *
+ * runAB has always computed delta.tokensIn/tokensOut/totalMs/toolCalls, and
+ * formatABReport has always PRINTED them in the arm table. But the verdict
+ * underneath read `d.solved === 0 && d.falseCompletions === 0` and nothing
+ * else, so a run where cognition ON scored the same 23/24 for twice the
+ * tokens was reported as:
+ *
+ *   NO MEASURABLE DIFFERENCE on this set: same solved count, same false
+ *   completions.
+ *
+ * Same correctness at higher cost is not "no difference" — it is a NEGATIVE
+ * result, and the eval's whole purpose is to be able to say so. (§27: never
+ * call something unchanged when one axis silently got worse.) The numbers
+ * were computed and displayed and never reached the conclusion — the same
+ * dead wire v121 closed three of.
+ *
+ * WHAT COUNTS AS EVIDENCE, and what does not:
+ *
+ *   tokens, tool calls   the verdict. Both are attributable to the stack and
+ *                        stable given the same task set.
+ *   wall time            reported as context, NEVER the verdict. One run per
+ *                        task against a live provider carries network and
+ *                        queueing the cognitive stack does not control, so a
+ *                        time delta is not evidence about the stack.
+ *
+ * The band is SINGLE_NOISE_PCT, reused from perfbench: each arm is one sample
+ * per task, which is the case that constant already exists for.
+ */
+export const COST = Object.freeze({
+  UNCHANGED: "unchanged",
+  COSTLIER: "costlier",
+  CHEAPER: "cheaper",
+  MIXED: "mixed",
+  UNKNOWN: "unknown",
+})
+
+export function costVerdict(ab, { band = SINGLE_NOISE_PCT } = {}) {
+  const none = { verdict: COST.UNKNOWN, axes: [], why: "", band }
+  if (!ab?.on || !ab?.off) return none
+  // An errored arm measures the setup, not the stack. No cost claim from it.
+  if (ab.on.errored || ab.off.errored) {
+    return { ...none, why: "an arm never reached the model" }
+  }
+  const axis = (label, onV, offV) => {
+    const on = Number(onV) || 0, off = Number(offV) || 0
+    // No baseline to be a percentage OF: only an exact tie is honest here.
+    if (!off) return { label, on, off, pct: null, moved: on !== 0 }
+    const pct = (on - off) / off
+    return { label, on, off, pct, moved: Math.abs(pct) > band }
+  }
+  const axes = [
+    axis("tokens", ab.on.tokensIn + ab.on.tokensOut, ab.off.tokensIn + ab.off.tokensOut),
+    axis("tool calls", ab.on.toolCalls, ab.off.toolCalls),
+  ]
+  const moved = axes.filter((a) => a.moved)
+  if (!moved.length) return { verdict: COST.UNCHANGED, axes, band, why: `every cost axis is inside the ±${Math.round(band * 100)}% single-sample band` }
+  const up = moved.filter((a) => (a.pct ?? (a.on - a.off)) > 0)
+  const down = moved.filter((a) => (a.pct ?? (a.on - a.off)) < 0)
+  const phrase = (a) => `${a.label} ${a.pct == null ? `${a.on} vs ${a.off}` : `${a.pct > 0 ? "+" : ""}${Math.round(a.pct * 100)}%`}`
+  if (up.length && down.length) {
+    return { verdict: COST.MIXED, axes, band, why: `${up.map(phrase).join(", ")} but ${down.map(phrase).join(", ")}` }
+  }
+  return {
+    verdict: up.length ? COST.COSTLIER : COST.CHEAPER,
+    axes, band,
+    why: moved.map(phrase).join(", "),
+  }
+}
+
 export function formatABReport(ab) {
   if (!ab?.on?.results?.length) return "no A/B results"
   const ms = (x) => (x >= 1000 ? `${(x / 1000).toFixed(1)}s` : `${x}ms`)
@@ -508,9 +702,33 @@ export function formatABReport(ab) {
 
   const d = ab.delta
   if (d.solved === 0 && d.falseCompletions === 0) {
-    lines.push("", `  NO MEASURABLE DIFFERENCE on this set: same solved count, same false completions.`,
-      `  That is a result. It does not prove the stack is useless — it proves this set does not show it — and`,
-      `  the honest next move is a harder set, not a louder claim.`)
+    // v122: outcomes tied — now ask what it COST to tie, before calling it
+    // "no difference". Cost is reported on tokens and tool calls only; wall
+    // time is context, never the verdict.
+    const cost = costVerdict(ab)
+    const timeNote = `  time ${sign(Math.round(d.totalMs / 1000))}s — reported, but a live provider's latency is not evidence about the stack.`
+    if (cost.verdict === COST.COSTLIER) {
+      lines.push("", `  SAME OUTCOMES AT HIGHER COST: identical solved count and identical false completions, for ${cost.why}.`,
+        `  That is a NEGATIVE result for cognition ON on this set, not a neutral one — the stack was paid for and`,
+        `  bought nothing measurable here.`, timeNote)
+    } else if (cost.verdict === COST.CHEAPER) {
+      lines.push("", `  SAME OUTCOMES FOR LESS: identical solved count and identical false completions, for ${cost.why}.`,
+        `  Cheaper at equal correctness is a real win, and the only one this set can show at its ceiling.`, timeNote)
+    } else if (cost.verdict === COST.MIXED) {
+      lines.push("", `  SAME OUTCOMES, MIXED COST: ${cost.why}.`,
+        `  The axes disagree, so this set does not support a cost claim either way.`, timeNote)
+    } else {
+      lines.push("", `  NO MEASURABLE DIFFERENCE on this set: same solved count, same false completions, and ${cost.why}.`,
+        `  That is a result. It does not prove the stack is useless — it proves this set does not show it — and`,
+        `  the honest next move is a harder set, not a louder claim.`, timeNote)
+    }
+    // At a ceiling the solved column has no room left to move, so "no
+    // difference" there says more about the set than about the stack.
+    const ceiling = ab.on.tasks > 0 && (ab.on.solved / ab.on.tasks) >= 0.9 && (ab.off.solved / ab.off.tasks) >= 0.9
+    if (ceiling) {
+      lines.push("", `  CEILING: both arms solved ${ab.on.solved}/${ab.on.tasks}. With that little headroom the solved column`,
+        `  cannot show a difference even if one exists — treat the outcome tie as uninformative, not as evidence.`)
+    }
   } else {
     const better = d.solved > 0 || (d.solved === 0 && d.falseCompletions < 0)
     lines.push("", `  ${better ? "cognition ON did better" : "cognition ON did WORSE"} on this set: ` +

@@ -10,7 +10,7 @@
  * CONTEXTUAL RANKING, not the fixture's spelling, so the fixtures are real
  * strategy names and §2b pins the skip itself.
  *
- *  1. recordStrategy stores the outcome WITH context (class, languages,
+ *  1. recordProjectStrategy stores the outcome WITH context (class, languages,
  *     latency) — future selection learns what worked where.
  *  2. pickStrategy weighs CONTEXTUAL factors: language overlap, task-class
  *     match, failure history, resource state (degraded prefers proven-fast).
@@ -43,9 +43,9 @@ const { TASK_CLASS } = await import("../classify.js")
 // ---------------------------------------------------------------------------
 console.log("== 1. outcomes stored WITH context ==")
 {
-  const r1 = st.recordStrategy({ cwd: WORK, name: "bisect-then-patch", ok: true, klass: "LARGE", langs: ["javascript"], latencyMs: 4000 })
-  st.recordStrategy({ cwd: WORK, name: "bisect-then-patch", ok: true, klass: "LARGE", langs: ["javascript"], latencyMs: 6000 })
-  st.recordStrategy({ cwd: WORK, name: "rewrite-module", ok: false, klass: "MEDIUM", langs: ["python"], latencyMs: 90000 })
+  const r1 = st.recordProjectStrategy({ cwd: WORK, name: "bisect-then-patch", ok: true, klass: "LARGE", langs: ["javascript"], latencyMs: 4000 })
+  st.recordProjectStrategy({ cwd: WORK, name: "bisect-then-patch", ok: true, klass: "LARGE", langs: ["javascript"], latencyMs: 6000 })
+  st.recordProjectStrategy({ cwd: WORK, name: "rewrite-module", ok: false, klass: "MEDIUM", langs: ["python"], latencyMs: 90000 })
   ok("context recorded (klass + langs + latency)", r1.klass === "LARGE" && r1.langs.includes("javascript") && r1.avgLatencyMs === 4000)
   const j = JSON.parse(fs.readFileSync(st.strategyPath(WORK), "utf8"))
   ok("persisted with the context fields", j.items["bisect-then-patch"].langs.includes("javascript") && j.items["rewrite-module"].klass === "MEDIUM")
@@ -65,13 +65,13 @@ console.log("== 2. contextual factors change the ranking ==")
   ok("context factors are attached to candidates", pyCtx.some((c) => c.factors?.languageOverlap === 1))
 
   // failure history penalty recorded when a strategy is consistently failing
-  for (let i = 0; i < 4; i++) st.recordStrategy({ cwd: WORK, name: "flaky-approach", ok: false })
+  for (let i = 0; i < 4; i++) st.recordProjectStrategy({ cwd: WORK, name: "flaky-approach", ok: false })
   const withFlaky = st.pickStrategy("flaky approach task", { cwd: WORK })
   const flaky = withFlaky.find((c) => c.name === "flaky-approach")
   ok("failure history flagged (recentFailureHistory)", flaky?.factors?.recentFailureHistory === true)
 
   // degraded resources: slow strategy gets the latency factor
-  st.recordStrategy({ cwd: WORK, name: "slow-strategy", ok: true, latencyMs: 90000 })
+  st.recordProjectStrategy({ cwd: WORK, name: "slow-strategy", ok: true, latencyMs: 90000 })
   const deg = st.pickStrategy("slow strategy task", { cwd: WORK, context: { resourceState: "degraded" } })
   const slow = deg.find((c) => c.name === "slow-strategy")
   ok("degraded context surfaces avgLatencyMs as a factor", slow?.factors?.avgLatencyMs === 90000)
@@ -82,8 +82,8 @@ console.log("== 2b. v121 — a task class is not a strategy ==")
 {
   const legacy = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93st-legacy-"))
   // Exactly what meta.js wrote, segment after segment, before v121.
-  for (let i = 0; i < 7; i++) st.recordStrategy({ cwd: legacy, name: "klass:MEDIUM", ok: i < 5, klass: "MEDIUM" })
-  for (let i = 0; i < 4; i++) st.recordStrategy({ cwd: legacy, name: "klass:LARGE", ok: i < 2, klass: "LARGE" })
+  for (let i = 0; i < 7; i++) st.recordProjectStrategy({ cwd: legacy, name: "klass:MEDIUM", ok: i < 5, klass: "MEDIUM" })
+  for (let i = 0; i < 4; i++) st.recordProjectStrategy({ cwd: legacy, name: "klass:LARGE", ok: i < 2, klass: "LARGE" })
   ok("legacy rows are kept on disk — nothing is deleted behind the user",
     fs.readFileSync(st.strategyPath(legacy), "utf8").includes("klass:MEDIUM"))
   ok("but a task class is never offered as a strategy choice",
@@ -91,7 +91,7 @@ console.log("== 2b. v121 — a task class is not a strategy ==")
   ok("and the justified block stays silent rather than naming one",
     st.formatStrategyJustified(st.pickStrategyJustified("add a retry", { cwd: legacy, klass: "MEDIUM" })) === "")
   // A real strategy in the same store is unaffected.
-  st.recordStrategy({ cwd: legacy, name: "bisect-then-patch", ok: true, klass: "MEDIUM" })
+  st.recordProjectStrategy({ cwd: legacy, name: "bisect-then-patch", ok: true, klass: "MEDIUM" })
   ok("a genuinely named strategy in the same store still ranks",
     st.pickStrategy("bisect then patch it", { cwd: legacy, klass: "MEDIUM" })[0]?.name === "bisect-then-patch")
 }
@@ -99,7 +99,7 @@ console.log("== 2b. v121 — a task class is not a strategy ==")
 // ---------------------------------------------------------------------------
 console.log("== 3. the justified pick — why / why-not / evidence ==")
 {
-  st.recordStrategy({ cwd: WORK, name: "bisect-then-patch", ok: true, klass: "LARGE", langs: ["javascript"] })
+  st.recordProjectStrategy({ cwd: WORK, name: "bisect-then-patch", ok: true, klass: "LARGE", langs: ["javascript"] })
   const j = st.pickStrategyJustified("a large javascript task", { cwd: WORK, klass: "LARGE", context: { languages: ["javascript"] } })
   ok("a chosen strategy is named", typeof j.chosen === "string" && j.chosen.length > 0)
   ok("WHY is evidence-based (rate + samples + match)", /% ok over \d+ sample/.test(j.why) && /(match|similarity)/.test(j.why))
@@ -108,7 +108,7 @@ console.log("== 3. the justified pick — why / why-not / evidence ==")
   ok("EVIDENCE object carries the numbers", j.evidence?.rate != null && j.evidence?.samples >= 1)
 
   // weak evidence is WARNED, not hidden
-  st.recordStrategy({ cwd: WORK, name: "tiny-evidence", ok: true })
+  st.recordProjectStrategy({ cwd: WORK, name: "tiny-evidence", ok: true })
   const j2 = st.pickStrategyJustified("tiny evidence task", { cwd: WORK })
   const tiny = j2.candidates.find((c) => c.name === "tiny-evidence")
   void tiny
@@ -140,7 +140,7 @@ console.log("== 4. living-loop wiring ==")
   // success rate, and jointroute/crewroute/empirics/resources each record the
   // same segment already.
   ok("meta no longer records a task class as a strategy",
-    !/recordStrategy\(\{[\s\S]{0,200}?name: `klass:/.test(metaSrc))
+    !/recordProjectStrategy\(\{[\s\S]{0,200}?name: `klass:/.test(metaSrc))
   ok("and the per-class success rate still has an owner",
     /recordReasoning\(/.test(fs.readFileSync(new URL("../cognition.js", import.meta.url), "utf8")))
   ok("strategy.js never auto-ACTIVEs (no kernel self-mod)", !/lifecycle\s*=|SKILL_LIFE/.test(fs.readFileSync(new URL("../strategy.js", import.meta.url), "utf8")))

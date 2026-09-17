@@ -257,9 +257,27 @@ const suites = [
   // ---- v122 yolowise: ONE full-control switch, honoured by every layer ------
   // ---- that can refuse, pause or freeze ------------------------------------
   ["v122", "node", ["test-v122.mjs"]],
+  // ---- v123 hardereval: the eval set could only measure one model call, ----
+  // ---- so the A/B it fed could only ever report "no difference" ------------
+  ["v123", "node", ["test-v123.mjs"]],
+  // ---- v124 yolodiag: forge already ships unlimited, and one stale config --
+  // ---- key silently put every layer back in charge without saying which ----
+  ["v124", "node", ["test-v124.mjs"]],
+  // ---- v125 memoryworth: engineering memory was the one retrieval surface --
+  // ---- with no outcome loop — nine ranking priors and not one measurement --
+  ["v125", "node", ["test-v125.mjs"]],
   // ---- v126 shapewise: the planner adopted the SAME plan shape 32/32 and ----
   // ---- never learned whether it was the one that worked -------------------
   ["v126", "node", ["test-v126.mjs"]],
+  // ---- v127 costwise: the A/B called "no measurable difference" on tied ----
+  // ---- outcomes without ever reading the cost it had just printed ---------
+  ["v127", "node", ["test-v127.mjs"]],
+  // ---- v128 auditwise: a 30s connect guard that no config could change, ----
+  // ---- and a test that passed with the defect put back --------------------
+  ["v128", "node", ["test-v128.mjs"]],
+  // ---- v129 dupewise: 21 duplicated export names — RISK_ORDER was two -----
+  // ---- incompatible TYPES, RETIRE_BELOW two values, pidAlive copy-pasted --
+  ["v129", "node", ["test-v129.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

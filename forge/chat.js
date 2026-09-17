@@ -913,6 +913,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           system: "Summarize this conversation for an AI assistant that will continue it. In <=250 words capture: the user's goals, decisions made, files created or changed, facts to remember, and open tasks. Output only the summary.",
           messages: [{ role: "user", content: digest }],
           maxTokens: 600,
+          // v128: same omission as agent.js — the summarizer inherited the
+          // provider default rather than the user's configured connect guard.
+          connectMs: config.retry?.connectMs, requestTimeoutMs: config.retry?.requestTimeoutMs,
         })
         return s.content || ""
       },

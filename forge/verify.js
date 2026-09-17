@@ -28,7 +28,9 @@ import { recommendedVerify } from "./langengine.js"
 import { buildCrossGraph } from "./repomap.js"
 import { testsForFiles } from "./xlang.js"
 
-export const CHECK = {
+// v129: was CHECK — completion.js also exports that name for its completion
+// GATE checks. These are verification kinds.
+export const VERIFY_CHECK = {
   FILE_EXISTS: "file_exists",
   SYNTAX: "syntax",
   CONTENT_APPLIED: "content_applied",
@@ -105,21 +107,21 @@ export function verificationPlan(name, args = {}, { risk = RISK.LOW, registry = 
 
   if (name === "write_file") {
     for (const t of targets) {
-      checks.push({ kind: CHECK.FILE_EXISTS, target: t, why: "the file the write claims to have created must exist", executor: "local" })
-      if (syntaxKind(t)) checks.push({ kind: CHECK.SYNTAX, target: t, why: "a written source file must still parse", executor: "local" })
+      checks.push({ kind: VERIFY_CHECK.FILE_EXISTS, target: t, why: "the file the write claims to have created must exist", executor: "local" })
+      if (syntaxKind(t)) checks.push({ kind: VERIFY_CHECK.SYNTAX, target: t, why: "a written source file must still parse", executor: "local" })
     }
   } else if (name === "edit_file" || name === "multi_edit") {
     for (const t of targets) {
-      checks.push({ kind: CHECK.CONTENT_APPLIED, target: t, why: "the replacement text must actually be in the file", executor: "local", expect: expectedText(name, a) })
-      if (syntaxKind(t)) checks.push({ kind: CHECK.SYNTAX, target: t, why: "an edited source file must still parse", executor: "local" })
+      checks.push({ kind: VERIFY_CHECK.CONTENT_APPLIED, target: t, why: "the replacement text must actually be in the file", executor: "local", expect: expectedText(name, a) })
+      if (syntaxKind(t)) checks.push({ kind: VERIFY_CHECK.SYNTAX, target: t, why: "an edited source file must still parse", executor: "local" })
     }
   } else if (name === "apply_patch") {
-    checks.push({ kind: CHECK.PATCH_APPLIED, target: targets, why: "every file the patch touches must be in its post-patch state", executor: "local", patch: String(a.patch ?? "") })
-    for (const t of targets) if (syntaxKind(t)) checks.push({ kind: CHECK.SYNTAX, target: t, why: "a patched source file must still parse", executor: "local" })
+    checks.push({ kind: VERIFY_CHECK.PATCH_APPLIED, target: targets, why: "every file the patch touches must be in its post-patch state", executor: "local", patch: String(a.patch ?? "") })
+    for (const t of targets) if (syntaxKind(t)) checks.push({ kind: VERIFY_CHECK.SYNTAX, target: t, why: "a patched source file must still parse", executor: "local" })
   } else if (name === "bash") {
     const cmd = String(a.command ?? "")
     if (/\b(npm|pnpm|yarn|bun)\s+(i|install|add|ci)\b|\bpip3?\s+install\b/.test(cmd)) {
-      checks.push({ kind: CHECK.INSTALL, target: cwd, why: "a dependency change must be followed by a build/test run", executor: "agent" })
+      checks.push({ kind: VERIFY_CHECK.INSTALL, target: cwd, why: "a dependency change must be followed by a build/test run", executor: "agent" })
     }
   } else if (declared.size) {
     for (const kind of declared) checks.push({ kind, target: targets[0] ?? cwd, why: "declared by the tool", executor: "local" })
@@ -130,7 +132,7 @@ export function verificationPlan(name, args = {}, { risk = RISK.LOW, registry = 
   if (mutates && riskRank(risk) >= riskRank(RISK.HIGH)) {
     const focus = focusedVerify(cwd, targets)
     checks.push({
-      kind: CHECK.TESTS, target: cwd,
+      kind: VERIFY_CHECK.TESTS, target: cwd,
       why: `risk=${risk}: run the focused test/build before declaring success`,
       executor: "agent",
       ...(focus.command ? { command: focus.command } : {}),
@@ -249,11 +251,11 @@ export async function runVerification(plan, { cwd = process.cwd(), timeoutMs = D
 async function runCheck(c, { cwd, timeoutMs }) {
   try {
     switch (c.kind) {
-      case CHECK.FILE_EXISTS: {
+      case VERIFY_CHECK.FILE_EXISTS: {
         const ok = fs.existsSync(c.target)
         return { ok, skipped: false, detail: ok ? "exists" : "missing after write" }
       }
-      case CHECK.SYNTAX: {
+      case VERIFY_CHECK.SYNTAX: {
         const kind = syntaxKind(c.target)
         const f = readBounded(c.target)
         if (!f) return { ok: null, skipped: true, detail: "file unreadable" }
@@ -265,7 +267,7 @@ async function runCheck(c, { cwd, timeoutMs }) {
         if (kind === "js") return { ...(await nodeCheck(c.target, f.text, timeoutMs)), skipped: false }
         return { ok: null, skipped: true, detail: "no local checker for this file type" }
       }
-      case CHECK.CONTENT_APPLIED: {
+      case VERIFY_CHECK.CONTENT_APPLIED: {
         const f = readBounded(c.target)
         if (!f) return { ok: false, skipped: false, detail: "file missing after edit" }
         if (f.tooBig) return { ok: null, skipped: true, detail: "file too large to confirm" }
@@ -273,7 +275,7 @@ async function runCheck(c, { cwd, timeoutMs }) {
         const ok = f.text.includes(c.expect)
         return { ok, skipped: false, detail: ok ? "replacement present" : "replacement text not found in the file" }
       }
-      case CHECK.PATCH_APPLIED: {
+      case VERIFY_CHECK.PATCH_APPLIED: {
         const targets = Array.isArray(c.target) ? c.target : [c.target].filter(Boolean)
         if (!targets.length) return { ok: null, skipped: true, detail: "patch touched no known file" }
         const missing = targets.filter((t) => !fs.existsSync(t))

@@ -29,7 +29,7 @@
 import path from "node:path"
 import fs from "node:fs"
 import {
-  CLASS, RISK, RISK_ORDER, riskRank, maxRisk, STATUS, CAPABILITY,
+  CLASS, RISK, RISK_TIERS, riskRank, maxRisk, STATUS, CAPABILITY,
   operationRisk, classifyCall, costScore,
 } from "./capabilities.js"
 import { verificationPlan, focusedVerify } from "./verify.js"
@@ -978,4 +978,4 @@ export function describeRoute(decision) {
   return lines.join("\n")
 }
 
-export { RISK, RISK_ORDER, CLASS, maxRisk }
+export { RISK, RISK_TIERS, CLASS, maxRisk }

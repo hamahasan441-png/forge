@@ -46,7 +46,10 @@ function saveStrategies(cwd, data) {
   writeStateFile(strategyPath(cwd), JSON.stringify(data, null, 1), { mode: 0o600 })
 }
 
-export function recordStrategy({ cwd = process.cwd(), name = "", ok = false, score = null, klass = null, langs = [], latencyMs = null } = {}) {
+// v129: was recordStrategy — metalearn.js also exports that name for its
+// per-task-class strategy row. This one writes the project strategy store
+// (strategy.json). Confusing the two cost real time during v121.
+export function recordProjectStrategy({ cwd = process.cwd(), name = "", ok = false, score = null, klass = null, langs = [], latencyMs = null } = {}) {
   const id = String(name || "").trim().slice(0, 48)
   if (!cwd || !id) return null
   const all = loadStrategies(cwd)

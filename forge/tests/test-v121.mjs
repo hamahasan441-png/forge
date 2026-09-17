@@ -44,7 +44,7 @@ const ok = (name, cond, detail = "") => { if (cond) { PASS++; console.log(`  ok 
 
 const { recordPrediction, predictionCalibration, MIN_CALIBRATION_SAMPLES } = await import("../prediction.js")
 const { assessPlan, predictNodes, alternatives, calibrationPressure, CALIBRATION_MIN_SAMPLES } = await import("../plannerisk.js")
-const { pickStrategy, recordStrategy: recordProjectStrategy, LEGACY_CLASS_ROW } = await import("../strategy.js")
+const { pickStrategy, recordProjectStrategy, LEGACY_CLASS_ROW } = await import("../strategy.js")
 const { rankStrategies, strategyKey } = await import("../governor.js")
 const { recordStrategy, strategyRates } = await import("../metalearn.js")
 const { intentHypothesesFor } = await import("../usermodel.js")

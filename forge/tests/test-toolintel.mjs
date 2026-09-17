@@ -18,7 +18,7 @@ import os from "node:os"
 import path from "node:path"
 import { createToolIntel, argsHash, TOOL_EVENTS } from "../toolintel.js"
 import { classifyFailure, recoveryPlan, diagnose, formatDiagnosis, shouldEscalate, FAILURE, FAILURE_CODES, STRATEGY } from "../diagnose.js"
-import { verificationPlan, runVerification, verifyTargets, CHECK } from "../verify.js"
+import { verificationPlan, runVerification, verifyTargets, VERIFY_CHECK } from "../verify.js"
 import { createRegistry, RISK, STATUS } from "../capabilities.js"
 import { makeToolContext } from "../tools.js"
 import { createUIStore, bridgeAgentEvent, createBridgeContext } from "../uistate.js"
@@ -107,9 +107,9 @@ console.log("== §13 verification contracts ==")
   const p1 = verificationPlan("read_file", { path: "app.js" }, { risk: RISK.LOW, cwd: tmp })
   ok("a read declares no verification", p1.required === false && p1.checks.length === 0)
   const p2 = verificationPlan("edit_file", { path: "app.js", old: "1", new: "2" }, { risk: RISK.MEDIUM, cwd: tmp, meta: { read_only: false, verification_required: true, verify_after: [] } })
-  ok("an edit verifies content + syntax", p2.required && p2.checks.some((c) => c.kind === CHECK.CONTENT_APPLIED) && p2.checks.some((c) => c.kind === CHECK.SYNTAX))
+  ok("an edit verifies content + syntax", p2.required && p2.checks.some((c) => c.kind === VERIFY_CHECK.CONTENT_APPLIED) && p2.checks.some((c) => c.kind === VERIFY_CHECK.SYNTAX))
   const p3 = verificationPlan("apply_patch", { patch: "--- a/app.js\n+++ b/app.js\n" }, { risk: RISK.HIGH, cwd: tmp, meta: { read_only: false, verification_required: true, verify_after: [] } })
-  ok("high risk escalates to a recommended test run", p3.checks.some((c) => c.kind === CHECK.TESTS && c.executor === "agent"))
+  ok("high risk escalates to a recommended test run", p3.checks.some((c) => c.kind === VERIFY_CHECK.TESTS && c.executor === "agent"))
   ok("verification is proportional to risk", p3.level === "strict" && p2.level === "standard")
   ok("verifyTargets resolves patched files", verifyTargets("apply_patch", { patch: "--- a/x.js\n+++ b/x.js\n" }, tmp)[0] === path.join(tmp, "x.js"))
 
@@ -124,7 +124,7 @@ console.log("== §13 verification contracts ==")
   ok("invalid JSON is caught", badJson.ok === false)
   const txtPlan = verificationPlan("write_file", { path: "notes.txt" }, { risk: RISK.MEDIUM, cwd: tmp, meta: { read_only: false, verification_required: true } })
   const txt = await runVerification(txtPlan, { cwd: tmp })
-  ok("a file type with no local checker is never failed", txt.ok === true && !txtPlan.checks.some((c) => c.kind === CHECK.SYNTAX))
+  ok("a file type with no local checker is never failed", txt.ok === true && !txtPlan.checks.some((c) => c.kind === VERIFY_CHECK.SYNTAX))
   ok("verification never throws on a missing file", (await runVerification(verificationPlan("write_file", { path: "ghost.js" }, { risk: RISK.MEDIUM, cwd: tmp, meta: { read_only: false, verification_required: true } }), { cwd: tmp })).ok === false)
   fs.rmSync(tmp, { recursive: true, force: true })
 }

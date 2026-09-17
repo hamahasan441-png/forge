@@ -338,7 +338,7 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
  * commands + exit codes, errors, blocked actions) is always produced, so a
  * context-overflow retry always gets a SMALLER, well-formed history.
  */
-async function compactAgentHistory(messages, p, { onEvent, force = false }) {
+async function compactAgentHistory(messages, p, { onEvent, force = false, retry = null, signal = null }) {
   try {
     const summarize = async (digest) => {
       const s = await chatOnce({
@@ -346,6 +346,9 @@ async function compactAgentHistory(messages, p, { onEvent, force = false }) {
         system: "Summarize this agent work-log for an AI agent continuing the same task. In <=200 words capture: what was done, key findings, what was tried and failed, and what remains. Do not list files or commands (they are recorded separately). Output only the summary.",
         messages: [{ role: "user", content: digest }],
         maxTokens: 500,
+        // v128: this call omitted both, so history compaction ran on the
+        // provider default (30s connect) and could not be cancelled.
+        connectMs: retry?.connectMs, requestTimeoutMs: retry?.requestTimeoutMs, signal,
       })
       return s?.content ?? null
     }
@@ -1243,7 +1246,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         if (e instanceof ProviderError && e.contextOverflow && overflowBudget > 0) {
           overflowBudget--
           onEvent?.({ type: "compacted", before: messages.length, after: -1, estTok: estimateTokens(JSON.stringify(messages)), budgetTok: 0, reason: "context overflow — compressing and retrying", ...identityMeta() })
-          messages = await compactAgentHistory(messages, p, { onEvent, force: true })
+          messages = await compactAgentHistory(messages, p, { onEvent, force: true, retry: config.retry, signal })
           messages = hardShrink(messages)
           steps--
           continue
@@ -1455,7 +1458,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           } catch (e) { swallowed("agent", "cognition settle", e) }
         }
         injectPendingVision(messages, tools.ctx)
-        messages = await compactAgentHistory(messages, p, { onEvent })
+        messages = await compactAgentHistory(messages, p, { onEvent, retry: config.retry, signal })
         continue
       }
 
