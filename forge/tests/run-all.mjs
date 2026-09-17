@@ -278,6 +278,10 @@ const suites = [
   // ---- v129 dupewise: 21 duplicated export names — RISK_ORDER was two -----
   // ---- incompatible TYPES, RETIRE_BELOW two values, pidAlive copy-pasted --
   ["v129", "node", ["test-v129.mjs"]],
+  // ---- v130 yolomode: full control got a NAME (off|yolo|full) — one key, --
+  // ---- one patch shape — plus the chat plugin loader that threw on a bare --
+  // ---- out-of-scope read and loaded zero plugins, silently ---------------
+  ["v130", "node", ["test-v130.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

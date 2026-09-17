@@ -36,7 +36,7 @@ import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
-import { yoloState, yoloGrants, formatYolo, NEVER_YOLO, NEVER_YOLO_CORRECTNESS } from "./yolo.js" // v122: one resolved full-control state
+import { yoloState, yoloGrants, formatYolo, modeOf, applyYoloMode, yoloModeNote, yoloModeFlags, FULL_CONTROL_FLAGS, NEVER_YOLO, NEVER_YOLO_CORRECTNESS } from "./yolo.js" // v122: one resolved full-control state · v130: and a name for each mode
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
@@ -118,7 +118,7 @@ export const COMMANDS = [
   ["tool", "download|verify", "download a tool (CANDIDATE) or structurally verify it (never ~/.forge/tools)"],
   ["tools", "[on|off]", `list the ${toolCount()} agent tools, or toggle auto-tools in chat`],
   ["shell", "[on|off]", "terminal mode info / toggle Linux-command auto-detect"],
-  ["yolo", "[on|off|status]", "FULL CONTROL — nothing refused, nothing paused, nothing frozen (default ON); status prints every layer"],
+  ["yolo", "[full|on|off|status]", "FULL CONTROL — nothing refused, nothing paused, nothing frozen (default ON); full keeps the governor + critique enforcing; status prints every layer"],
   ["deep", "", "toggle DEEP THINKING (high reasoning effort + bigger budgets)"],
   ["compact", "", "force context compaction (older turns → summary)"],
   ["usage", "", "session token totals + est. cost"],
@@ -195,7 +195,7 @@ ${bold("setup")}
   /tool download <url>  download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
   /tool verify <name>   structurally verify a downloaded tool (hostless playbook)
   /tools [on|off]       list the ${toolCount()} agent tools, or toggle auto-tools in chat
-  /yolo [on|off|status] FULL CONTROL — everything allowed, nothing frozen; status prints every layer (default ON)
+  /yolo [full|on|off|status] FULL CONTROL — everything allowed, nothing frozen; full = grants open AND governor + critique enforcing; status prints every layer (default ON)
   /shell [on|off]       terminal mode info / toggle Linux-command auto-detect
   !<command>            force-execute a shell command right here (always works)
   /deep                 toggle DEEP THINKING (high reasoning effort + bigger budgets)
@@ -514,6 +514,14 @@ function metaEventPrinter(agentPrinter) {
  */
 export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt = null } = {}) {
   const out = { plugins: [], errors: [], mcpClients: [], pluginHost: null }
+  // v130: this function read a bare `unrestricted`, which is declared inside
+  // startChat — a DIFFERENT function — so every call threw
+  // "ReferenceError: unrestricted is not defined" and the best-effort catch
+  // below swallowed it. Result: interactive chat loaded ZERO user tool plugins,
+  // silently, while `forge agent` loaded them fine. The grant now comes from
+  // the one resolved control state (yolo.js) like every other layer, and a
+  // loader throw is reported instead of disappearing.
+  const control = yoloState(config ?? {})
   if (config?.tools?.plugins !== false) {
     try {
       const loaded = await loadToolPlugins(undefined, {
@@ -521,13 +529,13 @@ export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt =
         grants: config.tools?.pluginGrants ?? {},
         cwd,
         startedAt,
-        allowNewPlugins: unrestricted || config.tools?.allowNewPlugins === true,
+        allowNewPlugins: control.allowNewPlugins,
       })
       // v48: learned plugins are playbooks, never a live plugin-host spawn.
       out.plugins = loaded.tools
       out.pluginHost = loaded
       out.errors.push(...(loaded.errors || []))
-    } catch { /* best-effort */ }
+    } catch (e) { out.errors.push(`plugin loader failed: ${e?.message ?? e}`) }
   }
   if (config?.tools?.mcp !== false) {
     try {
@@ -537,7 +545,7 @@ export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt =
         out.mcpClients = mcp.clients
       }
       out.errors.push(...(mcp.errors || []))
-    } catch { /* best-effort */ }
+    } catch (e) { out.errors.push(`mcp loader failed: ${e?.message ?? e}`) }
   }
   return out
 }
@@ -2231,7 +2239,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         {
           const y = control()
           const onoff = (v) => v ? green("on ") : yellow("off")
-          console.log(`  control:    ${y.yolo ? yellow("YOLO — FULL CONTROL") : "guarded"} ${dim(`(${y.source})`)} • shell ${green("never refuses")} (v88) • governor ${y.governorEnforce ? yellow("enforcing") : green("advisory")} • critique ${y.critiqueEnforce ? yellow("enforcing") : green("advisory")} • ceiling ${y.maxRisk ? yellow(String(y.maxRisk)) : green("none")}`)
+          console.log(`  control:    ${y.yolo ? yellow("YOLO — FULL CONTROL") : "guarded"} ${dim(`(${y.mode} · ${y.source})`)} • shell ${green("never refuses")} (v88) • governor ${y.governorEnforce ? yellow("enforcing") : green("advisory")} • critique ${y.critiqueEnforce ? yellow("enforcing") : green("advisory")} • ceiling ${y.maxRisk ? yellow(String(y.maxRisk)) : green("none")}`)
           console.log(`              grants: sudo ${onoff(y.allowSudo)} • outside-project ${onoff(y.allowOutsideProject)} • traversal ${onoff(y.allowOutsideTraversal)} • interpreter-eval ${onoff(y.allowInterpreterEval)} • upload ${onoff(y.allowNetworkUpload)} • private-urls ${onoff(y.fetchPrivateUrls)} • new-plugins ${onoff(y.allowNewPlugins)}`)
           console.log(`              rails YOLO never turns off: project-config strip • injection fence • secret redaction • atomic writes • socket pinning ${dim("(/yolo status)")}`)
         }
@@ -2722,12 +2730,23 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           for (const line of formatYolo(st).split("\n")) console.log(line)
           break
         }
-        const on = arg2 === "on" ? true : arg2 === "off" ? false : !st.yolo
-        config.tools = { ...(config.tools || {}), yolo: on }
+        // v130 "yolomode": /yolo full|on|off sets a MODE through the SAME patch
+        // the CLI persists (applyYoloMode), so chat and `forge agent` can never
+        // resolve differently. A bare /yolo still toggles, and toggling ON means
+        // mode "yolo" — the oversight layers advise only — because that is what
+        // "full control, nothing stops the run" has meant here since v87.
+        const wanted = arg2 === "" ? (st.yolo ? "off" : "yolo") : arg2
+        const asked = modeOf(wanted)
+        if (asked === null) {
+          warn("usage: /yolo [full|on|off|status]   full = every grant open AND governor + critique enforcing")
+          break
+        }
+        const next = applyYoloMode(config, asked)
+        config.tools = next.tools
+        config.governor = next.governor
+        config.critique = next.critique
+        const on = asked !== "off"
         if (on) {
-          config.tools.unrestricted = true
-          config.tools.autoApprove = true
-          config.tools.assumeYes = true
           process.env.FORGE_AUTO_APPROVE = "1"
           process.env.FORGE_UNRESTRICTED = "1"
           process.env.FORGE_ASSUME_YES = "1"
@@ -2743,7 +2762,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (c) Object.assign(c, yoloGrants(y), { readOnlyBashByClass: y.readOnlyBashByClass, unrestricted, assumeYes })
         saveConfig(config)
         if (on) {
-          ok(`YOLO — FULL CONTROL ON • no pauses • guards off • governor advisory • critique advisory • no risk ceiling • every command runs ${dim("(saved: tools.yolo in ~/.forge/config.json)")}`)
+          const flags = yoloModeFlags(y)
+          ok(`YOLO — mode ${y.mode.toUpperCase()} • ${y.mode === "full" ? "every grant open • governor ENFORCING • critique ENFORCING" : "no pauses • guards off • governor advisory • critique advisory"} • no risk ceiling • every command runs ${dim("(saved: tools.yoloMode in ~/.forge/config.json)")}`)
+          console.log(dim(`  ${FULL_CONTROL_FLAGS.map((k) => `${k} ${flags[k] ? "true" : "false"}`).join(" · ")}`))
+          if (y.mode === "full") for (const line of yoloModeNote("full")) console.log(dim(`  ${line}`))
           console.log(dim("  rails YOLO deliberately keeps (defence against other people's code, not friction for you):"))
           for (const [name, where] of NEVER_YOLO) console.log(dim(`    ${name} — ${where}`))
           console.log(dim("  kept for correctness, not permission:"))

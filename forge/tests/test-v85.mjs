@@ -121,8 +121,21 @@ console.log("== chat.js / agent.js imply every privileged flag ==")
   ok("chat.js unrestricted implies assumeYes", /assumeYes = yoloNow\.assumeYes \|\| unrestricted/.test(chat))
   ok("chat.js user terminal passes unrestricted", /userMayRun\(cmd, \{ cwd: shellState\.cwd, root: process\.cwd\(\), allowInterpreterEval: unrestricted \|\| config\.tools\?\.allowInterpreterEval === true, unrestricted \}, \{ interactive, assumeYes, unrestricted \}\)/.test(chat))
   ok("agent.js unrestricted implies assumeYes", /assumeYes: yolo\.assumeYes \|\| unrestricted/.test(agent))
-  ok("chat.js unrestricted implies allowNewPlugins", /allowNewPlugins: unrestricted \|\| config\.tools\?\.allowNewPlugins === true/.test(chat))
-  ok("agent.js unrestricted implies allowNewPlugins", /allowNewPlugins: unrestricted \|\| config\.tools\?\.allowNewPlugins === true/.test(agent))
+  // v130: the plugin grant now comes from the RESOLVED control state, not from
+  // a local re-derivation. The old `unrestricted || config.tools?.allowNewPlugins`
+  // ignored `tools.yolo` entirely — and in chat.js the `unrestricted` identifier
+  // was declared in a different function, so the call threw a ReferenceError
+  // that the best-effort catch swallowed: interactive chat loaded ZERO user
+  // plugins while reporting nothing. The implication this section pins is now
+  // behaviour (asserted below), not a grep for one spelling of it.
+  ok("chat.js takes allowNewPlugins from the resolved state", /allowNewPlugins: control\.allowNewPlugins/.test(chat))
+  ok("agent.js takes allowNewPlugins from the resolved state", /allowNewPlugins: yolo\.allowNewPlugins/.test(agent))
+  {
+    const { yoloState } = await import("../yolo.js")
+    ok("and unrestricted still implies it (behaviour, not a grep)",
+      yoloState({ tools: { unrestricted: true, autoApprove: true } }, {}).allowNewPlugins === true
+      && yoloState({ tools: { unrestricted: true, allowNewPlugins: true } }, { FORGE_YOLO: "0" }).allowNewPlugins === true)
+  }
 }
 
 console.log("== v122: the implication is BEHAVIOUR, not a grep ==")
