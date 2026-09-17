@@ -260,6 +260,9 @@ const suites = [
   // ---- v123 hardereval: the eval set could only measure one model call, ----
   // ---- so the A/B it fed could only ever report "no difference" ------------
   ["v123", "node", ["test-v123.mjs"]],
+  // ---- v124 yolodiag: forge already ships unlimited, and one stale config --
+  // ---- key silently put every layer back in charge without saying which ----
+  ["v124", "node", ["test-v124.mjs"]],
   // ---- v126 shapewise: the planner adopted the SAME plan shape 32/32 and ----
   // ---- never learned whether it was the one that worked -------------------
   ["v126", "node", ["test-v126.mjs"]],

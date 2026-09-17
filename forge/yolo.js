@@ -89,9 +89,38 @@ export function yoloState(config = {}, env = process.env) {
   const governorPin = pinOf(config?.governor?.enforce, envSwitch(env, "FORGE_GOVERNOR"))
   const critiquePin = pinOf(config?.critique?.enforce, envSwitch(env, "FORGE_CRITIQUE_ENFORCE"))
 
+  // v124: WHICH key is holding it off, and the one command that fixes it.
+  //
+  // YOLO ships ON — a default config resolves every grant true. But the
+  // derivation is `unrestricted && autoApprove`, and `forge config set` writes
+  // the WHOLE merged object, so a config file written by a forge older than
+  // v85 persists `unrestricted: false` forever. One stale key silently puts
+  // every layer back in charge, and `source` only said
+  // "tools.unrestricted/autoApprove off" — naming both keys without saying
+  // which, and never saying how to undo it. Same shape as the v120 stale
+  // `retry.connectMs`: an old default outliving the release that changed it.
+  const blockedBy = []
+  if (explicit === false) blockedBy.push("env FORGE_YOLO")
+  else if (persisted === false) blockedBy.push("tools.yolo")
+  else if (!yolo) {
+    if (!unrestricted) blockedBy.push("tools.unrestricted")
+    if (!autoApprove) blockedBy.push("tools.autoApprove")
+  }
+  // A pin keeps its layer enforcing even with YOLO on — deliberate, but it is
+  // the other way a run gets refused while `forge yolo` reads "FULL CONTROL".
+  const pinnedOn = []
+  if (yolo && governorPin === "always") pinnedOn.push("governor.enforce")
+  if (yolo && critiquePin === "always") pinnedOn.push("critique.enforce")
+
   return {
     yolo,
     source,
+    blockedBy,
+    pinnedOn,
+    // the exact command, because "set the flag" is not an instruction
+    fix: blockedBy.length
+      ? (blockedBy[0] === "env FORGE_YOLO" ? "unset FORGE_YOLO   (or: FORGE_YOLO=1)" : "forge yolo on")
+      : pinnedOn.length ? `forge config set ${pinnedOn[0]} auto` : null,
     // the historical switches, resolved the same way every caller used to
     unrestricted,
     autoApprove,
@@ -162,6 +191,19 @@ export function formatYolo(state = {}) {
   const lines = []
   lines.push(`${on ? "YOLO — FULL CONTROL (nothing is refused, nothing pauses to ask)" : "YOLO off — the layers below are back in charge"}`)
   lines.push(`  source:         ${state.source ?? "(unset)"}`)
+  // v124: when it is off, say WHICH key and HOW to undo it. YOLO ships ON, so
+  // "off" always means something on this machine turned it off — and until now
+  // finding out which of four switches did it meant reading the source.
+  if (!on && (state.blockedBy ?? []).length) {
+    lines.push(`  held off by:    ${state.blockedBy.join(", ")}  ${state.blockedBy.includes("tools.unrestricted") ? "(ships true — an older config keeps the old default alive)" : ""}`.trimEnd())
+    if (state.fix) lines.push(`  turn it on:     ${state.fix}`)
+  }
+  // …and when it is ON but a layer is pinned, say so, because that is the
+  // other way a run gets refused while this screen reads FULL CONTROL.
+  if (on && (state.pinnedOn ?? []).length) {
+    lines.push(`  still enforcing: ${state.pinnedOn.join(", ")} pinned to "always" — YOLO does not override a pin`)
+    if (state.fix) lines.push(`  release it:     ${state.fix}`)
+  }
   lines.push("  refused or paused by the agent layer")
   lines.push(`    shellguard:         never refuses (v88 noguard) — level stays on every log line`)
   lines.push(`    autoApprove:        ${yn(state.autoApprove)} — no y/N, no "needs your decision"`)
