@@ -76,6 +76,47 @@ const t = (id, klass, prompt, file, broken, fixed, checks) => ({
  * function or hard-codes the failing case does not pass. Grouped by defect
  * class so the report can say WHERE forge is weak, not only how often.
  */
+/**
+ * v123 — a task the single-file `t()` cannot express.
+ *
+ * WHY THIS EXISTS, measured rather than asserted. The starter set was 24 tasks
+ * and every one of them was the same shape:
+ *
+ *   single-file            24/24
+ *   names the exact file   24/24
+ *   ends in "Fix it."      23/24
+ *   median seed            4 lines   (largest task in the whole set: 6)
+ *
+ * So `forge eval` measured ONE model call's code generation and nothing else.
+ * It could not exercise search (the file is always named), decomposition (one
+ * file), verification strategy (nothing to run) or recovery (no failure to
+ * recover from) — which is the entire stack `--ab` toggles. That is why both
+ * arms scored an identical 23/24 on a live run against deepseek-v4-flash: not
+ * mainly a ceiling, but a treatment whose whole surface the instrument never
+ * touched.
+ *
+ * `imports` names the modules the hidden oracle binds, so a check can assert
+ * across files — the cause AND the symptom — instead of a single export.
+ *
+ * The runner needed no change: writeFiles() has always taken a map, and
+ * test-v114 already proves every task's bug fails its own oracle and its
+ * solution passes, so these are validated the moment they are added.
+ */
+const tm = (id, klass, prompt, files, solution, imports, checks) => ({
+  id,
+  class: klass,
+  prompt,
+  files,
+  solution,
+  hiddenFiles: {
+    "verify.mjs":
+      Object.entries(imports).map(([alias, f]) => `import * as ${alias} from "./${f}"`).join("\n")
+      + '\nconst eq = (got, want, label) => { if (JSON.stringify(got) !== JSON.stringify(want)) { console.error(label + ": got " + JSON.stringify(got) + ", want " + JSON.stringify(want)); process.exit(1) } }\n'
+      + checks + '\nconsole.log("ok")\n',
+  },
+  verify: ["node", ["verify.mjs"]],
+})
+
 export const EVAL_TASKS = [
   t("off-by-one", "off-by-one",
     "sum(numbers) in sum.js returns the wrong total - it is missing the last element. Fix it.",
@@ -244,6 +285,80 @@ export const EVAL_TASKS = [
     "export async function processAll(xs, fn) {\n  const out = []\n  xs.forEach(async (x) => { out.push(await fn(x)) })\n  return out\n}\n",
     "export async function processAll(xs, fn) {\n  const out = []\n  for (const x of xs) out.push(await fn(x))\n  return out\n}\n",
     'eq(await m.processAll([1,2,3], async (x) => x * 2), [2,4,6], "awaited results, in order")\nlet threw = false\ntry { await m.processAll([1], async () => { throw new Error("boom") }) } catch { threw = true }\neq(threw, true, "an error from fn propagates")\neq(await m.processAll([], async (x) => x), [], "empty input")'),
+
+  // -------------------------------------------------------------------------
+  // v123 — tasks the cognitive stack can actually be measured on.
+  //
+  // Each one targets a capability the 24 single-file tasks structurally cannot
+  // reach. They are still hidden-oracle and still carry negative checks, so a
+  // "fix" that deletes the function or hard-codes the case does not pass.
+  // -------------------------------------------------------------------------
+
+  // SEARCH + MULTI-FILE. The symptom is in the file the prompt names; the CAUSE
+  // is one import away, in a file the prompt never mentions. The oracle asserts
+  // the primitive itself, so patching around it in the caller does not pass.
+  tm("cross-file-cause", "cross-file",
+    "Customers are being refunded one cent less than they paid on some orders. Start from refundTotal in order.js and find where it actually goes wrong.",
+    {
+      "order.js": 'import { toCents } from "./money.js"\n\nexport function refundTotal(items) {\n  return items.reduce((a, i) => a + toCents(i.price * i.qty), 0)\n}\n',
+      "money.js": "export function toCents(amount) {\n  return Math.trunc(amount * 100)\n}\n",
+    },
+    {
+      "order.js": 'import { toCents } from "./money.js"\n\nexport function refundTotal(items) {\n  return items.reduce((a, i) => a + toCents(i.price * i.qty), 0)\n}\n',
+      "money.js": "export function toCents(amount) {\n  return Math.round(amount * 100)\n}\n",
+    },
+    { o: "order.js", m: "money.js" },
+    'eq(o.refundTotal([{ price: 19.99, qty: 1 }]), 1999, "a single 19.99 item")\n'
+    + 'eq(o.refundTotal([{ price: 0.29, qty: 3 }]), 87, "cents that float badly")\n'
+    + 'eq(o.refundTotal([{ price: 19.99, qty: 1 }, { price: 0.29, qty: 3 }]), 2086, "two items")\n'
+    + 'eq(o.refundTotal([]), 0, "no items")\n'
+    + '// the CAUSE, not only the symptom: patching the caller leaves this wrong\n'
+    + 'eq(m.toCents(19.99), 1999, "the cents primitive itself")\n'
+    + 'eq(m.toCents(5), 500, "a whole amount still works")'),
+
+  // VERIFICATION SUFFICIENCY. There is a test file in the workspace and it is
+  // GREEN before any change is made. The requirement in the prompt is real and
+  // the test does not cover it. An agent that runs the suite, sees green and
+  // reports COMPLETED produces a false completion — which is the metric this
+  // whole harness exists to measure, on the failure mode most likely to
+  // produce it in a real repo.
+  tm("green-but-wrong", "verification",
+    "titleCase(s) in title.js must leave short joining words (a, an, and, of, the) lowercase unless they are the first word. Run test.mjs — it should stay passing when you are done.",
+    {
+      "title.js": "export function titleCase(s) {\n  return String(s).split(\" \").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(\" \")\n}\n",
+      "test.mjs": 'import { titleCase } from "./title.js"\nconst eq = (got, want) => { if (got !== want) { console.error("got " + got + ", want " + want); process.exit(1) } }\neq(titleCase("hello world"), "Hello World")\neq(titleCase("one"), "One")\nconsole.log("ok")\n',
+    },
+    {
+      "title.js": "const SMALL = new Set([\"a\", \"an\", \"and\", \"of\", \"the\"])\nexport function titleCase(s) {\n  return String(s).split(\" \").map((w, i) => (i > 0 && SMALL.has(w.toLowerCase()) ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(\" \")\n}\n",
+      "test.mjs": 'import { titleCase } from "./title.js"\nconst eq = (got, want) => { if (got !== want) { console.error("got " + got + ", want " + want); process.exit(1) } }\neq(titleCase("hello world"), "Hello World")\neq(titleCase("one"), "One")\nconsole.log("ok")\n',
+    },
+    { m: "title.js" },
+    'eq(m.titleCase("the lord of the rings"), "The Lord of the Rings", "small words stay lowercase, except first")\n'
+    + 'eq(m.titleCase("a tale of two cities"), "A Tale of Two Cities", "leading small word is capitalised")\n'
+    + '// the visible test must STILL pass — the fix may not trade one for the other\n'
+    + 'eq(m.titleCase("hello world"), "Hello World", "the case the visible test covers")\n'
+    + 'eq(m.titleCase("one"), "One", "a single word")'),
+
+  // INCOMPLETE FIX. The value lives in two places because one module hard-codes
+  // what the other exports. Changing the constant alone looks complete and
+  // leaves the system inconsistent — the oracle checks both sites.
+  tm("two-sites", "incomplete-fix",
+    "The upload size limit is going up from 100 to 250. Make the code agree on the new limit.",
+    {
+      "limits.js": "export const MAX_UPLOAD = 100\n",
+      "validate.js": "export function accepts(size) {\n  return Number(size) <= 100\n}\n",
+    },
+    {
+      "limits.js": "export const MAX_UPLOAD = 250\n",
+      "validate.js": 'import { MAX_UPLOAD } from "./limits.js"\n\nexport function accepts(size) {\n  return Number(size) <= MAX_UPLOAD\n}\n',
+    },
+    { l: "limits.js", v: "validate.js" },
+    'eq(l.MAX_UPLOAD, 250, "the exported limit")\n'
+    + '// the second site: changing the constant alone leaves this at 100\n'
+    + 'eq(v.accepts(250), true, "the new limit is accepted")\n'
+    + 'eq(v.accepts(251), false, "one over is still rejected")\n'
+    + 'eq(v.accepts(100), true, "an old-limit value still passes")\n'
+    + 'eq(v.accepts(0), true, "zero is fine")'),
 ]
 
 /** Write a {path: content} map into a directory, creating parents. */
