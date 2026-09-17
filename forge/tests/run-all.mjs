@@ -257,6 +257,9 @@ const suites = [
   // ---- v122 yolowise: ONE full-control switch, honoured by every layer ------
   // ---- that can refuse, pause or freeze ------------------------------------
   ["v122", "node", ["test-v122.mjs"]],
+  // ---- v124 yolodiag: forge already ships unlimited, and one stale config --
+  // ---- key silently put every layer back in charge without saying which ----
+  ["v124", "node", ["test-v124.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

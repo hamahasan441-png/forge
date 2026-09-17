@@ -806,6 +806,24 @@ async function main() {
         console.log(`  retry:     ${stale.length ? yellow(`${stale.length} setting(s) well above the shipped default`) : green("at or near defaults")}`)
         for (const line of stale) console.log(`             ${dim(line)} — from an older forge; delete it to take the current default`)
       } catch { /* doctor never fails on a view */ }
+      // v124: the same stale-config shape, on the switch that decides whether
+      // forge asks permission at all. YOLO ships ON, but the derivation is
+      // `unrestricted && autoApprove` and `forge config set` persists the whole
+      // merged object — so a config written before v85 keeps `unrestricted:
+      // false` alive forever and every layer quietly goes back to refusing.
+      // Reported here because "why is it still blocking me?" should be
+      // answerable without reading yolo.js.
+      try {
+        const y = yoloState(config)
+        if (y.yolo) {
+          console.log(`  control:   ${green("YOLO on — nothing refuses, nothing pauses")}${y.pinnedOn?.length ? yellow(` • ${y.pinnedOn.join(", ")} pinned to "always"`) : ""}`)
+          if (y.pinnedOn?.length) console.log(`             ${dim(`that layer still vetoes despite YOLO — release it with: ${y.fix}`)}`)
+        } else {
+          console.log(`  control:   ${yellow(`YOLO off — held off by ${y.blockedBy.join(", ") || y.source}`)}`)
+          console.log(`             ${dim("this ships ON; a saved config is keeping an older default alive")}`)
+          if (y.fix) console.log(`             ${dim(`turn it back on: ${y.fix}`)}`)
+        }
+      } catch { /* doctor never fails on a view */ }
       const prof = loadProfile(process.cwd())
       const langList = [...new Set((prof.langs ?? []).map((l) => l.ext))].slice(0, 4).join("/")
       console.log(`  project:   ${langList || prof.packageManager ? green(`${langList || "detected"}${prof.git?.branch ? " on " + prof.git.branch : ""}${prof.scripts?.test ? " • " + prof.scripts.test : ""}`) : dim("not a code project (plain folder)")} ${dim(prof.cached ? "(cached)" : "(fresh)")}`)
