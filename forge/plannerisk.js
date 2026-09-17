@@ -437,9 +437,37 @@ function calibratedUncertainty(calibration, pressure = null) {
  * alternatives are no longer computed-then-ignored.
  */
 export const ADOPT_MARGIN = 0.03
+
+/**
+ * v126 — how much MEASURED shape history may move a candidate.
+ *
+ * Sized against the two gaps that actually occur. On a real two-node plan the
+ * top candidates sit 0.001 apart (inspect-first 0.746, incremental-verify
+ * 0.745) — a statistical tie the estimate cannot resolve — while the gap to
+ * the original is 0.082. With add-two damping the term spans +/-0.03, so the
+ * widest SWING between two candidates is 0.06: decisive on a near-tie, and
+ * unable to overturn a clear estimate difference. One observation moves a
+ * candidate by 0.010, a third of ADOPT_MARGIN — visible, never decisive.
+ *
+ * Damping is crewroute's, not a new invention: (ok + 1) / (samples + 2), two
+ * pseudo-runs at 50%. It needs no minimum-sample floor because a single
+ * result barely moves it and it converges honestly — which matters here,
+ * because alternatives() only runs on high-risk plans, so a hard floor of 5
+ * might never fill on a small project.
+ */
+export const SHAPE_WEIGHT = 0.06
+
+/** Damped, bounded adjustment for one shape's measured history. */
+export function shapeAdjustment(rec) {
+  const samples = Number(rec?.samples) || 0
+  if (samples <= 0) return 0
+  const ok = Number(rec?.ok) || 0
+  const shrunk = (ok + 1) / (samples + 2)     // add-two damping (crewroute)
+  return Number(((shrunk - 0.5) * SHAPE_WEIGHT).toFixed(4))
+}
 export const NON_ADOPTABLE = new Set(["conservative-order"]) // drops declared dependencies — advised, never auto-adopted
 
-export function alternatives(assessment, planDefs = []) {
+export function alternatives(assessment, planDefs = [], { shapeRates = null } = {}) {
   // v96 unifywise: ONE return shape. This function used to return [] (an
   // array) for low/medium-risk plans and an object for high/critical — every
   // caller had to guard with `alts?.recommended` AND `!Array.isArray(alts)`.
@@ -456,7 +484,21 @@ export function alternatives(assessment, planDefs = []) {
   // deepwise: the original plan competes on the SAME thin-prior options as
   // the variants — an apples-to-apples comparison, not a rigged one.
   const a0 = assessPlan(buildTempDag(nodes), opts)
-  const original = { name: "original", nodes: nodes.length, risk: a0.risk, successProbability: a0.successProbability, expectedVerifiedProgress: Number((a0.successProbability * 0.8 - a0.risk * 0.15).toFixed(3)) }
+  // v126: measured history for this task class, applied to the ESTIMATE that
+  // ranks candidates. `rates` absent (or empty) leaves every number exactly as
+  // it was, so a fresh project plans identically to before.
+  const rates = shapeRates && typeof shapeRates === "object" ? shapeRates : {}
+  const measuredFor = (name) => {
+    const rec = rates[name]
+    const adj = shapeAdjustment(rec)
+    return adj ? { adjustment: adj, samples: Number(rec.samples) || 0, ok: Number(rec.ok) || 0 } : null
+  }
+  const withMeasured = (cand) => {
+    const m = measuredFor(cand.name)
+    if (!m) return cand
+    return { ...cand, estimatedVerifiedProgress: cand.expectedVerifiedProgress, measured: m, expectedVerifiedProgress: Number((cand.expectedVerifiedProgress + m.adjustment).toFixed(3)) }
+  }
+  const original = withMeasured({ name: "original", nodes: nodes.length, risk: a0.risk, successProbability: a0.successProbability, expectedVerifiedProgress: Number((a0.successProbability * 0.8 - a0.risk * 0.15).toFixed(3)) })
   const variants = []
   const defsByName = {}
   // (a) inspect-first: prepend a read-only discovery node that everything depends on
@@ -476,7 +518,7 @@ export function alternatives(assessment, planDefs = []) {
     const a = assessPlan(buildTempDag(defs), opts)
     const verifiedFraction = 0.8 + (defs.some((d) => d.id?.startsWith("alt_verify") || d.id === "alt_inspect") ? 0.1 : 0)
     const expectedVerifiedProgress = Number((a.successProbability * verifiedFraction - a.risk * 0.15).toFixed(3))
-    variants.push({ name, nodes: defs.length, risk: a.risk, successProbability: a.successProbability, expectedVerifiedProgress })
+    variants.push(withMeasured({ name, nodes: defs.length, risk: a.risk, successProbability: a.successProbability, expectedVerifiedProgress }))
     defsByName[name] = defs
   }
   variants.sort((a, b) => b.expectedVerifiedProgress - a.expectedVerifiedProgress)

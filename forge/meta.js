@@ -894,6 +894,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // history + prediction calibration. Estimates, never proof — weak evidence
   // lowers the reported confidence instead of faking precision.
   let planRisk = null
+  // v126: which plan SHAPE this run actually executed, so the outcome at the
+  // end can score the choice made at the start. null = alternatives() never
+  // ran, so there was no shape decision to learn from.
+  let planShape = null
   let liveRisk = null
   // v96 unifywise: §24 information-gain experiments captured at planning time
   // and injected into the FIRST segment's context (consumed once, then null).
@@ -934,7 +938,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // model call). The adopted defs flow into the DAG below: the guard node
       // (inspect/verify) becomes real executed work, not advice.
       if (planRisk.riskLadder === "high" || planRisk.riskLadder === "critical") {
-        const alts = alternatives(planRisk, planDefs)
+        // v126: the shape choice was made on a pure estimate — a number the
+        // planner predicts about itself. Hand it what this project has actually
+        // measured for this task class: damped, bounded, and a complete no-op
+        // on a fresh project.
+        let shapeRates = null
+        try {
+          const { planShapeRates } = await import("./metalearn.js")
+          shapeRates = planShapeRates(process.cwd(), classified.class)
+        } catch { /* shape history is evidence, never a requirement */ }
+        const alts = alternatives(planRisk, planDefs, { shapeRates })
         if (alts?.recommended) {
           let adoptedName = null, adoptWhy = ""
           const decision = adoptDecision(alts)
@@ -957,6 +970,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               liveRisk = createLiveRisk(planRisk.successProbability)
               adoptedName = decision.name
               adoptWhy = decision.why
+              planShape = decision.name
             } catch { /* adoption is advisory — on any failure keep the original plan */ }
           }
           emit({
@@ -968,6 +982,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               ? `executing the ${adoptedName} shape — ${adoptWhy}`
               : "executing the original plan; alternatives recorded for replan decisions",
           })
+          // Keeping the original is a choice too, and it has an outcome.
+          if (!planShape) planShape = "original"
         }
       }
       // §24 information gain — when uncertainty is high, run the CHEAPEST
@@ -2989,6 +3005,22 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         klass: classified?.class ?? null,
       })
     } catch { /* the empirics view is best-effort */ }
+    // v126: the plan SHAPE this run executed. Recorded beside the model
+    // outcome because it is the same question one layer up — the planner chose
+    // a shape from an estimate about itself, and this is the only place that
+    // knows whether it worked. Only when alternatives() actually ran: with no
+    // choice there is nothing to learn.
+    if (planShape) {
+      try {
+        const { recordPlanShape } = await import("./metalearn.js")
+        recordPlanShape({
+          cwd: process.cwd(),
+          klass: classified?.class ?? null,
+          shape: planShape,
+          ok: finalStatus === FINAL.COMPLETED,
+        })
+      } catch { /* shape memory is best-effort */ }
+    }
   } catch { }
 
   emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, state: finalState, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
