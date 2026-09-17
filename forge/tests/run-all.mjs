@@ -272,6 +272,9 @@ const suites = [
   // ---- v127 costwise: the A/B called "no measurable difference" on tied ----
   // ---- outcomes without ever reading the cost it had just printed ---------
   ["v127", "node", ["test-v127.mjs"]],
+  // ---- v128 auditwise: a 30s connect guard that no config could change, ----
+  // ---- and a test that passed with the defect put back --------------------
+  ["v128", "node", ["test-v128.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

@@ -807,7 +807,14 @@ export async function chatOnce(opts) {
 }
 
 async function chatOnceInner(opts) {
-  const { protocol = "openai", baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, system, connectMs = 30000, requestTimeoutMs = 180000 } = opts
+  // v128: connectMs defaulted to 30000 here while its two siblings
+  // (streamChat at :582, the non-tool path at :640) and the shipped config
+  // (config.js defaultConfig -> retry.connectMs) all say 8000. Any caller that
+  // omitted it silently bought a 30-SECOND connect guard instead of an 8-second
+  // one — and two callers did omit it. v120 attributed a user's 30s guards
+  // entirely to a stale config; that was incomplete, because this default
+  // produces exactly the same 30s on a perfectly current config.
+  const { protocol = "openai", baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, system, connectMs = 8000, requestTimeoutMs = 180000 } = opts
   const _deep = opts.deep
   const base = (baseUrl || "").replace(/\/$/, "")
   if (!base) throw new ProviderError("no baseUrl configured for this provider")
