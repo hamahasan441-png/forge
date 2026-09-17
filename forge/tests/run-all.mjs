@@ -257,6 +257,9 @@ const suites = [
   // ---- v122 yolowise: ONE full-control switch, honoured by every layer ------
   // ---- that can refuse, pause or freeze ------------------------------------
   ["v122", "node", ["test-v122.mjs"]],
+  // ---- v125 memoryworth: engineering memory was the one retrieval surface --
+  // ---- with no outcome loop — nine ranking priors and not one measurement --
+  ["v125", "node", ["test-v125.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],
