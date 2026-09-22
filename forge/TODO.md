@@ -26,6 +26,19 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v133 "stickwise" — leftovers (completed plan removed, house style)
+
+- [ ] package.json is still 122.0.0 while named suites run through v133.
+      Dozens of historical tests pin the literal `122.0.0` / `/^122\./`.
+      A versionwise release that updates every pin (and only that) is the
+      honest bump; this release refused to mix it in.
+- [ ] LARGE/ARCHITECTURAL Core can still switch providers when
+      `applyModelChoice` reports high-confidence measured-better (v110
+      product). Stickwise made MICRO/SMALL and crew protocol-sticky; a
+      deliberate LARGE bake-off is not a silent steal.
+- [ ] five review systems remain. Journal recovery is still a second prompt.
+      `think()` is on the episode store, not tracer/engmemory.
+
 ## v132 "mindwise" — leftovers (completed plan removed, house style)
 
 - [ ] package.json is still 122.0.0 while named suites run through v132.

@@ -3,6 +3,10 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
+**v133 "stickwise"** — the model you picked is the model that runs. Core and
+crew call `applyModelChoice`. MICRO/SMALL keep the caller; crew never leaves
+the owner's protocol. Package version remains 122.0.0.
+
 **v132 "mindwise"** — one judgment table, and memory that returns. Worker
 self-review actually decides whether the ledger records a pass. `think()`
 reaches the episode store. Failed approaches reach the next planner

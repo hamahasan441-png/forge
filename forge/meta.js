@@ -32,7 +32,7 @@ import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./reso
 import { createExecutionController } from "./execcontroller.js"
 import { createEngMemory } from "./engmemory.js"
 import { assessPlan, predictNodes, alternatives, adoptDecision, informationGainExperiments, classifyRealityDelta, createLiveRisk, verificationPlanForRisk, gatherPlannerEvidence } from "./plannerisk.js"
-import { selectModel, reconsiderModel, recordOutcome, resolveLane } from "./modelstrategy.js"
+import { applyModelChoice, reconsiderModel, recordOutcome, resolveLane } from "./modelstrategy.js"
 import { warmCaches } from "./fastwise.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
@@ -292,7 +292,6 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const bus91 = createBus({ taskId, persist: true })
   const handoffs91 = createHandoffLedger()
   const crewRouter = createCrewRouter({ cwd: process.cwd(), config })
-  const crewModels = new Map() // "provider|model" → built provider (reuse, never rebuild)
   // reassignment budget: at most ONE successor per node per task (§35 — never
   // an infinite relay of doomed workers)
   const reassignBudget = new Map() // nodeId → count
@@ -305,15 +304,6 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     },
   })
   const provRef = { prov: provider }
-  /** Build (and cache) an alternate provider for per-role model routing. */
-  const buildProvider91 = async (cfg, name) => {
-    try {
-      const { buildProvider } = await import("./providers.js")
-      const p = buildProvider(cfg, name)
-      return p && p.model ? p : null
-    } catch { return null }
-  }
-
   const pluginStartedAtMs = pluginStartedAt ?? Date.now()
   const rawAgent = runAgent ?? (await import("./agent.js")).runAgent
   const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs })
@@ -330,19 +320,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (config?.agent?.crewRouting !== false) {
         try {
           const cls = preferredClassFor(role)
-          const rsel = selectModel(config, { task: subTask, preferredClass: cls })
-          if (rsel?.decision?.provider && rsel.decision.provider !== provRef.prov?.name) {
-            const key = `${rsel.decision.provider}|${rsel.decision.model}`
-            if (!crewModels.has(key)) {
-              const built = await buildProvider91(config, rsel.decision.provider)
-              if (built) crewModels.set(key, built)
-            }
-            const p = crewModels.get(key)
-            if (p) {
-              roleProv = { ...p, model: rsel.decision.model }
-              try { setModel?.(rsel.decision.model) } catch { }
-              emit({ type: "CREW_MODEL_ROUTED", taskId, runId: taskRunId, nodeId: dagNode ?? null, role, model: rsel.decision.model, provider: rsel.decision.provider, class: cls })
-            }
+          // v133: specialists may pick a different model on the SAME provider.
+          // Leaving the owner's protocol used to be silent (Anthropic → OpenAI)
+          // and e2e never saw it because autonomous:false skipped Core.
+          const choice = applyModelChoice({
+            config, provider: provRef.prov, task: subTask,
+            preferredClass: cls, sameProvider: true,
+            lock: Boolean(process.env.FORGE_LOCK_MODEL),
+          })
+          if (choice.switched && choice.provider) {
+            roleProv = choice.provider
+            try { setModel?.(choice.provider.model) } catch { }
+            emit({ type: "CREW_MODEL_ROUTED", taskId, runId: taskRunId, nodeId: dagNode ?? null, role, model: choice.provider.model, provider: choice.provider.name, class: cls })
           }
         } catch { roleProv = provRef.prov }
       }
@@ -414,22 +403,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // (task complexity + device tier from the resource manager) and feed the
   // EXISTING selection opts — one strategy engine, deterministic, offline.
   const lane = resolveLane({ task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true } })
-  const sel = selectModel(config, { task: state.objective, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
-  const requiredCaps = sel?.capabilities ?? null
+  // v133: selection happens AFTER classify so MICRO/SMALL can keep the caller.
+  // The v110 table (applyModelChoice) is the one answer; raw selectModel here
+  // used to swap providers before anyone knew the task class.
+  let sel = null
   let prov = provider
-  if (sel?.decision && config?.agent?.modelStrategy !== false) {
-    emit({ type: "MODEL_SELECTED", model: sel.decision.model, provider: sel.decision.provider, reason: sel.decision.reason, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
-    ts.noteModel(sel.decision.provider, sel.decision.model, sel.decision.reason)
-    if (sel.decision.provider !== provider?.name) {
-      try {
-        const { buildProvider } = await import("./providers.js")
-        const np = buildProvider(config, sel.decision.provider)
-        if (np && np.model) { prov = { ...np, model: sel.decision.model }; provRef.prov = prov; manager.configure({ config, provider: prov }) }
-      } catch { }
-    }
-  } else {
-    ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider")
-  }
 
   let resumeRecon = null
   if (resumeRec) {
@@ -446,6 +424,36 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const riskLevel = riskForChange({ task: state.objective })
   const classified = classifyTask(state.objective, { resume: Boolean(resumeRec) })
+  // v133 stickwise: the v110 table, now that we know the class. MICRO/SMALL
+  // keep the caller's model. Lane opts still feed selectModel (fastwise pin).
+  if (config?.agent?.modelStrategy !== false) {
+    const choice = applyModelChoice({
+      config, provider, task: state.objective, klass: classified.class,
+      lock: Boolean(process.env.FORGE_LOCK_MODEL),
+      deep: classified.strategy.deep,
+      latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias,
+    })
+    sel = choice.selection ?? null
+    if (choice.switched && choice.provider) {
+      prov = choice.provider
+      provRef.prov = prov
+      manager.configure({ config, provider: prov })
+    }
+    const noted = choice.provider ?? provider
+    ts.noteModel(noted?.name ?? "?", noted?.model ?? "?", choice.why)
+    emit({
+      type: "MODEL_SELECTED",
+      model: noted?.model, provider: noted?.name,
+      reason: choice.why,
+      confidence: choice.selection?.decision?.confidence ?? null,
+      capabilities: choice.selection?.decision?.capabilities,
+      switched: choice.switched === true,
+      taskId, runId: taskRunId,
+    })
+  } else {
+    ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider")
+  }
+  const requiredCaps = sel?.capabilities ?? null
   // v122 "yolowise": the autonomous lifecycle honours the SAME control state
   // the one-shot agent does. Before this, `forge agent --auto` under YOLO still
   // froze tools on the governor's action, because meta built its cognition

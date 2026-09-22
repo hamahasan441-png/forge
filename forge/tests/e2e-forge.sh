@@ -813,6 +813,28 @@ else
   PASS=$((PASS+1)); echo "  ok  v131 controller still removes outside target (v88: no boundary)"
 fi
 
+# ---- v133: Anthropic-on-Core stays on the anthropic wire ----
+# Both providers are configured; active is mocka. Before v133, Core called
+# selectModel BEFORE classify and swapped to the OpenAI mock. USE_TOOL_A then
+# printed "Hello from mock!" because the OpenAI needle excludes USE_TOOL_A.
+# The historical one-shot path (autonomous:false, check 15) never showed this.
+CFG133="$T/v133.json"
+HOME133="$T/home133"
+mkdir -p "$HOME133"
+printf '{}\n' > "$CFG133"
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set providers.mock.apiKey $KEY >/dev/null 2>&1
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set providers.mock.baseUrl http://127.0.0.1:8787/v1 >/dev/null 2>&1
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set providers.mock.model mock-mini >/dev/null 2>&1
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set providers.mocka.apiKey $KEY >/dev/null 2>&1
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set providers.mocka.baseUrl http://127.0.0.1:8787 >/dev/null 2>&1
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set providers.mocka.model mock-a >/dev/null 2>&1
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set providers.mocka.protocol anthropic >/dev/null 2>&1
+FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F config set activeProvider mocka >/dev/null 2>&1
+out=$(FORGE_CONFIG="$CFG133" FORGE_HOME="$HOME133" $F agent --cwd "$T/work" "USE_TOOL_A please run echo" 2>&1 </dev/null)
+check "v133 default loop is controller" "$out" "loop: controller"
+check "v133 anthropic-on-core still runs bash" "$out" "anthropic-e2e-ok"
+check_absent "v133 did not silently switch to the OpenAI mock" "$out" "Hello from mock!"
+
 kill $MOCK_PID 2>/dev/null
 rm -rf "$T"
 echo

@@ -289,6 +289,9 @@ const suites = [
   // ---- trusted or not), think() reaches the episode store, failed ----
   // ---- approaches reach the planner without BM25 luck
   ["v132", "node", ["test-v132.mjs"]],
+  // ---- v133 stickwise: Core + crew use applyModelChoice — the owner's ----
+  // ---- provider is the provider; crew may change model, not protocol ------
+  ["v133", "node", ["test-v133.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

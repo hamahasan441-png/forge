@@ -7,6 +7,25 @@ preserved — leftovers live in TODO.md.
 
 ## 122.0.0 — yolowise (full control is one switch, and it is inspectable)
 
+### v133 — stickwise (the model you picked is the model that runs)
+
+Package version stays **122.0.0**. Named suite, same shape as v123–v132.
+
+v110 already solved this on the one-shot: `applyModelChoice` keeps MICRO, honors
+lock, keeps low-confidence. Core is the default loop (v131) and did not use
+that function. It called `selectModel` *before* classify, then swapped
+providers with no MICRO guard. Crew routing did it again per role — explorer
+and tester could leave Anthropic for a "fast" OpenAI id. e2e Anthropic agent
+ran with `agent.autonomous: false`, so Anthropic-on-Core was untested.
+
+Core and crew now call `applyModelChoice`. MICRO and SMALL keep the caller.
+Crew may pick a different model on the **same** provider, never a different
+protocol. Mid-run `reconsiderModel` has the same rule. `modelStrategy` and
+`crewRouting` opt-outs stay. YOLO and the completion gate stay.
+
+Pinned by `tests/test-v133.mjs`. e2e: both providers configured, active is
+Anthropic, shipped default loop, `anthropic-e2e-ok`.
+
 ### v132 — mindwise (one judgment table, and memory that returns)
 
 Package version stays **122.0.0**. Named suite, same shape as v123–v131.
