@@ -5,7 +5,9 @@ reads it at runtime and every user-agent is built from that single source.
 Historical entries below are kept honest and short; completed plans are not
 preserved — leftovers live in TODO.md.
 
-## v131 — onewise (the controller is the default loop)
+## 122.0.0 — yolowise (full control is one switch, and it is inspectable)
+
+### v131 — onewise (the controller is the default loop)
 
 Package version stays **122.0.0** (dozens of suites pin the string; bumping it
 is its own release). This is the named suite, same shape as v123–v130.
@@ -41,10 +43,9 @@ Controller recovery [C] parks the task WAITING (excluded from
 `interruptedTasks`) so "leave as-is" does not re-nag on every subsequent
 start.
 
-Pinned by `tests/test-v131.mjs`.
-
-## 122.0.0 — yolowise (full control is one switch, and it is inspectable)
-
+Pinned by `tests/test-v131.mjs`. The historical e2e printer contract
+(`[step 1] bash`, `TOOL RESULT RECEIVED`) opts out with `agent.autonomous:
+false`; the shipped default is still the controller.
 
 CLI only. No Web OS. No SafetyManager. The owner's decision, recorded once.
 

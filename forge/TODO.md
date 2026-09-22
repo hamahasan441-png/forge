@@ -41,7 +41,9 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       memory / the tracer. A later run cannot recall it.
 - [ ] default `forge agent` now uses Core, so piped output is the controller
       card (`loop: controller`, segment summary) rather than `[step 1] bash`.
-      `agent.autonomous: false` restores the one-shot printer.
+      `agent.autonomous: false` restores the one-shot printer. e2e-forge.sh
+      pins that opt-out so the historical printer contract stays a regression
+      net; a v131 block at the end still runs the shipped default.
 - [ ] Ctrl+C during Core planning is CANCELLED (was WAITING). Recovery [C]
       parks WAITING so the nag stops. Journal recovery is still a second
       prompt on a crashed run that also left a runlog entry.
