@@ -767,6 +767,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     delegateTimeoutSec: config.agent?.delegateTimeoutSec ?? AGENT_BUDGETS.delegateTimeoutSec,
     maxParallelDelegates: config.agent?.maxParallelSubAgents ?? (resProfile.tier === "low" ? 1 : AGENT_BUDGETS.maxParallelSubAgents),
     signal,
+    onEvent,
     subAgent: readonly && !planOnly,
     vision: config.tools?.vision !== false,
     visionProvider: { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl },

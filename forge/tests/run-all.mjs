@@ -282,6 +282,9 @@ const suites = [
   // ---- one patch shape — plus the chat plugin loader that threw on a bare --
   // ---- out-of-scope read and loaded zero plugins, silently ---------------
   ["v130", "node", ["test-v130.mjs"]],
+  // ---- v131 onewise: one loop predicate — TTY /agent and forge agent use ----
+  // ---- the controller the default config already claimed to; think() records
+  ["v131", "node", ["test-v131.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

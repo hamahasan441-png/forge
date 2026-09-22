@@ -26,7 +26,30 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v131 "onewise" — leftovers (completed plan removed, house style)
+
+- [ ] package.json is still 122.0.0 while named suites run through v131.
+      Dozens of historical tests pin the literal `122.0.0` / `/^122\./`.
+      A versionwise release that updates every pin (and only that) is the
+      honest bump; this release refused to mix it in.
+- [ ] five review systems remain (`review.js`, `codereview.js`, `selfreview.js`,
+      `critique.js`, `plancritique.js`). Routing TTY through the controller
+      means interactive runs now HIT the meta-side ones; merging them is still
+      future work.
+- [ ] `think()` records on the tool context of one run and emits `reasoning`
+      (the dock's existing thought line). It is not persisted to episodes /
+      memory / the tracer. A later run cannot recall it.
+- [ ] default `forge agent` now uses Core, so piped output is the controller
+      card (`loop: controller`, segment summary) rather than `[step 1] bash`.
+      `agent.autonomous: false` restores the one-shot printer. e2e-forge.sh
+      pins that opt-out so the historical printer contract stays a regression
+      net; a v131 block at the end still runs the shipped default.
+- [ ] Ctrl+C during Core planning is CANCELLED (was WAITING). Recovery [C]
+      parks WAITING so the nag stops. Journal recovery is still a second
+      prompt on a crashed run that also left a runlog entry.
+
 ## v130 "yolomode" — leftovers (completed plan removed, house style)
+
 
 - [ ] `agent.js` and `chat.js` still OR the resolved grants with the
       historical `unrestricted` when they build the tool ctx

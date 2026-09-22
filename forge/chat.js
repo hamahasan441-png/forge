@@ -28,7 +28,7 @@ import readline from "node:readline"
 import { execFile } from "node:child_process"
 import { streamChatResilient, chatOnce, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
-import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
+import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS, useController } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
 import { injectPendingVision, stripOldVisionParts } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
@@ -72,7 +72,7 @@ import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./edi
 import { unifiedDiff } from "./textdiff.js"
 import { interruptedRuns, verifyRun, markRun, listRuns, resolveRunId } from "./runlog.js"
 // v91 ∞ CORE introspection commands
-import { listTasks } from "./taskstate.js"
+import { listTasks, openTask, TASK_STATUS, DURABILITY } from "./taskstate.js"
 import { busPath } from "./bus.js"
 import { loadCrewPerf } from "./crewroute.js"
 import { roleCatalog } from "./agentmanager.js"
@@ -1517,6 +1517,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     }
     dispatchUI({ type: "RECOVERY_COMPLETED" })
     setMode(mode)
+    // v131: "leave as-is" used to keep the task in PLANNING with a dead pid,
+    // so interruptedTasks() re-prompted on every subsequent start and poisoned
+    // the next /agent. WAITING is excluded from that scan and is the resume
+    // path (`forge tasks --resume`) — files stay, the nag stops.
+    try {
+      const ts = openTask(task.task_id, { create: false })
+      if (ts) ts.transition(TASK_STATUS.WAITING, { reason: "left as-is at recovery", durability: DURABILITY.CRITICAL })
+    } catch { /* parking is best-effort; the user already chose */ }
     warn("task left as-is — forge tasks lists it; forge tasks --resume <id> continues it later")
     return true
   }
@@ -1687,26 +1695,19 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (eff.notice) out(dim(`  · ${eff.notice}`))
     if (ui) dispatchUI({ type: "MODE_CHANGED", mode: planOnly ? "plan" : "agent" })
     let res = null
-    // The premium TTY dock renders the single-run agent loop's compact tool
-    // rows/steps/checkpoints, so interactive TTY agent tasks use that proven
-    // path (which already has failover, overflow recovery, verification and
-    // checkpoints). The meta controller drives piped/non-TTY autonomous runs
-    // and `forge agent`, where its multi-segment lifecycle is printed as lines.
-    //
-    // v96 unifywise — RESUME ALWAYS GOES THROUGH THE CONTROLLER. A resumed
-    // task has persisted DAG/ledger/checkpoint state that ONLY the meta
-    // lifecycle reconciles (recovery.js effect reconciliation + PLAN_RESTORED
-    // + verification epochs). The old TTY branch silently dropped
-    // resumeTaskId and re-ran the objective as a single-shot agent — the
-    // "resume via controller" prompt was a lie in interactive mode. Now a
-    // resume in TTY uses the controller regardless (same rendering pattern as
-    // `forge agent --auto`: the dock shows the embedded agent's tool traffic;
-    // lifecycle events are ignored by the bridge — unknown types are no-ops).
-    const useMeta = !planOnly && (resumeTaskId != null || (config?.agent?.autonomous !== false && !ui))
-    if (useMeta && ui && resumeTaskId != null) out(dim("  · resuming via the task controller — reconciling persisted DAG/ledger state first"))
-    const onEvent = ui ? ui.view.onEvent : (config?.agent?.autonomous === false ? agentEventPrinter() : metaEventPrinter(agentEventPrinter()))
+    // v131 onewise — ONE loop. The TTY dock used to force the one-shot path
+    // (`&& !ui`) so interactive Agent Mode never reached the controller that
+    // piped chat already used. Resume already went through Core; every other
+    // TTY /agent line did not. The dock ignores unknown meta events (no-ops),
+    // which is the same rendering resume has used since v96. Plan-only stays
+    // one-shot. `agent.autonomous: false` (or "off"/"direct") opts out.
+    const controller = useController({ planOnly, resumeTaskId, autonomous: config?.agent?.autonomous })
+    if (controller && ui && resumeTaskId != null) out(dim("  · resuming via the task controller — reconciling persisted DAG/ledger state first"))
+    else if (controller) out(dim("  · loop: controller"))
+    else out(dim("  · loop: direct"))
+    const onEvent = ui ? ui.view.onEvent : (controller ? metaEventPrinter(agentEventPrinter()) : agentEventPrinter())
     try {
-      if (useMeta) {
+      if (controller) {
         // v21 autonomous lifecycle through the meta controller.
         // v91: entered through the ∞ Core (bus, crew routing, decisions,
         // episodes, world model — one coherent engineering system).
@@ -1726,6 +1727,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           taskId: m.taskId,
           segments: m.segments,
           repairs: m.repairs,
+          toolCallsTotal: m.toolCalls,
           verification: m.verification,
         }
         if (m.status === "WAITING") res.waiting = true
@@ -1734,19 +1736,22 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // agent-result shape printResult expects (text/steps/toolLog/wrote).
         if (ui) {
           lastAgentState = store.state
-          ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
-          // v96 unifywise honesty: the dock's "COMPLETED" mark reflects UI
-          // checks, not the task record — a meta run that ended WAITING/
-          // FAILED without a failing check would otherwise look done. The
-          // controller's verdict is printed verbatim when it is not COMPLETED
-          // (same wording as the piped path).
-          if (!planOnly && res.taskStatus && res.taskStatus !== "COMPLETED") {
-            out(yellow(`  status: ${res.taskStatus}${res.waiting ? " — checkpoint saved; the task can resume (forge tasks --resume)" : ""}`))
-          }
-          if (!planOnly && res.taskStatus === "COMPLETED" && (res.text || "").trim()) {
-            messages.push({ role: "user", content: `[agent task] ${launchLine}` })
-            messages.push({ role: "assistant", content: res.text })
-            persist()
+          // v131: a controller CANCELLED (Ctrl+C during plan or a segment) is
+          // the same user interrupt the one-shot path throws as AbortError —
+          // use the cancel card ("execution stopped safely"), never ✓ COMPLETED.
+          if (m.status === "CANCELLED") {
+            dispatchUI({ type: "USER_INTERRUPTED", phase: "stopped" })
+            ui.view.printResult(res, { aborted: true, elapsedMs: Date.now() - t0 })
+          } else {
+            ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
+            if (!planOnly && res.taskStatus && res.taskStatus !== "COMPLETED") {
+              out(yellow(`  status: ${res.taskStatus}${res.waiting ? " — checkpoint saved; the task can resume (forge tasks --resume)" : ""}`))
+            }
+            if (!planOnly && res.taskStatus === "COMPLETED" && (res.text || "").trim()) {
+              messages.push({ role: "user", content: `[agent task] ${launchLine}` })
+              messages.push({ role: "assistant", content: res.text })
+              persist()
+            }
           }
           out()
         }

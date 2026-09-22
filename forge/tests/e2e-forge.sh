@@ -35,7 +35,12 @@ export NO_COLOR=1
 # project boundary). Since v85 the shipped default is tools.unrestricted:true
 # (the owner's master switch — every guard off). Pin it OFF here so those
 # checks keep testing the guards; test-v85.mjs covers the unrestricted path.
-printf '{"tools":{"unrestricted":false}}\n' > "$T/config.json"
+# v131: these checks were written against the one-shot printer (`[step 1] bash`,
+# TOOL RESULT RECEIVED, no planner BLOCKED). The shipped default is the
+# controller; test-v131.mjs pins that path, and a block at the end of this
+# file proves the controller still executes. autonomous:false here is the e2e
+# opt-out, not a product default.
+printf '{"tools":{"unrestricted":false},"agent":{"autonomous":false}}\n' > "$T/config.json"
 # v20: the mock lives on 127.0.0.1 — fetch_url tests opt INTO private fetches
 # (the negative test below unsets it to prove the guard blocks by default)
 export FORGE_ALLOW_PRIVATE_URLS=1
@@ -779,6 +784,34 @@ check_absent "raw secret not sent to model" "$LAST" "abcdef1234567890abcdef"
 # 92. plan-mode delegation is allowed (delegate is read-only, v20 fix)
 out=$($F agent --cwd "$T/work" --plan "USE_DELEGATE research sub.txt" 2>&1 </dev/null)
 check "plan mode delegates" "$out" "SUB-AGENT REPORT"
+
+# ---- v131: shipped default is the controller; it still executes ----
+# The rest of this file pinned agent.autonomous:false so the one-shot printer
+# contract stays a regression net. This block uses a fresh config with the
+# shipped default and asserts the controller still runs tools and honors v88
+# (outside rm actually happens). Planner workers may print BLOCKED (read-only
+# inspect) — that is Core, not a v88 regression; the evidence is the file gone.
+CFG131="$T/v131.json"
+HOME131="$T/home131"
+mkdir -p "$HOME131"
+printf '{"tools":{"unrestricted":false}}\n' > "$CFG131"
+FORGE_CONFIG="$CFG131" FORGE_HOME="$HOME131" $F config set activeProvider mock >/dev/null 2>&1
+FORGE_CONFIG="$CFG131" FORGE_HOME="$HOME131" $F config set providers.mock.apiKey $KEY >/dev/null 2>&1
+FORGE_CONFIG="$CFG131" FORGE_HOME="$HOME131" $F config set providers.mock.baseUrl http://127.0.0.1:8787/v1 >/dev/null 2>&1
+FORGE_CONFIG="$CFG131" FORGE_HOME="$HOME131" $F config set providers.mock.model mock-mini >/dev/null 2>&1
+out=$(FORGE_CONFIG="$CFG131" FORGE_HOME="$HOME131" $F agent --cwd "$T/work" "USE_TOOL please run echo" 2>&1 </dev/null)
+check "v131 default loop is controller" "$out" "loop: controller"
+check "v131 controller still runs bash" "$out" "forge-e2e-ok"
+printf 'alpha beta gamma\n' > "$T/work/multi.txt"
+out=$(FORGE_CONFIG="$CFG131" FORGE_HOME="$HOME131" $F agent --cwd "$T/work" "USE_MULTI_EDIT fix the file" 2>&1 </dev/null)
+check "v131 controller still multi_edits" "$(cat "$T/work/multi.txt")" "ALPHA"
+echo "v88" > /tmp/forge-e2e-outside-target
+out=$(FORGE_CONFIG="$CFG131" FORGE_HOME="$HOME131" $F agent --cwd "$T/work" "USE_OUTSIDE_RM clean the temp dir" 2>&1 </dev/null)
+if [ -e /tmp/forge-e2e-outside-target ]; then
+  FAIL=$((FAIL+1)); echo "  FAIL v131 controller expected the outside target to be removed"
+else
+  PASS=$((PASS+1)); echo "  ok  v131 controller still removes outside target (v88: no boundary)"
+fi
 
 kill $MOCK_PID 2>/dev/null
 rm -rf "$T"

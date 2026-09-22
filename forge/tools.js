@@ -901,6 +901,8 @@ export function makeToolContext(opts = {}) {
     allowOutsideProject, allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
     yolo, readOnlyBashByClass,
     delegateTimeoutSec, signal, subAgent, runId,
+    thoughts: [],
+    onEvent: typeof opts.onEvent === "function" ? opts.onEvent : null,
     _plugins: pluginMap,
     _delegateActive: 0,
     _delegateMax: Math.max(1, Math.min(AGENT_BUDGETS.maxParallelSubAgents, maxParallelDelegates)),
@@ -2028,10 +2030,13 @@ function todo(ctx, args) {
   return `ERROR: unknown action "${action}" (set|list|update)`
 }
 
-function think(_ctx, args) {
+function think(ctx, args) {
   const t = String(args.thought ?? "").slice(0, 4000)
   if (!t.trim()) return "ERROR: empty thought"
-  return "Noted. Reasoning recorded — continue with the plan."
+  if (!Array.isArray(ctx.thoughts)) ctx.thoughts = []
+  ctx.thoughts.push({ at: Date.now(), text: t, runId: ctx.runId ?? null })
+  try { ctx.onEvent?.({ type: "reasoning", text: t, source: "think", chars: t.length, runId: ctx.runId ?? null }) } catch { /* event is additive */ }
+  return `Recorded (${t.length} chars). Continue with the plan.`
 }
 
 // --- memory (v20: hierarchical + learning) ----------------------------------------

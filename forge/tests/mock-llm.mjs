@@ -6,10 +6,12 @@
  * POST /v1/chat/completions      → scripted replies (OpenAI wire):
  *   - invalid bearer key          → 401
  *   - last message role=tool      → final answer incl. tool output
+ *   - verify-nudge after a write  → same final (current-task head is the nudge)
  *   - FLAKY_CHECK user msg        → 429 twice, then success (retry test)
  *   - OVERFLOW_ONCE user msg      → 400 context_length_exceeded once, then success
  *   - SUBTASK_SLOW user msg       → success after 3s (delegate timeout test)
  *   - user msg USE_TOOL           → tool_call: bash echo forge-e2e-ok
+ *     (USE_TOOL_A does not steal this branch; that needle is Anthropic-only)
  *   - user msg USE_GITDIFF/USE_GITLOG/USE_GITBLAME → tool_call: the matching v90 git view
  *   - user msg EMPTY_ONCE           → empty response once, nudge message → RECOVERED AFTER NUDGE
  *   - user msg EMPTY_ALWAYS         → empty response every turn (agent must fail loudly)
@@ -216,8 +218,26 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 20 } }))
       }
 
+      // The current instruction is the first block of the latest user
+      // message. agent.js appends Core extraContext after `\n\n`
+      // (retrieval, continuity, cognition). Matching needles against the
+      // WHOLE prompt made a previous USE_TOOL sitting in retrieved memory
+      // steal the current task's branch — v131 put TTY /agent through Core,
+      // so this stopped being theoretical.
+      const currentTask = (() => {
+        for (let i = wire.length - 1; i >= 0; i--) {
+          if (wire[i]?.role === "user") {
+            const t = String(wire[i].content ?? "")
+            const cut = t.indexOf("\n\n")
+            return cut === -1 ? t : t.slice(0, cut)
+          }
+        }
+        return ""
+      })()
+
       // agent asked to use a tool
-      const wantsTool = msgs.some((m) => m.role === "user" && String(m.content).includes("USE_TOOL"))
+      // USE_TOOL_A is the Anthropic-wire needle — must not steal this branch.
+      const wantsTool = currentTask.includes("USE_TOOL") && !currentTask.includes("USE_TOOL_A")
       if (wantsTool) {
         const msg = { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo forge-e2e-ok" }) } }] }
         if (j.stream) return sse(res, [
@@ -230,7 +250,7 @@ const server = http.createServer((req, res) => {
       }
 
       // agent asked to fetch a URL (fetch_url tool test)
-      const wantsUrl = msgs.some((m) => m.role === "user" && String(m.content).includes("USE_URL"))
+      const wantsUrl = currentTask.includes("USE_URL")
       if (wantsUrl) {
         const msg = { role: "assistant", content: "", tool_calls: [{ id: "call_2", type: "function", function: { name: "fetch_url", arguments: JSON.stringify({ url: "http://127.0.0.1:8787/hello" }) } }] }
         res.writeHead(200, { "content-type": "application/json" })
@@ -239,7 +259,7 @@ const server = http.createServer((req, res) => {
 
       // v15 tool branches
       const branch = (needle, tool, args, id) => {
-        if (!msgs.some((m) => m.role === "user" && String(m.content).includes(needle))) return false
+        if (!currentTask.includes(needle)) return false
         // stream-aware: streaming rounds get SSE tool_call deltas (fragmented args),
         // non-streaming rounds get the plain JSON message
         if (j.stream) {
@@ -285,7 +305,7 @@ const server = http.createServer((req, res) => {
       if (branch("PATCH_FAIL", "apply_patch", { patch: MOCK_PATCH_BAD }, "call_patchbad")) return
       if (branch("USE_GIT", "git_status", {}, "call_git")) return
       // two read-only tool calls in ONE round → parallel execution test
-      if (msgs.some((m) => m.role === "user" && String(m.content).includes("USE_TWO_READS"))) {
+      if (currentTask.includes("USE_TWO_READS")) {
         const msg = { role: "assistant", content: "", tool_calls: [
           { id: "call_r1", type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "sub.txt" }) } },
           { id: "call_r2", type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "multi.txt" }) } },
@@ -303,6 +323,23 @@ const server = http.createServer((req, res) => {
         ])
         res.writeHead(200, { "content-type": "application/json" })
         return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 8, completion_tokens: 9 } }))
+      }
+
+      // v131: matching needles against the CURRENT-task head (so Core
+      // extraContext cannot steal the branch) means a verify-nudge user
+      // turn no longer looks like USE_MULTI_EDIT. A real model still
+      // answers from the tool result sitting in history. The mock does
+      // the same so write-tool e2e keeps seeing TOOL RESULT RECEIVED.
+      const wantsVerifyNudge = wire.some((m) => m.role === "user" && String(m.content ?? "").startsWith("(system) you changed files"))
+      if (wantsVerifyNudge) {
+        const lastTool = [...wire].reverse().find((m) => m.role === "tool")
+        const content = `Final answer. TOOL RESULT RECEIVED: ${String(lastTool?.content ?? "checked").slice(0, 200)}`
+        if (j.stream) return sse(res, [
+          { choices: [{ delta: { content }, finish_reason: null }] },
+          { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 20 } },
+        ])
+        res.writeHead(200, { "content-type": "application/json" })
+        return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 20 } }))
       }
 
       // v90 empty-response resilience: EMPTY_ALWAYS → every turn is empty
@@ -364,12 +401,22 @@ const server = http.createServer((req, res) => {
       const wireA = msgs.filter((m) => !isGovernorA(m))
       const last = wireA[wireA.length - 1] ?? {}
       const blockText = (m) => Array.isArray(m.content) ? m.content.filter((b) => b.type === "text" || b.type === "tool_result").map((b) => b.text ?? JSON.stringify(b.content ?? "")).join(" ") : String(m.content ?? "")
+      const currentTaskA = (() => {
+        for (let i = wireA.length - 1; i >= 0; i--) {
+          if (wireA[i]?.role === "user") {
+            const t = blockText(wireA[i])
+            const cut = t.indexOf("\n\n")
+            return cut === -1 ? t : t.slice(0, cut)
+          }
+        }
+        return ""
+      })()
 
       let reply = { thinking: "anthropic thinking deeply...", text: "Hello from anthropic mock!" }
       // tool result round-trip → final answer
       if (Array.isArray(last.content) && last.content.some((b) => b.type === "tool_result")) {
         reply = { thinking: "anthropic assembling answer...", text: `Anthropic stream OK. TOOL RESULT RECEIVED: ${blockText(last).slice(0, 160)}` }
-      } else if (msgs.some((m) => m.role === "user" && blockText(m).includes("USE_TOOL_A"))) {
+      } else if (currentTaskA.includes("USE_TOOL_A")) {
         if (j.stream) {
           // streaming tool_use with FRAGMENTED json — tests input_json_delta assembly
           res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" })
