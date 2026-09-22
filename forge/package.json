@@ -84,6 +84,7 @@
     "install.sh",
     "integrate.js",
     "jointroute.js",
+    "judge.js",
     "keys.js",
     "knowgap.js",
     "knowgraph.js",

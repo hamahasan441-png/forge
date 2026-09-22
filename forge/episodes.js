@@ -96,6 +96,7 @@ export function createEpisode({ problem = "", context = "", taskId = null, sympt
     result: null,     // EPISODE_RESULT
     lesson: null,     // the distilled reusable knowledge
     failed_approaches: [], // preserved so nobody repeats them (§78)
+    thoughts: [],          // v132: think() scratchpad that a later run can recall
   }
 }
 
@@ -114,7 +115,7 @@ export function setLesson(ep, lesson, { result = null } = {}) {
 
 export function episodeToText(ep) {
   if (!ep) return ""
-  const parts = [ep.problem, ep.context, ...ep.symptoms, ...ep.files, ...ep.failed_approaches, ep.lesson]
+  const parts = [ep.problem, ep.context, ...ep.symptoms, ...ep.files, ...ep.failed_approaches, ...(ep.thoughts ?? []).map((t) => t.text || t), ep.lesson]
   return parts.filter(Boolean).join("\n")
 }
 
@@ -193,6 +194,51 @@ export function createEpisodeStore({ cwd = process.cwd(), max = MAX_EPISODES } =
     return true
   }
 
+  /** v132: a think() that dies with the tool context cannot teach the next run. */
+  function addThought(ep, text, { runId = null } = {}) {
+    if (!ep) return false
+    if (!Array.isArray(ep.thoughts)) ep.thoughts = []
+    const t = String(text ?? "").trim().slice(0, 400)
+    if (!t) return false
+    ep.thoughts.push({ at: Date.now(), text: t, runId: runId ?? null })
+    if (ep.thoughts.length > MAX_LIST) ep.thoughts.shift()
+    ep.updated_at = Date.now()
+    persist()
+    return true
+  }
+
+  /**
+   * Failed approaches for THIS query. BM25 similar() misses when the next
+   * objective is worded differently; overlap + recency does not.
+   */
+  function failedApproachesFor(query, { limit = 6 } = {}) {
+    const qTokens = new Set(String(query ?? "").toLowerCase().match(/[a-z][a-z0-9_.-]{2,}/g) ?? [])
+    const scored = []
+    for (let i = 0; i < episodes.length; i++) {
+      const e = episodes[i]
+      const fails = Array.isArray(e.failed_approaches) ? e.failed_approaches : []
+      if (!fails.length) continue
+      const pTokens = new Set(String(e.problem ?? "").toLowerCase().match(/[a-z][a-z0-9_.-]{2,}/g) ?? [])
+      let overlap = 0
+      for (const t of qTokens) if (pTokens.has(t)) overlap++
+      const recent = i >= episodes.length - 3
+      if (overlap === 0 && qTokens.size && !recent) continue
+      const recency = e.updated_at ?? e.created_at ?? 0
+      for (const fa of fails) scored.push({ text: String(fa), overlap, recency })
+    }
+    scored.sort((a, b) => b.overlap - a.overlap || b.recency - a.recency)
+    const seen = new Set()
+    const out = []
+    for (const s of scored) {
+      const k = s.text.slice(0, 80)
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(s.text.slice(0, 200))
+      if (out.length >= limit) break
+    }
+    return out
+  }
+
   function setReview(ep, verdict) {
     if (!ep) return false
     ep.review = String(verdict ?? "").slice(0, MAX_TEXT)
@@ -217,6 +263,7 @@ export function createEpisodeStore({ cwd = process.cwd(), max = MAX_EPISODES } =
     for (const e of sims) {
       lines.push(`- Problem: ${e.problem.slice(0, 160)}`)
       if (e.failed_approaches.length) lines.push(`  Failed before: ${e.failed_approaches.slice(0, 3).join(" | ")}`)
+      if (e.thoughts?.length) lines.push(`  Thought: ${e.thoughts.slice(-2).map((t) => String(t.text || t).slice(0, 160)).join(" | ")}`)
       if (e.fixes.length) lines.push(`  Fix that worked: ${e.fixes[e.fixes.length - 1].slice(0, 160)}`)
       if (e.lesson) lines.push(`  Lesson: ${e.lesson.slice(0, 160)}`)
     }
@@ -233,7 +280,8 @@ export function createEpisodeStore({ cwd = process.cwd(), max = MAX_EPISODES } =
 
   return {
     start, get, latest, addHypothesis, addExperiment, addEvidence, addFix,
-    addVerification, addFailedApproach, setReview,
+    addVerification, addFailedApproach, addThought, setReview,
+    failedApproachesFor,
     // v96 unifywise: setLesson is usually the LAST mutation of an episode
     // (core.run closes with setReview → setLesson → addFix-only-if-files).
     // The bare module function mutates in memory only, so a run whose gate

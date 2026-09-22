@@ -3,6 +3,12 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
+**v132 "mindwise"** — one judgment table, and memory that returns. Worker
+self-review actually decides whether the ledger records a pass.
+`think()` reaches the episode store. Failed approaches reach the next
+planner without BM25 luck. Five review systems stay; YOLO and the gate
+stay. Package version remains 122.0.0.
+
 **v131 "onewise"** — the controller is the default loop. `forge agent` and
 interactive Agent Mode use the same Core that piped chat already did.
 Printed as `loop: controller`. `think()` records. Package version remains
