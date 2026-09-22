@@ -868,18 +868,26 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   } catch (e) {
     ts.noteError("PLAN_FAILED", e?.message ?? String(e))
     planValidation = { ok: false, errors: [String(e?.message ?? e)], recoverable: true, code: "PLAN_EXCEPTION" }
-    ts.transition(TASK_STATUS.WAITING, { reason: `planning failed: ${String(e?.message ?? e).slice(0, 200)}` })
+    // v131: Ctrl+C during planning used to return WAITING ("planning failed:
+    // This operation was aborted") and skip the function-end abort rewrite,
+    // so the next `forge chat` popped FORGE RECOVERY for a user who just
+    // cancelled. Abort is CANCELLED — same as a segment abort.
+    const aborted = e?.name === "AbortError" || signal?.aborted
+    ts.transition(aborted ? TASK_STATUS.CANCELLED : TASK_STATUS.WAITING, {
+      reason: aborted ? "user cancel" : `planning failed: ${String(e?.message ?? e).slice(0, 200)}`,
+      durability: DURABILITY.CRITICAL,
+    })
     persistCritical()
     return {
       taskId,
       runId: taskRunId,
-      status: FINAL.WAITING,
-      text: `planning failed: ${String(e?.message ?? e)}`,
+      status: aborted ? FINAL.CANCELLED : FINAL.WAITING,
+      text: aborted ? "cancelled by user" : `planning failed: ${String(e?.message ?? e)}`,
       segments: 0,
       repairs: 0,
       toolCalls: 0,
       filesChanged: [],
-      verification: { ok: false, missing: [], reason: "planning failed" },
+      verification: { ok: false, missing: [], reason: aborted ? "cancelled" : "planning failed" },
       state: state.status,
       task: state,
     }

@@ -244,7 +244,8 @@ console.log("== 13. meta wiring (source contract) ==")
 console.log("== 14. chat: resume always goes through the controller ==")
 {
   const chatSrc = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
-  ok("useMeta includes resumeTaskId != null (TTY resume no longer drops the task state)", chatSrc.includes("resumeTaskId != null || (config?.agent?.autonomous !== false && !ui)"))
+  ok("useController decides the loop (resume still forces the controller)", chatSrc.includes("useController({ planOnly, resumeTaskId, autonomous: config?.agent?.autonomous })"))
+  ok("TTY no longer has a private one-shot exemption", !chatSrc.includes("autonomous !== false && !ui"))
   ok("TTY controller runs render through printResult", chatSrc.includes("ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })"))
 }
 

@@ -3,6 +3,13 @@
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
+**v131 "onewise"** — the controller is the default loop. `forge agent` and
+interactive Agent Mode use the same Core that piped chat already did (DAG,
+plan critique, code review, gitship, requirement invalidation). Printed as
+`loop: controller`. `agent.autonomous: false` keeps the one-shot. `think()`
+finally records. Package version remains 122.0.0 (pinned by historical
+suites).
+
 **Version 122.0.0 — "yolowise"** — full control is ONE switch that every refusing layer
 reads, and `forge yolo` prints the whole state. CLI only.
 

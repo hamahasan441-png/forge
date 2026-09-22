@@ -26,7 +26,7 @@
  */
 import fs from "node:fs"
 import path from "node:path"
-import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
+import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig, useController } from "./config.js"
 import { yoloState, formatYolo, modeOf, applyYoloMode, yoloModeNote, yoloModeFlags, FULL_CONTROL_FLAGS } from "./yolo.js" // v122: one resolved full-control state, one command that shows it · v130: and a NAME for each state
 import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
@@ -559,8 +559,9 @@ async function main() {
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
       if (!(await activateSourceFlag())) return // v97 §4: --source wins over cwd/git — local first
       const planMode = flags.plan !== undefined
+      const controller = useController({ planOnly: planMode, autonomous: cfg.agent?.autonomous, auto: flags.auto === true })
       console.log(dim(`forge agent — ${bold(task)}${flags.deep === true ? "  " + green("DEEP") : ""}`))
-      console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps}${planMode ? " • PLAN MODE (read-only)" : ""}`))
+      console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps}${planMode ? " • PLAN MODE (read-only)" : ""}${controller ? " • loop: controller" : " • loop: direct"}`))
       // v103 §2: said BEFORE the work, not after it. Running from forge's own
       // checkout on a task that never mentions forge is the case where the
       // agent would otherwise build the user's project inside forge itself.
@@ -607,10 +608,10 @@ async function main() {
       }
       let res
       try {
-        if (!planMode && (flags.auto === true || cfg.agent?.autonomous === "meta")) {
-          // v21: full autonomous meta-controller lifecycle (segments, DAG,
-          // model strategy, workers, verification ledger, recovery). Opt-in via
-          // `--auto` so the default one-shot keeps its classic, pinned output.
+        if (controller) {
+          // v131 onewise: the default (agent.autonomous: true) IS the
+          // controller. `--auto` and autonomous:"meta" still mean yes;
+          // autonomous:false / "off" / "direct" keeps the one-shot.
           // v91: entered through the ∞ Core, which wires the communication
           // bus, crew routing, decisions, episodes and the world model around it.
           const { createForgeCore } = await import("./core.js")
@@ -2476,8 +2477,8 @@ ${bold("usage")}
   ${cyan('forge ask "summarize git log"')} quick one-shot answer ${dim('(or: echo q | forge ask)')}
   ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
-  ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)
-  ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
+  ${cyan('forge agent "fix the bug"')}    coding agent through the controller ${dim("(DAG, review, repair — agent.autonomous:false for the one-shot)")}
+  ${cyan('forge agent --auto "task"')}    same controller ${dim("(kept for compatibility; the default already uses it)")}
   ${cyan("forge --yolo …")}            FULL CONTROL for ONE process — every layer that can refuse, pause or freeze is off ${dim("(tools.yolo + tools.autoApprove in ~/.forge/config.json make it permanent)")}
   ${cyan("forge --yolo-full …")}       same, but the governor and the pre-edit critique KEEP their veto — unrestricted machine, oversight intact
   ${cyan("forge yolo [full|on|off]")}    persist a control MODE, or print the resolved state of every layer and the nine YOLO mode flags

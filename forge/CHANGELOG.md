@@ -5,6 +5,44 @@ reads it at runtime and every user-agent is built from that single source.
 Historical entries below are kept honest and short; completed plans are not
 preserved — leftovers live in TODO.md.
 
+## v131 — onewise (the controller is the default loop)
+
+Package version stays **122.0.0** (dozens of suites pin the string; bumping it
+is its own release). This is the named suite, same shape as v123–v130.
+
+The default config has shipped `agent.autonomous: true` since v21. Two callers
+disagreed about what that meant:
+
+- `chat.js` ran the controller only when there was no TTY (`&& !ui`). Interactive
+  Agent Mode was a one-shot. Resume already used Core; every other `/agent` line
+  did not.
+- `forge.js` required `--auto` or the string `"meta"`. Boolean `true` — the
+  shipped value — was ignored. `forge agent "fix the bug"` never reached the
+  DAG, plan critique, code review, gitship or requirement invalidation.
+
+`useController()` in config.js is the one predicate. Chat and the CLI both
+call it. The path is printed (`loop: controller` / `loop: direct`). Plan-only
+stays one-shot. `agent.autonomous: false` / `"off"` / `"direct"` opts out.
+`--auto` still means yes.
+
+`think()` appends to `ctx.thoughts` and emits a `reasoning` event (the dock
+already renders that vocabulary). The return string "Noted. Reasoning recorded"
+was a lie; it now reports the recorded length. The agent loop hands `onEvent`
+into the tool context so the event actually leaves the tool. The TTY result
+card reads `toolCallsTotal` so a controller run no longer prints "0 tool calls"
+because the adapter's `toolLog` is empty.
+
+Ctrl+C during planning is CANCELLED, not a parked WAITING task — that early
+return used to skip the function-end abort rewrite, so the next chat start
+popped FORGE RECOVERY for a user who just cancelled. TTY CANCELLED uses the
+same cancel card as the one-shot (`execution stopped safely`). The result
+card no longer prints ✓ COMPLETED for a non-COMPLETED controller status.
+Controller recovery [C] parks the task WAITING (excluded from
+`interruptedTasks`) so "leave as-is" does not re-nag on every subsequent
+start.
+
+Pinned by `tests/test-v131.mjs`.
+
 ## 122.0.0 — yolowise (full control is one switch, and it is inspectable)
 
 

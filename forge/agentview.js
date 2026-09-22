@@ -195,7 +195,8 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
       out.push(o.th.bold(planOnly ? o.th.active(`${o.sym.rule.repeat(2)} plan ${o.sym.rule.repeat(Math.max(4, Math.min(54, W() - 12)))}`) : o.th.ok(`${o.sym.rule.repeat(2)} result ${o.sym.rule.repeat(Math.max(4, Math.min(50, W() - 12)))}`)))
       out.push(renderMarkdown(res.text))
     }
-    const summary = `${res?.steps ?? 0} steps • ${res?.toolLog?.length ?? s.activity.length} tool calls • ${(elapsedMs / 1000).toFixed(1)}s`
+    const nTools = Number.isFinite(res?.toolCallsTotal) ? res.toolCallsTotal : (res?.toolLog?.length ?? s.activity.length)
+    const summary = `${res?.steps ?? 0} steps • ${nTools} tool calls • ${(elapsedMs / 1000).toFixed(1)}s`
     if (planOnly) {
       out.push(o.th.muted(`  ${summary}`))
       if (savedPlan) out.push(o.th.muted(`  saved → ${savedPlan}`))
@@ -207,6 +208,7 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     const failedCheck = checkKeys.find((k) => checks[k].ok === false)
     out.push("")
     if (failedCheck) out.push(o.th.warn(`${mark("warn", o)} FINISHED WITH FAILING CHECKS`) + o.th.muted(`  ${failedCheck}: ${checks[failedCheck].summary || "failed"}`))
+    else if (res?.taskStatus && res.taskStatus !== "COMPLETED") out.push(o.th.warn(`${mark("warn", o)} ${res.taskStatus}`) + o.th.muted(`  ${summary}`))
     else out.push(o.th.ok(`${mark("ok", o)} COMPLETED`) + o.th.muted(`  ${summary}`))
     const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(`  ${padRight(k, 12)} ${v}`) }
     if (files.length) row("Changes", `${files.length} file${files.length === 1 ? "" : "s"}` + o.th.muted(oneShot ? `  (forge undo --run rolls back)` : `  (/diff to review${res?.runId ? ", /undo --run to roll back" : ""})`))

@@ -62,6 +62,30 @@ export const AGENT_BUDGETS = Object.freeze({
   maxToolCallsHardCap: 500,
 })
 
+/**
+ * v131 "onewise" — ONE answer to "does this mutating run go through the controller?"
+ *
+ * Before this, two call sites disagreed about the same config key:
+ *   chat.js  `autonomous !== false && !ui`  — piped yes, TTY only on resume
+ *   forge.js `flags.auto || autonomous === "meta"`
+ *            — boolean true (what defaultConfig ships) was IGNORED
+ * So the default ran the controller in piped chat and the one-shot everywhere
+ * people actually type. The DAG, plan critique, code review, gitship and
+ * requirement invalidation this repo already owns never reached those paths.
+ *
+ * Resume always takes the controller (persisted DAG/ledger). Plan-only never
+ * does (read-only one-shot). Explicit off: false / "off" / "direct".
+ * `--auto` and the historical string "meta" still mean yes.
+ */
+export function useController({ planOnly = false, resumeTaskId = null, autonomous, auto = false } = {}) {
+  if (planOnly) return false
+  if (resumeTaskId != null && String(resumeTaskId).length) return true
+  if (auto === true) return true
+  const a = autonomous
+  if (a === false || a === 0 || a === "off" || a === "direct" || a === "false" || a === "no") return false
+  return true
+}
+
 export function defaultConfig() {
   const b = AGENT_BUDGETS
   return {

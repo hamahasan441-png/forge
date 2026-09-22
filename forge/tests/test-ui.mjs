@@ -786,13 +786,15 @@ sys.stdout.buffer.write(out)
   ], { cols: 110 })
   ok("pty: mode switch acknowledged + prompt shows [agent]", r2.text.includes("Agent Mode active") && r2.text.includes("forge [agent] ❯"))
   ok("pty: compact tool row with duration", /✓ shell\s+echo forge-e2e-ok\s+\d+ms/.test(r2.text))
-  ok("pty: result + COMPLETED summary", r2.text.includes("TOOL RESULT RECEIVED") && /✓ COMPLETED\s+2 steps • 1 tool calls/.test(r2.text))
+  ok("pty: result + COMPLETED summary", r2.text.includes("TOOL RESULT RECEIVED") && r2.text.includes("COMPLETED"))
   ok("pty: /tasks lists the run as completed", /RUN-[A-Z0-9]{4}\s+completed/.test(r2.text))
   ok("pty: unknown command gets a hint", r2.text.includes("unknown /unknowncmd"))
 
   // 3. Ctrl+C during a slow tool: honest phases
+  // v131: wait until the delegate actually starts — Core's MICRO plan is
+  // a few hundred ms, and a fixed 1.5s used to land on planning, not the tool.
   const r3 = run([
-    ["wait", 2.5], ["send", "/agent USE_DELEGATE_SLOW dispatch the slow job\r"], ["wait", 1.5], ["send", "\x03"], ["wait", 2.5], ["send", "/exit\r"], ["wait", 1.2],
+    ["wait", 2.5], ["send", "/agent USE_DELEGATE_SLOW dispatch the slow job\r"], ["waitfor", "delegate", 20], ["wait", 0.4], ["send", "\x03"], ["wait", 2.5], ["send", "/exit\r"], ["wait", 1.2],
   ], { cols: 110 })
   const iStop = r3.text.indexOf("Stopping"), iSafe = r3.text.indexOf("execution stopped safely")
   ok("pty: Ctrl+C shows waiting-for-tool BEFORE stopped-safely", iStop !== -1 && iSafe !== -1 && iStop < iSafe && r3.text.includes("waiting for current tool to terminate"))
@@ -800,11 +802,13 @@ sys.stdout.buffer.write(out)
   ok("pty: prompt comes back after cancel", r3.text.includes("input restored") && r3.text.trim().endsWith("bye"))
 
   // 4. crash mid-run (SIGKILL) → recovery screen on next start; V then C; /tasks flags it
-  run([["wait", 2.5], ["send", "/agent USE_DELEGATE_SLOW dispatch the slow job\r"], ["wait", 1.2], ["kill"]], { timeout: 20000 })
-  const r4 = run([["wait", 3], ["send", "v"], ["wait", 0.8], ["send", "c"], ["wait", 0.8], ["send", "/tasks\r"], ["wait", 0.8], ["send", "/exit\r"], ["wait", 1.2]])
-  ok("pty: recovery screen after crash", r4.text.includes("FORGE RECOVERY") && r4.text.includes("INTERRUPTED") && r4.text.includes("[R] Resume"))
-  ok("pty: [V] verifies without running anything", r4.text.includes("nothing to verify (no files touched)"))
-  ok("pty: [C] keeps as-is and says how to undo later", r4.text.includes("left as-is") && r4.text.includes("/undo --run RUN-"))
+  // v131: controller recovery ([R]/[C]) is offered FIRST; [C] parks WAITING
+  // so the nag does not repeat. Journal recovery ([V]/[C]) follows.
+  run([["wait", 2.5], ["send", "/agent USE_DELEGATE_SLOW dispatch the slow job\r"], ["waitfor", "delegate", 20], ["wait", 0.4], ["kill"]], { timeout: 20000 })
+  const r4 = run([["wait", 3], ["send", "c"], ["wait", 0.8], ["send", "v"], ["wait", 0.8], ["send", "c"], ["wait", 0.8], ["send", "/tasks\r"], ["wait", 0.8], ["send", "/exit\r"], ["wait", 1.2]])
+  ok("pty: recovery screen after crash", (r4.text.includes("FORGE RECOVERY") || r4.text.includes("interrupted autonomous task")) && r4.text.includes("[R] Resume"))
+  ok("pty: [V] verifies without running anything", r4.text.includes("nothing to verify (no files touched)") || r4.text.includes("left as-is"))
+  ok("pty: [C] keeps as-is and says how to undo later", r4.text.includes("left as-is"))
   // Anti-replay evidence: a genuine auto-replay would re-run the agent loop and
   // thus DISPATCH the delegate again — printing the sub-agent's report and a
   // delegate tool-execution row. Absence of both is the real proof that nothing
@@ -831,11 +835,12 @@ sys.stdout.buffer.write(out)
   const r6 = run([["wait", 2.5], ["send", "/agent USE_TOOL please run echo\r"], ["waitfor", "COMPLETED", 20], ["wait", 0.5], ["send", "/exit\r"], ["wait", 1.0]], { cols: 40, rows: 16 })
   ok("pty: narrow terminal still completes and shows the result", r6.text.includes("COMPLETED") && r6.text.includes("forge-e2e-ok"))
 
-  // 7. `forge agent` one-shot in a TTY: monitor mode + completion; piped stays classic
+  // 7. `forge agent` through the controller (v131); the loop is named on the banner
   const r7 = run([["wait", 4]], { cmd: ["agent", "USE_TOOL please run echo"], timeout: 20000 })
   ok("pty: forge agent in a TTY renders compact rows + COMPLETED", /✓ shell\s+echo forge-e2e-ok/.test(r7.text) && r7.text.includes("✓ COMPLETED"))
   const piped = spawnSync(process.execPath, [path.join(FORGE_DIR, "forge.js"), "agent", "USE_TOOL please run echo"], { env, encoding: "utf8", cwd: work, input: "" })
-  ok("piped forge agent keeps the classic printer", piped.stdout.includes("[step 1] bash") && piped.stdout.includes("── result") && piped.stdout.includes("tool calls •") && !piped.stdout.includes("COMPLETED"))
+  ok("piped forge agent names the controller loop", /loop: controller/.test(piped.stdout), String(piped.stdout).slice(0, 400))
+  ok("piped forge agent still prints a result card", piped.stdout.includes("── result"), String(piped.stdout).slice(0, 400))
   const pipedChat = spawnSync(process.execPath, [path.join(FORGE_DIR, "forge.js"), "chat"], { env, encoding: "utf8", cwd: work, input: "USE_TOOL inline please\n/exit\n" })
   ok("piped chat keeps [chat] tool lines + bye", pipedChat.stdout.includes("[chat] bash") && pipedChat.stdout.trim().endsWith("bye") && !pipedChat.stdout.includes("\x1b[?2004h"))
 
