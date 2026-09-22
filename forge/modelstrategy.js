@@ -470,20 +470,48 @@ export function selectModel(config, opts = {}) {
 }
 
 /**
- * Live-path hook. MICRO never switches (a typo is not a bake-off).
+ * Live-path hook. MICRO/SMALL never switch (a typo is not a bake-off).
  * Low-confidence decisions keep the caller's model. Lock skips selection.
+ * sameProvider (crew): a specialist may pick a different model on the SAME
+ * provider, never a different protocol — the owner's wire is the wire.
  */
-export function applyModelChoice({ config, provider, task = "", klass = "", lock = false, deep = false } = {}) {
+export function applyModelChoice({ config, provider, task = "", klass = "", lock = false, deep = false, sameProvider = false, latencyBudgetMs, costBias, preferredClass } = {}) {
   if (lock) return { provider, switched: false, why: "model locked by the user" }
   const k = String(klass || "")
-  if (k === "MICRO" || k === "trivial") {
-    return { provider, switched: false, why: "MICRO keeps the caller's model" }
+  if (!sameProvider && (k === "MICRO" || k === "trivial" || k === "SMALL" || k === "simple")) {
+    return { provider, switched: false, why: `${k === "SMALL" || k === "simple" ? "SMALL" : "MICRO"} keeps the caller's model` }
   }
-  const sel = selectModel(config, { task, provider, taskClass: deriveTaskClass(task), requireCapabilities: deep ? ["reasoning"] : [] })
+  const selOpts = {
+    task, provider,
+    taskClass: deriveTaskClass(task),
+    requireCapabilities: deep ? ["reasoning"] : [],
+  }
+  if (latencyBudgetMs != null) selOpts.latencyBudgetMs = latencyBudgetMs
+  if (costBias != null) selOpts.costBias = costBias
+  if (preferredClass != null) selOpts.preferredClass = preferredClass
+  const sel = selectModel(config, selOpts)
   const d = sel?.decision
   if (!d) return { provider, switched: false, why: sel?.reason || "no decision", selection: sel }
   if (d.provider === provider?.name && d.model === provider?.model) {
     return { provider, switched: false, why: d.reason || "already the measured-best model", selection: sel }
+  }
+  if (sameProvider && d.provider !== provider?.name) {
+    const same = (sel.candidates || []).filter((c) => c.provider === provider?.name)
+    const bestSame = same[0]
+    if (!bestSame || bestSame.model === provider?.model) {
+      return { provider, switched: false, why: "crew stays on the caller's provider", selection: sel }
+    }
+    const current = same.find((c) => c.model === provider?.model)
+    const margin = (bestSame.score ?? 0) - (current?.score ?? 0)
+    if (margin < 3) {
+      return { provider, switched: false, why: "crew stays on the caller's provider", selection: sel }
+    }
+    return {
+      provider: { ...provider, model: bestSame.model },
+      switched: true,
+      why: `same-provider model for the role (${bestSame.model})`,
+      selection: sel,
+    }
   }
   if (d.confidence === "low") {
     return { provider, switched: false, why: "margin too small to steal the caller's model", selection: sel }
@@ -551,6 +579,13 @@ export function reconsiderModel(config, opts = {}) {
     })
     if (!res.decision) return null
     if (res.decision.provider === provider?.name && res.decision.model === provider?.model) return null
+    // v133: a slow/failing model may rethink, not leave the owner's protocol.
+    if (res.decision.provider !== provider?.name) {
+      const same = (res.candidates || []).filter((c) => c.provider === provider?.name && c.model !== provider?.model)
+      const bestSame = same[0]
+      if (!bestSame) return null
+      return { ...res.decision, provider: provider.name, model: bestSame.model, reason: `same-provider rethink: ${res.decision.reason}` }
+    }
     return res.decision
   }
   return null
