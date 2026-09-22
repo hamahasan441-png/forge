@@ -69,6 +69,7 @@ import { createBus, MESSAGE_TYPE } from "./bus.js"
 import { createDecisionEngine, DECISION_TYPE } from "./decisionengine.js"
 import { createCrewRouter, preferredClassFor } from "./crewroute.js"
 import { reviewWorkerResult } from "./selfreview.js"
+import { trustWorkerEvidence, failedApproachesPrefix } from "./judge.js"
 // v96 unifywise: handoffContextBlock is no longer imported here — it is now
 // consumed where it belongs (agentmanager.reassign renders the structured
 // handoff into the successor's context) instead of being dead import surface.
@@ -537,6 +538,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (extra.length) planLessons.avoided = [...new Set([...(planLessons.avoided || []), ...extra])]
     }
     const lessonPrefix = planLessonsPrefix(planLessons)
+    // v132: failed approaches for THIS objective, not "whatever BM25 ranked".
+    // After the first blank line so the mock currentTask head stays the objective.
+    const failedPrefix = (!restoredDAG && !fastPath && !recoveryPath)
+      ? failedApproachesPrefix(state.objective, { cwd: process.cwd() })
+      : ""
     if (planLessons.count || planLessons.avoided.length) {
       emit({ type: "PLAN_LESSONS", taskId, runId: taskRunId, count: planLessons.count, avoided: planLessons.avoided.slice(0, 4) })
     }
@@ -676,7 +682,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${failedPrefix ? `${failedPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -1797,6 +1803,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 verification: "unverified",
               })
               r.selfReview = sr
+              // v132: the comment above used to be a lie — self-review ran
+              // and the ledger still recorded passed: true. One table.
+              // Fatal flags are ledger honesty; the node still completes so a
+              // zero-tool inspect worker (the mock, and real read-only looks)
+              // cannot stall the DAG.
+              const trust = trustWorkerEvidence(sr)
               emit({ type: "SELF_REVIEW", taskId, runId: taskRunId, segmentId, nodeId: n.id, workerId: r.workerId ?? job.id, role: n.role, ok: sr.ok, confidence: sr.confidence, flags: sr.flags, uncertainties: sr.uncertainties })
               // A read-only node's outcome is its findings: record that as
               // scoped ACCEPTANCE evidence, then complete the node WITH it.
@@ -1805,7 +1817,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 taskId, nodeId: n.id, segmentId,
                 verificationEpoch: state.verification_epoch ?? 0,
                 affectedFiles: [], scope: "node", type: "acceptance",
-                passed: true, exitCode: 0, exitCodeKnown: true,
+                passed: trust.trust, exitCode: trust.trust ? 0 : 1, exitCodeKnown: true,
                 evidence: String(r.result ?? "").slice(0, 300),
                 timestamp: Date.now(), command: `worker:${n.role}`, output: String(r.result ?? "").slice(0, 500),
               })

@@ -285,6 +285,10 @@ const suites = [
   // ---- v131 onewise: one loop predicate — TTY /agent and forge agent use ----
   // ---- the controller the default config already claimed to; think() records
   ["v131", "node", ["test-v131.mjs"]],
+  // ---- v132 mindwise: one judgment table (worker evidence is actually ----
+  // ---- trusted or not), think() reaches the episode store, failed ----
+  // ---- approaches reach the planner without BM25 luck
+  ["v132", "node", ["test-v132.mjs"]],
   ["cognition", "node", ["test-cognition.mjs"]],
   ["authority", "node", ["test-authority.mjs"]],
   ["intel", "node", ["test-intel.mjs"]],

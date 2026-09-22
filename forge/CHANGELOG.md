@@ -7,7 +7,36 @@ preserved — leftovers live in TODO.md.
 
 ## 122.0.0 — yolowise (full control is one switch, and it is inspectable)
 
+### v132 — mindwise (one judgment table, and memory that returns)
+
+Package version stays **122.0.0**. Named suite, same shape as v123–v131.
+
+Five review systems still run where they belong (plan → plancritique, pre-mutation
+→ critique, worker → selfreview, post-mutation → codereview, gate → review +
+completion). They used to disagree in silence. The worker self-review was
+computed, emitted, and then the ledger recorded `passed: true` anyway — the
+comment in meta.js said the report "must survive" before being trusted as
+evidence. `trustWorkerEvidence()` is the one answer. Fatal flags (empty / no
+inspection / no evidence) are ledger honesty; the DAG still `markCompleted` so
+a zero-tool inspect worker cannot stall the loop. Opt-out, YOLO, and the
+completion gate are untouched.
+
+`think()` already recorded on the tool context (v131). Nothing durable read it.
+`persistThoughts()` writes the scratchpad onto the project's episode store so
+the next planner's `contextBlock` can actually see it. `runAgent` persists in
+`finally`.
+
+Failed approaches were stored; the planner hoped BM25 similar-episodes would
+retrieve them. When the next objective was worded differently, they vanished.
+`failedApproachesPrefix` is a dedicated planner prefix — same shape as
+`planLessonsPrefix` — so "do not retry this" does not depend on ranking luck.
+It sits after the first blank line so the mock `currentTask` head stays the
+objective.
+
+Pinned by `tests/test-v132.mjs`.
+
 ### v131 — onewise (the controller is the default loop)
+
 
 Package version stays **122.0.0** (dozens of suites pin the string; bumping it
 is its own release). This is the named suite, same shape as v123–v130.

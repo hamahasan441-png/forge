@@ -68,6 +68,7 @@ import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
 import { yoloState } from "./yolo.js"
+import { persistThoughts } from "./judge.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 
@@ -1782,6 +1783,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     else endRun("failed", { error: e?.message ?? String(e), wrote })
     throw e
   } finally {
+    try { persistThoughts({ cwd: process.cwd(), task, runId: effectiveRunId, thoughts: tools.ctx?.thoughts }) } catch { /* thoughts persist is best-effort */ }
     try { recordToolRun({ cwd: process.cwd(), task, klass, records: intel.records() }) } catch { /* persist is best-effort */ }
     try {
       recordRunOutcomes({
